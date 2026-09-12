@@ -21,6 +21,9 @@ pub mod client;
 pub mod document;
 pub mod editor;
 pub mod editor_adapter;
+mod image_preview;
+pub(crate) mod markdown_media;
+mod markdown_preview;
 pub mod model;
 pub mod preview;
 pub mod search;
@@ -520,6 +523,7 @@ impl FilesSurface {
             if this.sync_target(cx) {
                 this.ensure_loaded(cx);
             }
+            this.sync_active_markdown_comments(cx);
         });
         let mut surface = Self {
             state,
@@ -900,6 +904,7 @@ impl FilesSurface {
             self.target_change_pending = true;
             self.pending_request_context = next;
             self.preview.cancel_autosaves();
+            self.suspend_images(cx);
             cx.notify();
             return false;
         }
@@ -919,6 +924,7 @@ impl FilesSurface {
     }
 
     fn apply_target(&mut self, next: Option<FilesRequestContext>, cx: &mut Context<Self>) {
+        self.suspend_images(cx);
         self.cancel_review_comment_flush(cx);
         self.loads.clear();
         self.watch_task = None;

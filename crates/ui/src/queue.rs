@@ -773,10 +773,7 @@ impl Composer {
         {
             self.queue_full_preview = None;
             self.show_queue_image(
-                attachments::PreviewImage {
-                    name: image.name,
-                    image: image.image,
-                },
+                crate::attachments::PreviewImage::new(image.name, image.image),
                 cx,
             );
             return;
@@ -802,10 +799,7 @@ impl Composer {
                 }
                 if let Some(image) = image {
                     this.show_queue_image(
-                        attachments::PreviewImage {
-                            name: image.name.into(),
-                            image: image.image,
-                        },
+                        crate::attachments::PreviewImage::new(image.name, image.image),
                         cx,
                     );
                 } else {

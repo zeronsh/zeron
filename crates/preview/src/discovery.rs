@@ -131,6 +131,50 @@ fn mark_descendants(listeners: &mut [Listener], parents: &HashMap<u32, u32>, own
     }
 }
 
+/// Process start in ms since the epoch, derived the same way for the scanner
+/// and for [`same_process`] so the two agree exactly.
+#[cfg(target_os = "linux")]
+fn linux_clock() -> (u64, u64) {
+    let boot = std::fs::read_to_string("/proc/stat")
+        .ok()
+        .and_then(|s| {
+            s.lines().find_map(|line| {
+                line.strip_prefix("btime ")
+                    .and_then(|v| v.parse::<u64>().ok())
+            })
+        })
+        .unwrap_or(0);
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    (boot, ticks)
+}
+#[cfg(target_os = "linux")]
+fn linux_started_at(stat_fields: &[&str], boot: u64, ticks: u64) -> u64 {
+    boot * 1000
+        + stat_fields
+            .get(19)
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+            * 1000
+            / ticks
+}
+
+/// Whether `pid` is still the process the scanner observed with `started_at`.
+/// Cheap enough to run per proxied connection; a full [`listeners`] pass
+/// walks every process (and spawns lsof/ps on macOS), which the proxy used
+/// to do for every asset a remote page requested.
+#[cfg(target_os = "linux")]
+pub fn same_process(pid: u32, started_at: u64) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let Some((_, tail)) = stat.rsplit_once(") ") else {
+        return false;
+    };
+    let fields: Vec<_> = tail.split_whitespace().collect();
+    let (boot, ticks) = linux_clock();
+    linux_started_at(&fields, boot, ticks) == started_at
+}
+
 #[cfg(target_os = "linux")]
 pub fn listeners() -> Vec<Listener> {
     use std::{fs, os::unix::fs::MetadataExt};
@@ -148,16 +192,7 @@ pub fn listeners() -> Vec<Listener> {
             }
         }
     }
-    let boot = fs::read_to_string("/proc/stat")
-        .ok()
-        .and_then(|s| {
-            s.lines().find_map(|line| {
-                line.strip_prefix("btime ")
-                    .and_then(|v| v.parse::<u64>().ok())
-            })
-        })
-        .unwrap_or(0);
-    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    let (boot, ticks) = linux_clock();
     let uid = unsafe { libc::geteuid() };
     let mut result = Vec::new();
     let mut parents = HashMap::new();
@@ -186,13 +221,7 @@ pub fn listeners() -> Vec<Listener> {
         let Ok(cwd) = fs::read_link(path.join("cwd")) else {
             continue;
         };
-        let started_at = boot * 1000
-            + fields
-                .get(19)
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(0)
-                * 1000
-                / ticks;
+        let started_at = linux_started_at(&fields, boot, ticks);
         let args = fs::read(path.join("cmdline"))
             .unwrap_or_default()
             .split(|b| *b == 0)
@@ -271,9 +300,35 @@ fn proc_address(value: &str, ipv6: bool) -> Option<SocketAddr> {
     ))
 }
 
+/// `ps lstart=` tokens ("Thu Sep 11 16:14:42 2026") to ms since the epoch.
+#[cfg(target_os = "macos")]
+fn parse_lstart(parts: &[&str]) -> u64 {
+    use chrono::TimeZone;
+    chrono::NaiveDateTime::parse_from_str(&parts.join(" "), "%a %b %e %T %Y")
+        .ok()
+        .and_then(|d| chrono::Local.from_local_datetime(&d).earliest())
+        .map(|d| d.timestamp_millis().max(0) as u64)
+        .unwrap_or(0)
+}
+
+/// See the Linux variant. One `ps -p` for a single pid instead of two lsof
+/// passes and a full `ps -ax` per proxied connection.
+#[cfg(target_os = "macos")]
+pub fn same_process(pid: u32, started_at: u64) -> bool {
+    let Ok(output) = std::process::Command::new("/bin/ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .output()
+    else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<_> = text.split_whitespace().collect();
+    parts.len() >= 5 && parse_lstart(&parts[..5]) == started_at
+}
+
 #[cfg(target_os = "macos")]
 pub fn listeners() -> Vec<Listener> {
-    use chrono::TimeZone;
     use std::process::Command;
     let uid = unsafe { libc::geteuid() }.to_string();
     let fields = |arguments: &[&str]| -> Vec<(u32, String)> {
@@ -313,12 +368,7 @@ pub fn listeners() -> Vec<Listener> {
                 continue;
             };
             parents.insert(pid, parent);
-            let started_at =
-                chrono::NaiveDateTime::parse_from_str(&parts[2..7].join(" "), "%a %b %e %T %Y")
-                    .ok()
-                    .and_then(|d| chrono::Local.from_local_datetime(&d).earliest())
-                    .map(|d| d.timestamp_millis().max(0) as u64)
-                    .unwrap_or(0);
+            let started_at = parse_lstart(&parts[2..7]);
             processes.insert(
                 pid,
                 (
@@ -373,6 +423,10 @@ pub fn listeners() -> Vec<Listener> {
 pub fn listeners() -> Vec<Listener> {
     Vec::new()
 }
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn same_process(_pid: u32, _started_at: u64) -> bool {
+    false
+}
 
 #[cfg(test)]
 mod tests {
@@ -402,6 +456,56 @@ mod tests {
         );
         assert!(proc_address("0101A8C0:1435", false).is_none());
         assert!(proc_address("malformed:00", true).is_none());
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn same_process_matches_the_scanner_start_time() {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        struct Kill(std::process::Child);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let _guard = Kill(child);
+        // `listeners()` only reports sockets; derive the scanner's start time
+        // through the same platform path it uses.
+        #[cfg(target_os = "linux")]
+        let started_at = {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+            let (_, tail) = stat.rsplit_once(") ").unwrap();
+            let fields: Vec<_> = tail.split_whitespace().collect();
+            let (boot, ticks) = linux_clock();
+            linux_started_at(&fields, boot, ticks)
+        };
+        #[cfg(target_os = "macos")]
+        let started_at = {
+            let output = std::process::Command::new("/bin/ps")
+                .args(["-axo", "pid=,ppid=,lstart=,command="])
+                .env("LC_ALL", "C")
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(&output.stdout);
+            text.lines()
+                .map(|line| line.split_whitespace().collect::<Vec<_>>())
+                .find(|parts| parts.first().and_then(|p| p.parse::<u32>().ok()) == Some(pid))
+                .map(|parts| parse_lstart(&parts[2..7]))
+                .unwrap()
+        };
+        assert!(started_at > 0);
+        assert!(same_process(pid, started_at));
+        assert!(!same_process(pid, started_at + 1000));
+        assert!(!same_process(pid, 0));
+        drop(_guard);
+        assert!(
+            !same_process(pid, started_at),
+            "a reaped pid no longer matches"
+        );
     }
     #[tokio::test]
     async fn requires_an_http_response() {

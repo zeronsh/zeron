@@ -965,7 +965,10 @@ fn comment_state_key(
     comments: &[ReviewComment],
     draft: Option<&(String, CommentSide, u32)>,
 ) -> u64 {
-    let mut parts: Vec<String> = comments.iter().map(|comment| comment.id.clone()).collect();
+    let mut parts: Vec<String> = comments
+        .iter()
+        .flat_map(|comment| [comment.id.clone(), comment.body.clone()])
+        .collect();
     if let Some((path, side, line)) = draft {
         parts.push(format!("draft:{path}:{}:{line}", side.tag()));
     }
@@ -1530,6 +1533,7 @@ struct HoverRow {
 }
 
 struct CommentDraft {
+    editing_id: Option<String>,
     /// Composer the note will stage onto, captured when the card opened. A
     /// draft belongs to the checkout it was written over, so it must not
     /// follow the user onto whatever chat is selected by commit time.
@@ -2573,7 +2577,17 @@ impl Changes {
     /// Cloned because rendering borrows `self` mutably a moment later.
     fn staged_comments(&self, cx: &App) -> Vec<ReviewComment> {
         let state = self.state.read(cx);
-        state.review_comments(&state.composer_key()).to_vec()
+        state
+            .review_comments(&state.composer_key())
+            .iter()
+            .filter(|comment| {
+                self.draft
+                    .as_ref()
+                    .and_then(|draft| draft.editing_id.as_ref())
+                    != Some(&comment.id)
+            })
+            .cloned()
+            .collect()
     }
 
     fn comments_for(&self, path: &str, cx: &App) -> Vec<ReviewComment> {
@@ -2717,6 +2731,7 @@ impl Changes {
         let key = self.state.read(cx).composer_key();
         let old_path = self.old_path_of(&path);
         self.draft = Some(CommentDraft {
+            editing_id: None,
             key,
             path,
             old_path,
@@ -2726,6 +2741,32 @@ impl Changes {
             _events: events,
         });
         window.focus(&handle, cx);
+        self.sync_comment_rows(cx);
+        cx.notify();
+    }
+
+    fn edit_comment(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let Some(comment) = state
+            .review_comments(&state.composer_key())
+            .iter()
+            .find(|comment| comment.id == id && !comment.is_file())
+            .cloned()
+        else {
+            return;
+        };
+        let Some((side, line)) = comment.diff_anchor() else {
+            return;
+        };
+        self.open_draft(comment.path.clone(), side, line, window, cx);
+        let draft = self.draft.as_mut().unwrap();
+        draft.editing_id = Some(comment.id);
+        if let comments::CommentSource::Diff { old_path, .. } = comment.source {
+            draft.old_path = old_path;
+        }
+        draft
+            .input
+            .update(cx, |input, cx| input.set_text(comment.body, cx));
         self.sync_comment_rows(cx);
         cx.notify();
     }
@@ -2746,13 +2787,18 @@ impl Changes {
             cx.notify();
             return;
         }
-        let comment = ReviewComment::new(draft.path, draft.side, draft.line, body)
-            .renamed_from(draft.old_path);
+
         // `draft.key`, not the live one: the note stages onto the composer it
         // was written against even if the selection moved under it.
         let key = draft.key;
         self.state.update(cx, |state, cx| {
-            state.add_review_comment(&key, comment);
+            if let Some(id) = draft.editing_id {
+                state.update_review_comment_body(&key, &id, body);
+            } else {
+                let comment = ReviewComment::new(draft.path, draft.side, draft.line, body)
+                    .renamed_from(draft.old_path);
+                state.add_review_comment(&key, comment);
+            }
             cx.notify();
         });
         self.sync_comment_rows(cx);
@@ -3218,7 +3264,14 @@ impl Changes {
                 };
                 let comments = self.comments_for(&file_diff.path, cx);
                 match comments.get(card as usize) {
-                    Some(comment) => render_comment_card(comment, &theme, cx),
+                    Some(comment) => crate::comment_ui::render_comment_card(
+                        comment,
+                        &theme,
+                        cx,
+                        Self::edit_comment,
+                        Self::remove_comment,
+                        None,
+                    ),
                     None => gpui::Empty.into_any_element(),
                 }
             }
@@ -3233,12 +3286,16 @@ impl Changes {
                 {
                     // Header cites the same path the staged card and the
                     // prompt bullet will.
-                    Some(draft) => render_comment_draft(
+                    Some(draft) => crate::comment_ui::render_comment_draft(
                         draft_cite_path(draft),
                         draft.line,
                         draft.input.clone(),
+                        draft.editing_id.is_some(),
                         &theme,
                         cx,
+                        Self::cancel_draft,
+                        Self::commit_draft,
+                        None,
                     ),
                     None => gpui::Empty.into_any_element(),
                 }
@@ -4517,118 +4574,12 @@ fn render_comment_adder(
     cx: &Context<Changes>,
 ) -> AnyElement {
     let target = path.to_string();
-    div()
-        .id(SharedString::from(format!(
-            "cmt-add-{path}-{}-{line}",
-            side.tag()
-        )))
-        .size(px(COMMENT_ADDER_SIZE))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.0))
-        .bg(theme.solid)
-        .cursor_pointer()
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.open_draft(target.clone(), side, line, window, cx);
-        }))
-        .child(
-            crate::icons::icon(crate::icons::PLUS)
-                .size(px(11.0))
-                .text_color(theme.on_solid),
-        )
-        .into_any_element()
-}
-
-fn render_comment_card(
-    comment: &ReviewComment,
-    theme: &Theme,
-    cx: &Context<Changes>,
-) -> AnyElement {
-    let group: SharedString = format!("cmt-card-{}", comment.id).into();
-    let id = comment.id.clone();
-    div()
-        .group(group.clone())
-        .h(px(comments::card_height(&comment.body)))
-        .w_full()
-        .flex_none()
-        .flex()
-        .flex_row()
-        .bg(crate::theme::ink(0.05))
-        // A bar, not a border: it must match ACCENT_BAR_WIDTH exactly or the
-        // card's edge steps in and out of the column.
-        .child(comment_accent_bar(theme.solid.opacity(0.35)))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .px(px(Theme::SPACE_LG))
-                .py(px(comments::CARD_PAD_V / 2.0))
-                .child(
-                    div()
-                        .h(px(comments::CARD_HEADER_HEIGHT))
-                        .flex_none()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(
-                            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
-                                .size(px(12.0))
-                                .text_color(theme.text_faint),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .font_family(theme.font_mono.clone())
-                                .text_size(px(11.0))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from(comment.location())),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("cmt-remove-{}", comment.id)))
-                                .flex_none()
-                                .size(px(16.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(4.0))
-                                .cursor_pointer()
-                                .opacity(0.0)
-                                .group_hover(group, |s| s.opacity(1.0))
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.remove_comment(&id, cx)),
-                                )
-                                .child(
-                                    crate::icons::icon(crate::icons::CLOSE_CIRCLE)
-                                        .size(px(12.0))
-                                        .text_color(theme.text_muted),
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        // Height is analytic, so an over-long body clips
-                        // inside the card rather than past the fold height.
-                        .overflow_hidden()
-                        .text_size(px(12.0))
-                        .line_height(px(comments::CARD_LINE_HEIGHT))
-                        .text_color(theme.text_dim)
-                        .child(SharedString::from(comment.body.clone())),
-                ),
-        )
-        .into_any_element()
-}
-
-fn comment_accent_bar(color: gpui::Hsla) -> gpui::Div {
-    div().w(px(ACCENT_BAR_WIDTH)).h_full().flex_none().bg(color)
+    crate::comment_ui::render_comment_adder(
+        format!("cmt-add-{path}-{}-{line}", side.tag()).into(),
+        theme,
+        cx,
+        move |this, window, cx| this.open_draft(target.clone(), side, line, window, cx),
+    )
 }
 
 /// Mirrors [`ReviewComment::cite_path`] for the not-yet-staged note.
@@ -4637,113 +4588,6 @@ fn draft_cite_path(draft: &CommentDraft) -> &str {
         CommentSide::Old => draft.old_path.as_deref().unwrap_or(&draft.path),
         CommentSide::New => &draft.path,
     }
-}
-
-/// Fixed height, so an open draft never fights the fold tween.
-fn render_comment_draft(
-    path: &str,
-    line: u32,
-    input: Entity<ComposerInput>,
-    theme: &Theme,
-    cx: &Context<Changes>,
-) -> AnyElement {
-    div()
-        .h(px(comments::DRAFT_CARD_HEIGHT))
-        .w_full()
-        .flex_none()
-        .flex()
-        .flex_row()
-        .bg(crate::theme::ink(0.08))
-        .child(comment_accent_bar(theme.solid.opacity(0.7)))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .px(px(Theme::SPACE_LG))
-                .py(px(10.0))
-                .child(
-                    div()
-                        .h(px(comments::CARD_HEADER_HEIGHT))
-                        .flex_none()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(
-                            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
-                                .size(px(12.0))
-                                .text_color(theme.text_faint),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .font_family(theme.font_mono.clone())
-                                .text_size(px(11.0))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from(format!("{path}:{line}"))),
-                        ),
-                )
-                .child(
-                    div()
-                        .h(px(46.0))
-                        .flex_none()
-                        .overflow_hidden()
-                        .text_size(px(12.0))
-                        .child(input.into_any_element()),
-                )
-                .child(
-                    div()
-                        .h(px(28.0))
-                        .flex_none()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_end()
-                        .gap(px(6.0))
-                        .child(
-                            comment_action("cmt-cancel", "Cancel", false, theme)
-                                .on_click(cx.listener(|this, _, _, cx| this.cancel_draft(cx))),
-                        )
-                        .child(
-                            comment_action("cmt-commit", "Comment", true, theme)
-                                .on_click(cx.listener(|this, _, _, cx| this.commit_draft(cx))),
-                        ),
-                ),
-        )
-        .into_any_element()
-}
-
-fn comment_action(
-    id: &'static str,
-    label: &'static str,
-    primary: bool,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .h(px(22.0))
-        .px(px(10.0))
-        .flex()
-        .items_center()
-        .rounded(px(6.0))
-        .text_size(px(11.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .cursor_pointer()
-        .when(primary, |el| el.bg(theme.solid).text_color(theme.on_solid))
-        .when(!primary, |el| {
-            el.text_color(motion::hover_blend(id, theme.text_muted, theme.text))
-                .bg(motion::hover_blend(
-                    id,
-                    gpui::transparent_black(),
-                    theme.element_hover,
-                ))
-                .on_hover(motion::hover_listener(id))
-        })
-        .child(SharedString::from(label))
 }
 
 /// The expanded body of one file section: notices, hunk headers, +/-/context
@@ -5072,6 +4916,74 @@ impl Render for Changes {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[gpui::test]
+    fn editing_staged_diff_comments_preserves_identity_and_cancellation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::new(state, cx)
+        });
+        window
+            .update(cx, |changes, window, cx| {
+                for side in [CommentSide::Old, CommentSide::New] {
+                    let original =
+                        ReviewComment::new("new.rs", side, 7, "Original 🦀\nSecond line")
+                            .renamed_from(Some("old.rs"));
+                    changes.state.update(cx, |state, _| {
+                        state.add_review_comment("", original.clone())
+                    });
+                    changes.edit_comment(&original.id, window, cx);
+                    let draft = changes.draft.as_ref().unwrap();
+                    assert_eq!(draft.input.read(cx).text(), original.body);
+                    assert_eq!(draft_cite_path(draft), original.cite_path());
+                    assert!(draft.input.read(cx).focus_handle(cx).is_focused(window));
+                    let input = draft.input.clone();
+                    input.update(cx, |input, cx| input.set_text("Cancelled", cx));
+                    assert_eq!(changes.state.read(cx).review_comments("")[0], original);
+                    changes.cancel_draft(cx);
+                    assert_eq!(
+                        changes.state.read(cx).review_comments(""),
+                        &[original.clone()]
+                    );
+
+                    changes.edit_comment(&original.id, window, cx);
+                    changes
+                        .draft
+                        .as_ref()
+                        .unwrap()
+                        .input
+                        .clone()
+                        .update(cx, |input, cx| {
+                            input.set_text("  Revised\nMore detail  ", cx)
+                        });
+                    changes.commit_draft(cx);
+                    let mut expected = original.clone();
+                    expected.body = "Revised\nMore detail".into();
+                    assert_eq!(
+                        changes.state.read(cx).review_comments(""),
+                        &[expected.clone()]
+                    );
+                    assert_ne!(
+                        comment_state_key(&[original], None),
+                        comment_state_key(&[expected.clone()], None)
+                    );
+                    changes.edit_comment(&expected.id, window, cx);
+                    let sent = changes
+                        .state
+                        .update(cx, |state, _| state.take_review_comments(""));
+                    assert!(comments::with_comments("", &sent).contains("Revised\n  More detail"));
+                    changes.commit_draft(cx);
+                    assert!(changes.state.read(cx).review_comments("").is_empty());
+                }
+            })
+            .unwrap();
+    }
 
     const PATCH: &str = "\
 diff --git a/src/main.rs b/src/main.rs

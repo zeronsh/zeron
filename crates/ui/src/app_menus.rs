@@ -41,6 +41,8 @@ pub fn init(cx: &mut App) {
     #[cfg(all(target_os = "macos", not(test)))]
     native_quit::init(cx);
     cx.on_action(quit);
+    #[cfg(target_os = "macos")]
+    cx.on_action(|_: &About, _| about_panel::show());
     // Application-menu verbs — gpui wraps NSApp `hide` / `hideOtherApplications`
     // / `unhideAllApplications` (zed registers the same trio in
     // crates/zed/src/zed.rs `init`).
@@ -162,8 +164,8 @@ pub fn app_menus() -> Vec<Menu> {
     // macOS titles the first menu with the bundle/process name regardless of
     // what we pass, but gpui still wants a name.
     let mut app_items = vec![
-        // Placeholder until a real about dialog exists (explicitly disabled).
-        MenuItem::action("About Zeron", About).disabled(true),
+        // The native AppKit about panel; no equivalent elsewhere yet.
+        MenuItem::action("About Zeron", About).disabled(!macos),
         MenuItem::separator(),
         MenuItem::action("Settings", shell::OpenSettings),
         MenuItem::separator(),
@@ -259,13 +261,13 @@ mod tests {
     }
 
     #[test]
-    fn about_is_disabled_placeholder() {
+    fn about_enabled_only_on_macos() {
         let menus = app_menus();
-        let first = &menus[0].items[0];
-        assert!(
-            first.is_disabled(),
-            "About stays disabled until implemented"
-        );
+        let Some(first @ MenuItem::Action { action, .. }) = menus[0].items.first() else {
+            panic!("first app-menu item must be an action");
+        };
+        assert_eq!(action.name(), About.name());
+        assert_eq!(first.is_disabled(), !cfg!(target_os = "macos"));
     }
 
     #[test]
@@ -351,6 +353,43 @@ mod tests {
             Some(combo("ctrl-,"))
         );
         assert_eq!(find(&other, Quit.name()), None);
+    }
+}
+
+// Standard AppKit about panel. Icon and copyright still come from the bundle's
+// Info.plist; name and version are passed explicitly so unbundled dev builds
+// (`cargo run`) show "Zeron" and the crate version instead of the process name.
+#[cfg(target_os = "macos")]
+mod about_panel {
+    use objc2::MainThreadMarker;
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{
+        NSAboutPanelOptionApplicationName, NSAboutPanelOptionApplicationVersion,
+        NSAboutPanelOptionVersion, NSApplication,
+    };
+    use objc2_foundation::{NSDictionary, NSString};
+
+    pub(super) fn show() {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let name = NSString::from_str("Zeron");
+        let version = NSString::from_str(env!("CARGO_PKG_VERSION"));
+        // Empty build version: CFBundleVersion equals the marketing version, and
+        // AppKit would otherwise render "Version 0.2.61 (0.2.61)".
+        let build = NSString::from_str("");
+        let values: [&AnyObject; 3] = [&name, &version, &build];
+        unsafe {
+            let options = NSDictionary::from_slices(
+                &[
+                    NSAboutPanelOptionApplicationName,
+                    NSAboutPanelOptionApplicationVersion,
+                    NSAboutPanelOptionVersion,
+                ],
+                &values,
+            );
+            NSApplication::sharedApplication(mtm).orderFrontStandardAboutPanelWithOptions(&options);
+        }
     }
 }
 

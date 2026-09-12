@@ -20,8 +20,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::TryStreamExt as _;
 use gpui::{
-    AnyElement, BackgroundExecutor, Image, ImageFormat, ObjectFit, SharedString, Size,
-    StyledImage as _, div, img, prelude::*, px,
+    AnyElement, BackgroundExecutor, Image, ImageFormat, SharedString, Size, div, prelude::*, px,
 };
 
 use crate::state::EngineHandle;
@@ -795,22 +794,69 @@ pub fn seed_attachment(device_id: &str, path: &str, name: &str, image: Arc<Image
 pub struct PreviewImage {
     pub name: SharedString,
     pub image: Arc<Image>,
+    pub(crate) viewer: crate::image_viewer::ImageView,
 }
 
-/// The bare lightbox: dim scrim, the image at ≤85vh/90vw, the file name under
-/// it. Any click closes (the whole dialog is the close button, as in the
-/// original's `cursor-zoom-out` figure), and so does Escape — `focus` must be
-/// focused by the caller when the preview opens so the key reaches us.
+impl PreviewImage {
+    pub fn new(name: impl Into<SharedString>, image: Arc<Image>) -> Self {
+        Self {
+            name: name.into(),
+            image,
+            viewer: Default::default(),
+        }
+    }
+}
+
+/// Shared image viewer over a dim scrim. Escape and a click close it;
+/// dragging and zoom controls are consumed by the viewer.
 pub fn lightbox(
-    viewport: Size<gpui::Pixels>,
+    window: &mut gpui::Window,
     preview: &PreviewImage,
     focus: &gpui::FocusHandle,
     on_close: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+    cx: &mut gpui::App,
 ) -> AnyElement {
+    lightbox_with_size(window, preview, focus, None, on_close, cx)
+}
+
+/// Sanitized SVG variants retain their source's natural logical dimensions.
+pub(crate) fn lightbox_with_size(
+    window: &mut gpui::Window,
+    preview: &PreviewImage,
+    focus: &gpui::FocusHandle,
+    natural_size: Option<Size<gpui::Pixels>>,
+    on_close: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+    cx: &mut gpui::App,
+) -> AnyElement {
+    let viewport = window.viewport_size();
     let max_h = px(f32::from(viewport.height) * 0.85);
     let max_w = px(f32::from(viewport.width) * 0.9);
+    let natural_size = natural_size.or_else(|| {
+        preview
+            .image
+            .clone()
+            .use_render_image(window, cx)
+            .map(|image| {
+                let dimensions = image.size(0);
+                gpui::size(
+                    px(dimensions.width.0 as f32),
+                    px(dimensions.height.0 as f32),
+                )
+            })
+    });
+    let content = match natural_size {
+        Some(natural) => preview
+            .viewer
+            .render(preview.image.clone(), natural, None, window, cx),
+        None => div()
+            .text_color(ink(0.6))
+            .child("Loading image…")
+            .into_any_element(),
+    };
     let on_close = std::rc::Rc::new(on_close);
     let close_on_key = on_close.clone();
+    let press_state = preview.viewer.clone();
+    let click_state = preview.viewer.clone();
     gpui::deferred(
         gpui::anchored()
             .position(gpui::point(px(0.0), px(0.0)))
@@ -827,22 +873,25 @@ pub fn lightbox(
                     .items_center()
                     .justify_center()
                     .gap(px(12.0))
-                    .cursor_pointer()
                     .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
                         if event.keystroke.key == "escape" {
                             cx.stop_propagation();
                             close_on_key(window, cx);
                         }
                     })
-                    .on_click(move |_, window, cx| on_close(window, cx))
-                    .child(
-                        img(preview.image.clone())
-                            .object_fit(ObjectFit::Contain)
-                            .max_h(max_h)
-                            .max_w(max_w)
-                            .rounded(px(6.0))
-                            .shadow_2xl(),
-                    )
+                    .capture_any_mouse_down(move |event, _, _| {
+                        if event.button == gpui::MouseButton::Left {
+                            press_state.begin_click();
+                        }
+                    })
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        if !click_state.dragged() {
+                            on_close(window, cx);
+                        }
+                    })
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    .child(div().w(max_w).h(max_h).child(content))
                     .child(
                         div()
                             .max_w(max_w)

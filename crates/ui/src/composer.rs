@@ -4271,10 +4271,10 @@ impl Composer {
             if std::env::var("ZERON_ATTACH_PREVIEW").is_ok_and(|v| v == "1")
                 && let Some(first) = staged.first()
             {
-                composer.preview = Some(attachments::PreviewImage {
-                    name: first.name.clone().into(),
-                    image: first.image.clone(),
-                });
+                composer.preview = Some(attachments::PreviewImage::new(
+                    first.name.clone(),
+                    first.image.clone(),
+                ));
                 composer.preview_focus_pending = true;
             }
             if !staged.is_empty() {
@@ -4573,10 +4573,7 @@ impl Composer {
             .pt(px(STRIP_PAD_TOP));
         for (ix, att) in staged.iter().enumerate() {
             let group: SharedString = format!("composer-att-{}", att.id).into();
-            let preview = attachments::PreviewImage {
-                name: att.name.clone().into(),
-                image: att.image.clone(),
-            };
+            let preview = attachments::PreviewImage::new(att.name.clone(), att.image.clone());
             let remove_id = att.id.clone();
             strip = strip.child(
                 div()
@@ -4593,6 +4590,7 @@ impl Composer {
                             .border_color(crate::theme::hairline(0.10))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                preview.viewer.reset();
                                 this.preview = Some(preview.clone());
                                 this.preview_focus_pending = true;
                                 cx.notify();
@@ -4677,10 +4675,10 @@ impl Composer {
             - 2.0 * APPSHOT_IMAGE_INSET;
         for (ix, appshot) in appshots.iter().enumerate() {
             let group: SharedString = format!("composer-appshot-{}", appshot.id).into();
-            let preview = attachments::PreviewImage {
-                name: appshot.screenshot.name.clone().into(),
-                image: appshot.screenshot.image.clone(),
-            };
+            let preview = crate::attachments::PreviewImage::new(
+                appshot.screenshot.name.clone(),
+                appshot.screenshot.image.clone(),
+            );
             let preview_on_key = preview.clone();
             let preview_on_a11y = preview.clone();
             let composer_for_preview = cx.entity().downgrade();
@@ -4732,6 +4730,7 @@ impl Composer {
                 .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                         cx.stop_propagation();
+                        preview_on_key.viewer.reset();
                         this.preview = Some(preview_on_key.clone());
                         this.preview_focus_pending = true;
                         cx.notify();
@@ -4740,6 +4739,7 @@ impl Composer {
                 .on_a11y_action(gpui::AccessibleAction::Click, move |_, _, cx| {
                     composer_for_preview
                         .update(cx, |this, cx| {
+                            preview_on_a11y.viewer.reset();
                             this.preview = Some(preview_on_a11y.clone());
                             this.preview_focus_pending = true;
                             cx.notify();
@@ -4747,6 +4747,7 @@ impl Composer {
                         .ok();
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    preview.viewer.reset();
                     this.preview = Some(preview.clone());
                     this.preview_focus_pending = true;
                     cx.notify();
@@ -7719,7 +7720,7 @@ impl Render for Composer {
             }
             let weak = cx.weak_entity();
             return container.child(attachments::lightbox(
-                window.viewport_size(),
+                window,
                 &preview,
                 &self.preview_focus,
                 move |window, cx| {
@@ -7733,6 +7734,7 @@ impl Render for Composer {
                         window.focus(&input_focus, cx);
                     }
                 },
+                cx,
             ));
         }
         container

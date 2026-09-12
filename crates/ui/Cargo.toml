@@ -49,6 +49,9 @@ serde_json.workspace = true
 pulldown-cmark.workspace = true
 alacritty_terminal.workspace = true
 base64 = "0.22"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
+usvg = "0.46"
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 fontdb.workspace = true
@@ -60,7 +63,6 @@ tracing.workspace = true
 sha2.workspace = true
 roxmltree = "0.21.1"
 png = "0.18"
-image = { version = "0.25", default-features = false, features = ["png", "ico", "jpeg", "webp"] }
 thiserror.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -70,7 +72,7 @@ wry = { version = "0.56", default-features = false, features = ["os-webview"] }
 raw-window-handle = "0.6"
 objc2 = "0.6"
 block2 = "0.6"
-objc2-app-kit = { version = "0.3.2", features = ["NSBitmapImageRep", "NSImage", "NSEvent", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSBitmapImageRep", "NSImage", "NSEvent", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = "0.3.2"
 objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "WKNavigationDelegate", "WKNavigationAction", "WKSnapshotConfiguration"] }
 reqwest.workspace = true
