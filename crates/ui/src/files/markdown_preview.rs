@@ -1,4 +1,5 @@
 //! Native, virtualized preview of a file's current Markdown buffer.
+use crate::image_media::release_media;
 use crate::{
     markdown::{
         parser::{self, Block, BlockTree},
@@ -41,19 +42,6 @@ fn comment_block(lines: &[u32], line: u32) -> Option<usize> {
             .partition_point(|start| *start <= line)
             .saturating_sub(1)
     })
-}
-
-fn release_media(
-    images: impl IntoIterator<Item = super::markdown_media::MediaImage>,
-    cx: &mut gpui::App,
-) {
-    let images: Vec<_> = images.into_iter().map(|media| media.image).collect();
-    // After the active window returns to App, release its atlas tiles as well.
-    cx.defer(move |cx| {
-        for image in images {
-            gpui::ImageSource::Image(image).evict(None, cx);
-        }
-    });
 }
 
 pub(super) fn is_markdown(path: &str) -> bool {
@@ -132,14 +120,14 @@ pub(super) struct MarkdownPreview {
     loading: bool,
     truncated: bool,
     pub media_client: Option<(super::client::WorkspaceFilesClient, String)>,
-    images: HashMap<String, Result<super::markdown_media::MediaImage, String>>,
+    images: HashMap<String, Result<crate::image_media::MediaImage, String>>,
     image_task: Option<Task<()>>,
     image_generation: u64,
     media_dirty: bool,
     image_allowed: Rc<HashSet<String>>,
     diagram_allowed: Rc<HashSet<String>>,
-    image_snapshot: Rc<HashMap<String, Result<super::markdown_media::MediaImage, String>>>,
-    diagram_snapshot: Rc<HashMap<String, Result<super::markdown_media::MediaImage, String>>>,
+    image_snapshot: Rc<HashMap<String, Result<crate::image_media::MediaImage, String>>>,
+    diagram_snapshot: Rc<HashMap<String, Result<crate::image_media::MediaImage, String>>>,
     visible_rows: HashSet<gpui::SharedString>,
     code_fences: HashMap<SharedString, render::CodeFenceRuntime>,
     code_fences_generation: u64,
@@ -149,13 +137,13 @@ pub(super) struct MarkdownPreview {
     suspended: bool,
     selection_pointer: Option<gpui::Point<gpui::Pixels>>,
     selection_task: Option<Task<()>>,
-    diagrams: HashMap<String, Result<super::markdown_media::MediaImage, String>>,
+    diagrams: HashMap<String, Result<crate::image_media::MediaImage, String>>,
     diagram_task: Option<Task<()>>,
     diagram_style: u32,
     source_visible: HashSet<String>,
     preview_image: Option<crate::attachments::PreviewImage>,
-    zoom_source: Option<super::markdown_media::MediaImage>,
-    zoom_render: Option<super::markdown_media::MediaImage>,
+    zoom_source: Option<crate::image_media::MediaImage>,
+    zoom_render: Option<crate::image_media::MediaImage>,
     preview_focus: FocusHandle,
     open_file: Rc<dyn Fn(String, &mut gpui::App)>,
 }
@@ -286,6 +274,10 @@ impl MarkdownPreview {
     }
 
     fn comment_elements(&self, ix: usize, theme: &Theme, cx: &Context<Self>) -> Vec<AnyElement> {
+        let column = Some(crate::comment_ui::CommentContentColumn {
+            max_width: MAX_PREVIEW_CONTENT_WIDTH,
+            gutter: 24.0,
+        });
         let mut elements: Vec<_> = self
             .comments
             .iter()
@@ -297,6 +289,7 @@ impl MarkdownPreview {
                     cx,
                     Self::edit_comment,
                     Self::remove_comment,
+                    column,
                 )
             })
             .collect();
@@ -311,6 +304,7 @@ impl MarkdownPreview {
                     cx,
                     Self::cancel_comment,
                     Self::commit_comment,
+                    column,
                 ));
             }
         }
@@ -557,13 +551,11 @@ impl MarkdownPreview {
                             }
                         };
                         let result = match response {
-                            Ok((mime, bytes)) => {
-                                executor
-                                    .spawn(async move {
-                                        super::markdown_media::decode_image(&mime, bytes)
-                                    })
-                                    .await
-                            }
+                            Ok((mime, bytes)) => executor
+                                .spawn(
+                                    async move { crate::image_media::decode_image(&mime, bytes) },
+                                )
+                                .await,
                             Err(error) => Err(error.to_string()),
                         };
                         (source, result)
@@ -630,7 +622,7 @@ impl MarkdownPreview {
                     .background_executor()
                     .spawn(async move {
                         let svg = crate::markdown::mermaid::render(&source, &palette)?;
-                        super::markdown_media::decode_image("image/svg+xml", svg.into_bytes())
+                        crate::image_media::decode_image("image/svg+xml", svg.into_bytes())
                     })
                     .await;
                 if this
@@ -654,8 +646,8 @@ impl MarkdownPreview {
 
     fn admit_media(
         &self,
-        result: Result<super::markdown_media::MediaImage, String>,
-    ) -> Result<super::markdown_media::MediaImage, String> {
+        result: Result<crate::image_media::MediaImage, String>,
+    ) -> Result<crate::image_media::MediaImage, String> {
         let used: usize = self
             .images
             .values()
@@ -900,16 +892,13 @@ impl MarkdownPreview {
     }
 
     fn media_element(
-        loaded: &super::markdown_media::MediaImage,
+        loaded: &crate::image_media::MediaImage,
         id: gpui::SharedString,
         name: String,
         weak: gpui::WeakEntity<Self>,
     ) -> AnyElement {
         use gpui::StyledImage as _;
-        let preview = crate::attachments::PreviewImage {
-            name: name.into(),
-            image: loaded.image.clone(),
-        };
+        let preview = crate::attachments::PreviewImage::new(name, loaded.image.clone());
         let source = loaded.clone();
         div()
             .id(id)
@@ -926,6 +915,7 @@ impl MarkdownPreview {
                 let _ = weak.update(cx, |view, cx| {
                     view.close_media_preview(cx);
                     view.zoom_source = Some(source.clone());
+                    preview.viewer.reset();
                     view.preview_image = Some(preview.clone());
                     window.focus(&view.preview_focus, cx);
                     cx.notify();
@@ -1157,52 +1147,54 @@ impl MarkdownPreview {
                     div()
                         .w_full()
                         .flex()
-                        .justify_center()
-                        .px(px(24.0))
+                        .flex_col()
                         .pb(px(render::MD_BLOCK_GAP))
                         // Include the comment gutter so moving from the block to
                         // its button never leaves the hover group.
                         .group(group.clone())
                         .child(
-                            div()
-                                .w_full()
-                                .max_w(px(MAX_PREVIEW_CONTENT_WIDTH))
-                                .min_w_0()
-                                .relative()
-                                .when_some(comment_line, |el, line| {
-                                    el.child(
-                                        div()
-                                            .absolute()
-                                            .left(px(-20.0))
-                                            .top(px(3.0))
-                                            .opacity(0.0)
-                                            .group_hover(group, |style| style.opacity(1.0))
-                                            .child(crate::comment_ui::render_comment_adder(
-                                                format!("{}-comment-add-{ix}", self.scope).into(),
-                                                &theme,
-                                                cx,
-                                                move |this, window, cx| {
-                                                    this.open_comment(
-                                                        line,
-                                                        &comment_source,
-                                                        window,
-                                                        cx,
-                                                    )
-                                                },
-                                            )),
-                                    )
-                                })
-                                .child(render::render_block(
-                                    &top.block,
-                                    ix,
-                                    ix,
-                                    &opts,
-                                    &theme,
-                                    window,
-                                    self.highlights.get(&ix).map(|h| h.lines.as_slice()),
-                                ))
-                                .children(comments),
+                            div().w_full().flex().justify_center().px(px(24.0)).child(
+                                div()
+                                    .w_full()
+                                    .max_w(px(MAX_PREVIEW_CONTENT_WIDTH))
+                                    .min_w_0()
+                                    .relative()
+                                    .when_some(comment_line, |el, line| {
+                                        el.child(
+                                            div()
+                                                .absolute()
+                                                .left(px(-20.0))
+                                                .top(px(3.0))
+                                                .opacity(0.0)
+                                                .group_hover(group, |style| style.opacity(1.0))
+                                                .child(crate::comment_ui::render_comment_adder(
+                                                    format!("{}-comment-add-{ix}", self.scope)
+                                                        .into(),
+                                                    &theme,
+                                                    cx,
+                                                    move |this, window, cx| {
+                                                        this.open_comment(
+                                                            line,
+                                                            &comment_source,
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    },
+                                                )),
+                                        )
+                                    })
+                                    .child(render::render_block(
+                                        &top.block,
+                                        ix,
+                                        ix,
+                                        &opts,
+                                        &theme,
+                                        window,
+                                        self.highlights.get(&ix).map(|h| h.lines.as_slice()),
+                                    )),
+                            ),
                         )
+                        .children(comments)
                         .into_any_element(),
                 )
             })
@@ -1299,15 +1291,12 @@ impl Render for MarkdownPreview {
             );
         if let Some(preview) = &self.preview_image {
             let weak = cx.weak_entity();
-            let display_size = self.zoom_source.as_ref().map(|source| {
-                let viewport = window.viewport_size();
-                let scale = (f32::from(viewport.width) * 0.9 / source.width)
-                    .min(f32::from(viewport.height) * 0.85 / source.height)
-                    .min(1.0);
-                gpui::size(px(source.width * scale), px(source.height * scale))
-            });
+            let display_size = self
+                .zoom_source
+                .as_ref()
+                .map(|source| gpui::size(px(source.width), px(source.height)));
             root = root.child(crate::attachments::lightbox_with_size(
-                window.viewport_size(),
+                window,
                 preview,
                 &self.preview_focus,
                 display_size,
@@ -1318,6 +1307,7 @@ impl Render for MarkdownPreview {
                         cx.notify();
                     });
                 },
+                cx,
             ));
         }
         root
@@ -1687,7 +1677,7 @@ mod layout_tests {
                     let mut view = MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx);
                     view.tree = parser::parse_full("![Example](example.svg)"); view.list.reset(1);
                     view.diagram_style = crate::theme::style_generation();
-                    let media = super::super::markdown_media::decode_image("image/svg+xml", br##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="160"><rect width="240" height="160" fill="#468"/></svg>"##.to_vec()).unwrap();
+                    let media = crate::image_media::decode_image("image/svg+xml", br##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="160"><rect width="240" height="160" fill="#468"/></svg>"##.to_vec()).unwrap();
                     view.images.insert("example.svg".into(), Ok(media));
                     view
                 })
@@ -1741,7 +1731,7 @@ mod layout_tests {
                             let Block::CodeBlock { code, .. } = &view.tree.blocks[0].block else {
                                 panic!("missing Mermaid block");
                             };
-                            let media = super::super::markdown_media::decode_image(
+                            let media = crate::image_media::decode_image(
                                 "image/svg+xml",
                                 br##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="160"><rect width="240" height="160" fill="#468"/></svg>"##.to_vec(),
                             )
@@ -1888,8 +1878,7 @@ mod async_tests {
         let mut png = std::io::Cursor::new(Vec::new());
         raster.write_to(&mut png, image::ImageFormat::Png).unwrap();
         assert!(png.get_ref().len() < zeron_proto::MAX_WORKSPACE_IMAGE_BYTES);
-        let media =
-            super::super::markdown_media::decode_image("image/png", png.into_inner()).unwrap();
+        let media = crate::image_media::decode_image("image/png", png.into_inner()).unwrap();
         view.read_with(cx, |view, _| {
             assert!(view.admit_media(Ok(media)).is_err());
         });
@@ -1902,7 +1891,7 @@ mod async_tests {
             cx.new(|cx| MarkdownPreview::new("docs/README.md".into(), Rc::new(|_, _| {}), cx));
         view.update(cx, |view, cx| {
             view.tree = parser::parse_full("![a](../image.png)");
-            let mut media = super::super::markdown_media::decode_image(
+            let mut media = crate::image_media::decode_image(
                 "image/svg+xml",
                 br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>"#.to_vec(),
             )

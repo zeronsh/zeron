@@ -8,6 +8,13 @@ use crate::{
 };
 use gpui::{AnyElement, Context, Entity, SharedString, div, prelude::*, px};
 
+/// Align review controls with a centered document column while keeping the card full width.
+#[derive(Clone, Copy)]
+pub(crate) struct CommentContentColumn {
+    pub max_width: f32,
+    pub gutter: f32,
+}
+
 pub(crate) fn render_comment_adder<T: 'static>(
     id: SharedString,
     theme: &Theme,
@@ -44,6 +51,7 @@ pub(crate) fn render_comment_card<T: 'static>(
     cx: &Context<T>,
     edit: fn(&mut T, &str, &mut gpui::Window, &mut Context<T>),
     remove: fn(&mut T, &str, &mut Context<T>),
+    column: Option<CommentContentColumn>,
 ) -> AnyElement {
     let group: SharedString = format!("cmt-card-{}", comment.id).into();
     let id = comment.id.clone();
@@ -57,7 +65,14 @@ pub(crate) fn render_comment_card<T: 'static>(
         .bg(crate::theme::ink(0.05))
         // A bar, not a border: it must match ACCENT_BAR_WIDTH exactly or the
         // card's edge steps in and out of the column.
-        .child(comment_accent_bar(theme.solid.opacity(0.35)))
+        .when_some(column, |el, column| {
+            el.relative().justify_center().px(px(column.gutter))
+        })
+        .child(
+            comment_accent_bar(theme.solid.opacity(0.35)).when(column.is_some(), |el| {
+                el.absolute().left(px(0.0)).top(px(0.0))
+            }),
+        )
         .child(
             div()
                 .flex_1()
@@ -65,6 +80,9 @@ pub(crate) fn render_comment_card<T: 'static>(
                 .flex()
                 .flex_col()
                 .px(px(Theme::SPACE_LG))
+                .when_some(column, |el, column| {
+                    el.max_w(px(column.max_width)).px(px(0.0))
+                })
                 .py(px(comments::CARD_PAD_V / 2.0))
                 .child(
                     div()
@@ -174,6 +192,7 @@ pub(crate) fn render_comment_draft<T: 'static>(
     cx: &Context<T>,
     cancel: fn(&mut T, &mut Context<T>),
     commit: fn(&mut T, &mut Context<T>),
+    column: Option<CommentContentColumn>,
 ) -> AnyElement {
     div()
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -189,7 +208,14 @@ pub(crate) fn render_comment_draft<T: 'static>(
         .flex()
         .flex_row()
         .bg(crate::theme::ink(0.08))
-        .child(comment_accent_bar(theme.solid.opacity(0.7)))
+        .when_some(column, |el, column| {
+            el.relative().justify_center().px(px(column.gutter))
+        })
+        .child(
+            comment_accent_bar(theme.solid.opacity(0.7)).when(column.is_some(), |el| {
+                el.absolute().left(px(0.0)).top(px(0.0))
+            }),
+        )
         .child(
             div()
                 .flex_1()
@@ -197,6 +223,9 @@ pub(crate) fn render_comment_draft<T: 'static>(
                 .flex()
                 .flex_col()
                 .px(px(Theme::SPACE_LG))
+                .when_some(column, |el, column| {
+                    el.max_w(px(column.max_width)).px(px(0.0))
+                })
                 .py(px(10.0))
                 .child(
                     div()
