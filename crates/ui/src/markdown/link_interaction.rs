@@ -116,6 +116,11 @@ impl Element for LinkRanges {
             }
             state.focused = focused;
             state.bounds = bounds;
+            state.tooltip_bounds.set(None);
+            #[cfg(all(test, target_os = "linux"))]
+            rendered_tests::TOOLTIP_BOUNDS.with(|bounds| {
+                *bounds.borrow_mut() = Some(state.tooltip_bounds.clone());
+            });
             let theme = Theme::of(cx).clone();
             let mut overlays = Vec::new();
             for (index, (range, target)) in self.links.iter().enumerate() {
@@ -143,11 +148,15 @@ impl Element for LinkRanges {
                     let pointer_focus_pending = menu_focus_pending.clone();
                     let hit = div()
                         .id(format!("link-{index}-{part}-{}", state.epoch.get()))
-                        .hoverable_tooltip(move |_, cx| {
-                            let url = destination.clone();
-                            let bounds = tooltip_bounds.clone();
-                            cx.new(|_| super::link_destination::Destination(url, bounds))
-                                .into()
+                        // Removing the builder cancels both visible tooltips
+                        // and GPUI's delayed show task while the menu owns input.
+                        .when(state.menu.borrow().is_none(), |hit| {
+                            hit.hoverable_tooltip(move |_, cx| {
+                                let url = destination.clone();
+                                let bounds = tooltip_bounds.clone();
+                                cx.new(|_| super::link_destination::Destination(url, bounds))
+                                    .into()
+                            })
                         })
                         .w(rect.size.width)
                         .h(rect.size.height)
@@ -463,6 +472,37 @@ mod tests {
 mod rendered_tests {
     use super::*;
     use gpui::{Context, Render};
+    thread_local! {
+        pub(super) static TOOLTIP_BOUNDS: RefCell<Option<Rc<Cell<Option<Bounds<Pixels>>>>>> = RefCell::default();
+    }
+    fn draw_has_tooltip(window: &mut Window, cx: &mut App) -> bool {
+        TOOLTIP_BOUNDS.with(|bounds| {
+            if let Some(bounds) = bounds.borrow().as_ref() {
+                bounds.set(None);
+            }
+        });
+        window.refresh();
+        let _ = window.draw(cx);
+        TOOLTIP_BOUNDS.with(|bounds| bounds.borrow().as_ref().is_some_and(|b| b.get().is_some()))
+    }
+    fn key(window: &mut Window, key: &str, cx: &mut App) {
+        window.dispatch_event(
+            gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                keystroke: gpui::Keystroke::parse(key).unwrap(),
+                is_held: false,
+                prefer_character_input: false,
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            gpui::PlatformInput::KeyUp(gpui::KeyUpEvent {
+                keystroke: gpui::Keystroke::parse(key).unwrap(),
+            }),
+            cx,
+        );
+        window.refresh();
+        let _ = window.draw(cx);
+    }
     struct Fixture {
         markdown: String,
         width: f32,
@@ -491,6 +531,112 @@ mod rendered_tests {
                     &|_| None,
                 ))
         }
+    }
+    #[test]
+    fn context_menu_cancels_visible_and_pending_hover_tooltips() {
+        gpui_platform::headless().run(|cx| {
+            cx.set_global(Theme::dark());
+            // Keep the headless event loop alive between scenario windows.
+            cx.open_window(Default::default(), |_, cx| cx.new(|_| gpui::Empty))
+                .unwrap();
+            cx.spawn(async move |cx| {
+                for visible in [true, false] {
+                    for keyboard in [false, true] {
+                        let activated = Rc::new(RefCell::new(Vec::new()));
+                        let window = cx.update(|cx| {
+                            cx.open_window(Default::default(), |_, cx| {
+                                cx.new(|_| Fixture {
+                                    markdown: "[Docs](https://example.com/docs)".into(),
+                                    width: 320.,
+                                    activated: activated.clone(),
+                                })
+                            })
+                            .unwrap()
+                        });
+                        let position = cx
+                            .update_window(window.into(), |_, window, cx| {
+                                draw_has_tooltip(window, cx);
+                                let (_, layout, _) =
+                                    super::super::render::selection_test_snapshot("link-fixture:0");
+                                let position = range_rects(&layout, &(0..4), 0., 0.)[0].center();
+                                window.dispatch_event(
+                                    gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                        position,
+                                        ..Default::default()
+                                    }),
+                                    cx,
+                                );
+                                draw_has_tooltip(window, cx);
+                                position
+                            })
+                            .unwrap();
+                        if visible {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(650))
+                                .await;
+                            cx.update_window(window.into(), |_, window, cx| {
+                                assert!(
+                                    draw_has_tooltip(window, cx),
+                                    "hover should show the destination"
+                                );
+                            })
+                            .unwrap();
+                        }
+                        cx.update_window(window.into(), |_, window, cx| {
+                            if keyboard {
+                                window.focus_next(cx);
+                                draw_has_tooltip(window, cx);
+                                key(window, "shift-f10", cx);
+                            } else {
+                                window.dispatch_event(
+                                    gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                                        button: MouseButton::Right,
+                                        position,
+                                        click_count: 1,
+                                        ..Default::default()
+                                    }),
+                                    cx,
+                                );
+                                window.dispatch_event(
+                                    gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                                        button: MouseButton::Right,
+                                        position,
+                                        click_count: 1,
+                                        ..Default::default()
+                                    }),
+                                    cx,
+                                );
+                            }
+                            assert!(
+                                !draw_has_tooltip(window, cx),
+                                "menu must hide an already visible tooltip"
+                            );
+                        })
+                        .unwrap();
+                        // Leave the pointer over the link beyond the show delay.
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(650))
+                            .await;
+                        cx.update_window(window.into(), |_, window, cx| {
+                            assert!(
+                                !draw_has_tooltip(window, cx),
+                                "pending hover must not appear over the menu"
+                            );
+                            key(window, "down", cx);
+                            key(window, "enter", cx);
+                            let actions = activated.borrow();
+                            assert_eq!(actions.len(), 1);
+                            assert_eq!(actions[0].action, LinkAction::External);
+                            assert_eq!(actions[0].target.original, "https://example.com/docs");
+                            window.remove_window();
+                        })
+                        .unwrap();
+                    }
+                }
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
     }
     #[test]
     fn keyboard_visits_each_range_and_opens_the_link_menu() {
