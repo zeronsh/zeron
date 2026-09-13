@@ -85,7 +85,7 @@ pub struct RenderOptions {
     /// (previews outside the transcript).
     pub copy: Option<CopyUi>,
     /// Optional owner-provided routing for links that belong inside the app.
-    /// Returning true prevents the ordinary external URL opener from running.
+    /// Routing is explicit: rejected links never reach the external opener.
     pub link: Option<LinkUi>,
     /// Agent-transcript-only fence layout controls and tracked horizontal
     /// scroll state, keyed by the same element discriminator passed to
@@ -119,9 +119,37 @@ pub struct CopyUi {
     pub copied_ix: Option<usize>,
 }
 
+pub use super::links::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
+
 #[derive(Clone)]
 pub struct LinkUi {
-    pub handler: Rc<dyn Fn(&str, &mut Window, &mut gpui::App) -> bool>,
+    pub source_session: Option<String>,
+    pub handler: Rc<dyn Fn(&LinkActivation, &mut Window, &mut gpui::App) -> LinkOutcome>,
+}
+
+pub fn activate_link(
+    target: LinkTarget,
+    action: LinkAction,
+    ui: Option<&LinkUi>,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    if action == LinkAction::Copy {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(target.original.clone()));
+        return;
+    }
+    let activation = LinkActivation {
+        target,
+        action,
+        source_session: ui.and_then(|ui| ui.source_session.clone()),
+    };
+    let outcome = ui.map_or_else(
+        || activation.web_outcome(false),
+        |ui| (ui.handler)(&activation, window, cx),
+    );
+    if let LinkOutcome::External(url) = outcome {
+        cx.open_url(&url);
+    }
 }
 
 type HoverHandler = Rc<dyn Fn(bool, &mut Window, &mut gpui::App)>;
@@ -1025,18 +1053,28 @@ fn flat_text_element(
     let text_el: AnyElement = if flat.links.is_empty() {
         styled.into_any_element()
     } else {
-        let (ranges, urls): (Vec<_>, Vec<_>) = flat.links.iter().cloned().unzip();
+        let (ranges, targets): (Vec<_>, Vec<_>) = flat
+            .links
+            .iter()
+            .map(|(range, url)| {
+                (
+                    range.clone(),
+                    LinkTarget::new(&flat.text[range.clone()], url),
+                )
+            })
+            .unzip();
         let id: SharedString = format!("{}-t{ix}", opts.row_key).into();
         let link_handler = opts.link.clone();
         InteractiveText::new(id, styled)
             .on_click(ranges, move |clicked_ix, window, cx| {
-                if let Some(url) = urls.get(clicked_ix) {
-                    let handled = link_handler
-                        .as_ref()
-                        .is_some_and(|link| (link.handler)(url, window, cx));
-                    if !handled {
-                        cx.open_url(url);
-                    }
+                if let Some(target) = targets.get(clicked_ix) {
+                    activate_link(
+                        target.clone(),
+                        LinkAction::Internal,
+                        link_handler.as_ref(),
+                        window,
+                        cx,
+                    );
                 }
             })
             .into_any_element()

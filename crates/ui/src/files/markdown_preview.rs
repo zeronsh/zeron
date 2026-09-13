@@ -954,12 +954,12 @@ impl MarkdownPreview {
         let theme = Theme::of(cx).clone();
         let weak = cx.weak_entity();
         let link = LinkUi {
-            handler: Rc::new(move |target, _, cx| {
+            source_session: None,
+            handler: Rc::new(move |activation, _, cx| {
+                let target = &activation.target.original;
                 weak.update(cx, |view, cx| {
                     let Some((path, anchor)) = relative_target(&view.path, target) else {
-                        return !(target.starts_with("https://")
-                            || target.starts_with("http://")
-                            || target.starts_with("mailto:"));
+                        return activation.web_outcome(false);
                     };
                     if path == view.path {
                         if let Some(ix) = anchor.as_ref().and_then(|a| view.anchors.get(a)) {
@@ -972,9 +972,9 @@ impl MarkdownPreview {
                     } else {
                         (view.open_file)(path, cx);
                     }
-                    true
+                    render::LinkOutcome::Internal
                 })
-                .unwrap_or(true)
+                .unwrap_or(render::LinkOutcome::Rejected)
             }),
         };
         range
@@ -1082,9 +1082,13 @@ impl MarkdownPreview {
                                 el = el.child(
                                     super::toolbar_button("markdown-image-link", "Open image link")
                                         .on_click(move |_, window, cx| {
-                                            if !(link.handler)(&target, window, cx) {
-                                                cx.open_url(&target);
-                                            }
+                                            render::activate_link(
+                                                render::LinkTarget::new(&target, &target),
+                                                render::LinkAction::Internal,
+                                                Some(&link),
+                                                window,
+                                                cx,
+                                            );
                                         })
                                         .child(
                                             crate::icons::icon(crate::icons::ARROW_UP_RIGHT)

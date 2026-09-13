@@ -1420,17 +1420,9 @@ impl Shell {
         });
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
-        let shell = cx.weak_entity();
+        let links = Self::transcript_links(None, cx);
         transcript.update(cx, |transcript, _| {
-            transcript.set_workspace_link_handler(crate::markdown::render::LinkUi {
-                handler: std::rc::Rc::new(move |target, window, cx| {
-                    shell
-                        .update(cx, |shell, cx| {
-                            shell.open_workspace_file_link(target, window, cx)
-                        })
-                        .unwrap_or(false)
-                }),
-            });
+            transcript.set_workspace_link_handler(links)
         });
         // Every send glides the prompt to the viewport top and reserves the
         // reply's space below it (notes-app parity).
@@ -2442,6 +2434,27 @@ impl Shell {
         cx.notify();
     }
 
+    fn transcript_links(
+        source_session: Option<String>,
+        cx: &Context<Self>,
+    ) -> crate::markdown::render::LinkUi {
+        let shell = cx.weak_entity();
+        crate::markdown::render::LinkUi {
+            source_session,
+            handler: std::rc::Rc::new(move |activation, window, cx| {
+                shell
+                    .update(cx, |shell, cx| {
+                        if shell.open_workspace_file_link(&activation.target.original, window, cx) {
+                            crate::markdown::render::LinkOutcome::Internal
+                        } else {
+                            activation.web_outcome(false)
+                        }
+                    })
+                    .unwrap_or(crate::markdown::render::LinkOutcome::Rejected)
+            }),
+        }
+    }
+
     /// Browser tabs are independent instances owned by the current session.
     fn add_browser_surface(
         &mut self,
@@ -2794,6 +2807,10 @@ impl Shell {
         // a frozen one reads top-down.
         let transcript =
             cx.new(|cx| Transcript::for_doc(self.state.clone(), doc_id.clone(), !frozen, cx));
+        let links = Self::transcript_links(Some(self.active_chat.clone()), cx);
+        transcript.update(cx, |transcript, _| {
+            transcript.set_workspace_link_handler(links)
+        });
         let events = cx.subscribe(&transcript, Self::on_transcript_event);
         let fetch = if frozen {
             self.spawn_subagent_snapshot_fetch(&chat_id, &doc_id, cx)
