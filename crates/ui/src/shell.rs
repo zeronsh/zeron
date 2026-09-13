@@ -1420,7 +1420,7 @@ impl Shell {
         });
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
-        let links = Self::transcript_links(None, cx);
+        let links = Self::session_links(None, cx);
         transcript.update(cx, |transcript, _| {
             transcript.set_workspace_link_handler(links)
         });
@@ -2434,7 +2434,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn transcript_links(
+    fn session_links(
         source_session: Option<String>,
         cx: &Context<Self>,
     ) -> crate::markdown::render::LinkUi {
@@ -2444,14 +2444,14 @@ impl Shell {
             handler: std::rc::Rc::new(move |activation, window, cx| {
                 shell
                     .update(cx, |shell, cx| {
-                        shell.activate_transcript_link(activation, window, cx)
+                        shell.activate_session_link(activation, window, cx)
                     })
                     .unwrap_or(crate::markdown::render::LinkOutcome::Rejected)
             }),
         }
     }
 
-    fn activate_transcript_link(
+    fn activate_session_link(
         &mut self,
         activation: &crate::markdown::render::LinkActivation,
         window: &mut Window,
@@ -2584,6 +2584,13 @@ impl Shell {
                 window,
                 move |this: &mut Self, _, event, window, cx| match event {
                     FilesEvent::OpenFile(path) => this.add_file_surface(path.clone(), window, cx),
+                    FilesEvent::OpenWebLink(activation) => {
+                        if let crate::markdown::render::LinkOutcome::External(url) =
+                            this.activate_session_link(activation, window, cx)
+                        {
+                            cx.open_url(&url);
+                        }
+                    }
                     FilesEvent::TitleChanged => cx.notify(),
                     FilesEvent::FileRenamed { .. } => cx.notify(),
                     FilesEvent::WordWrapChanged(word_wrap) => {
@@ -2644,6 +2651,13 @@ impl Shell {
             window,
             move |this: &mut Self, _, event, window, cx| match event {
                 FilesEvent::OpenFile(path) => this.add_file_surface(path.clone(), window, cx),
+                FilesEvent::OpenWebLink(activation) => {
+                    if let crate::markdown::render::LinkOutcome::External(url) =
+                        this.activate_session_link(activation, window, cx)
+                    {
+                        cx.open_url(&url);
+                    }
+                }
                 FilesEvent::TitleChanged => cx.notify(),
                 FilesEvent::FileRenamed { old_path, new_path } => {
                     this.rename_file_surface(id, &event_panel_key, old_path, new_path, cx)
@@ -2835,7 +2849,7 @@ impl Shell {
         // a frozen one reads top-down.
         let transcript =
             cx.new(|cx| Transcript::for_doc(self.state.clone(), doc_id.clone(), !frozen, cx));
-        let links = Self::transcript_links(Some(self.active_chat.clone()), cx);
+        let links = Self::session_links(Some(self.active_chat.clone()), cx);
         transcript.update(cx, |transcript, _| {
             transcript.set_workspace_link_handler(links)
         });
@@ -10669,7 +10683,7 @@ mod exit_regressions {
                 };
                 assert!(!shell.right_pane_open(cx));
                 assert_eq!(
-                    shell.activate_transcript_link(&activation, window, cx),
+                    shell.activate_session_link(&activation, window, cx),
                     LinkOutcome::Internal
                 );
                 assert!(shell.right_pane_open(cx));
@@ -10682,17 +10696,17 @@ mod exit_regressions {
                     shell.resolved_right_active(cx),
                     RightSurface::Browser(first)
                 );
-                shell.activate_transcript_link(&activation, window, cx);
+                shell.activate_session_link(&activation, window, cx);
                 assert_eq!(shell.browsers.len(), 2);
                 activation.action = LinkAction::External;
                 assert_eq!(
-                    shell.activate_transcript_link(&activation, window, cx),
+                    shell.activate_session_link(&activation, window, cx),
                     LinkOutcome::External("https://example.com/docs".into())
                 );
                 assert_eq!(shell.browsers.len(), 2);
                 activation.source_session = Some("other-session".into());
                 assert_eq!(
-                    shell.activate_transcript_link(&activation, window, cx),
+                    shell.activate_session_link(&activation, window, cx),
                     LinkOutcome::Rejected
                 );
                 activation.source_session = Some("first-session".into());
@@ -10700,7 +10714,7 @@ mod exit_regressions {
                     state.selected_chat = Some("switch-in-progress".into())
                 });
                 assert_eq!(
-                    shell.activate_transcript_link(&activation, window, cx),
+                    shell.activate_session_link(&activation, window, cx),
                     LinkOutcome::Rejected
                 );
                 assert_eq!(shell.browsers.len(), 2);
@@ -10726,7 +10740,7 @@ mod exit_regressions {
                 activation.action = LinkAction::Internal;
                 activation.source_session = ui.source_session;
                 assert_eq!(
-                    shell.activate_transcript_link(&activation, window, cx),
+                    shell.activate_session_link(&activation, window, cx),
                     LinkOutcome::Internal
                 );
                 assert_eq!(shell.browsers.len(), 3);
@@ -10737,6 +10751,104 @@ mod exit_regressions {
             .unwrap();
         cx.run_until_parked();
         assert!(weak.upgrade().is_none());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[gpui::test]
+    fn markdown_preview_events_open_browser_from_tree_and_file_tabs(cx: &mut TestAppContext) {
+        use crate::markdown::render::{LinkAction, LinkActivation, LinkTarget};
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let surfaces = window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "owner".into();
+                shell
+                    .state
+                    .update(cx, |state, _| state.selected_chat = Some("owner".into()));
+                shell.add_files_surface(window, cx);
+                shell.add_file_surface("README.md".into(), window, cx);
+                [
+                    shell.files[&shell.panel_key(cx)].clone(),
+                    shell.file_surfaces[&shell.file_surface_seq].clone(),
+                ]
+            })
+            .unwrap();
+        let mut last_external_url = None;
+        for (index, surface) in surfaces.iter().enumerate() {
+            let mut activation = LinkActivation {
+                target: LinkTarget::new("Docs", &format!("https://example.com/preview/{index}")),
+                action: LinkAction::Internal,
+                source_session: Some("owner".into()),
+            };
+            surface.update(cx, |_, cx| {
+                cx.emit(FilesEvent::OpenWebLink(activation.clone()))
+            });
+            cx.run_until_parked();
+            assert_eq!(cx.opened_url(), last_external_url);
+            window
+                .update(cx, |shell, _, cx| {
+                    assert!(shell.right_pane_open(cx));
+                    assert_eq!(shell.browsers.len(), index + 1);
+                    assert_eq!(
+                        shell.resolved_right_active(cx),
+                        RightSurface::Browser(shell.browser_seq)
+                    );
+                    assert_eq!(
+                        shell.browsers[&shell.browser_seq]
+                            .read(cx)
+                            .page
+                            .url
+                            .as_deref(),
+                        Some(activation.target.original.as_str())
+                    );
+                })
+                .unwrap();
+            activation.action = LinkAction::External;
+            surface.update(cx, |_, cx| {
+                cx.emit(FilesEvent::OpenWebLink(activation.clone()))
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                cx.opened_url().as_deref(),
+                Some(activation.target.original.as_str())
+            );
+            last_external_url = Some(activation.target.original.clone());
+            activation.target = LinkTarget::new("Stale", "https://example.com/stale");
+            activation.source_session = Some("stale-owner".into());
+            for action in [LinkAction::Internal, LinkAction::External] {
+                activation.action = action;
+                surface.update(cx, |_, cx| {
+                    cx.emit(FilesEvent::OpenWebLink(activation.clone()))
+                });
+                cx.run_until_parked();
+                assert_eq!(cx.opened_url(), last_external_url);
+            }
+            window
+                .update(cx, |shell, _, _| {
+                    assert_eq!(shell.browsers.len(), index + 1)
+                })
+                .unwrap();
+        }
     }
 
     #[gpui::test]

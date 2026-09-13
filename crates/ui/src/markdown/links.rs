@@ -26,7 +26,7 @@ pub enum LinkOutcome {
     External(String),
     Rejected,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkActivation {
     pub target: LinkTarget,
     pub action: LinkAction,

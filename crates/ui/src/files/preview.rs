@@ -2462,6 +2462,17 @@ impl FilesSurface {
             .into_any_element()
     }
 
+    fn markdown_web_link_handler(cx: &Context<Self>) -> super::markdown_preview::WebLinkHandler {
+        let owner = cx.weak_entity();
+        Rc::new(move |activation, cx| {
+            let _ = owner.update(cx, |surface, cx| {
+                let mut activation = activation.clone();
+                activation.source_session = Some(surface.chat_id.clone());
+                cx.emit(FilesEvent::OpenWebLink(activation));
+            });
+        })
+    }
+
     fn prepare_markdown_preview(
         &mut self,
         path: &str,
@@ -2485,15 +2496,18 @@ impl FilesSurface {
             .markdown
             .get_or_insert_with(|| {
                 let owner = cx.weak_entity();
+                let web_links = Self::markdown_web_link_handler(cx);
                 cx.new(|cx| {
-                    super::markdown_preview::MarkdownPreview::new(
+                    let mut view = super::markdown_preview::MarkdownPreview::new(
                         path.to_string(),
                         Rc::new(move |path, cx| {
                             let _ =
                                 owner.update(cx, |surface, cx| surface.open_tree_file(path, cx));
                         }),
                         cx,
-                    )
+                    );
+                    view.set_web_link_handler(web_links);
+                    view
                 })
             })
             .clone();
@@ -4244,6 +4258,139 @@ mod markdown_buffer_tests {
                 assert_eq!(document.editor.as_ref(), Some(&editor));
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn markdown_preview_web_links_keep_the_file_session_and_full_target(cx: &mut TestAppContext) {
+        use crate::markdown::render::{self, LinkAction, LinkTarget};
+        use std::cell::RefCell;
+
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new(state, "owner".into(), false, 1000, 13.0, false, false, cx)
+        });
+        let (owner, preview) = window
+            .update(cx, |surface, _, cx| {
+                let mut document = FileDocument::loading(DocumentKey {
+                    chat_id: "owner".into(),
+                    checkout_id: Some("checkout".into()),
+                    path: "README.md".into(),
+                });
+                document.set_loaded(zeron_proto::WorkspaceFileText {
+                    checkout_id: "checkout".into(),
+                    path: "README.md".into(),
+                    text: Some("[Docs](https://example.com/docs)".into()),
+                    content_hash: Some("hash".into()),
+                    size: 32,
+                    modified_at: None,
+                    encoding: zeron_proto::WorkspaceTextEncoding::Utf8,
+                    line_ending: Some(zeron_proto::WorkspaceLineEnding::Lf),
+                    read_only_reason: None,
+                    truncated: false,
+                });
+                document.show_markdown = true;
+                surface.preview.active = Some("README.md".into());
+                surface
+                    .preview
+                    .documents
+                    .insert("README.md".into(), document);
+                let preview = surface
+                    .prepare_markdown_preview("README.md", None, cx)
+                    .unwrap();
+                // Changing the selected chat must not rewrite this file's owner.
+                surface
+                    .state
+                    .update(cx, |state, _| state.selected_chat = Some("other".into()));
+                (cx.entity(), preview)
+            })
+            .unwrap();
+        let received = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&owner, {
+                let received = received.clone();
+                let preview = preview.clone();
+                move |_, event, cx| {
+                    if let FilesEvent::OpenWebLink(activation) = event {
+                        received.borrow_mut().push(activation.clone());
+                        // Browser selection can suspend this same preview. This
+                        // must run after its owner/preview borrows have unwound.
+                        preview.update(cx, |preview, cx| preview.suspend(cx));
+                    }
+                }
+            })
+        });
+        let ui = preview.update(cx, |preview, cx| preview.link_ui(cx));
+        assert!(
+            ui.source_session.is_none(),
+            "file preview labels are not truncated"
+        );
+        let target = LinkTarget::new("Different label", "https://example.com/docs?q=%C3%B1#full");
+        for action in [LinkAction::Internal, LinkAction::External, LinkAction::Copy] {
+            cx.update_window(window.into(), |_, window, cx| {
+                render::activate_link(target.clone(), action, Some(&ui), window, cx);
+            })
+            .unwrap();
+        }
+        cx.run_until_parked();
+        let events = received.borrow();
+        assert_eq!(events.len(), 2);
+        for (event, action) in events
+            .iter()
+            .zip([LinkAction::Internal, LinkAction::External])
+        {
+            assert_eq!(event.target, target);
+            assert_eq!(event.action, action);
+            assert_eq!(event.source_session.as_deref(), Some("owner"));
+        }
+        drop(events);
+        cx.update(|cx| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some(target.original.as_str())
+            )
+        });
+        assert!(
+            cx.opened_url().is_none(),
+            "only the shell may open web destinations"
+        );
+        for url in [
+            "javascript:alert(1)",
+            "https://user:secret@example.com",
+            "https://example.com/%ZZ",
+            "https://example.com/\n",
+        ] {
+            for action in [LinkAction::Internal, LinkAction::External] {
+                cx.update_window(window.into(), |_, window, cx| {
+                    render::activate_link(
+                        LinkTarget::new("Bad", url),
+                        action,
+                        Some(&ui),
+                        window,
+                        cx,
+                    );
+                })
+                .unwrap();
+            }
+        }
+        cx.run_until_parked();
+        assert_eq!(received.borrow().len(), 2);
+        assert!(cx.opened_url().is_none());
+        // Mail links retain their existing OS handler.
+        cx.update_window(window.into(), |_, window, cx| {
+            render::activate_link(
+                LinkTarget::new("Mail", "mailto:hello@example.com"),
+                LinkAction::Internal,
+                Some(&ui),
+                window,
+                cx,
+            );
+        })
+        .unwrap();
+        assert_eq!(cx.opened_url().as_deref(), Some("mailto:hello@example.com"));
     }
 
     #[gpui::test]

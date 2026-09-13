@@ -159,7 +159,10 @@ pub(super) struct MarkdownPreview {
     zoom_render: Option<crate::image_media::MediaImage>,
     preview_focus: FocusHandle,
     open_file: Rc<dyn Fn(String, &mut gpui::App)>,
+    open_web_link: Option<WebLinkHandler>,
 }
+
+pub(super) type WebLinkHandler = Rc<dyn Fn(&render::LinkActivation, &mut gpui::App)>;
 
 impl MarkdownPreview {
     fn close_media_preview(&mut self, cx: &mut gpui::App) {
@@ -388,6 +391,7 @@ impl MarkdownPreview {
             loading: false,
             truncated: false,
             open_file,
+            open_web_link: None,
         }
     }
 
@@ -958,17 +962,27 @@ impl MarkdownPreview {
             .unwrap_or_else(|| gpui::Empty.into_any_element())
     }
 
-    fn render_rows(
-        &mut self,
-        range: std::ops::Range<usize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let theme = Theme::of(cx).clone();
+    pub(super) fn set_web_link_handler(&mut self, handler: WebLinkHandler) {
+        self.open_web_link = Some(handler);
+    }
+
+    pub(super) fn link_ui(&self, cx: &Context<Self>) -> LinkUi {
         let weak = cx.weak_entity();
-        let link = LinkUi {
+        let open_web_link = self.open_web_link.clone();
+        LinkUi {
             source_session: None,
             handler: Rc::new(move |activation, _, cx| {
+                if weak.upgrade().is_none() {
+                    return render::LinkOutcome::Rejected;
+                }
+                if activation.target.navigation.is_ok() {
+                    if let Some(open_web_link) = &open_web_link {
+                        // Emit through the owning FilesSurface before borrowing
+                        // this preview: selecting Browser can suspend this view.
+                        open_web_link(activation, cx);
+                        return render::LinkOutcome::Internal;
+                    }
+                }
                 let target = &activation.target.original;
                 weak.update(cx, |view, cx| {
                     let Some((path, anchor)) = relative_target(&view.path, target) else {
@@ -989,7 +1003,17 @@ impl MarkdownPreview {
                 })
                 .unwrap_or(render::LinkOutcome::Rejected)
             }),
-        };
+        }
+    }
+
+    fn render_rows(
+        &mut self,
+        range: std::ops::Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let theme = Theme::of(cx).clone();
+        let link = self.link_ui(cx);
         range
             .filter_map(|ix| {
                 let top = self.tree.blocks.get(ix)?.clone();
@@ -1139,8 +1163,16 @@ impl MarkdownPreview {
                                 .text_color(theme.text_muted)
                                 .child(text)
                                 .when(external, |el| {
-                                    el.cursor_pointer()
-                                        .on_click(move |_, _, cx| cx.open_url(&target))
+                                    let link = image_link.clone();
+                                    el.cursor_pointer().on_click(move |_, window, cx| {
+                                        render::activate_link(
+                                            render::LinkTarget::new(&target, &target),
+                                            render::LinkAction::Internal,
+                                            Some(&link),
+                                            window,
+                                            cx,
+                                        );
+                                    })
                                 })
                                 .into_any_element()
                         }
