@@ -4,6 +4,10 @@ use std::{
     time::Duration,
 };
 use zeron_preview::PreviewService;
+/// Every service binds the fixed proxy port, so tests in this binary must
+/// not run concurrently: one test freeing 7331 for its own proxy to reclaim
+/// would otherwise race another test's service for it.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 struct Child(std::process::Child);
 impl Drop for Child {
     fn drop(&mut self) {
@@ -48,6 +52,7 @@ async fn wait(service: &PreviewService, expected_pid: Option<u32>) {
 }
 #[tokio::test]
 async fn only_current_project_http_processes_are_exposed_and_removals_are_live() {
+    let _serial = SERIAL.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let a = temp.path().join("app");
     let b = temp.path().join("unrelated");
@@ -97,4 +102,58 @@ async fn only_current_project_http_processes_are_exposed_and_removals_are_live()
                 .is_ok()
         );
     }
+}
+
+/// A discovered dev server receives exactly one probe for its lifetime. The
+/// scanner used to send `HEAD /` every cycle to every project listener, which
+/// showed up as request spam (and growing memory) in dev servers like Expo.
+#[tokio::test]
+async fn a_discovered_server_is_probed_once_not_every_cycle() {
+    let _serial = SERIAL.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let app = temp.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    let log = temp.path().join("requests.log");
+    let script = format!(
+        "import http.server,socketserver\n\
+         class H(http.server.SimpleHTTPRequestHandler):\n\
+         \x20   def do_HEAD(self):\n\
+         \x20       open({log:?},'a').write(self.command+' '+self.path+'\\n')\n\
+         \x20       super().do_HEAD()\n\
+         \x20   def log_message(self,*a): pass\n\
+         socketserver.TCPServer(('127.0.0.1',0),H).serve_forever()\n",
+        log = log.display().to_string()
+    );
+    let server = Child(
+        std::process::Command::new("python3")
+            .args(["-c", &script])
+            .current_dir(&app)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let service = PreviewService::new(
+        temp.path().join("names.json"),
+        "local".into(),
+        "Laptop".into(),
+    )
+    .unwrap();
+    let roots = vec![app.clone()];
+    service.start(Arc::new(move || roots.clone()), None).await;
+    wait(&service, Some(server.0.id())).await;
+    // Several scan cycles (2s cadence) pass while the server stays discovered.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_eq!(
+        service.catalog().snapshot().services.len(),
+        1,
+        "the server stays listed without being re-probed"
+    );
+    let requests = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        requests.lines().count(),
+        1,
+        "expected a single discovery probe, got:\n{requests}"
+    );
+    service.shutdown().await;
 }

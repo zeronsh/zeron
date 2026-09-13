@@ -20,8 +20,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::TryStreamExt as _;
 use gpui::{
-    AnyElement, BackgroundExecutor, Image, ImageFormat, ObjectFit, SharedString, Size,
-    StyledImage as _, div, img, prelude::*, px,
+    AnyElement, BackgroundExecutor, Image, ImageFormat, SharedString, Size, div, prelude::*, px,
 };
 
 use crate::state::EngineHandle;
@@ -71,6 +70,7 @@ pub fn with_attachments(text: &str, paths: &[String]) -> String {
 /// An attachment ref parsed back out of a user message's text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserImageAttachment {
+    pub appshot: Option<crate::appshots::AppshotPresentation>,
     pub id: String,
     pub path: String,
     pub name: String,
@@ -130,7 +130,8 @@ pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
             attachments: Vec::new(),
         };
     };
-    let body = content[..body_end].trim_end();
+    let body = crate::appshots::strip_context_for_display(content[..body_end].trim_end());
+    let presentations = crate::appshots::presentations(content);
     let attachments: Vec<UserImageAttachment> = content[refs_start..]
         .lines()
         .filter_map(|line| {
@@ -139,6 +140,7 @@ pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
         })
         .enumerate()
         .map(|(index, path)| UserImageAttachment {
+            appshot: presentations.get(&path).cloned(),
             id: format!("{index}:{path}"),
             name: name_from_path(&path),
             path,
@@ -258,6 +260,16 @@ pub fn stage_clipboard_image(image: Image) -> StagedAttachment {
         id: uuid::Uuid::new_v4().to_string(),
         name: ensure_extension("image", format),
         image: Arc::new(image),
+    }
+}
+
+/// Stage native macOS capture bytes without a temporary file. The capture
+/// service already encoded PNG and enforces the shared size limit.
+pub fn stage_png_bytes(name: String, bytes: Vec<u8>) -> StagedAttachment {
+    StagedAttachment {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: ensure_extension(&name, ImageFormat::Png),
+        image: Arc::new(Image::from_bytes(ImageFormat::Png, bytes)),
     }
 }
 
@@ -505,6 +517,26 @@ pub async fn read_attachment_image(
     })
 }
 
+/// Decode with a fixed allocation budget and retain only a small queue image.
+/// Full resolution is fetched on explicit preview, never retained by queue rows.
+pub(crate) fn queue_thumbnail_image(source: &Image) -> Option<Arc<Image>> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(source.bytes.as_slice()))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let thumb = reader.decode().ok()?.thumbnail(160, 112);
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    thumb.write_to(&mut bytes, image::ImageFormat::Png).ok()?;
+    Some(Arc::new(Image::from_bytes(
+        ImageFormat::Png,
+        bytes.into_inner(),
+    )))
+}
+
 // ---------------------------------------------------------------------------
 // Transcript image cache (transcript-attachment-cache.ts)
 // ---------------------------------------------------------------------------
@@ -651,12 +683,12 @@ pub fn attachment_snapshot(device_id: &str, path: &str) -> AttachmentSnapshot {
             // resolves the rewritten ref instantly instead of blanking the
             // thumbnail into a skeleton while the bytes round-trip
             // (2026-08-19 "photo disappears after it finishes sending").
-            if let Some(image) = upload_alias_id8(path)
-                .and_then(|id8| match cache.map.get(&alias_key(device_id, &id8)) {
+            if let Some(image) = upload_alias_id8(path).and_then(|id8| {
+                match cache.map.get(&alias_key(device_id, &id8)) {
                     Some(CacheEntry::Loaded { image, .. }) => Some(image.clone()),
                     _ => None,
-                })
-            {
+                }
+            }) {
                 cache.insert_loaded(key(device_id, path), image.clone());
                 return AttachmentSnapshot::Loaded(image);
             }
@@ -671,9 +703,8 @@ pub fn attachment_snapshot(device_id: &str, path: &str) -> AttachmentSnapshot {
 fn upload_alias_id8(path: &str) -> Option<String> {
     let base = std::path::Path::new(path).file_name()?.to_str()?;
     let (id8, _) = base.split_at_checked(8)?;
-    (base.as_bytes().get(8) == Some(&b'-')
-        && id8.bytes().all(|b| b.is_ascii_alphanumeric()))
-    .then(|| id8.to_string())
+    (base.as_bytes().get(8) == Some(&b'-') && id8.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .then(|| id8.to_string())
 }
 
 fn alias_key(device_id: &str, id8: &str) -> (String, String) {
@@ -763,33 +794,69 @@ pub fn seed_attachment(device_id: &str, path: &str, name: &str, image: Arc<Image
 pub struct PreviewImage {
     pub name: SharedString,
     pub image: Arc<Image>,
+    pub(crate) viewer: crate::image_viewer::ImageView,
 }
 
-/// The bare lightbox: dim scrim, the image at ≤85vh/90vw, the file name under
-/// it. Any click closes (the whole dialog is the close button, as in the
-/// original's `cursor-zoom-out` figure), and so does Escape — `focus` must be
-/// focused by the caller when the preview opens so the key reaches us.
+impl PreviewImage {
+    pub fn new(name: impl Into<SharedString>, image: Arc<Image>) -> Self {
+        Self {
+            name: name.into(),
+            image,
+            viewer: Default::default(),
+        }
+    }
+}
+
+/// Shared image viewer over a dim scrim. Escape and a click close it;
+/// dragging and zoom controls are consumed by the viewer.
 pub fn lightbox(
-    viewport: Size<gpui::Pixels>,
+    window: &mut gpui::Window,
     preview: &PreviewImage,
     focus: &gpui::FocusHandle,
     on_close: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+    cx: &mut gpui::App,
 ) -> AnyElement {
-    lightbox_with_size(viewport, preview, focus, None, on_close)
+    lightbox_with_size(window, preview, focus, None, on_close, cx)
 }
 
-/// Allow bounded raster variants to retain the source's logical display size.
+/// Sanitized SVG variants retain their source's natural logical dimensions.
 pub(crate) fn lightbox_with_size(
-    viewport: Size<gpui::Pixels>,
+    window: &mut gpui::Window,
     preview: &PreviewImage,
     focus: &gpui::FocusHandle,
-    display_size: Option<Size<gpui::Pixels>>,
+    natural_size: Option<Size<gpui::Pixels>>,
     on_close: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+    cx: &mut gpui::App,
 ) -> AnyElement {
+    let viewport = window.viewport_size();
     let max_h = px(f32::from(viewport.height) * 0.85);
     let max_w = px(f32::from(viewport.width) * 0.9);
+    let natural_size = natural_size.or_else(|| {
+        preview
+            .image
+            .clone()
+            .use_render_image(window, cx)
+            .map(|image| {
+                let dimensions = image.size(0);
+                gpui::size(
+                    px(dimensions.width.0 as f32),
+                    px(dimensions.height.0 as f32),
+                )
+            })
+    });
+    let content = match natural_size {
+        Some(natural) => preview
+            .viewer
+            .render(preview.image.clone(), natural, None, window, cx),
+        None => div()
+            .text_color(ink(0.6))
+            .child("Loading image…")
+            .into_any_element(),
+    };
     let on_close = std::rc::Rc::new(on_close);
     let close_on_key = on_close.clone();
+    let press_state = preview.viewer.clone();
+    let click_state = preview.viewer.clone();
     gpui::deferred(
         gpui::anchored()
             .position(gpui::point(px(0.0), px(0.0)))
@@ -806,25 +873,25 @@ pub(crate) fn lightbox_with_size(
                     .items_center()
                     .justify_center()
                     .gap(px(12.0))
-                    .cursor_pointer()
                     .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
                         if event.keystroke.key == "escape" {
                             cx.stop_propagation();
                             close_on_key(window, cx);
                         }
                     })
-                    .on_click(move |_, window, cx| on_close(window, cx))
-                    .child(
-                        img(preview.image.clone())
-                            .when_some(display_size, |image, size| {
-                                image.w(size.width).h(size.height)
-                            })
-                            .object_fit(ObjectFit::Contain)
-                            .max_h(max_h)
-                            .max_w(max_w)
-                            .rounded(px(6.0))
-                            .shadow_2xl(),
-                    )
+                    .capture_any_mouse_down(move |event, _, _| {
+                        if event.button == gpui::MouseButton::Left {
+                            press_state.begin_click();
+                        }
+                    })
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        if !click_state.dragged() {
+                            on_close(window, cx);
+                        }
+                    })
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    .child(div().w(max_w).h(max_h).child(content))
                     .child(
                         div()
                             .max_w(max_w)
@@ -842,6 +909,48 @@ pub(crate) fn lightbox_with_size(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appshot_cards_follow_their_exact_image_reference() {
+        let shot = crate::appshots::tests::shot();
+        let paths = HashMap::from([(shot.screenshot.id.clone(), "/remote/a & b.png".to_string())]);
+        let body = crate::appshots::with_appshots("Look here", &[shot], &paths);
+        let message = with_attachments(
+            &body,
+            &["/remote/ordinary.png".into(), "/remote/a & b.png".into()],
+        );
+        let parsed = parse_user_message_images(&message);
+        assert_eq!(parsed.text, "Look here");
+        assert!(parsed.attachments[0].appshot.is_none());
+        let appshot = parsed.attachments[1].appshot.as_ref().unwrap();
+        assert_eq!(appshot.app_name, "Safari & Notes");
+        assert_eq!(appshot.title(), "A \"window\"");
+    }
+
+    #[test]
+    fn duplicate_or_invalid_appshot_metadata_stays_an_ordinary_attachment() {
+        let body = format!(
+            "Question\n\n{}\n<appshot app=\"One\" image=\"/a.png\">private text</appshot><appshot app=\"Two\" image=\"/a.png\">other text</appshot>",
+            crate::appshots::CONTEXT_MARKER
+        );
+        let parsed = parse_user_message_images(&with_attachments(&body, &["/a.png".into()]));
+        assert!(parsed.attachments[0].appshot.is_none());
+        assert_eq!(parsed.text, "Question");
+    }
+
+    #[test]
+    fn queue_images_have_a_small_retained_pixel_budget() {
+        let source = image::DynamicImage::new_rgba8(2400, 1600);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        source
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let source = Image::from_bytes(ImageFormat::Png, bytes.into_inner());
+        let thumbnail = queue_thumbnail_image(&source).unwrap();
+        let (width, height) = crate::appshots::png_dimensions(&thumbnail.bytes).unwrap();
+        assert!(width <= 160 && height <= 112);
+        assert!(thumbnail.bytes.len() < 160 * 112 * 4);
+    }
 
     #[test]
     fn with_attachments_round_trips_through_parse() {
@@ -863,6 +972,19 @@ mod tests {
         let parsed = parse_user_message_images(&content);
         assert_eq!(parsed.text, "");
         assert_eq!(parsed.attachments.len(), 1);
+    }
+
+    #[test]
+    fn appshot_context_is_hidden_but_image_remains() {
+        let body = format!(
+            "Fix the layout\n\n{}\n<appshot app=\"Safari\">secret AX text</appshot>",
+            crate::appshots::CONTEXT_MARKER
+        );
+        let content = with_attachments(&body, &["/a/appshot.png".to_string()]);
+        let parsed = parse_user_message_images(&content);
+        assert_eq!(parsed.text, "Fix the layout");
+        assert_eq!(parsed.attachments.len(), 1);
+        assert_eq!(parsed.attachments[0].path, "/a/appshot.png");
     }
 
     #[test]
@@ -955,7 +1077,10 @@ mod tests {
         // Exact multiple: no trailing empty chunk.
         let exact = chunk_ranges(UPLOAD_CHUNK_B64_CHARS * 2);
         assert_eq!(exact.len(), 2);
-        assert_eq!(exact[1], (1, UPLOAD_CHUNK_B64_CHARS..UPLOAD_CHUNK_B64_CHARS * 2));
+        assert_eq!(
+            exact[1],
+            (1, UPLOAD_CHUNK_B64_CHARS..UPLOAD_CHUNK_B64_CHARS * 2)
+        );
         // Partial tail.
         let partial = chunk_ranges(UPLOAD_CHUNK_B64_CHARS + 7);
         assert_eq!(partial.len(), 2);
