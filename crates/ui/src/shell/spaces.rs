@@ -401,6 +401,10 @@ impl Shell {
             s.select_chat(None, cx);
         });
         self.schedule_save(cx);
+        if self.onboarding.active() {
+            self.onboarding.error = None;
+            self.onboarding_remember_target(cx);
+        }
         cx.notify();
     }
 
@@ -2049,6 +2053,7 @@ impl Shell {
             // instead of editing text or moving focus.
             "tab" => {
                 self.add_space_accept_completion(cx);
+                cx.stop_propagation();
                 return;
             }
             _ => {}
