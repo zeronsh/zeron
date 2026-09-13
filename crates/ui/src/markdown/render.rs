@@ -15,9 +15,9 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, BorderStyle, Bounds, Context, FontStyle, FontWeight, Hsla, InteractiveText, Render,
-    SharedString, StyledText, TextRun, UnderlineStyle, Window, canvas, div, font, point,
-    prelude::*, px, quad, size,
+    AnyElement, BorderStyle, Bounds, Context, FontStyle, FontWeight, Hsla, Render, SharedString,
+    StyledText, TextRun, UnderlineStyle, Window, canvas, div, font, point, prelude::*, px, quad,
+    size,
 };
 use zeron_syntax::{HighlightKind, HighlightSpan, HighlightedDocument};
 
@@ -1050,35 +1050,8 @@ fn flat_text_element(
     };
     let styled = StyledText::new(flat.text.clone()).with_runs(text_runs);
     let layout = styled.layout().clone();
-    let text_el: AnyElement = if flat.links.is_empty() {
-        styled.into_any_element()
-    } else {
-        let (ranges, targets): (Vec<_>, Vec<_>) = flat
-            .links
-            .iter()
-            .map(|(range, url)| {
-                (
-                    range.clone(),
-                    LinkTarget::new(&flat.text[range.clone()], url),
-                )
-            })
-            .unzip();
-        let id: SharedString = format!("{}-t{ix}", opts.row_key).into();
-        let link_handler = opts.link.clone();
-        InteractiveText::new(id, styled)
-            .on_click(ranges, move |clicked_ix, window, cx| {
-                if let Some(target) = targets.get(clicked_ix) {
-                    activate_link(
-                        target.clone(),
-                        LinkAction::Internal,
-                        link_handler.as_ref(),
-                        window,
-                        cx,
-                    );
-                }
-            })
-            .into_any_element()
-    };
+    let text_el = styled.into_any_element();
+    let link_layout = layout.clone();
     // Underlay canvas: inline-code washes + the selection wash, painted
     // BEFORE the text (earlier sibling ⇒ underneath), reading glyph geometry
     // from the text's own layout handle. Pure paint — never in layout. The
@@ -1131,11 +1104,31 @@ fn flat_text_element(
     )
     .absolute()
     .size_full();
-    div()
+    let child = div()
         .relative()
         .child(underlay)
         .child(text_el)
-        .into_any_element()
+        .into_any_element();
+    if flat.links.is_empty() {
+        return child;
+    }
+    super::link_interaction::LinkRanges {
+        id: format!("{}-t{ix}", opts.row_key).into(),
+        child,
+        layout: link_layout,
+        links: flat
+            .links
+            .iter()
+            .map(|(range, url)| {
+                (
+                    range.clone(),
+                    LinkTarget::new(&flat.text[range.clone()], url),
+                )
+            })
+            .collect(),
+        ui: opts.link.clone(),
+    }
+    .into_any_element()
 }
 
 /// Selection tint shared with native inputs and the composer.
