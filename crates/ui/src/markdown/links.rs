@@ -45,6 +45,24 @@ impl LinkActivation {
 mod tests {
     use super::*;
     #[test]
+    fn internal_external_and_unsupported_platform_routes() {
+        let mut a = LinkActivation {
+            target: LinkTarget::new("label", "https://example.com"),
+            action: LinkAction::Internal,
+            source_session: Some("owner".into()),
+        };
+        assert_eq!(a.web_outcome(true), LinkOutcome::Internal);
+        assert_eq!(
+            a.web_outcome(false),
+            LinkOutcome::External("https://example.com/".into())
+        );
+        a.action = LinkAction::External;
+        assert_eq!(
+            a.web_outcome(true),
+            LinkOutcome::External("https://example.com/".into())
+        );
+    }
+    #[test]
     fn rejected_targets_never_fall_back() {
         for url in [
             "javascript:alert(1)",

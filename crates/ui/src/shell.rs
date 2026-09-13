@@ -2444,15 +2444,43 @@ impl Shell {
             handler: std::rc::Rc::new(move |activation, window, cx| {
                 shell
                     .update(cx, |shell, cx| {
-                        if shell.open_workspace_file_link(&activation.target.original, window, cx) {
-                            crate::markdown::render::LinkOutcome::Internal
-                        } else {
-                            activation.web_outcome(false)
-                        }
+                        shell.activate_transcript_link(activation, window, cx)
                     })
                     .unwrap_or(crate::markdown::render::LinkOutcome::Rejected)
             }),
         }
+    }
+
+    fn activate_transcript_link(
+        &mut self,
+        activation: &crate::markdown::render::LinkActivation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> crate::markdown::render::LinkOutcome {
+        use crate::markdown::render::{LinkAction, LinkOutcome};
+        if self.active_chat.is_empty()
+            || activation.source_session.as_deref() != Some(self.active_chat.as_str())
+            || self.state.read(cx).selected_chat.as_deref() != Some(self.active_chat.as_str())
+        {
+            return LinkOutcome::Rejected;
+        }
+        if activation.target.navigation.is_err() {
+            return if activation.action == LinkAction::Internal
+                && self.open_workspace_file_link(&activation.target.original, window, cx)
+            {
+                LinkOutcome::Internal
+            } else {
+                LinkOutcome::Rejected
+            };
+        }
+        let outcome = activation.web_outcome(cfg!(any(target_os = "macos", target_os = "linux")));
+        if outcome == LinkOutcome::Internal {
+            if !self.right_pane_open(cx) {
+                self.toggle_right_pane(cx);
+            }
+            self.add_browser_surface(activation.target.navigation.clone().ok(), window, cx);
+        }
+        outcome
     }
 
     /// Browser tabs are independent instances owned by the current session.
@@ -10577,6 +10605,91 @@ mod exit_regressions {
                 assert!(shell.state.read(cx).no_project);
             })
             .unwrap();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[gpui::test]
+    fn transcript_links_open_new_tabs_and_reject_stale_sessions(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let weak = window
+            .update(cx, |shell, window, cx| {
+                use crate::markdown::render::{
+                    LinkAction, LinkActivation, LinkOutcome, LinkTarget,
+                };
+                shell.active_chat = "first-session".into();
+                shell.state.update(cx, |state, _| {
+                    state.selected_chat = Some("first-session".into())
+                });
+                let mut activation = LinkActivation {
+                    target: LinkTarget::new("Docs", "https://example.com/docs"),
+                    action: LinkAction::Internal,
+                    source_session: Some("first-session".into()),
+                };
+                assert!(!shell.right_pane_open(cx));
+                assert_eq!(
+                    shell.activate_transcript_link(&activation, window, cx),
+                    LinkOutcome::Internal
+                );
+                assert!(shell.right_pane_open(cx));
+                let first = shell.browser_seq;
+                assert_eq!(
+                    shell.browsers[&first].read(cx).page.url.as_deref(),
+                    Some("https://example.com/docs")
+                );
+                assert_eq!(
+                    shell.resolved_right_active(cx),
+                    RightSurface::Browser(first)
+                );
+                shell.activate_transcript_link(&activation, window, cx);
+                assert_eq!(shell.browsers.len(), 2);
+                activation.action = LinkAction::External;
+                assert_eq!(
+                    shell.activate_transcript_link(&activation, window, cx),
+                    LinkOutcome::External("https://example.com/docs".into())
+                );
+                assert_eq!(shell.browsers.len(), 2);
+                activation.source_session = Some("other-session".into());
+                assert_eq!(
+                    shell.activate_transcript_link(&activation, window, cx),
+                    LinkOutcome::Rejected
+                );
+                activation.source_session = Some("first-session".into());
+                shell.state.update(cx, |state, _| {
+                    state.selected_chat = Some("switch-in-progress".into())
+                });
+                assert_eq!(
+                    shell.activate_transcript_link(&activation, window, cx),
+                    LinkOutcome::Rejected
+                );
+                assert_eq!(shell.browsers.len(), 2);
+                let weak = shell.browsers[&first].downgrade();
+                shell.close_right_surface(RightSurface::Browser(first), window, cx);
+                weak
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(weak.upgrade().is_none());
     }
 
     #[gpui::test]
