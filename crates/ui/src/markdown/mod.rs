@@ -14,6 +14,7 @@
 //!   reflow already-painted text; the canonical parse settles honestly on
 //!   completion.
 
+mod link_destination;
 mod link_interaction;
 pub mod links;
 pub mod mend;

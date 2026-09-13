@@ -1113,7 +1113,15 @@ fn flat_text_element(
         return child;
     }
     super::link_interaction::LinkRanges {
-        id: format!("{}-t{ix}", opts.row_key).into(),
+        id: format!(
+            "{}-{}-t{ix}",
+            opts.row_key,
+            opts.link
+                .as_ref()
+                .and_then(|ui| ui.source_session.as_deref())
+                .unwrap_or_default()
+        )
+        .into(),
         child,
         layout: link_layout,
         links: flat

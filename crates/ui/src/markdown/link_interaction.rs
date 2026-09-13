@@ -9,7 +9,11 @@ use gpui::{
     FocusHandle, GlobalElementId, InspectorElementId, LayoutId, MouseButton, Pixels, Point, Role,
     ScrollWheelEvent, SharedString, TextLayout, Window, div, prelude::*, px,
 };
-use std::{cell::RefCell, ops::Range, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    ops::Range,
+    rc::Rc,
+};
 
 pub struct LinkRanges {
     pub id: SharedString,
@@ -24,6 +28,10 @@ struct Interaction {
     menu_focus: [FocusHandle; 3],
     menu: Rc<RefCell<Option<(usize, Point<Pixels>)>>>,
     bounds: Bounds<Pixels>,
+    epoch: Rc<Cell<u64>>,
+    dismissed: Rc<Cell<bool>>,
+    tooltip_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    focused: Option<usize>,
 }
 impl IntoElement for LinkRanges {
     type Element = Self;
@@ -33,7 +41,13 @@ impl IntoElement for LinkRanges {
 }
 impl Element for LinkRanges {
     type RequestLayoutState = ();
-    type PrepaintState = (Vec<AnyElement>, Rc<RefCell<Option<(usize, Point<Pixels>)>>>);
+    type PrepaintState = (
+        Vec<AnyElement>,
+        Rc<RefCell<Option<(usize, Point<Pixels>)>>>,
+        Rc<Cell<u64>>,
+        Rc<Cell<bool>>,
+        Rc<Cell<Option<Bounds<Pixels>>>>,
+    );
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone().into())
     }
@@ -72,10 +86,24 @@ impl Element for LinkRanges {
                     menu_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
                     menu: Rc::default(),
                     bounds,
+                    epoch: Rc::default(),
+                    dismissed: Rc::default(),
+                    tooltip_bounds: Rc::default(),
+                    focused: None,
                 });
             if state.bounds != bounds {
                 state.menu.borrow_mut().take();
+                state.epoch.set(state.epoch.get().wrapping_add(1));
+                state.dismissed.set(true);
             }
+            let focused = state
+                .focus
+                .iter()
+                .position(|focus| focus.is_focused(window));
+            if focused != state.focused {
+                state.dismissed.set(false);
+            }
+            state.focused = focused;
             state.bounds = bounds;
             let theme = Theme::of(cx).clone();
             let mut overlays = Vec::new();
@@ -88,10 +116,18 @@ impl Element for LinkRanges {
                     let keyboard_menu = menu.clone();
                     let focus = state.focus[index].clone();
                     let click_target = target.clone();
+                    let destination = target.original.clone();
+                    let tooltip_bounds = state.tooltip_bounds.clone();
                     let click_ui = self.ui.clone();
                     let menu_focus = state.menu_focus[0].clone();
                     let hit = div()
-                        .id(format!("link-{index}-{part}"))
+                        .id(format!("link-{index}-{part}-{}", state.epoch.get()))
+                        .hoverable_tooltip(move |_, cx| {
+                            let url = destination.clone();
+                            let bounds = tooltip_bounds.clone();
+                            cx.new(|_| super::link_destination::Destination(url, bounds))
+                                .into()
+                        })
                         .w(rect.size.width)
                         .h(rect.size.height)
                         .cursor_pointer()
@@ -153,6 +189,33 @@ impl Element for LinkRanges {
                         cx,
                     );
                     overlays.push(hit);
+                }
+            }
+            if state.menu.borrow().is_none() && !state.dismissed.get() {
+                if let Some(index) = focused {
+                    if let Some(rect) =
+                        range_rects(&self.layout, &self.links[index].0, 0., 0.).first()
+                    {
+                        let card = super::link_destination::destination_card(
+                            &state.targets[index].original,
+                            state.tooltip_bounds.clone(),
+                            window,
+                            cx,
+                        );
+                        let mut popup = crate::popover::menu_at(
+                            "focused-link-destination",
+                            rect.bottom_left(),
+                            card,
+                            None,
+                        );
+                        popup.prepaint_as_root(
+                            bounds.origin,
+                            window.viewport_size().map(AvailableSpace::Definite),
+                            window,
+                            cx,
+                        );
+                        overlays.push(popup);
+                    }
                 }
             }
             if let Some((index, position)) = *state.menu.borrow() {
@@ -229,7 +292,16 @@ impl Element for LinkRanges {
                 );
                 overlays.push(popup);
             }
-            ((overlays, state.menu.clone()), state)
+            (
+                (
+                    overlays,
+                    state.menu.clone(),
+                    state.epoch.clone(),
+                    state.dismissed.clone(),
+                    state.tooltip_bounds.clone(),
+                ),
+                state,
+            )
         })
     }
     fn paint(
@@ -243,8 +315,18 @@ impl Element for LinkRanges {
         cx: &mut App,
     ) {
         let menu = paint.1.clone();
-        window.on_mouse_event(move |_: &ScrollWheelEvent, phase, window, _| {
-            if phase == DispatchPhase::Capture && menu.borrow_mut().take().is_some() {
+        let epoch = paint.2.clone();
+        let dismissed = paint.3.clone();
+        let tooltip_bounds = paint.4.clone();
+        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, _| {
+            if phase == DispatchPhase::Capture
+                && !tooltip_bounds
+                    .get()
+                    .is_some_and(|rect| rect.contains(&event.position))
+            {
+                menu.borrow_mut().take();
+                epoch.set(epoch.get().wrapping_add(1));
+                dismissed.set(true);
                 window.refresh();
             }
         });
