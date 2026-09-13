@@ -2567,3 +2567,9 @@ mod tests {
         assert!(cache.code.is_empty());
     }
 }
+
+/// Native fixture access to actual shaped link ranges; absent in shipped builds.
+#[cfg(feature = "browser-fixture")]
+pub fn fixture_link(target: &str) -> Option<(gpui::Point<gpui::Pixels>, gpui::FocusHandle)> {
+    super::link_interaction::fixture_link(target)
+}

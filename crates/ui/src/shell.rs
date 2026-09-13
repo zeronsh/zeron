@@ -6395,7 +6395,28 @@ impl Shell {
         }
     }
 
-    fn on_key_down(&mut self, event: &gpui::KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Inputs and completion menus consume Tab first. Unhandled Tab walks
+        // accessible controls, including individual transcript link ranges.
+        let modifiers = event.keystroke.modifiers;
+        if event.keystroke.key == "tab"
+            && !modifiers.control
+            && !modifiers.alt
+            && !modifiers.platform
+        {
+            if modifiers.shift {
+                window.focus_prev(cx);
+            } else {
+                window.focus_next(cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         let selected_chat = self.state.read(cx).selected_chat.clone();
         let indicator = selected_chat
             .as_deref()
@@ -10683,6 +10704,32 @@ mod exit_regressions {
                     LinkOutcome::Rejected
                 );
                 assert_eq!(shell.browsers.len(), 2);
+                shell.state.update(cx, |state, _| {
+                    state.selected_chat = Some("first-session".into())
+                });
+                shell.add_subagent_surface(
+                    "first-session".into(),
+                    "child-doc".into(),
+                    "Child".into(),
+                    true,
+                    cx,
+                );
+                let child = shell
+                    .subagent_tabs
+                    .values()
+                    .next()
+                    .unwrap()
+                    .transcript
+                    .clone();
+                let ui = child.read(cx).link_ui().unwrap();
+                assert_eq!(ui.source_session.as_deref(), Some("first-session"));
+                activation.action = LinkAction::Internal;
+                activation.source_session = ui.source_session;
+                assert_eq!(
+                    shell.activate_transcript_link(&activation, window, cx),
+                    LinkOutcome::Internal
+                );
+                assert_eq!(shell.browsers.len(), 3);
                 let weak = shell.browsers[&first].downgrade();
                 shell.close_right_surface(RightSurface::Browser(first), window, cx);
                 weak
@@ -10916,6 +10963,18 @@ mod exit_regressions {
 /// Native browser regression fixture hooks are excluded from shipped builds.
 #[cfg(feature = "browser-fixture")]
 impl Shell {
+    pub fn fixture_focus_mounted(&self, window: &Window, cx: &App) -> bool {
+        self.shortcut_focus.contains_focused(window, cx)
+    }
+    pub fn fixture_active_browser(
+        &self,
+        cx: &App,
+    ) -> Option<(u64, Entity<crate::browser::BrowserSurface>)> {
+        let RightSurface::Browser(id) = self.resolved_right_active(cx) else {
+            return None;
+        };
+        self.browsers.get(&id).cloned().map(|browser| (id, browser))
+    }
     pub fn fixture_open_browser(
         &mut self,
         url: Option<String>,

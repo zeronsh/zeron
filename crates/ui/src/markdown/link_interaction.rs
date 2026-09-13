@@ -15,6 +15,15 @@ use std::{
     rc::Rc,
 };
 
+#[cfg(feature = "browser-fixture")]
+thread_local! {
+    static FIXTURE_LINKS: RefCell<std::collections::HashMap<String, (Point<Pixels>, FocusHandle)>> = RefCell::default();
+}
+#[cfg(feature = "browser-fixture")]
+pub(crate) fn fixture_link(target: &str) -> Option<(Point<Pixels>, FocusHandle)> {
+    FIXTURE_LINKS.with(|links| links.borrow().get(target).cloned())
+}
+
 pub struct LinkRanges {
     pub id: SharedString,
     pub child: AnyElement,
@@ -26,6 +35,7 @@ struct Interaction {
     targets: Vec<LinkTarget>,
     focus: Vec<FocusHandle>,
     menu_focus: [FocusHandle; 3],
+    menu_focus_pending: Rc<Cell<bool>>,
     menu: Rc<RefCell<Option<(usize, Point<Pixels>)>>>,
     bounds: Bounds<Pixels>,
     epoch: Rc<Cell<u64>>,
@@ -84,6 +94,7 @@ impl Element for LinkRanges {
                         .collect(),
                     targets,
                     menu_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+                    menu_focus_pending: Rc::default(),
                     menu: Rc::default(),
                     bounds,
                     epoch: Rc::default(),
@@ -112,6 +123,15 @@ impl Element for LinkRanges {
                     .into_iter()
                     .enumerate()
                 {
+                    #[cfg(feature = "browser-fixture")]
+                    if part == 0 {
+                        FIXTURE_LINKS.with(|links| {
+                            links.borrow_mut().insert(
+                                target.original.clone(),
+                                (rect.center(), state.focus[index].clone()),
+                            )
+                        });
+                    }
                     let menu = state.menu.clone();
                     let keyboard_menu = menu.clone();
                     let focus = state.focus[index].clone();
@@ -119,7 +139,8 @@ impl Element for LinkRanges {
                     let destination = target.original.clone();
                     let tooltip_bounds = state.tooltip_bounds.clone();
                     let click_ui = self.ui.clone();
-                    let menu_focus = state.menu_focus[0].clone();
+                    let menu_focus_pending = state.menu_focus_pending.clone();
+                    let pointer_focus_pending = menu_focus_pending.clone();
                     let hit = div()
                         .id(format!("link-{index}-{part}-{}", state.epoch.get()))
                         .hoverable_tooltip(move |_, cx| {
@@ -153,6 +174,7 @@ impl Element for LinkRanges {
                         })
                         .on_mouse_down(MouseButton::Right, move |event, window, cx| {
                             *menu.borrow_mut() = Some((index, event.position));
+                            pointer_focus_pending.set(true);
                             cx.stop_propagation();
                             window.refresh();
                         })
@@ -167,7 +189,7 @@ impl Element for LinkRanges {
                                 }
                                 "f10" if event.keystroke.modifiers.shift => {
                                     *keyboard_menu.borrow_mut() = Some((index, rect.bottom_left()));
-                                    window.focus(&menu_focus, cx);
+                                    menu_focus_pending.set(true);
                                     window.refresh();
                                 }
                                 "escape" => {
@@ -222,7 +244,25 @@ impl Element for LinkRanges {
                 let menu = state.menu.clone();
                 let dismiss_menu = state.menu.clone();
                 let return_focus = state.focus[index].clone();
+                let menu_focus = state.menu_focus.clone();
+                let pending = state.menu_focus_pending.clone();
+                let initial_focus = state.menu_focus[0].clone();
                 let mut card = crate::popover::popover_card(&theme)
+                    .child(
+                        gpui::canvas(
+                            move |_, window, cx| {
+                                // Claim focus only when the deferred menu mounts. The
+                                // shell recovers focus from handles that are not mounted.
+                                if pending.replace(false) {
+                                    window.focus(&initial_focus, cx);
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .w(px(0.))
+                        .h(px(0.)),
+                    )
                     .id("link-actions")
                     .on_key_down(move |event, window, cx| {
                         match event.keystroke.key.as_str() {
@@ -231,9 +271,21 @@ impl Element for LinkRanges {
                                 window.focus(&return_focus, cx);
                                 window.refresh();
                             }
-                            "tab" if event.keystroke.modifiers.shift => window.focus_prev(cx),
-                            "tab" | "down" => window.focus_next(cx),
-                            "up" => window.focus_prev(cx),
+                            "tab" | "down" | "up" => {
+                                let current = menu_focus
+                                    .iter()
+                                    .position(|focus| focus.is_focused(window))
+                                    .unwrap_or(0);
+                                let backwards = event.keystroke.key == "up"
+                                    || (event.keystroke.key == "tab"
+                                        && event.keystroke.modifiers.shift);
+                                let next = if backwards {
+                                    (current + 2) % 3
+                                } else {
+                                    (current + 1) % 3
+                                };
+                                window.focus(&menu_focus[next], cx);
+                            }
                             _ => return,
                         }
                         cx.stop_propagation();

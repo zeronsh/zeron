@@ -22,7 +22,7 @@ async fn eval(
         pause(cx, 20).await;
     }
 }
-fn dispatch(
+pub(super) fn dispatch(
     window: WindowHandle<shell::Shell>,
     event: PlatformInput,
     cx: &mut AsyncApp,

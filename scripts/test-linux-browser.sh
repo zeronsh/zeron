@@ -52,8 +52,15 @@ record_fixture() {
     done
   fi
   [ -n "$capture_window" ]
+  local codec="${BROWSER_FIXTURE_VIDEO_CODEC:-libx264}"
+  local -a encoding=(-c:v "$codec")
+  if [ "$codec" = libx264 ]; then
+    encoding+=(-preset veryfast -crf 20)
+  else
+    encoding+=(-q:v 4)
+  fi
   ffmpeg -nostdin -loglevel error -y -f x11grab -framerate 30 -window_id "$capture_window" -i "$DISPLAY" \
-    -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -movflags +faststart \
+    "${encoding[@]}" -pix_fmt yuv420p -movflags +faststart \
     "$output/$mode/browser.mp4" >"$output/$mode/video.log" 2>&1 &
   video_pid=$!
   processes+=("$video_pid")

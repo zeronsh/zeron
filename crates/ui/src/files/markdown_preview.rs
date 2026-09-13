@@ -49,6 +49,19 @@ pub(super) fn is_markdown(path: &str) -> bool {
         .is_some_and(|(_, ext)| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"))
 }
 
+fn preview_link_outcome(activation: &render::LinkActivation) -> render::LinkOutcome {
+    let target = &activation.target.original;
+    // File previews already support mail links; chat's web-only policy does
+    // not replace this surface's specialized routing.
+    if !target.chars().any(char::is_control)
+        && url::Url::parse(target).is_ok_and(|url| url.scheme() == "mailto")
+    {
+        render::LinkOutcome::External(target.clone())
+    } else {
+        activation.web_outcome(false)
+    }
+}
+
 /// URL path resolution is independent of the UI host's filesystem.
 pub(super) fn relative_target(document: &str, target: &str) -> Option<(String, Option<String>)> {
     if let Some(target) = target.strip_prefix("zeron-file:") {
@@ -959,7 +972,7 @@ impl MarkdownPreview {
                 let target = &activation.target.original;
                 weak.update(cx, |view, cx| {
                     let Some((path, anchor)) = relative_target(&view.path, target) else {
-                        return activation.web_outcome(false);
+                        return preview_link_outcome(activation);
                     };
                     if path == view.path {
                         if let Some(ix) = anchor.as_ref().and_then(|a| view.anchors.get(a)) {
@@ -1322,6 +1335,24 @@ impl Render for MarkdownPreview {
 mod tests {
     use super::*;
 
+    #[test]
+    fn preview_retains_mail_links_without_allowing_active_schemes() {
+        for (url, allowed) in [
+            ("mailto:reader@example.com", true),
+            ("https://example.com", true),
+            ("javascript:alert(1)", false),
+        ] {
+            let a = render::LinkActivation {
+                target: render::LinkTarget::new("label", url),
+                action: render::LinkAction::Internal,
+                source_session: None,
+            };
+            assert_eq!(
+                matches!(preview_link_outcome(&a), render::LinkOutcome::External(_)),
+                allowed
+            );
+        }
+    }
     #[test]
     fn comments_map_to_original_lines_and_containing_blocks() {
         let source = "# Título 🦀\r\n\r\nPárrafo\r\nsegunda línea\r\n\r\n- uno\r\n- dos\r\n\r\n```mermaid\r\ngraph TD; A-->B\r\n```\r\n";
