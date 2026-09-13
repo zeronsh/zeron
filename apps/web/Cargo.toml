@@ -1,0 +1,39 @@
+[workspace]
+
+[package]
+name = "comet-web"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[profile.dev]
+debug = 0
+
+# Omit debug/name sections so the WASM fits Cloudflare's 25 MiB asset limit.
+[profile.release]
+strip = "symbols"
+
+opt-level = "s"
+
+[dependencies]
+zeron-ui = { path = "../../crates/ui" }
+zeron-proto = { path = "../../crates/proto" }
+zeron-rpc = { path = "../../crates/rpc", default-features = false, features = ["client"] }
+gpui = { git = "https://github.com/Gratenes/zui", rev = "8d78b9c2175b66e6881fa1ba0c576fffe847b1d0" }
+gpui_platform = { git = "https://github.com/Gratenes/zui", rev = "8d78b9c2175b66e6881fa1ba0c576fffe847b1d0" }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "Node", "HtmlElement", "Location", "WebSocket", "BinaryType", "MessageEvent", "Event", "CloseEvent", "ErrorEvent", "Request", "RequestInit", "RequestCredentials", "Response", "Headers", "AbortController", "AbortSignal"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+# Keep path-based Comet crates on the same published zui revision as this app.
+[patch."https://github.com/zeronsh/zui"]
+gpui = { git = "https://github.com/Gratenes/zui", rev = "8d78b9c2175b66e6881fa1ba0c576fffe847b1d0" }
+gpui_macros = { git = "https://github.com/Gratenes/zui", rev = "8d78b9c2175b66e6881fa1ba0c576fffe847b1d0" }
+gpui_platform = { git = "https://github.com/Gratenes/zui", rev = "8d78b9c2175b66e6881fa1ba0c576fffe847b1d0" }
+gpui_tokio = { git = "https://github.com/Gratenes/zui", rev = "8d78b9c2175b66e6881fa1ba0c576fffe847b1d0" }
+gpui_web = { git = "https://github.com/Gratenes/zui", rev = "8d78b9c2175b66e6881fa1ba0c576fffe847b1d0" }

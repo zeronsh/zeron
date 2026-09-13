@@ -1,0 +1,53 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Standalone staging target. Never deploy using the production config.
+  "name": "zeron-web-staging",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-12",
+  "account_id": "f3130440b1b0daacd1b0426a3a7f6bb5",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "zeron-test.embedez.com", "custom_domain": true }],
+  "assets": {
+    "directory": "../apps/web/dist",
+    // The UI lives at /. Missing paths must reach the BFF, never index.html.
+    "not_found_handling": "none",
+    "run_worker_first": ["/api", "/api/*", "/auth", "/auth/*", "/health"]
+  },
+  "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
+  "alias": { "loro-crdt": "loro-crdt/base64" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "SESSION_ROOMS", "class_name": "SessionRoom" },
+      { "name": "DEVICE_ROOMS", "class_name": "DeviceRoom" },
+      { "name": "BROWSER_SESSIONS", "class_name": "BrowserSessionStore" },
+      { "name": "PREVIEW_ROOMS", "class_name": "PreviewRoom" },
+      { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
+      { "name": "CHAT_ROOMS", "class_name": "ChatRoom" }
+    ]
+  },
+  // New Worker: all DO namespaces are independent of production.
+  "migrations": [{
+    "tag": "v1",
+    "new_sqlite_classes": ["SessionRoom", "DeviceRoom", "BrowserSessionStore", "PreviewRoom", "RegistryRoom", "ChatRoom"]
+  }],
+  "r2_buckets": [
+    { "binding": "BLOBS", "bucket_name": "zeron-web-staging-blobs" },
+    { "binding": "RELEASES", "bucket_name": "zeron-web-staging-releases" }
+  ],
+  "vars": {
+    "AUTH_MODE": "workos",
+    "WORKOS_BROWSER_ORIGIN": "https://zeron-test.embedez.com",
+    // Staging WorkOS app; each authenticated user owns their sessions/devices.
+    "WORKOS_CLIENT_ID": "client_01M270WMSY2KHVFJFZJMG7YTDF",
+    "WORKOS_ISSUER": "https://api.workos.com/user_management/client_01M270WMSY2KHVFJFZJMG7YTDF",
+    "WORKOS_JWKS_URL": "https://api.workos.com/sso/jwks/client_01M270WMSY2KHVFJFZJMG7YTDF"
+    // Secrets: WORKOS_API_KEY and a fresh 32-byte base64url BROWSER_SESSION_KEY.
+    // No BROWSER_PREVIEW_ORIGIN: untrusted previews require a separate origin.
+  },
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.01 }
+  }
+}

@@ -572,6 +572,18 @@ impl gpui::Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        #[cfg(any(target_arch = "wasm32", feature = "web-input-tests"))]
+        {
+            // Register even while unfocused: touch dispatch must recognize the
+            // terminal on its FIRST tap, before another frame is painted.
+            let focus = self.panel.read(cx).focus_handle();
+            window.handle_input(
+                &focus,
+                gpui::ElementInputHandler::new(bounds, self.panel.clone()),
+                cx,
+            );
+        }
+
         let line_h = px(TERM_LINE_HEIGHT);
         let origin = point(
             bounds.left() + px(TERM_PADDING),

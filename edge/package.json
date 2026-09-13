@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run test:unit && npm run test:workerd",
     "test:unit": "vitest run",
-    "test:workerd": "vitest run -c vitest.workerd.config.ts",
+    "test:workerd": "node scripts/test-workerd.mjs",
+    "postinstall": "node scripts/patch-vitest-pool.mjs",
     "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {

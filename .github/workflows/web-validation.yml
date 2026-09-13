@@ -1,0 +1,125 @@
+name: Web validation
+
+on:
+  pull_request:
+    paths:
+      - 'apps/web/**'
+      - 'crates/**'
+      - 'vendor/**'
+      - '.cargo/**'
+      - 'edge/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'rust-toolchain'
+      - '.github/workflows/deploy.yml'
+      - '.github/workflows/web-validation.yml'
+  push:
+    paths:
+      - 'apps/web/**'
+      - 'crates/**'
+      - 'vendor/**'
+      - '.cargo/**'
+      - 'edge/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'rust-toolchain'
+      - '.github/workflows/deploy.yml'
+      - '.github/workflows/web-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wasm:
+    name: Locked WASM build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-09-08
+          targets: wasm32-unknown-unknown
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/web
+          cache-on-failure: true
+      - name: Install Trunk
+        run: cargo install trunk --locked --version 0.21.14
+      - name: Build web bundle
+        working-directory: apps/web
+        env:
+          RUSTUP_TOOLCHAIN: nightly-2026-09-08
+          CARGO_BUILD_JOBS: 2
+        run: env -u NO_COLOR trunk build --release --locked
+      - name: Check web assets
+        run: |
+          test -s apps/web/dist/index.html
+          cmp apps/web/_headers apps/web/dist/_headers
+          find apps/web/dist -name '*.wasm' -size +0c | grep .
+          oversized=$(find apps/web/dist -type f -size +26214400c)
+          if [ -n "$oversized" ]; then
+            printf 'Assets exceed the 25 MiB limit:\n%s\n' "$oversized"
+            exit 1
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: edge/package-lock.json
+      - name: Install edge packaging tools
+        working-directory: edge
+        run: npm ci
+      # Uses the production config without credentials or remote mutations.
+      - name: Package production Worker and web assets (dry run)
+        working-directory: edge
+        run: npx wrangler deploy --config wrangler.jsonc --dry-run --outdir dist
+      - name: Local production routing integration
+        working-directory: edge
+        timeout-minutes: 5
+        run: node scripts/production-routing.mjs
+
+  lifecycle:
+    name: Browser lifecycle tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/web/tests/lifecycle
+          cache-on-failure: true
+      - name: Run lifecycle tests
+        run: cargo test --locked --manifest-path apps/web/tests/lifecycle/Cargo.toml
+
+  edge:
+    name: Focused edge auth and device tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: edge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: edge/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Unit auth and frame tests
+        run: npm run test:unit -- src/browser-auth.test.ts src/browser-routes.test.ts src/device-frame.test.ts
+      - name: Workerd session and DeviceRoom tests
+        run: npm run test:workerd -- test/workerd/browser-discovery.workerd.test.ts test/workerd/browser-sessions.workerd.test.ts test/workerd/device-browser.workerd.test.ts test/workerd/browser-multi-user.workerd.test.ts

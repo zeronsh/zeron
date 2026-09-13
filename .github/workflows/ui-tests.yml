@@ -66,6 +66,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: UI and headless layout regressions
         run: cargo test --release --locked -p zeron-ui --lib -- --test-threads=1
+      - name: Browser terminal input regressions
+        run: cargo test --release --locked -p zeron-ui --features web-input-tests --lib terminal::panel::input_tests -- --test-threads=1
 
   macos-frame-recovery:
     runs-on: macos-latest

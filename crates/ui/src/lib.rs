@@ -53,13 +53,17 @@ pub mod transcript;
 pub mod typography;
 mod workspace_links;
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
+#[cfg(not(target_arch = "wasm32"))]
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
 pub use state::EngineBootConfig;
 pub use zeron_proto::HarnessId;
+
+#[cfg(not(target_arch = "wasm32"))]
 
 /// Everything the headed binary passes in (config/env resolution lives in
 /// `apps/zeron`, not here).
@@ -84,6 +88,8 @@ pub struct UiConfig {
     pub initial_url: Option<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+
 impl UiConfig {
     fn boot(&self) -> EngineBootConfig {
         EngineBootConfig {
@@ -98,6 +104,8 @@ impl UiConfig {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+
 /// What a dock-icon reopen needs to rebuild the main window after ⌘W closed it
 /// (macOS keeps the process alive with just the menu bar, like zed).
 struct ReopenState {
@@ -105,7 +113,11 @@ struct ReopenState {
     boot: EngineBootConfig,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+
 impl gpui::Global for ReopenState {}
+
+#[cfg(not(target_arch = "wasm32"))]
 
 /// Run the headed app: tokio bridge up, engine bootstrap kicked off (probe →
 /// connect-or-embed), 1320×880 window (min 900×600) with [`shell::Shell`] as the
@@ -229,6 +241,7 @@ pub fn run_app(config: UiConfig) {
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// A clicked banner: bring Zeron forward on that chat through the sidebar's
 /// own path (chat route + composer focus), reopening the main window first if
 /// ⌘W closed it.

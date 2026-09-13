@@ -9,9 +9,9 @@
   // so renaming the worker would orphan every session/registry/chat room.
   "$schema": "node_modules/wrangler/config-schema.json",
   // Deployed by .github/workflows/deploy.yml on pushes to main that touch
-  // edge/ (CLOUDFLARE_API_TOKEN repo secret).
+  // edge/ or web build inputs (CLOUDFLARE_API_TOKEN repo secret).
   "name": "comet-native-edge",
-  "main": "src/index.ts",
+  "main": "src/production.ts",
   "compatibility_date": "2026-07-01",
   "account_id": "b57dde68ee5964dccc025437b5478a5b",
   "workers_dev": true,
@@ -20,7 +20,11 @@
   // domain, so `curl -fsSL https://zeron.sh/install.sh | sh` installs Zeron
   // while the rest of zeron.sh serves the landing page.
   "routes": [
+    { "pattern": "web.zeron.sh", "custom_domain": true },
     { "pattern": "edge.zeron.sh", "custom_domain": true },
+    { "pattern": "preview.edge.zeron.sh", "custom_domain": true },
+
+    { "pattern": "*.preview.edge.zeron.sh/*", "zone_name": "zeron.sh" },
     { "pattern": "zeron.sh/install.sh", "zone_name": "zeron.sh" },
     { "pattern": "zeron.sh/releases/*", "zone_name": "zeron.sh" },
     // Legacy comet hostnames — keep until 0.1.x clients are gone.
@@ -28,6 +32,14 @@
     { "pattern": "comet.zeron.sh/install.sh", "zone_name": "zeron.sh" },
     { "pattern": "comet.zeron.sh/releases/*", "zone_name": "zeron.sh" }
   ],
+  // Worker-first is essential: these assets must never be served on preview
+  // or native API hostnames. production.ts restricts them to the web origin.
+  "assets": {
+    "directory": "../apps/web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "none",
+    "run_worker_first": true
+  },
   // Serve src/install.sh as a string (the /install.sh route).
   "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
   // loro-crdt's default entry loads its WASM via URL fetch, which workerd
@@ -39,6 +51,7 @@
     "bindings": [
       { "name": "SESSION_ROOMS", "class_name": "SessionRoom" },
       { "name": "DEVICE_ROOMS", "class_name": "DeviceRoom" },
+      { "name": "BROWSER_SESSIONS", "class_name": "BrowserSessionStore" },
       { "name": "PREVIEW_ROOMS", "class_name": "PreviewRoom" },
       { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
       { "name": "CHAT_ROOMS", "class_name": "ChatRoom" }
@@ -61,7 +74,8 @@
       "tag": "v3",
       "new_sqlite_classes": ["ChatRoom"]
     },
-    { "tag": "v4", "new_sqlite_classes": ["PreviewRoom"] }
+    { "tag": "v4", "new_sqlite_classes": ["PreviewRoom"] },
+    { "tag": "v5", "new_sqlite_classes": ["BrowserSessionStore"] }
   ],
   "r2_buckets": [
     {
@@ -75,14 +89,19 @@
     }
   ],
   "vars": {
-    // WorkOS AuthKit client id — JWTs verified against its JWKS. Placeholder;
-    // set the real client id before deploying. Set AUTH_MODE=dev locally to
-    // accept bearer==userId. WORKOS_API_KEY is a wrangler secret
-    // (`wrangler secret put WORKOS_API_KEY`) powering the /auth/* routes.
+    // Preserve the production WorkOS app used by existing native clients.
+    // Before rollout, verify these trust anchors and register the web callback.
+    // WORKOS_API_KEY and BROWSER_SESSION_KEY are remote Worker secrets.
     "WORKOS_CLIENT_ID": "client_01KWD0EAKZKD50YCQJNYSRE4BY",
-    "AUTH_MODE": "workos"
+    "AUTH_MODE": "workos",
+    "WORKOS_BROWSER_ORIGIN": "https://web.zeron.sh",
+    "WORKOS_ISSUER": "https://api.workos.com/user_management/client_01KWD0EAKZKD50YCQJNYSRE4BY",
+    "WORKOS_JWKS_URL": "https://api.workos.com/sso/jwks/client_01KWD0EAKZKD50YCQJNYSRE4BY",
+    "BROWSER_PREVIEW_ORIGIN": "https://preview.edge.zeron.sh"
   },
   "observability": {
-    "enabled": true
+    "enabled": true,
+    "logs": { "enabled": true },
+    "traces": { "enabled": true, "head_sampling_rate": 0.01 }
   }
 }

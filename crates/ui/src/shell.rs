@@ -13,6 +13,10 @@
 
 use std::path::PathBuf;
 use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use chrono::Utc;
 use gpui::{
@@ -22,10 +26,41 @@ use gpui::{
     WindowControlArea, actions, div, prelude::*, px,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
 use gpui_tokio::Tokio;
+#[cfg(not(target_arch = "wasm32"))]
 use zeron_engine::InstanceLock;
 use zeron_proto::{AuthState, WorkspaceScope};
 use zeron_rpc::methods;
+
+#[cfg(not(target_arch = "wasm32"))]
+type InstallKind = zeron_update::InstallKind;
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+enum InstallKind {
+    Unavailable,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn detect_install() -> InstallKind {
+    zeron_update::detect_install()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn detect_install() -> InstallKind {
+    InstallKind::Unavailable
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_mac_app(install: &InstallKind) -> bool {
+    matches!(install, zeron_update::InstallKind::MacApp { .. })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn is_mac_app(_install: &InstallKind) -> bool {
+    false
+}
 
 use crate::changes::{Changes, ChangesEvent};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
@@ -77,6 +112,72 @@ actions!(
         ArchiveSession
     ]
 );
+
+/// A browser root may take ownership of account lifecycle actions without
+/// teaching the shared Shell about cookies or remote-device transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalLifecycleAction {
+    SignOut,
+    Retry,
+}
+
+pub type ExternalLifecycleHandler = std::rc::Rc<dyn Fn(ExternalLifecycleAction)>;
+
+#[derive(Default)]
+struct ExternalLifecycleRelay {
+    handler: Option<ExternalLifecycleHandler>,
+}
+
+impl ExternalLifecycleRelay {
+    fn set(&mut self, handler: Option<ExternalLifecycleHandler>) {
+        self.handler = handler;
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn is_installed(&self) -> bool {
+        self.handler.is_some()
+    }
+
+    fn dispatch(&self, action: ExternalLifecycleAction) -> bool {
+        let Some(handler) = &self.handler else {
+            return false;
+        };
+        handler(action);
+        true
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+std::thread_local! {
+    static EXTERNAL_LIFECYCLE_RELAY: std::cell::RefCell<ExternalLifecycleRelay> = Default::default();
+}
+
+/// Installs the browser-owned lifecycle coordinator for this UI root.
+#[cfg(target_arch = "wasm32")]
+pub fn set_external_lifecycle_handler(handler: Option<ExternalLifecycleHandler>) {
+    EXTERNAL_LIFECYCLE_RELAY.with(|relay| relay.borrow_mut().set(handler));
+}
+
+#[cfg(target_arch = "wasm32")]
+fn dispatch_external_lifecycle_action(action: ExternalLifecycleAction) -> bool {
+    EXTERNAL_LIFECYCLE_RELAY.with(|relay| relay.borrow().dispatch(action))
+}
+
+/// Whether this UI root delegates account lifecycle to its browser host.
+#[cfg(target_arch = "wasm32")]
+fn has_external_lifecycle_handler() -> bool {
+    EXTERNAL_LIFECYCLE_RELAY.with(|relay| relay.borrow().is_installed())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn dispatch_external_lifecycle_action(_action: ExternalLifecycleAction) -> bool {
+    false
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn has_external_lifecycle_handler() -> bool {
+    false
+}
 
 /// Restore a default focus only after an in-flight handoff has had a frame to
 /// claim the window. A synchronous focus-lost fallback can otherwise steal
@@ -139,7 +240,7 @@ pub(super) struct SidebarDisclosureMotion {
     pub(super) epoch: u64,
     pub(super) from: f32,
     pub(super) to: f32,
-    started: std::time::Instant,
+    started: Instant,
 }
 
 impl SidebarDisclosureMotion {
@@ -148,7 +249,7 @@ impl SidebarDisclosureMotion {
             epoch,
             from,
             to,
-            started: std::time::Instant::now(),
+            started: Instant::now(),
         }
     }
 
@@ -431,6 +532,49 @@ impl SettingsSection {
 pub enum Route {
     Chat,
     Settings(SettingsSection),
+}
+
+/// Narrow windows use transient overlays instead of reserving dock space for either pane.
+const MOBILE_BREAKPOINT: f32 = 768.0;
+// Mobile drawer sizing is pane-specific; widening Changes must not widen navigation.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MobileDrawer {
+    Sidebar,
+    RightPane,
+}
+
+fn is_mobile_width(viewport: f32) -> bool {
+    viewport < MOBILE_BREAKPOINT
+}
+
+fn mobile_drawer_width(viewport: f32, drawer: MobileDrawer) -> f32 {
+    let (fraction, max_width) = match drawer {
+        // Keep navigation from covering most of a phone; at 390px this leaves
+        // 110px of backdrop while retaining enough width for session labels.
+        MobileDrawer::Sidebar => (0.75, 280.0),
+        MobileDrawer::RightPane => (0.90, 380.0),
+    };
+    (viewport.max(0.0) * fraction).min(max_width)
+}
+
+fn toggle_mobile_drawer(
+    current: Option<MobileDrawer>,
+    requested: MobileDrawer,
+) -> Option<MobileDrawer> {
+    if current == Some(requested) {
+        None
+    } else {
+        Some(requested)
+    }
+}
+
+fn main_layout_width(viewport: f32, sidebar: f32, right: f32, mobile: bool) -> f32 {
+    if mobile {
+        viewport.max(0.0)
+    } else {
+        conversation_width(viewport, sidebar, right)
+    }
 }
 
 /// Maximum width the right pane may occupy while retaining the conversation
@@ -778,7 +922,7 @@ impl Render for DragGhost {
 struct WidthTween {
     from: f32,
     to: f32,
-    started: std::time::Instant,
+    started: Instant,
 }
 
 impl WidthTween {
@@ -786,7 +930,7 @@ impl WidthTween {
         Self {
             from,
             to,
-            started: std::time::Instant::now(),
+            started: Instant::now(),
         }
     }
 }
@@ -941,6 +1085,8 @@ enum AccountMenuAction {
 const RUNTIME_CHANGE_TIMEOUT: Duration = Duration::from_secs(10);
 const RUNTIME_CHANGE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+#[cfg(not(target_arch = "wasm32"))]
+
 /// Wait until a stopped daemon can no longer win the next bootstrap probe and
 /// has released the data directory for the replacement runtime.
 async fn wait_for_remote_engine_shutdown(
@@ -970,6 +1116,8 @@ async fn wait_for_remote_engine_shutdown(
         tokio::time::sleep(RUNTIME_CHANGE_POLL_INTERVAL).await;
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
 
 /// Stop the engine that owns the synced profile and wait until a local runtime
 /// can safely acquire both its IPC port and data-directory lock.
@@ -1150,7 +1298,12 @@ impl Render for SidebarPane {
                 Route::Chat => shell.render_chat_sidebar(&theme, cx),
             }
         });
-        div().size_full().child(inner).into_any_element()
+        div()
+            .id("sidebar-pane-content")
+            .debug_selector(|| "sidebar-pane-content".into())
+            .size_full()
+            .child(inner)
+            .into_any_element()
     }
 }
 
@@ -1176,6 +1329,9 @@ pub struct Shell {
     /// the transcript's bottom clearance, and the jump pill's anchor (the
     /// same one-frame lag every fade here rides).
     bottom_stack: std::rc::Rc<std::cell::Cell<f32>>,
+    /// The transient mobile drawer. Desktop pane state remains persisted or
+    /// session-scoped; this is intentionally never written to UiSettings.
+    mobile_drawer: Option<MobileDrawer>,
     /// The sidebar's archived accordion (t3code Sidebar): OPEN by default
     /// (user request), session-transient. `archived_shown` pages the
     /// expanded list ("Show more" reveals another page).
@@ -1303,7 +1459,7 @@ pub struct Shell {
     update_dismissed: Option<String>,
     /// How this binary was installed — decides the strip's click behavior.
     /// Cached: `detect_install` stats `current_exe` and this renders per frame.
-    install: zeron_update::InstallKind,
+    install: InstallKind,
     org: Option<OrgGateUi>,
     sync_flow: SyncFlow,
     mutate_task: Option<Task<()>>,
@@ -1389,7 +1545,7 @@ pub struct Shell {
     motion_active: std::cell::Cell<bool>,
     /// All pane masks and chrome evaluate animation at the same frame time.
     /// A slow render must not give the native page and its titlebar different widths.
-    render_time: Option<std::time::Instant>,
+    render_time: Option<Instant>,
     splash: SplashPhase,
     splash_task: Option<Task<()>>,
     /// Focus fallback (registered on first paint — [`Shell::new`] has no
@@ -1562,6 +1718,7 @@ impl Shell {
             // Seed with the compact composer stack's rough height so the
             // first frame's clearance isn't zero (the measure corrects it).
             bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),
+            mobile_drawer: None,
             archived_open: true,
             archived_shown: 0,
             archived_hover: None,
@@ -1627,7 +1784,7 @@ impl Shell {
             update_flow: UpdateFlow::Idle,
             update_task: None,
             update_dismissed: None,
-            install: zeron_update::detect_install(),
+            install: detect_install(),
             org: None,
             sync_flow: SyncFlow::Idle,
             mutate_task: None,
@@ -1891,7 +2048,7 @@ impl Shell {
                         let should_play = sound != crate::sound::Sound::Attention
                             || self
                                 .attention_sound_gate
-                                .should_play(std::time::Instant::now());
+                                .should_play(Instant::now());
                         if should_play {
                             crate::sound::play(sound);
                         }
@@ -1912,12 +2069,12 @@ impl Shell {
             if let Some(sound) = self.connectivity_notifications.update(
                 connectivity,
                 connectivity_observed,
-                std::time::Instant::now(),
+                Instant::now(),
             ) {
                 if self.settings.session_sound_enabled(sound)
                     && self
                         .attention_sound_gate
-                        .should_play(std::time::Instant::now())
+                        .should_play(Instant::now())
                 {
                     crate::sound::play(sound);
                 }
@@ -2054,6 +2211,18 @@ impl Shell {
         }
     }
 
+    /// One geometry contract for the mounted sidebar surface and every child.
+    /// Persisted width remains desktop-only; an open mobile navigation drawer
+    /// supplies its transient width without rewriting user settings.
+    fn effective_sidebar_width(&self) -> f32 {
+        if is_mobile_width(self.viewport_width) && self.mobile_drawer == Some(MobileDrawer::Sidebar)
+        {
+            mobile_drawer_width(self.viewport_width, MobileDrawer::Sidebar)
+        } else {
+            self.settings.sidebar_width
+        }
+    }
+
     /// Does the selected space's folder have git? Owner-stamped and synced —
     /// gates the Changes pane, its toggle, and Cmd-B with zero RPCs.
     fn space_git_detected(&self, cx: &App) -> bool {
@@ -2089,13 +2258,30 @@ impl Shell {
         !self.active_chat.is_empty() && self.panels.get(&self.panel_key(cx)).changes_open
     }
 
+    /// Whether the persisted desktop right pane is physically mounted.
+    /// Mobile visibility is handled separately by [`MobileDrawer`].
+    fn right_pane_visible(&self, cx: &App) -> bool {
+        !is_mobile_width(self.viewport_width) && self.right_pane_open(cx)
+    }
+
+    /// Whether right-pane content should be mounted for the current layout.
+    /// Mobile uses only the active chat and transient drawer state; desktop
+    /// uses the per-session panel flag.
+    fn right_pane_content_visible(&self, cx: &App) -> bool {
+        if is_mobile_width(self.viewport_width) {
+            !self.active_chat.is_empty() && self.mobile_drawer == Some(MobileDrawer::RightPane)
+        } else {
+            self.right_pane_open(cx)
+        }
+    }
+
     /// The current chat's terminal flag (per-session, in-memory).
     fn terminal_open(&self, cx: &App) -> bool {
         self.panels.get(&self.panel_key(cx)).terminal_open
     }
 
     fn right_target(&self, cx: &App) -> f32 {
-        if !self.right_pane_open(cx) {
+        if !self.right_pane_visible(cx) {
             0.0
         } else {
             // Manual sizing preserves a usable conversation column. Takeover
@@ -2113,6 +2299,11 @@ impl Shell {
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        if is_mobile_width(self.viewport_width) {
+            self.mobile_drawer = toggle_mobile_drawer(self.mobile_drawer, MobileDrawer::Sidebar);
+            cx.notify();
+            return;
+        }
         let from = self.eval_tween(self.sidebar_tween, self.sidebar_target());
         self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed;
         self.sidebar_tween = Some(WidthTween::new(from, self.sidebar_target()));
@@ -2121,6 +2312,14 @@ impl Shell {
     }
 
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
+        if is_mobile_width(self.viewport_width) {
+            if self.active_chat.is_empty() {
+                return;
+            }
+            self.mobile_drawer = toggle_mobile_drawer(self.mobile_drawer, MobileDrawer::RightPane);
+            cx.notify();
+            return;
+        }
         // Reverse from the visible width when toggled during an animation.
         let from = self.eval_tween(self.right_tween, self.right_target(cx));
         let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
@@ -2149,6 +2348,13 @@ impl Shell {
         {
             // Reopening onto a diff tab revalidates its watch.
             changes.update(cx, |changes, cx| changes.ensure_content(cx));
+        }
+        cx.notify();
+    }
+
+    fn close_mobile_drawer(&mut self, cx: &mut Context<Self>) {
+        if self.mobile_drawer.take().is_none() {
+            return;
         }
         cx.notify();
     }
@@ -2653,10 +2859,15 @@ impl Shell {
         };
 
         let key = self.panel_key(cx);
-        let was_open = self.panels.get(&key).changes_open;
+        let mobile = is_mobile_width(self.viewport_width);
+        let was_open = self.right_pane_content_visible(cx);
         let from = self.right_target(cx);
-        self.panels.update(&key, |panel| panel.changes_open = true);
-        if !was_open {
+        if mobile {
+            self.mobile_drawer = Some(MobileDrawer::RightPane);
+        } else {
+            self.panels.update(&key, |panel| panel.changes_open = true);
+        }
+        if !mobile && !was_open {
             self.right_tween = Some(WidthTween::new(from, self.right_target(cx)));
         }
         self.add_file_surface(link.path, window, cx);
@@ -2777,7 +2988,7 @@ impl Shell {
     ) {
         // The chip lives in the conversation column — the pane it opens into
         // may still be closed.
-        if !self.right_pane_open(cx) {
+        if !self.right_pane_content_visible(cx) {
             self.toggle_right_pane(cx);
         }
         if let Some((&id, _)) = self
@@ -2975,7 +3186,7 @@ impl Shell {
     /// active surface while the pane is open, or `None` on the picker empty
     /// state / a closed pane / the new-session canvas.
     fn closable_right_surface(&self, cx: &App) -> Option<RightSurface> {
-        if !self.right_pane_open(cx) {
+        if !self.right_pane_content_visible(cx) {
             return None;
         }
         match self.resolved_right_active(cx) {
@@ -3034,11 +3245,17 @@ impl Shell {
         let mut dirty = browser.chain(editors).collect::<Vec<_>>();
         dirty.sort_by_key(|(key, _)| (key != &current, key.clone()));
         if let Some((key, surface)) = dirty.into_iter().next() {
+            let mobile = is_mobile_width(self.viewport_width);
             self.panels.update(&key, |panel| {
-                panel.changes_open = true;
+                if !mobile {
+                    panel.changes_open = true;
+                }
                 panel.right_active = surface;
             });
             self.apply_nav(NavEntry::Chat(key), cx);
+            if mobile {
+                self.mobile_drawer = Some(MobileDrawer::RightPane);
+            }
         }
     }
 
@@ -3209,6 +3426,9 @@ impl Shell {
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
+        if dispatch_external_lifecycle_action(ExternalLifecycleAction::Retry) {
+            return;
+        }
         AppState::bootstrap(self.state.clone(), self.boot.clone(), cx);
     }
 
@@ -3688,7 +3908,9 @@ impl Shell {
     /// so an unguarded jump would switch sessions UNDER the open popover,
     /// stranding it over a session the user never picked.
     pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
-        self.add_space.is_some() || self.composer.read(cx).pickers().read(cx).is_open()
+        self.add_space.is_some()
+            || self.composer.read(cx).pickers().read(cx).is_open()
+            || self.mobile_drawer.is_some()
     }
 
     /// Track held modifiers for sidebar jump hints and the queue's submit hint.
@@ -3750,6 +3972,9 @@ impl Shell {
 
     fn request_sign_out(&mut self, cx: &mut Context<Self>) {
         self.close_user_menu(cx);
+        if dispatch_external_lifecycle_action(ExternalLifecycleAction::SignOut) {
+            return;
+        }
         if self.state.read(cx).workspace_scope != Some(WorkspaceScope::Synced) {
             return;
         }
@@ -3760,6 +3985,8 @@ impl Shell {
     fn confirm_sign_out(&mut self, cx: &mut Context<Self>) {
         self.start_local_runtime_transition(true, cx);
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
 
     fn start_local_runtime_transition(&mut self, sign_out: bool, cx: &mut Context<Self>) {
         if self.runtime_change_task.is_some() {
@@ -3901,6 +4128,8 @@ impl Shell {
     /// [`Self::drive_sync_switch`] run the import once the runtime is ready.
     /// Failure falls back to the quit-and-reopen dialog — the local profile is
     /// untouched, so the old path is always a safe exit.
+    #[cfg(not(target_arch = "wasm32"))]
+
     fn start_synced_switch(&mut self, import: bool, cx: &mut Context<Self>) {
         if self.runtime_change_task.is_some() {
             return;
@@ -3998,6 +4227,8 @@ impl Shell {
 
     /// Subscribe to the engine's one-time import stream and mirror its
     /// progress into the wizard.
+    #[cfg(not(target_arch = "wasm32"))]
+
     fn spawn_local_import(&mut self, cx: &mut Context<Self>) {
         if self.import_task.is_some() {
             return;
@@ -4063,6 +4294,38 @@ impl Shell {
         cx.notify();
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn unavailable_host_effect(&mut self, action: &str, cx: &mut Context<Self>) {
+        self.sidebar_notice =
+            Some(format!("{action} is unavailable in the browser fixture.").into());
+        cx.notify();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn start_local_runtime_transition(&mut self, _sign_out: bool, cx: &mut Context<Self>) {
+        self.unavailable_host_effect("Runtime transitions", cx);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn start_synced_switch(&mut self, _import: bool, cx: &mut Context<Self>) {
+        self.unavailable_host_effect("Runtime transitions", cx);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn spawn_local_import(&mut self, cx: &mut Context<Self>) {
+        self.unavailable_host_effect("Local workspace import", cx);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn quit_for_runtime_change(&mut self, cx: &mut Context<Self>) {
+        self.unavailable_host_effect("Stopping a runtime", cx);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn apply_staged_update(&mut self, _staged: PathBuf, cx: &mut Context<Self>) {
+        self.unavailable_host_effect("Installing updates", cx);
+    }
+
     fn apply_import_event(&mut self, item: &serde_json::Value, cx: &mut Context<Self>) {
         match item.get("kind").and_then(|k| k.as_str()) {
             Some("start") => {
@@ -4098,6 +4361,8 @@ impl Shell {
         }
         cx.notify();
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
 
     fn quit_for_runtime_change(&mut self, cx: &mut Context<Self>) {
         if !self.prepare_exit(PendingExit::RuntimeChange, cx) {
@@ -4309,9 +4574,9 @@ impl Shell {
 
     // ---- render pieces ----
 
-    fn tween_elapsed(&self, started: std::time::Instant) -> Duration {
+    fn tween_elapsed(&self, started: Instant) -> Duration {
         self.render_time
-            .unwrap_or_else(std::time::Instant::now)
+            .unwrap_or_else(Instant::now)
             .saturating_duration_since(started)
     }
 
@@ -4529,16 +4794,7 @@ impl Shell {
         // leave two competing + placements across the responsive variants.
         let plus_alpha = self.titlebar_plus_alpha(cx);
         let show_plus = plus_alpha > 0.01;
-        div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .h(px(Theme::TITLEBAR_HEIGHT))
-            .flex()
-            .flex_row()
-            .items_center()
-            .pt(px(Theme::TITLEBAR_TOP_PAD))
-            .px(px(TITLEBAR_CLUSTER_PAD))
+        presentation::titlebar_cluster(TITLEBAR_CLUSTER_PAD)
             .children(self.titlebar_spacer(TITLEBAR_CLUSTER_PAD))
             // Left-side Linux captions (GNOME `close:…` layouts): the
             // root-level caption overlay owns the buttons; the cluster row
@@ -4785,16 +5041,19 @@ impl Shell {
         out
     }
 
+    fn sidebar_content(&self) -> AnyElement {
+        self.sidebar_pane
+            .clone()
+            .cached(
+                gpui::StyleRefinement::default()
+                    .w(px(self.effective_sidebar_width()))
+                    .h_full()
+                    .flex_none(),
+            )
+            .into_any_element()
+    }
+
     fn render_sidebar(&mut self, _cx: &mut Context<Self>) -> AnyElement {
-        // The sidebar is part of the resolved theme. A second fixed-Zeron
-        // palette here made imported families look split in half and froze
-        // activity/glyph personality independently of the selected variant.
-        let inner = self.sidebar_pane.clone().cached(
-            gpui::StyleRefinement::default()
-                .w(px(self.settings.sidebar_width))
-                .h_full()
-                .flex_none(),
-        );
         let target = self.sidebar_target();
         // Transparent — the sidebar sits directly on the frost shell; the main
         // card's own border provides the separation. The content row spans the
@@ -4806,7 +5065,21 @@ impl Shell {
             div()
                 .h_full()
                 .pt(px(Theme::TITLEBAR_HEIGHT))
-                .child(inner)
+                .child(self.sidebar_content())
+                .into_any_element(),
+        )
+    }
+
+    /// Mobile uses the same sidebar entity and pane clipping, but gives it a
+    /// bounded overlay width and does not consult the persisted collapsed flag.
+    fn render_mobile_sidebar(&self, width: f32) -> AnyElement {
+        self.pane_container(
+            None,
+            width,
+            div()
+                .h_full()
+                .pt(px(Theme::TITLEBAR_HEIGHT))
+                .child(self.sidebar_content())
                 .into_any_element(),
         )
     }
@@ -4836,7 +5109,9 @@ impl Shell {
         // the sidebar's right edge (user-reported). Device identity lives on
         // the Accounts page now — the one surface where the device matters.
         div()
-            .w(px(self.settings.sidebar_width))
+            .id("settings-sidebar-content")
+            .debug_selector(|| "settings-sidebar-content".into())
+            .w(px(self.effective_sidebar_width()))
             .h_full()
             .flex()
             .flex_col()
@@ -5166,143 +5441,108 @@ impl Shell {
         // dimmed the active row under the pointer (user report).
         let hover_bg = if selected { selected_wash } else { hover };
         let rest_text = if selected { text } else { text.opacity(0.8) };
-        div()
-            .id(SharedString::from(format!("chat-{id}")))
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .rounded(px(8.0))
-            .px(px(Theme::SPACE_SM))
-            .py(px(6.0))
-            .text_color(motion::hover_blend(&fade_key, rest_text, text))
-            .bg(motion::hover_blend(&fade_key, rest_bg, hover_bg))
-            // No selection ring (user request) — the wash alone marks the
-            // active row.
-            // Row hover drives BOTH the wash blend and the corner's
-            // status→Archive swap (one listener — gpui allows a single
-            // hover listener per element).
-            .on_hover({
-                let fade_hover = motion::hover_listener(fade_key.clone());
-                let hover_id = id.clone();
-                cx.listener(move |this, hovered: &bool, window, cx| {
-                    fade_hover(hovered, window, cx);
-                    if *hovered {
-                        if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
-                            this.chat_status_hover = Some(hover_id.clone());
-                            cx.notify();
-                        }
-                    } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
-                        this.chat_status_hover = None;
+        presentation::chat_row(
+            format!("chat-{id}").into(),
+            &fade_key,
+            rest_text,
+            text,
+            rest_bg,
+            hover_bg,
+        )
+        // No selection ring (user request) — the wash alone marks the
+        // active row.
+        // Row hover drives BOTH the wash blend and the corner's
+        // status→Archive swap (one listener — gpui allows a single
+        // hover listener per element).
+        .on_hover({
+            let fade_hover = motion::hover_listener(fade_key.clone());
+            let hover_id = id.clone();
+            cx.listener(move |this, hovered: &bool, window, cx| {
+                fade_hover(hovered, window, cx);
+                if *hovered {
+                    if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
+                        this.chat_status_hover = Some(hover_id.clone());
                         cx.notify();
                     }
-                })
-            })
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.open_chat(select_id.clone(), cx);
-            }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.chat_menu.open(ChatMenuState {
-                        chat_id: menu_id.clone(),
-                        position: event.position,
-                        page: ChatMenuPage::Root,
-                    });
+                } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
+                    this.chat_status_hover = None;
                     cx.notify();
-                }),
-            )
-            // Line 1: "project @ device", status word / time-ago right.
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(Theme::SPACE_SM))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .line_height(px(14.0))
-                            .text_color(subline)
-                            .child(space_name),
-                    )
-                    .child(div().text_color(subline).child(corner)),
-            )
-            // Line 2: harness identity belongs directly with the title,
-            // instead of floating as unrelated metadata below it.
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP))
-                    .when_some(
-                        harness.map(crate::pickers::harness_brand_icon),
-                        |el, (path, tint)| {
-                            el.child(
-                                icon(path)
-                                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                                    .flex_none()
-                                    .text_color(tint.unwrap_or(subline).opacity(0.8)),
-                            )
-                        },
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .line_height(px(17.0))
-                            .child(title),
-                    ),
-            )
-            // Line 3 is structural, not reserved whitespace: compact states
-            // omit it completely when both Branch and Pull request are hidden.
-            .when(shows_metadata, |row| {
-                row.child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.0))
-                        .when_some(branch, |el, branch| {
-                            el.child(
-                                icon(icons::GIT_BRANCH)
-                                    .size(px(11.0))
-                                    .flex_none()
-                                    .text_color(subline),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .line_height(px(14.0))
-                                    .text_color(subline)
-                                    .child(branch),
-                            )
-                        })
-                        // Stable invisible spring keeps the optional PR badge
-                        // pinned right without changing no-PR paint.
-                        .child(div().flex_1().min_w_0())
-                        .when_some(change_request, |el, summary| {
-                            el.child(crate::change_requests::pull_request_badge(
-                                format!("chat-pr-{id}").into(),
-                                summary,
-                                crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                theme,
-                            ))
-                        }),
-                )
+                }
             })
-            .into_any_element()
+        })
+        .cursor_pointer()
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.open_chat(select_id.clone(), cx);
+        }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                this.chat_menu.open(ChatMenuState {
+                    chat_id: menu_id.clone(),
+                    position: event.position,
+                    page: ChatMenuPage::Root,
+                });
+                cx.notify();
+            }),
+        )
+        // Line 1: "project @ device", status word / time-ago right.
+        .child(presentation::chat_context(space_name, corner, subline))
+        // Line 2: harness identity belongs directly with the title,
+        // instead of floating as unrelated metadata below it.
+        .child(presentation::chat_title(
+            title,
+            harness
+                .map(crate::pickers::harness_brand_icon)
+                .map(|(path, tint)| {
+                    icon(path)
+                        .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                        .flex_none()
+                        .text_color(tint.unwrap_or(subline).opacity(0.8))
+                        .into_any_element()
+                }),
+            SIDEBAR_ACTIVE_HARNESS_TITLE_GAP,
+        ))
+        // Line 3 is structural, not reserved whitespace: compact states
+        // omit it completely when both Branch and Pull request are hidden.
+        .when(shows_metadata, |row| {
+            row.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
+                    .when_some(branch, |el, branch| {
+                        el.child(
+                            icon(icons::GIT_BRANCH)
+                                .size(px(11.0))
+                                .flex_none()
+                                .text_color(subline),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .line_height(px(14.0))
+                                .text_color(subline)
+                                .child(branch),
+                        )
+                    })
+                    // Stable invisible spring keeps the optional PR badge
+                    // pinned right without changing no-PR paint.
+                    .child(div().flex_1().min_w_0())
+                    .when_some(change_request, |el, summary| {
+                        el.child(crate::change_requests::pull_request_badge(
+                            format!("chat-pr-{id}").into(),
+                            summary,
+                            crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                            theme,
+                        ))
+                    }),
+            )
+        })
+        .into_any_element()
     }
 
     /// Chat-mode sidebar (spaces overhaul): window-control strip, the Spaces
@@ -5473,11 +5713,9 @@ impl Shell {
         // dropdown can float without being clipped by the list's overflow.
         let filter_row = self.render_spaces_filter(theme, cx);
 
-        div()
-            .w(px(self.settings.sidebar_width))
-            .h_full()
-            .flex()
-            .flex_col()
+        presentation::sidebar(self.effective_sidebar_width())
+            .id("chat-sidebar-content")
+            .debug_selector(|| "chat-sidebar-content".into())
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
             .child(filter_row)
@@ -5496,17 +5734,8 @@ impl Shell {
                     true,
                     true,
                     div().relative().flex_1().min_h_0().child(
-                        div()
-                            .id("sidebar-lists")
-                            .size_full()
-                            .overflow_y_scroll()
+                        presentation::session_list()
                             .track_scroll(&self.sidebar_scroll)
-                            .px(px(Theme::SPACE_SM))
-                            .flex()
-                            .flex_col()
-                            // No "Sessions" header (user request) — the list
-                            // is the whole column; a little air stands in.
-                            .pt(px(4.0))
                             .child(if !list_items.is_empty() {
                                 div()
                                     .flex()
@@ -5578,7 +5807,7 @@ impl Shell {
         if self.update_dismissed.as_deref() == Some(latest.as_str()) {
             return None;
         }
-        let mac_app = matches!(self.install, zeron_update::InstallKind::MacApp { .. });
+        let mac_app = is_mac_app(&self.install);
 
         let (label, clickable): (SharedString, bool) = if mac_app {
             match &self.update_flow {
@@ -5630,6 +5859,8 @@ impl Shell {
 
     /// Idle → download; Ready → swap + relaunch; Failed → retry; advisory
     /// installs → dismiss for this version.
+    #[cfg(not(target_arch = "wasm32"))]
+
     fn on_update_strip_click(&mut self, cx: &mut Context<Self>) {
         if !matches!(self.install, zeron_update::InstallKind::MacApp { .. }) {
             self.update_dismissed = self
@@ -5650,6 +5881,8 @@ impl Shell {
 
     /// Fetch the manifest and stage the new Zeron desktop bundle under the data dir
     /// (tokio — reqwest); the strip flips to "restart to apply" when done.
+    #[cfg(not(target_arch = "wasm32"))]
+
     fn begin_update_download(&mut self, cx: &mut Context<Self>) {
         let edge_url = self.boot.edge_url.clone();
         let data_dir = self.data_dir.clone();
@@ -5682,6 +5915,8 @@ impl Shell {
     /// Swap the staged bundle over the installed one, arm the detached
     /// relauncher, and quit — the relauncher `open`s the new bundle once this
     /// process (and its engine lock / IPC port) is gone.
+    #[cfg(not(target_arch = "wasm32"))]
+
     fn apply_staged_update(&mut self, staged: PathBuf, cx: &mut Context<Self>) {
         if !self.prepare_exit(PendingExit::InstallUpdate(staged.clone()), cx) {
             return;
@@ -5701,6 +5936,12 @@ impl Shell {
             }
         }
     }
+    #[cfg(target_arch = "wasm32")]
+    fn on_update_strip_click(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_notice =
+            Some("Installing updates is unavailable in the browser fixture.".into());
+        cx.notify();
+    }
 
     /// Scope-aware sidebar identity and account menu. Local runtimes advertise
     /// their storage boundary and offer sync; synced runtimes offer sign-out.
@@ -5713,7 +5954,10 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.user_menu.is_open();
-        let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
+        let browser_lifecycle = has_external_lifecycle_handler();
+        let action = browser_lifecycle
+            .then_some(AccountMenuAction::SignOut)
+            .or_else(|| account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow));
         // Bottom-of-sidebar identity: avatar circle + scope/account label and
         // its secondary status line.
         let initial: SharedString = user_line
@@ -5809,7 +6053,7 @@ impl Shell {
             // (`px-2 pb-1 pt-1.5 text-[11px] text-muted-foreground/70`),
             // the action selected by the runtime scope, then "Settings".
             let menu = popover::popover_card(theme)
-                .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
+                .w(px(self.effective_sidebar_width() - 2.0 * Theme::SPACE_SM))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.close_user_menu(cx);
                 }))
@@ -6281,7 +6525,7 @@ impl Shell {
     }
 
     fn active_changes(&self, cx: &App) -> Option<Entity<Changes>> {
-        if !self.right_pane_open(cx) {
+        if !self.right_pane_content_visible(cx) {
             return None;
         }
         let RightSurface::Diff(id) = self.resolved_right_active(cx) else {
@@ -6335,8 +6579,17 @@ impl Shell {
         if self.right_plus.get().is_some() {
             return true;
         }
-        self.active_changes(cx)
+        if self
+            .active_changes(cx)
             .is_some_and(|changes| changes.update(cx, |changes, cx| changes.handle_escape(cx)))
+        {
+            return true;
+        }
+        if self.mobile_drawer.is_some() {
+            self.close_mobile_drawer(cx);
+            return true;
+        }
+        false
     }
 
     fn on_key_down_capture(
@@ -6909,28 +7162,7 @@ impl Shell {
                     // strip + composer).
                     let term_h = self.eval_tween(self.terminal_tween, self.terminal_target(cx));
                     let stack_h = (self.bottom_stack.get() - term_h).max(0.0);
-                    // Opaque from the composer PILL's top (the reserved
-                    // status strip above it is empty air), zero at the
-                    // underlay's bottom edge.
-                    let bottom_band = (stack_h - Theme::STATUS_STRIP_HEIGHT).max(1.0);
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .bottom(px(term_h))
-                        .child(
-                            crate::edge_fade::edge_faded(
-                                Theme::TRANSCRIPT_FADE_BAND,
-                                true,
-                                true,
-                                div().size_full().child(outlet),
-                            )
-                            // Fully faded BY the titlebar's bottom edge (the
-                            // title text is opaque — overlap read as collision),
-                            // ramping in the band just below it.
-                            .inset_top(Theme::TITLEBAR_HEIGHT)
-                            .band_top(Theme::TRANSCRIPT_FADE_BAND)
-                            .band_bottom(bottom_band),
-                        )
+                    presentation::transcript_underlay(outlet, term_h, stack_h)
                         .children(self.render_jump_to_bottom(stack_h, cx))
                 },
             )
@@ -7236,15 +7468,58 @@ impl Shell {
         }
     }
 
+    fn mobile_drawer_close_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .size(px(28.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .bg(motion::hover_blend(
+                id,
+                crate::theme::wash(0.0),
+                theme.glass_hover(),
+            ))
+            .on_hover(motion::hover_listener(id))
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.close_mobile_drawer(cx);
+            }))
+            .child(
+                icon(icons::CLOSE)
+                    .size(px(16.0))
+                    .text_color(theme.text_muted),
+            )
+    }
+
     /// Right pane — the surface host (t3code RightPanelTabs): hidden by
     /// default, drag-resizable. Content is the ACTIVE surface — the Diff
     /// page (its options row + the lazy [`Changes`] viewer), workspace Files,
     /// an embedded terminal, or the surface picker when no tabs exist.
-    fn render_right_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_right_pane(
+        &mut self,
+        cx: &mut Context<Self>,
+        overlay_width: Option<f32>,
+    ) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let bg = theme.bg;
-        let content: AnyElement = if self.right_pane_open(cx) || self.tween_active(self.right_tween)
-        {
+        let mobile_overlay = overlay_width.is_some();
+        let content_visible =
+            self.right_pane_content_visible(cx) || self.tween_active(self.right_tween);
+        let content: AnyElement = if content_visible {
             match self.resolved_right_active(cx) {
                 // Rendering a Files surface activates its image. Keep it unmounted
                 // throughout the closing animation after suspending its resources.
@@ -7353,27 +7628,131 @@ impl Shell {
         } else {
             bg
         };
-        let panel = div()
+        let mut panel = div()
             .size_full()
             .flex()
             .flex_col()
             // In takeover the panel's left edge IS the sidebar seam, which
             // already carries the sidebar tone's right hairline — a second
-            // border there doubled up (user report).
-            .when(!self.right_pane_expanded, |el| {
+            // border there doubled up (user report). Mobile drawers always
+            // retain their own divider from the dimmed backdrop.
+            .when(!self.right_pane_expanded || mobile_overlay, |el| {
                 el.border_l_1().border_color(theme.border)
             })
             .bg(panel_bg)
-            .overflow_hidden()
+            .overflow_hidden();
+        if mobile_overlay {
+            let header = div()
+                .id("mobile-right-drawer-header")
+                .h(px(Theme::TITLEBAR_HEIGHT))
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .pl(px(8.0))
+                .pr(px(6.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .child(self.render_right_tab_strip(cx)),
+                )
+                .child(self.mobile_drawer_close_button(
+                    "mobile-right-drawer-close",
+                    "Close changes panel",
+                    &theme,
+                    cx,
+                ));
+            panel = panel
+                .child(header)
+                .child(div().flex_1().min_h_0().child(content));
+        } else {
             // The titlebar is a glass overlay over the full-height content
             // row; the panel's own chrome starts below it.
-            .pt(px(Theme::TITLEBAR_HEIGHT))
-            .child(content);
-        let target = self.right_target(cx);
+            panel = panel.pt(px(Theme::TITLEBAR_HEIGHT)).child(content);
+        }
+        let target = overlay_width.unwrap_or_else(|| self.right_target(cx));
+        let tween = if mobile_overlay {
+            None
+        } else {
+            self.right_tween
+        };
         self.right_pane_container(
-            self.right_tween,
+            tween,
             target,
             div().h_full().relative().child(panel).into_any_element(),
+        )
+    }
+
+    /// Render the active mobile drawer above the full-width conversation.
+    /// Neither pane is mounted in the base flex row at mobile widths, so the
+    /// backdrop and drawer are the only elements that can capture those
+    /// pointer regions.
+    fn render_mobile_drawer(
+        &mut self,
+        viewport: gpui::Size<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let drawer = self.mobile_drawer?;
+        if !is_mobile_width(f32::from(viewport.width)) {
+            return None;
+        }
+        let width = mobile_drawer_width(f32::from(viewport.width), drawer);
+        let theme = Theme::of(cx).clone();
+        let panel: AnyElement = match drawer {
+            MobileDrawer::Sidebar => div()
+                .id("mobile-sidebar-drawer")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .w(px(width))
+                .bg(theme.surface)
+                .border_r_1()
+                .border_color(theme.border)
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(self.render_mobile_sidebar(width))
+                .into_any_element(),
+            MobileDrawer::RightPane => {
+                if !matches!(self.route, Route::Chat) || !self.right_pane_content_visible(cx) {
+                    self.mobile_drawer = None;
+                    return None;
+                }
+                div()
+                    .id("mobile-right-drawer")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right_0()
+                    .w(px(width))
+                    .bg(theme.surface)
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(self.render_right_pane(cx, Some(width)))
+                    .into_any_element()
+            }
+        };
+        let backdrop = div()
+            .id("mobile-drawer-backdrop")
+            .absolute()
+            .inset_0()
+            .bg(theme.scrim().opacity(0.35 / 0.6))
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.close_mobile_drawer(cx)),
+            );
+        Some(
+            div()
+                .id("mobile-drawer-overlay")
+                .absolute()
+                .inset_0()
+                .child(backdrop)
+                .child(panel)
+                .into_any_element(),
         )
     }
 
@@ -8501,50 +8880,8 @@ fn grid_backdrop(theme: &Theme) -> AnyElement {
 
 /// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
 /// `grid size-6 place-items-center rounded-md text-muted-foreground`).
-fn window_control_button(
-    id: &'static str,
-    icon_path: &'static str,
-    theme: &Theme,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let muted = theme.text_muted;
-    let fade_key = format!("window-control-{id}");
-    div()
-        .id(id)
-        .size(px(24.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(6.0))
-        .cursor_pointer()
-        // zeron window-controls.tsx: `transition-colors` — the wash fades.
-        .bg(motion::hover_blend(
-            &fade_key,
-            theme.glass_hover().opacity(0.0),
-            theme.glass_hover(),
-        ))
-        .on_hover(motion::hover_listener(fade_key))
-        // Buttons in/over a titlebar drag strip must be EXCLUDED from the
-        // strip's event surface entirely. `.occlude()` (gpui
-        // `HitboxBehavior::BlockMouse`) makes the window hit-test STOP at the
-        // button, so every `is_hovered`-guarded strip listener — the
-        // mouse-down that arms the drag, the mouse-move that hands AppKit a
-        // native drag session (`performWindowDragWithEvent:`, whose second
-        // quick click zooms NATIVELY on macOS), and the `click_count == 2`
-        // zoom handler — never fires with the pointer over a button. It also
-        // removes the button's rect from the native Drag control-area
-        // hit-test on Windows/Linux. The click-level stop_propagation is
-        // zed's ButtonLike belt on top. Double-click on EMPTY strip space
-        // still zooms — nothing occludes it there.
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .on_click(move |event, window, cx| {
-            cx.stop_propagation();
-            on_click(event, window, cx)
-        })
-        .child(icon(icon_path).size(px(16.0)).text_color(muted))
-}
+pub(crate) mod presentation;
+use presentation::window_control_button;
 
 const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;
 const WINDOWS_CAPTION_WIDTH: f32 = WINDOWS_CAPTION_BUTTON_WIDTH * 3.0;
@@ -8655,32 +8992,7 @@ fn linux_caption_button(
 /// A titlebar history button (zeron window-controls.tsx): enabled it is a
 /// normal window-control button; disabled it dims to 35% opacity and ignores
 /// the pointer (`disabled:pointer-events-none disabled:opacity-35`).
-fn nav_history_button(
-    id: &'static str,
-    icon_path: &'static str,
-    enabled: bool,
-    theme: &Theme,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    if !enabled {
-        return div()
-            .size(px(24.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            // Even disabled it reads as a control — occlude so double-clicks
-            // on it don't fall through to the titlebar strip's zoom handler.
-            .occlude()
-            .child(
-                icon(icon_path)
-                    .size(px(16.0))
-                    .text_color(theme.text_muted.opacity(0.35)),
-            )
-            .into_any_element();
-    }
-    window_control_button(id, icon_path, theme, on_click).into_any_element()
-}
+use presentation::nav_history_button;
 
 /// A size-7 icon button for the main-panel header (zeron __root.tsx:
 /// `grid size-7 place-items-center rounded-md text-muted-foreground`).
@@ -8722,7 +9034,7 @@ fn header_icon_button(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_time = Some(std::time::Instant::now());
+        self.render_time = Some(Instant::now());
         if self.all_file_edits_flushed(cx)
             && let Some(action) = self.pending_exit.take()
         {
@@ -8750,19 +9062,19 @@ impl Render for Shell {
         }
         crate::transcript::record_view_frame("shell");
         self.viewport_width = f32::from(window.viewport_size().width);
+        if !is_mobile_width(self.viewport_width) {
+            // Drawer visibility is transient: desktop immediately returns to
+            // the persisted docked panes, and a later mobile resize must not
+            // resurrect a stale overlay.
+            self.mobile_drawer = None;
+        }
         // Appearance actions persist independently of the shell. Mirror the
         // globals before any later debounced settings save can overwrite them.
         self.settings.appearance = crate::appearance::mode(cx);
         self.settings.theme_selection = crate::appearance::themes(cx);
         self.settings.accent = crate::appearance::accent(cx);
         self.settings.surface = crate::appearance::surface(cx);
-        let theme = Theme::of(cx);
-        // The shell tone (zeron `.frost`): the surface the sidebar sits on and
-        // the main panel floats over as an inset rounded card. On macOS the
-        // window background is the blurred desktop (lib.rs `Blurred`), so the
-        // frost paints translucent — the sidebar and card margins read as
-        // glass while the opaque card keeps text off it.
-        let (frost, text, font) = (theme.glass(), theme.text, theme.font_sans.clone());
+        // Shared presentation resolves the shell tone and typography below.
         let (workspace_scope, auth) = {
             let state = self.state.read(cx);
             (state.workspace_scope, state.auth.clone())
@@ -8796,12 +9108,12 @@ impl Render for Shell {
         let browser_active = matches!(gate, GatePhase::Ready)
             && !restart_required
             && matches!(self.route, Route::Chat)
-            && (self.right_pane_open(cx) || self.tween_active(self.right_tween));
+            && (self.right_pane_content_visible(cx) || self.tween_active(self.right_tween));
         // Native clipping follows the animated GPUI mask. Drags only transfer
         // pointer ownership; the browser continues rendering and reflowing.
         let browser_dragging = cx.has_active_drag();
         #[cfg(target_os = "macos")]
-        let browser_resize_inset = if self.right_pane_open(cx)
+        let browser_resize_inset = if self.right_pane_visible(cx)
             && !self.right_pane_expanded
             && !self.tween_active(self.right_tween)
         {
@@ -8893,18 +9205,9 @@ impl Render for Shell {
             self.update_jump_hints(&window.modifiers(), cx);
         }
 
-        let root = div()
-            .id("shell-root")
+        let root = presentation::root(Theme::of(cx))
             .track_focus(&self.shortcut_focus)
             .child(div().track_focus(&self.unfocused))
-            .relative()
-            .flex()
-            .flex_row()
-            .size_full()
-            .bg(frost)
-            .text_color(text)
-            .font_family(font)
-            .text_size(crate::typography::ui_rems(14.0))
             .capture_key_down(cx.listener(Self::on_key_down_capture))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_drag_move(cx.listener(Self::on_sidebar_drag))
@@ -8920,7 +9223,7 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
-                if matches!(this.route, Route::Chat) && this.right_pane_open(cx) {
+                if matches!(this.route, Route::Chat) && this.right_pane_content_visible(cx) {
                     let file = match this.resolved_right_active(cx) {
                         RightSurface::Files => this.files.get(&this.panel_key(cx)).cloned(),
                         RightSurface::File(id) => this.file_surfaces.get(&id).cloned(),
@@ -8947,7 +9250,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleChanges, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.toggle_right_pane(cx);
-                    if !this.right_pane_open(cx) {
+                    if !this.right_pane_content_visible(cx) {
                         // The hidden editor can retain a focus handle after unmounting.
                         // Restore a mounted target so the next shortcut can reopen it.
                         window.focus(&this.composer.focus_handle(cx), cx);
@@ -9031,12 +9334,19 @@ impl Render for Shell {
                 }
                 // MessageRail width gate: hide below 48rem of main-panel width.
                 let viewport = f32::from(window.viewport_size().width);
+                let mobile = is_mobile_width(viewport);
                 // Stamped for `right_target` — the expanded changes panel
                 // sizes itself to the viewport.
                 self.viewport_width = viewport;
-                let main_target_width =
-                    conversation_width(viewport, self.sidebar_target(), self.right_target(cx));
-                let main_transition = self.active_tween_endpoints(self.main_takeover_tween);
+                let main_target_width = main_layout_width(
+                    viewport,
+                    if mobile { 0.0 } else { self.sidebar_target() },
+                    if mobile { 0.0 } else { self.right_target(cx) },
+                    mobile,
+                );
+                let main_transition = (!mobile)
+                    .then(|| self.active_tween_endpoints(self.main_takeover_tween))
+                    .flatten();
                 let main_content_width =
                     stable_panel_content_width(main_target_width, main_transition);
                 let main_width = (main_content_width - 10.0).max(0.0);
@@ -9053,20 +9363,26 @@ impl Render for Shell {
                     t.set_bottom_clearance(stack_h, cx);
                 });
 
-                let sidebar = self.render_sidebar(cx);
-                let sidebar_handle = self.resize_handle(
-                    "sidebar-resize",
-                    || SidebarResize,
-                    |shell, _| shell.settings.sidebar_width = SIDEBAR_DEFAULT,
-                    cx,
-                );
+                let sidebar = if mobile {
+                    Empty.into_any_element()
+                } else {
+                    self.render_sidebar(cx)
+                };
+                let sidebar_handle = (!mobile).then(|| {
+                    self.resize_handle(
+                        "sidebar-resize",
+                        || SidebarResize,
+                        |shell, _| shell.settings.sidebar_width = SIDEBAR_DEFAULT,
+                        cx,
+                    )
+                });
                 let main = self.render_main(window, cx);
                 // The Changes pane is chat-scoped chrome: the Settings route
                 // never renders it (zeron __root.tsx `!isSettings && activeChat`
                 // around the diff column) — the per-session open flags stay
                 // intact for the return trip.
                 let on_chat = matches!(self.route, Route::Chat);
-                let right_open = on_chat && self.right_pane_open(cx);
+                let right_open = !mobile && on_chat && self.right_pane_visible(cx);
                 // Takeover mode derives its width from the viewport, so a
                 // manual drag handle would fight the expanded target.
                 let right_handle = (right_open
@@ -9083,10 +9399,20 @@ impl Render for Shell {
                     // seam; the panel's 1px border remains the visual divider.
                     .left(px(-PANE_RESIZE_HITBOX_HALF_WIDTH))
                 });
-                let right: AnyElement = if on_chat {
-                    self.render_right_pane(cx)
+                let right: AnyElement = if on_chat && !mobile {
+                    self.render_right_pane(cx, None)
                 } else {
                     Empty.into_any_element()
+                };
+                // Only the left drawer yields to the shared titlebar cluster:
+                // its original sidebar button remains the close/reopen control.
+                // The right drawer keeps its baseline occlusion and close button.
+                let drawer_side = self.mobile_drawer;
+                let mobile_drawer = self.render_mobile_drawer(window.viewport_size(), cx);
+                let (mobile_sidebar, mobile_right) = match (drawer_side, mobile_drawer) {
+                    (Some(MobileDrawer::Sidebar), drawer) => (drawer, None),
+                    (Some(MobileDrawer::RightPane), drawer) => (None, drawer),
+                    (None, _) => (None, None),
                 };
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
@@ -9122,12 +9448,17 @@ impl Render for Shell {
                 // (zero layout width, same idiom as the changes-pane grabber)
                 // so the sidebar's right gutter stays exactly as wide as its
                 // left one — a 5px flex child here read as lopsided spacing.
-                let sidebar_seam = div()
-                    .w(px(0.0))
-                    .h_full()
-                    .flex_none()
-                    .relative()
-                    .child(sidebar_handle.left(px(-6.0)));
+                let sidebar_seam = if let Some(sidebar_handle) = sidebar_handle {
+                    div()
+                        .w(px(0.0))
+                        .h_full()
+                        .flex_none()
+                        .relative()
+                        .child(sidebar_handle.left(px(-6.0)))
+                        .into_any_element()
+                } else {
+                    Empty.into_any_element()
+                };
                 // Keep the right resize target outside the pane's
                 // overflow-hidden width container. This mirrors the sidebar
                 // seam and lets the target straddle both adjacent panes.
@@ -9155,15 +9486,7 @@ impl Render for Shell {
                 let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
                 // Hairline on its right edge — full height like the tone,
                 // so the sidebar column reads as its own surface.
-                let sidebar_tone = div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left_0()
-                    .w(px(sidebar_now))
-                    .bg(crate::theme::wash(0.05))
-                    .border_r_1()
-                    .border_color(border_color);
+                let sidebar_tone = presentation::sidebar_tone(sidebar_now, border_color);
                 // The content row spans the FULL window height — the titlebar
                 // overlays it (glass, no fill), so the transcript can scroll
                 // under the header and fade out at its edge. Columns that
@@ -9190,7 +9513,9 @@ impl Render for Shell {
                             ),
                     )
                     .child(div().absolute().top_0().left_0().right_0().child(title_bar))
+                    .children(mobile_sidebar)
                     .child(self.render_titlebar_cluster(cx))
+                    .children(mobile_right)
                     .children(overlays);
                 root.child(sidebar_tone)
                     .child(motion::fade_in("phase-app", page))
@@ -9269,6 +9594,79 @@ impl Render for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mobile_layout_uses_full_width_for_the_conversation() {
+        assert!(is_mobile_width(767.0));
+        assert!(!is_mobile_width(768.0));
+        assert_eq!(main_layout_width(390.0, 256.0, 520.0, true), 390.0);
+        assert_eq!(main_layout_width(1200.0, 256.0, 520.0, false), 424.0);
+    }
+
+    #[test]
+    fn mobile_drawer_width_is_bounded_and_leaves_a_backdrop() {
+        for (drawer, cap) in [
+            (MobileDrawer::Sidebar, 280.0),
+            (MobileDrawer::RightPane, 380.0),
+        ] {
+            for viewport in [240.0, 320.0, 390.0, 767.0] {
+                let width = mobile_drawer_width(viewport, drawer);
+                assert!(width > 0.0 && width < viewport);
+                assert!(width <= cap);
+            }
+            assert_eq!(mobile_drawer_width(0.0, drawer), 0.0);
+            assert_eq!(mobile_drawer_width(-1.0, drawer), 0.0);
+            assert_eq!(mobile_drawer_width(768.0, drawer), cap);
+        }
+        assert_eq!(mobile_drawer_width(320.0, MobileDrawer::Sidebar), 240.0);
+        assert_eq!(mobile_drawer_width(320.0, MobileDrawer::RightPane), 288.0);
+        assert_eq!(mobile_drawer_width(390.0, MobileDrawer::Sidebar), 280.0);
+        assert_eq!(mobile_drawer_width(390.0, MobileDrawer::RightPane), 351.0);
+    }
+
+    #[test]
+    fn mobile_drawer_toggle_keeps_one_overlay_at_a_time() {
+        assert_eq!(
+            toggle_mobile_drawer(None, MobileDrawer::Sidebar),
+            Some(MobileDrawer::Sidebar)
+        );
+        assert_eq!(
+            toggle_mobile_drawer(Some(MobileDrawer::Sidebar), MobileDrawer::Sidebar),
+            None
+        );
+        assert_eq!(
+            toggle_mobile_drawer(Some(MobileDrawer::Sidebar), MobileDrawer::RightPane),
+            Some(MobileDrawer::RightPane)
+        );
+        assert_eq!(
+            toggle_mobile_drawer(Some(MobileDrawer::RightPane), MobileDrawer::Sidebar),
+            Some(MobileDrawer::Sidebar)
+        );
+    }
+
+    #[test]
+    fn external_lifecycle_relay_routes_browser_actions_without_runtime_rpc() {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut relay = ExternalLifecycleRelay::default();
+        assert!(!relay.dispatch(ExternalLifecycleAction::SignOut));
+
+        let observed = seen.clone();
+        relay.set(Some(std::rc::Rc::new(move |action| {
+            observed.borrow_mut().push(action);
+        })));
+        assert!(relay.dispatch(ExternalLifecycleAction::SignOut));
+        assert!(relay.dispatch(ExternalLifecycleAction::Retry));
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                ExternalLifecycleAction::SignOut,
+                ExternalLifecycleAction::Retry,
+            ]
+        );
+
+        relay.set(None);
+        assert!(!relay.dispatch(ExternalLifecycleAction::SignOut));
+    }
 
     #[test]
     fn every_default_shortcut_binds_on_this_platform() {
@@ -10142,7 +10540,7 @@ mod tests {
     #[test]
     fn sidebar_disclosure_motion_lands_exactly_on_its_target() {
         let mut tween = SidebarDisclosureMotion::new(1, 240.0, 0.0);
-        tween.started = std::time::Instant::now() - motion::COLLAPSE.total().mul_f32(2.0);
+        tween.started = Instant::now() - motion::COLLAPSE.total().mul_f32(2.0);
         assert_eq!(tween.current(), 0.0);
         assert!(!tween.animating());
     }
@@ -10151,7 +10549,221 @@ mod tests {
 #[cfg(test)]
 mod exit_regressions {
     use super::*;
-    use gpui::{AppContext, TestAppContext};
+    use gpui::{AppContext, TestAppContext, VisualTestContext};
+
+    struct SidebarBoundsHost {
+        shell: Entity<Shell>,
+        viewport_width: f32,
+    }
+
+    impl Render for SidebarBoundsHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let viewport_width = self.viewport_width;
+            let width = if is_mobile_width(viewport_width) {
+                mobile_drawer_width(viewport_width, MobileDrawer::Sidebar)
+            } else {
+                self.shell.read(cx).settings.sidebar_width
+            };
+            let sidebar = self.shell.update(cx, |shell, cx| {
+                shell.viewport_width = viewport_width;
+                shell.mobile_drawer =
+                    is_mobile_width(viewport_width).then_some(MobileDrawer::Sidebar);
+                let theme = Theme::of(cx).clone();
+                match shell.route {
+                    Route::Settings(section) => shell.render_settings_nav(section, &theme, cx),
+                    Route::Chat => shell.render_chat_sidebar(&theme, cx),
+                }
+            });
+            div()
+                .id("sidebar-surface")
+                .debug_selector(|| "sidebar-surface".into())
+                .w(px(width))
+                .h(px(600.0))
+                .child(sidebar)
+        }
+    }
+
+    fn sidebar_bounds_fixture(
+        cx: &mut TestAppContext,
+        persisted_width: f32,
+    ) -> (
+        Entity<SidebarBoundsHost>,
+        Entity<Shell>,
+        &mut VisualTestContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let (host, cx) = cx.add_window_view(move |_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let shell = cx.new(|cx| {
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.settings.sidebar_width = persisted_width;
+                shell
+            });
+            SidebarBoundsHost {
+                shell,
+                viewport_width: 320.0,
+            }
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        draw_sidebar(cx);
+        (host, shell, cx)
+    }
+
+    fn draw_sidebar(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear());
+    }
+
+    fn assert_sidebar_width(cx: &mut VisualTestContext, selector: &'static str, expected: f32) {
+        let surface = cx.debug_bounds("sidebar-surface").unwrap();
+        let content = cx.debug_bounds(selector).unwrap();
+        assert_eq!(f32::from(surface.size.width), expected);
+        assert_eq!(
+            f32::from(content.size.width),
+            expected,
+            "{selector} diverged from the rendered sidebar surface"
+        );
+    }
+
+    #[gpui::test]
+    fn sidebar_descendants_share_mobile_and_desktop_rendered_width(cx: &mut TestAppContext) {
+        let (host, shell, cx) = sidebar_bounds_fixture(cx, 340.0);
+
+        assert_sidebar_width(cx, "chat-sidebar-content", 240.0);
+
+        shell.update(cx, |shell, cx| {
+            shell.route = Route::Settings(SettingsSection::Devices);
+            cx.notify();
+        });
+        draw_sidebar(cx);
+        assert_sidebar_width(cx, "settings-sidebar-content", 240.0);
+
+        shell.update(cx, |shell, cx| {
+            shell.settings.sidebar_width = 220.0;
+            cx.notify();
+        });
+
+        host.update(cx, |host, cx| {
+            host.viewport_width = 390.0;
+            cx.notify();
+        });
+        draw_sidebar(cx);
+        assert_sidebar_width(cx, "settings-sidebar-content", 280.0);
+
+        shell.update(cx, |shell, cx| {
+            shell.route = Route::Chat;
+            cx.notify();
+        });
+        draw_sidebar(cx);
+        assert_sidebar_width(cx, "chat-sidebar-content", 280.0);
+
+        host.update(cx, |host, cx| {
+            host.viewport_width = 1200.0;
+            cx.notify();
+        });
+        draw_sidebar(cx);
+        assert_sidebar_width(cx, "chat-sidebar-content", 220.0);
+    }
+
+    #[gpui::test]
+    fn mobile_right_drawer_preserves_docked_panel_state(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                shell.active_chat = "session".into();
+                shell.viewport_width = 1200.0;
+                shell.toggle_right_pane(cx);
+                assert!(shell.right_pane_open(cx));
+                shell.right_pane_expanded = true;
+
+                shell.viewport_width = 390.0;
+                shell.toggle_right_pane(cx);
+                assert_eq!(shell.mobile_drawer, Some(MobileDrawer::RightPane));
+                assert!(shell.right_pane_open(cx));
+
+                assert!(shell.right_pane_content_visible(cx));
+                assert!(!shell.right_pane_visible(cx));
+                assert_eq!(
+                    main_layout_width(390.0, 256.0, right_pane_takeover_width(390.0, 0.0), true,),
+                    390.0,
+                    "an expanded desktop pane must not reduce mobile chat width"
+                );
+
+                shell.close_mobile_drawer(cx);
+                assert!(shell.mobile_drawer.is_none());
+                assert!(shell.right_pane_open(cx));
+                shell.viewport_width = 1200.0;
+                assert!(shell.right_pane_open(cx));
+
+                shell.toggle_right_pane(cx);
+                assert!(!shell.right_pane_open(cx));
+                shell.viewport_width = 390.0;
+                shell.toggle_right_pane(cx);
+                assert_eq!(shell.mobile_drawer, Some(MobileDrawer::RightPane));
+
+                assert!(shell.right_pane_content_visible(cx));
+                shell.close_mobile_drawer(cx);
+                assert!(shell.mobile_drawer.is_none());
+                assert!(!shell.right_pane_open(cx));
+                shell.viewport_width = 1200.0;
+                assert!(!shell.right_pane_open(cx));
+            })
+            .unwrap();
+    }
 
     #[gpui::test]
     fn appshot_destinations_retain_last_session_and_use_new_canvas_defaults(
@@ -10262,7 +10874,7 @@ mod exit_regressions {
         window
             .update(cx, |shell, _, cx| {
                 let duration = RESIZE.total().mul_f32(motion::speed_scale());
-                let started = std::time::Instant::now() - duration.mul_f32(2.);
+                let started = Instant::now() - duration.mul_f32(2.);
                 let tween = Some(WidthTween {
                     from: 520.,
                     to: 0.,
@@ -10792,7 +11404,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (u64, Entity<crate::browser::BrowserSurface>) {
-        if !self.right_pane_open(cx) {
+        if !self.right_pane_content_visible(cx) {
             self.toggle_right_pane(cx);
         }
         // Hosted Macs can expose only a 1024px desktop. Use the app's

@@ -176,7 +176,11 @@ impl Shell {
         // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a
         // session is selected (`render_titlebar_cluster`) — this row budgets
         // one button slot so the title never sits under it.
-        let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+        let sidebar_now = if is_mobile_width(self.viewport_width) {
+            0.0
+        } else {
+            self.eval_tween(self.sidebar_tween, self.sidebar_target())
+        };
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
 
         // Same glide as the old strip: content starts at the inset card's
@@ -193,7 +197,7 @@ impl Shell {
         // the pane itself would sit under the drag region and never see a
         // click. Closed, it is just the stable open/close toggle. Hidden on
         // the new-session canvas (user request) — nothing to diff yet.
-        let takeover = !on_canvas && self.right_pane_open(cx) && self.right_pane_expanded;
+        let takeover = !on_canvas && self.right_pane_visible(cx) && self.right_pane_expanded;
         // In takeover the title hides and the strip owns the whole band, so
         // the row's left inset pulls back to the sidebar seam — the title
         // inset would push the scope dropdown off the pane's own left gutter
@@ -222,7 +226,7 @@ impl Shell {
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
         } else {
-            let right_open = self.right_pane_open(cx);
+            let right_open = self.right_pane_visible(cx);
             let mut controls = div()
                 .id("right-titlebar-controls")
                 .flex_none()
@@ -308,47 +312,21 @@ impl Shell {
             // title would sit UNDER it (both flex_none, the row overflows and
             // paint order stacks them), so it hides for the duration.
             .when(!takeover, |el| {
-                el.child(
-                    div()
-                        .min_w_0()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .when_some(
-                            harness.map(crate::pickers::harness_brand_icon),
-                            |el, (path, tint)| {
-                                el.child(
-                                    icon(path)
-                                        .size(px(14.0))
-                                        .flex_none()
-                                        .text_color(tint.unwrap_or(theme.text_muted)),
-                                )
-                            },
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(if on_canvas {
-                                    theme.text_muted.opacity(0.7)
-                                } else {
-                                    theme.text.opacity(0.85)
-                                })
-                                .child(title),
-                        )
-                        .when_some(target, |el, target| {
-                            el.child(
-                                div()
-                                    .flex_none()
-                                    .text_size(crate::typography::ui_rems(12.0))
-                                    .text_color(theme.text_muted.opacity(0.5))
-                                    .child(target),
-                            )
+                el.child(presentation::title_identity(
+                    &theme,
+                    title,
+                    target,
+                    harness
+                        .map(crate::pickers::harness_brand_icon)
+                        .map(|(path, tint)| {
+                            icon(path)
+                                .size(px(14.0))
+                                .flex_none()
+                                .text_color(tint.unwrap_or(theme.text_muted))
+                                .into_any_element()
                         }),
-                )
+                    on_canvas,
+                ))
             })
             .child(div().flex_1())
             .children(trailing);
