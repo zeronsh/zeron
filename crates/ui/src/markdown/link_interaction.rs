@@ -412,6 +412,8 @@ mod rendered_tests {
     use super::*;
     use gpui::{Context, Render};
     struct Fixture {
+        markdown: String,
+        width: f32,
         activated: Rc<RefCell<Vec<LinkActivation>>>,
     }
     impl Render for Fixture {
@@ -425,11 +427,9 @@ mod rendered_tests {
                     LinkOutcome::Rejected
                 }),
             });
-            let tree = super::super::parser::parse_full(
-                "[first](https://example.com/one) and [second](https://example.org/two)",
-            );
+            let tree = super::super::parser::parse_full(&self.markdown);
             div()
-                .w(px(320.))
+                .w(px(self.width))
                 .child(super::super::render::selection_frame_reset())
                 .child(super::super::render::render_tree(
                     &tree,
@@ -448,7 +448,13 @@ mod rendered_tests {
             let log = activated.clone();
             let window = cx
                 .open_window(Default::default(), |_, cx| {
-                    cx.new(|_| Fixture { activated })
+                    cx.new(|_| Fixture {
+                        activated,
+                        width: 320.,
+                        markdown:
+                            "[first](https://example.com/one) and [second](https://example.org/two)"
+                                .into(),
+                    })
                 })
                 .unwrap();
             cx.update_window(window.into(), |_, window, cx| {
@@ -500,6 +506,102 @@ mod rendered_tests {
                 assert_eq!(log.borrow().len(), 3);
                 assert_eq!(log.borrow()[2].action, LinkAction::External);
                 assert_eq!(log.borrow()[2].target.original, "https://example.org/two");
+            })
+            .unwrap();
+            cx.spawn(async move |cx| {
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+    }
+    #[test]
+    fn rendered_truncation_resizes_and_selects_the_original_url() {
+        gpui_platform::headless().run(|cx| {
+            cx.set_global(Theme::dark());
+            let url = format!("https://example.com/{}", "long-segment-🙂/".repeat(20));
+            let markdown = format!("[{url}]({url})");
+            let window = cx
+                .open_window(Default::default(), |_, cx| {
+                    cx.new(|_| Fixture {
+                        activated: Rc::default(),
+                        width: 180.,
+                        markdown,
+                    })
+                })
+                .unwrap();
+            let view = window.entity(cx).unwrap();
+            for width in [180., 420., 100.] {
+                view.update(cx, |view, cx| {
+                    view.width = width;
+                    cx.notify();
+                });
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.refresh();
+                    let _ = window.draw(cx);
+                    let (original, layout, offsets) =
+                        super::super::render::selection_test_snapshot("link-fixture:0");
+                    assert_eq!(original.as_ref(), url);
+                    let offsets = offsets.unwrap();
+                    assert_eq!(offsets.omissions.len(), 1);
+                    assert!(layout.bounds().size.width <= px(width));
+                    assert!(layout.bounds().size.height <= px(23.));
+                    let shown_end = offsets.displayed(url.len());
+                    let start =
+                        layout.position_for_index(0).unwrap() + gpui::point(px(0.1), px(8.));
+                    let end = layout.position_for_index(shown_end).unwrap()
+                        + gpui::point(px(0.1), px(8.));
+                    window.dispatch_event(
+                        gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                            button: MouseButton::Left,
+                            position: start,
+                            click_count: 1,
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                    window.refresh();
+                    let _ = window.draw(cx);
+                    window.dispatch_event(
+                        gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                            position: end,
+                            pressed_button: Some(MouseButton::Left),
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                    window.dispatch_event(
+                        gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                            button: MouseButton::Left,
+                            position: end,
+                            click_count: 1,
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                    assert_eq!(
+                        super::super::selection::selected_text().as_deref(),
+                        Some(url.as_str())
+                    );
+                    assert!(view.read(cx).activated.borrow().is_empty());
+                    super::super::selection::clear_if_owner("link-fixture:0");
+                })
+                .unwrap();
+            }
+            view.update(cx, |view, cx| {
+                view.width = 220.;
+                view.markdown =
+                    format!("| [{url}]({url}) | Notes |\n| --- | --- |\n| short | cell |");
+                cx.notify();
+            });
+            cx.update_window(window.into(), |_, window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+                let (original, layout, offsets) =
+                    super::super::render::selection_test_snapshot("link-fixture:0");
+                assert_eq!(original.as_ref(), url);
+                assert_eq!(offsets.unwrap().omissions.len(), 1);
+                assert!(layout.bounds().size.width < px(220.));
+                assert!(layout.bounds().size.height <= px(23.));
             })
             .unwrap();
             cx.spawn(async move |cx| {
