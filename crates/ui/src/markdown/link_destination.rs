@@ -1,8 +1,6 @@
 //! Destination disclosure is local text only. Never fetch link previews.
 use crate::theme::Theme;
-use gpui::{
-    AnyElement, App, ClipboardItem, Context, Render, SharedString, Window, div, prelude::*, px,
-};
+use gpui::{AnyElement, App, Context, Render, SharedString, Window, div, prelude::*, px};
 
 pub struct Destination(
     pub String,
@@ -15,12 +13,12 @@ impl Render for Destination {
 }
 fn viewport_limits(width: f32, height: f32) -> (f32, f32) {
     (
-        (width - 24.).clamp(1., 560.),
-        (height - 80.).clamp(1., 280.),
+        (width - 24.).clamp(1., 360.),
+        (height - 80.).clamp(1., 160.),
     )
 }
 /// Invisible break opportunities let even a single long path segment wrap.
-/// The clipboard always receives the untouched original, never this string.
+/// This presentation string never replaces the original link destination.
 fn breakable_url(url: &str) -> String {
     use unicode_segmentation::UnicodeSegmentation;
     url.graphemes(true).collect::<Vec<_>>().join("\u{200b}")
@@ -32,11 +30,23 @@ pub fn destination_card(
     cx: &App,
 ) -> AnyElement {
     let theme = Theme::of(cx);
-    let (width, height) = viewport_limits(
+    let (max_width, height) = viewport_limits(
         window.viewport_size().width.into(),
         window.viewport_size().height.into(),
     );
-    let copy: SharedString = url.to_owned().into();
+    let text: SharedString = breakable_url(url).into();
+    // GPUI measures hover tooltips with min-content constraints. Use the
+    // shaped text width so short URLs stay on one line despite wrap points.
+    let natural_width = window
+        .text_system()
+        .shape_line(
+            text.clone(),
+            px(11.),
+            &[window.text_style().to_run(text.len())],
+            None,
+        )
+        .width();
+    let width = (f32::from(natural_width).ceil() + 14.).min(max_width);
     div()
         .id("web-destination-card")
         .relative()
@@ -47,36 +57,24 @@ pub fn destination_card(
         )
         .w(px(width))
         .max_w(px(width))
-        .p(px(8.))
-        .rounded(px(6.))
+        .px(px(6.))
+        .py(px(4.))
+        .rounded(px(4.))
         .border_1()
         .border_color(theme.border_strong)
         .bg(theme.surface_raised)
-        .shadow_md()
-        .text_size(px(12.))
+        .shadow_sm()
+        .text_size(px(11.))
+        .line_height(px(14.))
         .text_color(theme.text)
         .flex()
         .flex_col()
-        .gap(px(6.))
         .child(
             div()
                 .id("web-destination-scroll")
                 .max_h(px(height))
                 .overflow_y_scroll()
-                .child(breakable_url(url)),
-        )
-        .child(
-            div()
-                .id("copy-web-destination")
-                .role(gpui::Role::Button)
-                .aria_label("Copy link address")
-                .cursor_pointer()
-                .py(px(4.))
-                .child("Copy link address")
-                .hover(|s| s.bg(theme.selection))
-                .on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(copy.to_string()))
-                }),
+                .child(text),
         )
         .into_any_element()
 }

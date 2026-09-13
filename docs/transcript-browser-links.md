@@ -4,7 +4,7 @@ Click an HTTP(S) link in an agent message to open and select a **new Browser tab
 
 Right-click a link for **Open in Zeron**, **Open in external browser**, or **Copy link address**. Tab and Shift+Tab move through links and other controls when an input or completion menu does not consume the key. Enter or Space activates a focused link. Shift+F10 opens its action menu; arrows or Tab move through the actions, and Escape dismisses the menu.
 
-Hover or keyboard focus shows the full destination, including when the Markdown label says something different. The disclosure wraps long destinations, scrolls within the window, and includes a copy action. Inspecting a link makes no network requests. Scrolling the transcript, changing conversations, or removing a link dismisses its disclosure.
+Hover or keyboard focus shows the full destination, including when the Markdown label says something different. The compact tooltip fits the destination text up to 360 px, wraps long destinations, and scrolls within the window. Copy link address is available in the context menu. Inspecting a link makes no network requests. Scrolling the transcript, changing conversations, or removing a link dismisses its disclosure.
 
 Long web links are shortened with an ellipsis according to the actual available text width, including inside table cells. Navigation, destination disclosure, and Copy link address retain the complete URL. Text selection uses the original label: selecting an entire shortened URL copies the full URL, and selecting its visible prefix copies that prefix. Selecting across the ellipsis includes the omitted text. Labels, styles, and selection positions update when the window width or streaming content changes.
 
