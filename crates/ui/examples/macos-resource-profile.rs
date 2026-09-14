@@ -121,9 +121,11 @@ fn main() -> anyhow::Result<()> {
     let (state, window) = handles.borrow_mut().take().unwrap();
     let notifications = Rc::new(std::cell::Cell::new(0usize));
     let observed = notifications.clone();
-    let _notification_probe = app.update(|cx| cx.observe(&state, move |_, _| {
-        observed.set(observed.get() + 1);
-    }));
+    let _notification_probe = app.update(|cx| {
+        cx.observe(&state, move |_, _| {
+            observed.set(observed.get() + 1);
+        })
+    });
     let dispatcher = executor.dispatcher().as_bench().unwrap();
     let start = Instant::now();
     let first_at = frames[0].at;
@@ -161,8 +163,11 @@ fn main() -> anyhow::Result<()> {
                     })
                 });
                 if text_only {
-                    assert_eq!(notifications.get(), before,
-                        "text growth must not notify unrelated app-state observers");
+                    assert_eq!(
+                        notifications.get(),
+                        before,
+                        "text growth must not notify unrelated app-state observers"
+                    );
                 }
             }
             app.update(|cx| {
@@ -302,11 +307,11 @@ fn main() -> anyhow::Result<()> {
                 let mut painted = 0;
                 for y in 180..800 {
                     let left = cached.get_pixel(20, y).0;
-                    if left[0] >= 30 && left[0] <= 60
-                        && left[0] == left[1] && left[1] == left[2]
-                    {
-                        anyhow::ensure!(cached.get_pixel(491, y).0 == left,
-                            "Sidebar row does not fill its width at y={y}: {scenario}");
+                    if left[0] >= 30 && left[0] <= 60 && left[0] == left[1] && left[1] == left[2] {
+                        anyhow::ensure!(
+                            cached.get_pixel(491, y).0 == left,
+                            "Sidebar row does not fill its width at y={y}: {scenario}"
+                        );
                         painted += 1;
                     }
                 }

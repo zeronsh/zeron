@@ -9,11 +9,15 @@ use gpui::{
 };
 
 use crate::appshots::{AppshotCapabilities, AppshotDestination};
+use crate::settings::loadout_model::{
+    LoadoutConfig, keymap_shortcut_conflict, loadout_shortcut_owner, reserved_loadout_combo,
+};
 
 #[path = "appshots.rs"]
 mod appshots_page;
 use crate::settings::{
-    ComposerSendBehavior, KeymapConfig, ShortcutId, combo_from_keystroke, display_combo,
+    ComposerSendBehavior, KeymapConfig, LOADOUT_SLOTS, ShortcutId, combo_from_keystroke,
+    display_combo,
 };
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -61,6 +65,7 @@ pub struct ShortcutsPage {
     keymap: KeymapConfig,
     escape_stops_active_agent: bool,
     composer_send_behavior: ComposerSendBehavior,
+    loadout: LoadoutConfig,
     recording: Option<ShortcutId>,
     recording_blur: Option<gpui::Subscription>,
     recording_interceptor: Option<gpui::Subscription>,
@@ -87,6 +92,7 @@ impl ShortcutsPage {
         keymap: KeymapConfig,
         escape_stops_active_agent: bool,
         composer_send_behavior: ComposerSendBehavior,
+        loadout: LoadoutConfig,
         appshots_enabled: bool,
         appshot_sound_enabled: bool,
         appshot_destination: AppshotDestination,
@@ -100,6 +106,7 @@ impl ShortcutsPage {
             keymap,
             escape_stops_active_agent,
             composer_send_behavior,
+            loadout,
             recording: None,
             recording_blur: None,
             recording_interceptor: None,
@@ -155,6 +162,11 @@ impl ShortcutsPage {
 
     fn commit(&mut self, cx: &mut Context<Self>) {
         cx.emit(ShortcutsEvent::KeymapChanged(self.keymap.clone()));
+        cx.notify();
+    }
+
+    pub fn set_loadout(&mut self, loadout: LoadoutConfig, cx: &mut Context<Self>) {
+        self.loadout = loadout;
         cx.notify();
     }
 
@@ -229,6 +241,34 @@ impl ShortcutsPage {
                         format!("{} is reserved for the composer.", display_combo(&combo)).into(),
                     );
                     self.stop_recording();
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if let Some(owner) = reserved_loadout_combo(cfg!(target_os = "macos"), &combo) {
+                    self.conflict_notice = Some(
+                        format!("{} is reserved for {}.", display_combo(&combo), owner).into(),
+                    );
+                    self.recording = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if let Some(slot) = loadout_shortcut_owner(
+                    cfg!(target_os = "macos"),
+                    &self.loadout,
+                    LOADOUT_SLOTS,
+                    &combo,
+                ) {
+                    self.conflict_notice = Some(
+                        format!(
+                            "{} is already assigned to loadout slot {}.",
+                            display_combo(&combo),
+                            slot + 1
+                        )
+                        .into(),
+                    );
+                    self.recording = None;
                     cx.notify();
                     cx.stop_propagation();
                     return;
@@ -395,9 +435,7 @@ impl ShortcutsPage {
 
 /// The shortcut (other than `id`) already bound to `combo`, if any. Pure.
 pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Option<ShortcutId> {
-    ShortcutId::ALL
-        .into_iter()
-        .find(|&other| other.available() && other != id && keymap.get(other) == combo)
+    keymap_shortcut_conflict(cfg!(target_os = "macos"), keymap, combo, Some(id))
 }
 
 pub fn send_combo_is_reserved(_behavior: ComposerSendBehavior, combo: &str) -> bool {
@@ -746,6 +784,7 @@ impl Render for ShortcutsPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::loadout_model::is_fixed_loadout_combo;
 
     #[gpui::test]
     fn appshots_setup_can_be_enabled_and_configured_by_keyboard(cx: &mut gpui::TestAppContext) {
@@ -760,6 +799,7 @@ mod tests {
                 KeymapConfig::default(),
                 false,
                 ComposerSendBehavior::default(),
+                LoadoutConfig::default(),
                 false,
                 false,
                 AppshotDestination::Automatic,
@@ -853,6 +893,7 @@ mod tests {
                 KeymapConfig::default(),
                 false,
                 ComposerSendBehavior::default(),
+                LoadoutConfig::default(),
                 false,
                 true,
                 AppshotDestination::Automatic,
@@ -1010,5 +1051,12 @@ mod tests {
             ComposerSendBehavior::ModEnter,
             "mod-shift-enter"
         ));
+    }
+
+    #[test]
+    fn loadout_shortcuts_are_reserved() {
+        assert!(is_fixed_loadout_combo("mod-shift-1"));
+        assert!(is_fixed_loadout_combo("mod-shift-5"));
+        assert!(!is_fixed_loadout_combo("mod-1"));
     }
 }

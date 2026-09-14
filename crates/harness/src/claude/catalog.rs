@@ -255,4 +255,67 @@ mod tests {
             "do it"
         );
     }
+
+    #[test]
+    fn context_window_is_advertised_only_for_long_context_models() {
+        let models = static_models();
+        let context_ids: Vec<_> = models
+            .iter()
+            .filter(|model| {
+                model
+                    .options
+                    .iter()
+                    .any(|option| option.id == "contextWindow")
+            })
+            .map(|model| model.id.as_str())
+            .collect();
+        assert_eq!(
+            context_ids,
+            vec![
+                "claude-fable-5-1",
+                "claude-fable-5",
+                "claude-opus-5",
+                "claude-sonnet-5",
+            ]
+        );
+
+        for model in models
+            .iter()
+            .filter(|model| context_ids.contains(&model.id.as_str()))
+        {
+            let option = model
+                .options
+                .iter()
+                .find(|option| option.id == "contextWindow")
+                .expect("context option");
+            assert_eq!(
+                option
+                    .choices
+                    .iter()
+                    .map(|choice| choice.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["200k", "1m"]
+            );
+            assert_eq!(option.default_choice, "200k");
+        }
+
+        assert!(
+            !models
+                .iter()
+                .find(|model| model.id == "claude-opus-4-8")
+                .unwrap()
+                .options
+                .iter()
+                .any(|option| option.id == "contextWindow")
+        );
+        assert!(
+            !models
+                .iter()
+                .find(|model| model.id == "claude-haiku-4-5")
+                .unwrap()
+                .options
+                .iter()
+                .any(|option| option.id == "contextWindow")
+        );
+    }
 }

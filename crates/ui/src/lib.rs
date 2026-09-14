@@ -54,6 +54,7 @@ pub mod syntax_cache;
 pub mod terminal;
 pub mod theme;
 pub mod theme_library;
+pub mod toast;
 pub mod transcript;
 pub mod typography;
 mod workspace_links;

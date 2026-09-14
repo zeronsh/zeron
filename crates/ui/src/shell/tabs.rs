@@ -128,6 +128,13 @@ impl Shell {
             }
             s.select_chat(None, cx);
         });
+        if let Some(slot) = self.settings.loadout.slot(0).cloned() {
+            self.composer.update(cx, |composer, cx| {
+                let _ = composer
+                    .pickers()
+                    .update(cx, |pickers, cx| pickers.apply_loadout_slot(&slot, cx));
+            });
+        }
         cx.notify();
     }
 

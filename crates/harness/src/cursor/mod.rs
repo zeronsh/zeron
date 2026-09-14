@@ -272,6 +272,13 @@ impl Harness for CursorHarness {
 
         let (stdin_tx, stdin_rx) = mpsc::unbounded_channel::<String>();
         tokio::spawn(stdin_writer(stdin, stdin_rx));
+        let mut model_options = request.model_options;
+        if let Some(reasoning) = request.reasoning {
+            model_options.insert(
+                "effort".into(),
+                Value::String(cursor_effort(reasoning).into()),
+            );
+        }
         let first = json!({
             "op": "run",
             "prompt": request.prompt,
@@ -279,7 +286,7 @@ impl Harness for CursorHarness {
             "model": request.model,
             // Typed parameter picks (thinking/context/effort/fast/…) — the
             // shim folds them into the SDK's ModelSelection params.
-            "modelOptions": request.model_options,
+            "modelOptions": model_options,
             "resume": request.resume,
         });
         let _ = stdin_tx.send(first.to_string());
@@ -326,6 +333,31 @@ fn static_models() -> Vec<Model> {
     ]
 }
 
+fn cursor_reasoning(value: &str) -> Option<ReasoningLevel> {
+    match value.to_ascii_lowercase().as_str() {
+        "minimal" => Some(ReasoningLevel::Minimal),
+        "low" => Some(ReasoningLevel::Low),
+        "medium" => Some(ReasoningLevel::Medium),
+        "high" => Some(ReasoningLevel::High),
+        "xhigh" => Some(ReasoningLevel::XHigh),
+        "max" => Some(ReasoningLevel::Max),
+        "ultra" => Some(ReasoningLevel::Ultra),
+        _ => None,
+    }
+}
+
+fn cursor_effort(level: ReasoningLevel) -> &'static str {
+    match level {
+        ReasoningLevel::Minimal => "minimal",
+        ReasoningLevel::Low => "low",
+        ReasoningLevel::Medium => "medium",
+        ReasoningLevel::High => "high",
+        ReasoningLevel::XHigh | ReasoningLevel::Ultracode | ReasoningLevel::Ultrathink => "xhigh",
+        ReasoningLevel::Max => "max",
+        ReasoningLevel::Ultra => "ultra",
+    }
+}
+
 /// `Cursor.models.list()` items → picker models. Item shape (1.0.28
 /// `options.d.ts` `ModelListItem`): `{id, displayName, description?,
 /// aliases?, parameters?: [{id, displayName?, values: [{value,
@@ -361,14 +393,32 @@ fn map_model_items(items: &Value) -> Vec<Model> {
                 .find(|v| v.get("isDefault").and_then(Value::as_bool) == Some(true))
                 .and_then(|v| v.get("params").and_then(Value::as_array).cloned())
                 .unwrap_or_default();
-            let options: Vec<ModelOption> = item
+            let parameters = item
                 .get("parameters")
                 .and_then(Value::as_array)
                 .map(|a| a.as_slice())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            let mut reasoning_levels: Vec<ReasoningLevel> = parameters
+                .iter()
+                .filter(|p| p.get("id").and_then(Value::as_str) == Some("effort"))
+                .flat_map(|p| {
+                    p.get("values")
+                        .and_then(Value::as_array)
+                        .map(|a| a.as_slice())
+                        .unwrap_or_default()
+                })
+                .filter_map(|value| value.get("value").and_then(Value::as_str))
+                .filter_map(cursor_reasoning)
+                .collect();
+            reasoning_levels.sort_unstable();
+            reasoning_levels.dedup();
+            let options: Vec<ModelOption> = parameters
                 .iter()
                 .filter_map(|p| {
                     let pid = str_of(p, "id")?;
+                    if pid == "effort" {
+                        return None;
+                    }
                     let choices: Vec<ModelOptionChoice> = p
                         .get("values")
                         .and_then(Value::as_array)
@@ -403,7 +453,7 @@ fn map_model_items(items: &Value) -> Vec<Model> {
                 id,
                 label,
                 description: str_of(item, "description"),
-                reasoning_levels: Vec::new(),
+                reasoning_levels,
                 options,
             })
         })
@@ -946,10 +996,9 @@ mod tests {
 
     #[test]
     fn nested_frames_arrive_tagged() {
-        let frame: Value = serde_json::from_str(
-            r#"{"ev":"text","text":"sub says","parent":"call_task_1"}"#,
-        )
-        .unwrap();
+        let frame: Value =
+            serde_json::from_str(r#"{"ev":"text","text":"sub says","parent":"call_task_1"}"#)
+                .unwrap();
         assert_eq!(
             map_shim_frame(&frame, false),
             vec![AgentEvent::Subagent {

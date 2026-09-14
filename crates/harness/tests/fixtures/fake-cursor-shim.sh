@@ -9,7 +9,7 @@ emit() { printf '%s\n' "$1"; }
 # shapes — parameterized Auto + its bare `default` alias twin (skipped by the
 # harness) + a plain model.
 if [ "$1" = "models" ]; then
-  emit '{"ev":"models","items":[{"id":"auto-smart","displayName":"Auto","parameters":[{"id":"optimize_for","displayName":"Optimize For","values":[{"value":"intelligence","displayName":"Intelligence"},{"value":"balanced","displayName":"Balance"},{"value":"cost","displayName":"Cost"}]}],"variants":[{"params":[{"id":"optimize_for","value":"balanced"}],"displayName":"Auto","isDefault":true}]},{"id":"default","displayName":"Auto","aliases":["auto"]},{"id":"claude-fable-5","displayName":"Claude Fable 5","description":"Anthropic frontier","parameters":[{"id":"thinking","values":[{"value":"enabled"},{"value":"disabled"}]}]}]}'
+  emit '{"ev":"models","items":[{"id":"auto-smart","displayName":"Auto","parameters":[{"id":"optimize_for","displayName":"Optimize For","values":[{"value":"intelligence","displayName":"Intelligence"},{"value":"balanced","displayName":"Balance"},{"value":"cost","displayName":"Cost"}]}],"variants":[{"params":[{"id":"optimize_for","value":"balanced"}],"displayName":"Auto","isDefault":true}]},{"id":"default","displayName":"Auto","aliases":["auto"]},{"id":"claude-fable-5","displayName":"Claude Fable 5","description":"Anthropic frontier","parameters":[{"id":"thinking","values":[{"value":"enabled"},{"value":"disabled"}]},{"id":"effort","displayName":"Reasoning Effort","values":[{"value":"high","displayName":"High"},{"value":"xhigh","displayName":"Extra High"},{"value":"low","displayName":"Low"},{"value":"medium","displayName":"Medium"},{"value":"high","displayName":"High"},{"value":"turbo","displayName":"Turbo"}]}]}]}'
   exit 0
 fi
 
@@ -20,6 +20,17 @@ case "$first" in
 esac
 
 case "$first" in
+
+*scenario:reasoning*)
+  case "$first" in
+  *'"modelOptions":{"effort":"xhigh","thinking":"enabled"}'*)
+    emit '{"ev":"ready","agentId":"agent-r","model":"claude-fable-5"}'
+    emit '{"ev":"turn","status":"finished"}'
+    ;;
+  *) emit '{"ev":"fatal","message":"missing reasoning effort"}'; exit 1 ;;
+  esac
+  exit 0
+  ;;
 
 *scenario:happy*)
   emit '{"ev":"ready","agentId":"agent-1","model":"composer-2.5"}'

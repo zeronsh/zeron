@@ -361,16 +361,11 @@ fn exit_progress(since: std::time::Instant) -> f32 {
     motion::MENU_OUT.progress(raw)
 }
 
-/// The frosted card for a popover layer: full blur while open; while exiting
-/// the blur radius rides the exit progress down to 0 — the `BackdropBlur`
-/// primitive ignores `element_opacity`, so without this the glass slab would
-/// hold full strength through the fade and pop off at unmount.
-fn frosted_menu(exit: Option<f32>, content: AnyElement) -> AnyElement {
-    let blur = crate::frost::MENU_BLUR * (1.0 - exit.unwrap_or(0.0));
+fn dismiss_guard() -> impl IntoElement {
     // Outside-dismiss listeners run during capture. Consume that same press
     // during bubble, after dismissal, so content behind the menu cannot act
     // on it too. The following click can reach that content normally.
-    let guard = gpui::canvas(
+    gpui::canvas(
         |_, _, _| (),
         |bounds, _, window, _| {
             window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, _, cx| {
@@ -381,17 +376,31 @@ fn frosted_menu(exit: Option<f32>, content: AnyElement) -> AnyElement {
         },
     )
     .absolute()
-    .inset_0();
-    crate::frost::frosted(
-        CARD_RADIUS,
-        blur,
-        div()
-            .relative()
-            .child(guard)
-            .child(content)
-            .into_any_element(),
-    )
-    .into_any_element()
+    .inset_0()
+}
+
+fn with_dismiss_guard(content: AnyElement) -> AnyElement {
+    div()
+        .relative()
+        .child(dismiss_guard())
+        .child(content)
+        .into_any_element()
+}
+
+/// Backdrop-blur a single popover card. Split menus (root + submenu) must
+/// frost each card rather than the union bounds, or the leftover L-shape
+/// fills with a glass slab.
+pub fn frosted_card(content: impl IntoElement) -> crate::frost::Frosted {
+    crate::frost::frosted(CARD_RADIUS, crate::frost::MENU_BLUR, content)
+}
+
+/// The frosted card for a popover layer: full blur while open; while exiting
+/// the blur radius rides the exit progress down to 0 — the `BackdropBlur`
+/// primitive ignores `element_opacity`, so without this the glass slab would
+/// hold full strength through the fade and pop off at unmount.
+fn frosted_menu(exit: Option<f32>, content: AnyElement) -> AnyElement {
+    let blur = crate::frost::MENU_BLUR * (1.0 - exit.unwrap_or(0.0));
+    crate::frost::frosted(CARD_RADIUS, blur, with_dismiss_guard(content)).into_any_element()
 }
 
 /// Entrance or exit motion for a popover layer. While exiting (the [`Popup`]
@@ -494,7 +503,27 @@ pub fn anchored_menu_below_gap(
     gap: f32,
 ) -> AnyElement {
     let exit = closing.map(exit_progress);
-    let content = frosted_menu(exit, content);
+    anchored_below(id.into(), frosted_menu(exit, content), exit, gap)
+}
+
+/// [`anchored_menu_below`] for a row of cards that each wrap
+/// [`frosted_card`]. The layer still occludes and dismiss-guards, but it
+/// does not paint one glass slab over the union bounds.
+pub fn anchored_menu_below_split(
+    id: impl Into<SharedString>,
+    content: AnyElement,
+    closing: Option<std::time::Instant>,
+) -> AnyElement {
+    let exit = closing.map(exit_progress);
+    anchored_below(id.into(), with_dismiss_guard(content), exit, 6.0)
+}
+
+fn anchored_below(
+    id: SharedString,
+    content: AnyElement,
+    exit: Option<f32>,
+    gap: f32,
+) -> AnyElement {
     div()
         .absolute()
         .bottom_0()
@@ -506,7 +535,7 @@ pub fn anchored_menu_below_gap(
                     .anchor(Anchor::TopLeft)
                     .snap_to_window_with_margin(px(8.0))
                     .child(menu_motion(
-                        id.into(),
+                        id,
                         exit,
                         div().occlude().pt(px(gap)).child(content),
                     )),

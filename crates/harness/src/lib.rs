@@ -86,6 +86,11 @@ pub trait Harness: Send + Sync {
         self.deterministic_turn_end()
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError>;
+    /// Discover models for a workspace when the agent supports project-local
+    /// model configuration. Other harnesses keep their ordinary catalog.
+    async fn models_for_cwd(&self, _cwd: Option<&str>) -> Result<Vec<Model>, HarnessError> {
+        self.models().await
+    }
     /// Slash commands the agent advertises (ACP `availableCommands`); empty
     /// for harnesses without them. May spawn a short-lived discovery process.
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {

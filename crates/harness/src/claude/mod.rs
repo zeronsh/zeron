@@ -111,6 +111,18 @@ fn option_is_on(options: &serde_json::Map<String, Value>, key: &str) -> bool {
     }
 }
 
+fn model_argument(model: &str, options: &serde_json::Map<String, Value>) -> String {
+    let one_m = options
+        .get("contextWindow")
+        .and_then(Value::as_str)
+        .is_some_and(|choice| choice.eq_ignore_ascii_case("1m"));
+    if one_m && !model.ends_with("[1m]") && !model.ends_with("-1m") {
+        format!("{model}[1m]")
+    } else {
+        model.to_owned()
+    }
+}
+
 /// The Claude Code harness. Construct with [`ClaudeHarness::new`]; tests point
 /// it at a fake CLI with [`ClaudeHarness::with_executable`].
 pub struct ClaudeHarness {
@@ -194,17 +206,8 @@ impl ClaudeHarness {
         // (`sonnet[1m]`), exactly how the CLI itself does it; fast mode and
         // always-on thinking are settings overrides.
         if let Some(model) = &request.model {
-            let one_m = request
-                .model_options
-                .get("contextWindow")
-                .and_then(Value::as_str)
-                == Some("1m");
             cmd.arg("--model");
-            cmd.arg(if one_m {
-                format!("{model}[1m]")
-            } else {
-                model.clone()
-            });
+            cmd.arg(model_argument(model, &request.model_options));
         }
         if let Some(effort) = to_effort(request.reasoning, request.model.as_deref()) {
             cmd.args(["--effort", effort]);
@@ -951,5 +954,25 @@ mod tests {
         assert_eq!(updated["answers"]["Pick one"], json!("B"));
         // Original input is preserved alongside the answers.
         assert!(updated["questions"].is_array());
+    }
+
+    #[test]
+    fn context_window_selection_composes_cli_model_id_once() {
+        let mut options = serde_json::Map::new();
+        options.insert("contextWindow".into(), json!("1m"));
+
+        assert_eq!(
+            model_argument("claude-opus-5", &options),
+            "claude-opus-5[1m]"
+        );
+        assert_eq!(model_argument("opus[1m]", &options), "opus[1m]");
+        assert_eq!(
+            model_argument("claude-opus-5-1m", &options),
+            "claude-opus-5-1m"
+        );
+        assert_eq!(
+            model_argument("claude-opus-5", &serde_json::Map::new()),
+            "claude-opus-5"
+        );
     }
 }

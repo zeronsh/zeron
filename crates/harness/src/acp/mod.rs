@@ -32,8 +32,8 @@ mod normalize;
 mod subagent;
 mod subagent_devin;
 
-use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -819,8 +819,13 @@ impl AcpHarness {
     /// (SessionModelState) with the `model` config option as fallback. The
     /// wire is the source of truth — the spec's static catalog only enriches
     /// matching entries and names the pick when the agent advertises nothing.
-    async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
-        let (mut child, stderr_tail) = self.spawn_agent(None, false, &[]).await?;
+    async fn discover_models(&self, cwd: Option<&Path>) -> Result<Vec<Model>, HarnessError> {
+        let cwd = cwd
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let cwd_text = cwd.to_string_lossy().into_owned();
+        let (mut child, stderr_tail) = self.spawn_agent(Some(&cwd_text), false, &[]).await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -832,9 +837,8 @@ impl AcpHarness {
             client
                 .request("initialize", initialize_params(self.spec.id))
                 .await?;
-            let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".into());
             let session = client
-                .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
+                .request("session/new", json!({ "cwd": cwd_text, "mcpServers": [] }))
                 .await?;
             let mut models = models_from_session(&session, &(self.spec.models)());
             // Prompt-convention modes (Claude Ultrathink) extend any real
@@ -868,6 +872,222 @@ impl AcpHarness {
             }
         }
     }
+}
+
+fn pi_settings_patterns(settings: &Value) -> Option<Vec<String>> {
+    settings.get("enabledModels")?.as_array().map(|patterns| {
+        patterns
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|pattern| !pattern.is_empty())
+            .map(str::to_owned)
+            .collect()
+    })
+}
+
+fn effective_pi_model_patterns(
+    global: Option<&Value>,
+    project: Option<&Value>,
+) -> Option<Vec<String>> {
+    project
+        .and_then(pi_settings_patterns)
+        .or_else(|| global.and_then(pi_settings_patterns))
+}
+
+fn read_pi_settings(path: &Path) -> Option<Value> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::warn!(
+                target: "zeron_harness::acp",
+                path = %path.display(),
+                "could not read pi model settings: {error}"
+            );
+            return None;
+        }
+    };
+    match serde_json::from_str(&raw) {
+        Ok(settings) => Some(settings),
+        Err(error) => {
+            tracing::warn!(
+                target: "zeron_harness::acp",
+                path = %path.display(),
+                "could not parse pi model settings: {error}"
+            );
+            None
+        }
+    }
+}
+
+fn expand_home(path: PathBuf, home: Option<&Path>) -> PathBuf {
+    let Some(raw) = path.to_str() else {
+        return path;
+    };
+    if raw == "~" {
+        return home.map(Path::to_path_buf).unwrap_or(path);
+    }
+    raw.strip_prefix("~/")
+        .and_then(|rest| home.map(|home| home.join(rest)))
+        .unwrap_or(path)
+}
+
+fn load_pi_model_patterns(cwd: &Path) -> Option<Vec<String>> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let agent_dir = std::env::var_os("PI_CODING_AGENT_DIR")
+        .map(PathBuf::from)
+        .map(|path| expand_home(path, home.as_deref()))
+        .or_else(|| home.as_ref().map(|home| home.join(".pi/agent")))?;
+    load_pi_model_patterns_from(&agent_dir, cwd)
+}
+
+fn load_pi_model_patterns_from(agent_dir: &Path, cwd: &Path) -> Option<Vec<String>> {
+    let global = read_pi_settings(&agent_dir.join("settings.json"));
+    let project = read_pi_settings(&cwd.join(".pi/settings.json"));
+    effective_pi_model_patterns(global.as_ref(), project.as_ref())
+}
+
+fn pi_model_id(model: &Model) -> &str {
+    model
+        .id
+        .split_once('/')
+        .map_or(model.id.as_str(), |(_, id)| id)
+}
+
+fn pi_thinking_suffix(pattern: &str) -> Option<&str> {
+    let (base, level) = pattern.rsplit_once(':')?;
+    matches!(
+        level,
+        "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    )
+    .then_some(base)
+}
+
+fn pi_is_alias(model: &Model) -> bool {
+    let id = pi_model_id(model);
+    if id.ends_with("-latest") {
+        return true;
+    }
+    id.rsplit_once('-').is_none_or(|(_, suffix)| {
+        suffix.len() != 8 || !suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+fn pi_pattern_matches(pattern: &str, models: &[Model]) -> Vec<usize> {
+    let has_glob = pattern.contains(['*', '?', '[']);
+    let pattern = if has_glob {
+        pi_thinking_suffix(pattern).unwrap_or(pattern)
+    } else {
+        pattern
+    };
+    if has_glob {
+        let Ok(pattern) = glob::Pattern::new(pattern) else {
+            return Vec::new();
+        };
+        let options = glob::MatchOptions {
+            case_sensitive: false,
+            require_literal_separator: true,
+            require_literal_leading_dot: false,
+        };
+        return models
+            .iter()
+            .enumerate()
+            .filter_map(|(index, model)| {
+                (pattern.matches_with(&model.id, options)
+                    || pattern.matches_with(pi_model_id(model), options))
+                .then_some(index)
+            })
+            .collect();
+    }
+
+    let exact = |candidate: &str| {
+        models
+            .iter()
+            .enumerate()
+            .find(|(_, model)| model.id.eq_ignore_ascii_case(candidate))
+            .map(|(index, _)| index)
+            .or_else(|| {
+                let matches = models
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, model)| pi_model_id(model).eq_ignore_ascii_case(candidate))
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                (matches.len() == 1).then(|| matches[0])
+            })
+    };
+    if let Some(index) = exact(pattern) {
+        return vec![index];
+    }
+    // Pi falls back to the prefix when the final colon is not a recognized
+    // thinking level, after first giving the full model id an exact chance.
+    let pattern = pattern
+        .rsplit_once(':')
+        .map_or(pattern, |(prefix, _)| prefix);
+    if let Some(index) = exact(pattern) {
+        return vec![index];
+    }
+    let needle = pattern.to_ascii_lowercase();
+    let matches = models
+        .iter()
+        .enumerate()
+        .filter(|(_, model)| {
+            pi_model_id(model).to_ascii_lowercase().contains(&needle)
+                || model.label.to_ascii_lowercase().contains(&needle)
+        })
+        .collect::<Vec<_>>();
+    let preferred = matches
+        .iter()
+        .copied()
+        .filter(|(_, model)| pi_is_alias(model));
+    preferred
+        .max_by(|(_, left), (_, right)| pi_model_id(left).cmp(pi_model_id(right)))
+        .or_else(|| {
+            matches
+                .into_iter()
+                .max_by(|(_, left), (_, right)| pi_model_id(left).cmp(pi_model_id(right)))
+        })
+        .map(|(index, _)| vec![index])
+        .unwrap_or_default()
+}
+
+fn filter_pi_models(models: Vec<Model>, patterns: &[String]) -> Vec<Model> {
+    if patterns.is_empty() {
+        return models;
+    }
+    let mut included = Vec::new();
+    let mut excluded = HashSet::new();
+    let mut has_positive = false;
+    for raw in patterns {
+        let (exclude, pattern) = raw.strip_prefix(['!', '-']).map_or_else(
+            || (false, raw.strip_prefix('+').unwrap_or(raw.as_str())),
+            |pattern| (true, pattern),
+        );
+        if pattern.is_empty() {
+            continue;
+        }
+        let matches = pi_pattern_matches(pattern, &models);
+        if exclude {
+            excluded.extend(matches);
+        } else {
+            has_positive = true;
+            for index in matches {
+                if !included.contains(&index) {
+                    included.push(index);
+                }
+            }
+        }
+    }
+    if !has_positive {
+        included.extend(0..models.len());
+    }
+    let mut models = models.into_iter().map(Some).collect::<Vec<_>>();
+    included
+        .into_iter()
+        .filter(|index| !excluded.contains(index))
+        .filter_map(|index| models[index].take())
+        .collect()
 }
 
 /// Map an advertised `thought_level` value id onto zeron's ladder.
@@ -1156,6 +1376,10 @@ impl Harness for AcpHarness {
     /// Other ACP agents use a cached session probe, with the spec's static
     /// catalog as fallback when they advertise nothing or probing fails.
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        self.models_for_cwd(None).await
+    }
+
+    async fn models_for_cwd(&self, cwd: Option<&str>) -> Result<Vec<Model>, HarnessError> {
         self.resolve_launch()?;
         if self.spec.id == HarnessId::Devin {
             let (exe, _) = self.resolve_program(false).await?;
@@ -1164,6 +1388,23 @@ impl Harness for AcpHarness {
                 .refresh(&exe, self.model_discovery_timeout)
                 .await;
         }
+        if self.spec.id == HarnessId::Pi {
+            let cwd = cwd
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from("/"));
+            let patterns = load_pi_model_patterns(&cwd).filter(|patterns| !patterns.is_empty());
+            let _probe = self.models_probe.lock().await;
+            return match self.discover_models(Some(&cwd)).await {
+                Ok(models) => match patterns {
+                    Some(patterns) => Ok(filter_pi_models(models, &patterns)),
+                    _ if models.is_empty() => Ok((self.spec.models)()),
+                    _ => Ok(models),
+                },
+                Err(_) if patterns.is_some() => Ok(Vec::new()),
+                Err(_) => Ok((self.spec.models)()),
+            };
+        }
         if let Some(models) = self.models_cache.get() {
             return Ok(models.clone());
         }
@@ -1171,7 +1412,7 @@ impl Harness for AcpHarness {
         if let Some(models) = self.models_cache.get() {
             return Ok(models.clone());
         }
-        match self.discover_models().await {
+        match self.discover_models(None).await {
             Ok(models) if !models.is_empty() => {
                 let _ = self.models_cache.set(models.clone());
                 Ok(self.models_cache.get().cloned().unwrap_or(models))
@@ -3424,6 +3665,115 @@ mod tests {
         assert!(models[0].options.iter().any(|o| o.id == "serviceTier"));
         // …unknown ids get none.
         assert!(models[1].options.is_empty());
+    }
+
+    #[test]
+    fn pi_model_scope_honors_ordered_allow_and_deny_patterns() {
+        let model = |id: &str| Model {
+            id: id.into(),
+            label: id.into(),
+            description: None,
+            reasoning_levels: Vec::new(),
+            options: Vec::new(),
+        };
+        let models = vec![
+            model("openai-codex/gpt-5.6-luna"),
+            model("openai-codex/gpt-5.6-sol"),
+            model("openrouter/z-ai/glm-5.3-flash"),
+            model("xai/grok-4.6"),
+        ];
+        let patterns = vec![
+            "openrouter/*/*".to_owned(),
+            "openai-codex/*".to_owned(),
+            "-openai-codex/gpt-5.6-sol".to_owned(),
+            "XAI/GROK-4.6:high".to_owned(),
+        ];
+
+        assert_eq!(
+            filter_pi_models(models, &patterns)
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "openrouter/z-ai/glm-5.3-flash",
+                "openai-codex/gpt-5.6-luna",
+                "xai/grok-4.6",
+            ]
+        );
+    }
+
+    #[test]
+    fn pi_model_scope_supports_deny_only_and_project_override() {
+        let model = |id: &str| Model {
+            id: id.into(),
+            label: id.into(),
+            description: None,
+            reasoning_levels: Vec::new(),
+            options: Vec::new(),
+        };
+        let models = vec![model("openai/gpt-5"), model("xai/grok-4.6")];
+        assert_eq!(
+            filter_pi_models(models, &["!xai/*".to_owned()])
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["openai/gpt-5"]
+        );
+
+        let global = json!({ "enabledModels": ["openai/*"] });
+        let project = json!({ "enabledModels": ["xai/*"] });
+        assert_eq!(
+            effective_pi_model_patterns(Some(&global), Some(&project)),
+            Some(vec!["xai/*".to_owned()])
+        );
+        assert_eq!(
+            effective_pi_model_patterns(Some(&global), None),
+            Some(vec!["openai/*".to_owned()])
+        );
+    }
+
+    #[test]
+    fn pi_model_scope_matches_pi_fuzzy_and_settings_file_behavior() {
+        let model = |id: &str| Model {
+            id: id.into(),
+            label: id.into(),
+            description: None,
+            reasoning_levels: Vec::new(),
+            options: Vec::new(),
+        };
+        let models = vec![
+            model("anthropic/claude-sonnet-4-20250514"),
+            model("anthropic/claude-sonnet-4"),
+        ];
+        assert_eq!(
+            filter_pi_models(models, &["sonnet:bogus".to_owned()])[0].id,
+            "anthropic/claude-sonnet-4"
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let agent_dir = root.path().join("agent");
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(cwd.join(".pi")).unwrap();
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            r#"{"enabledModels":["openai/*"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(".pi/settings.json"),
+            r#"{"enabledModels":["xai/*"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_pi_model_patterns_from(&agent_dir, &cwd),
+            Some(vec!["xai/*".to_owned()])
+        );
+        std::fs::write(cwd.join(".pi/settings.json"), "not json").unwrap();
+        assert_eq!(
+            load_pi_model_patterns_from(&agent_dir, &cwd),
+            Some(vec!["openai/*".to_owned()])
+        );
     }
 
     #[test]

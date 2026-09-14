@@ -3841,6 +3841,7 @@ impl Render for ComposerInput {
 /// Events the shell listens for.
 #[derive(Debug, Clone)]
 pub enum ComposerEvent {
+    OpenLoadoutSettings,
     /// Arm the shared-element transition before the draft route is replaced
     /// by the newly-created session. Emitting this before `select_chat` keeps
     /// the first destination frame on the same timeline as the source frame.
@@ -3848,11 +3849,17 @@ pub enum ComposerEvent {
     /// A prompt was sent optimistically — give the transcript its exact row
     /// identity so it can anchor the prompt at the top with the reply's
     /// reserved space below it.
-    Sent { chat_id: String, message_id: String },
+    Sent {
+        chat_id: String,
+        message_id: String,
+    },
     /// A locally-authored queue row was accepted. It is not a transcript send
     /// yet: the transcript remembers the stable id and promotes it to an
     /// own-turn anchor only when the host materializes the matching bubble.
-    Queued { chat_id: String, message_id: String },
+    Queued {
+        chat_id: String,
+        message_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4131,6 +4138,7 @@ pub struct Composer {
     _observe: Subscription,
     _pickers_observe: Subscription,
     _picker_focus: Subscription,
+    _picker_settings: Subscription,
     _input_events: Subscription,
 }
 
@@ -4209,6 +4217,12 @@ impl Composer {
             |this: &mut Self, _, _: &crate::pickers::ReturnComposerFocus, cx| {
                 this.focus_pending = true;
                 cx.notify();
+            },
+        );
+        let picker_settings = cx.subscribe(
+            &pickers,
+            |_: &mut Self, _, _: &crate::pickers::OpenLoadoutSettings, cx| {
+                cx.emit(ComposerEvent::OpenLoadoutSettings);
             },
         );
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
@@ -4325,6 +4339,7 @@ impl Composer {
             _observe: observe,
             _pickers_observe: pickers_observe,
             _picker_focus: picker_focus,
+            _picker_settings: picker_settings,
             _input_events: input_events,
         };
         // Dev knob: pre-stage attachments (drop/paste can't be synthesized on

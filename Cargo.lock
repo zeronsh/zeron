@@ -11784,6 +11784,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "futures",
+ "glob",
  "libc",
  "reqwest",
  "serde",

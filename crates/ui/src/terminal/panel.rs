@@ -1257,12 +1257,7 @@ impl TerminalPanel {
         cx.stop_propagation();
     }
 
-    fn on_terminal_hover(
-        &mut self,
-        hovered: &bool,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_terminal_hover(&mut self, hovered: &bool, _window: &mut Window, cx: &mut Context<Self>) {
         if self.terminal_hovered != *hovered {
             self.terminal_hovered = *hovered;
             if !*hovered {

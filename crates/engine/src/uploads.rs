@@ -478,7 +478,10 @@ mod tests {
             .set_modified(stale)
             .unwrap();
         uploads.append("upload-other", "aGk=", Some(0)).unwrap();
-        assert!(!racing.exists(), "abandoned empty staging dir must be swept");
+        assert!(
+            !racing.exists(),
+            "abandoned empty staging dir must be swept"
+        );
     }
 
     #[test]

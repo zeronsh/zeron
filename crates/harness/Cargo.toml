@@ -19,6 +19,7 @@ serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+glob.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

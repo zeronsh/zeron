@@ -312,7 +312,41 @@ async fn model_discovery_maps_the_live_catalog() {
     assert_eq!(optimize.default_choice, "balanced");
     assert_eq!(models[1].id, "claude-fable-5");
     assert_eq!(models[1].description.as_deref(), Some("Anthropic frontier"));
+    assert_eq!(
+        models[1].reasoning_levels,
+        vec![
+            zeron_proto::ReasoningLevel::Low,
+            zeron_proto::ReasoningLevel::Medium,
+            zeron_proto::ReasoningLevel::High,
+            zeron_proto::ReasoningLevel::XHigh,
+        ]
+    );
+    assert_eq!(
+        models[1].options.len(),
+        1,
+        "effort belongs in the reasoning bar"
+    );
     // A parameter without displayName labels by id; default = first value.
     assert_eq!(models[1].options[0].id, "thinking");
     assert_eq!(models[1].options[0].default_choice, "enabled");
+}
+
+#[tokio::test]
+async fn reasoning_is_sent_as_cursor_effort() {
+    let (controls, _steer, _token) = controls();
+    let mut req = request("scenario:reasoning");
+    req.model = Some("claude-fable-5".into());
+    req.reasoning = Some(zeron_proto::ReasoningLevel::XHigh);
+    req.model_options.insert(
+        "thinking".into(),
+        serde_json::Value::String("enabled".into()),
+    );
+    let events = run_to_first_done(&harness(), req, controls).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
 }

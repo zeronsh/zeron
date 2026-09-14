@@ -26,7 +26,7 @@ use zeron_proto::{AgentEvent, DoneStatus, ToolCall};
 
 use crate::HarnessError;
 
-use super::normalize::{cap_text, xai_tool_name, OUTPUT_CAP};
+use super::normalize::{OUTPUT_CAP, cap_text, xai_tool_name};
 
 /// Cadence of the transcript tail (the CLI appends at message granularity, so
 /// sub-second polling is plenty "live").
@@ -198,7 +198,11 @@ impl SubagentTracker {
                 .pending
                 .iter()
                 .position(|p| !description.is_empty() && p.description == description)
-                .or(if self.pending.is_empty() { None } else { Some(0) });
+                .or(if self.pending.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                });
             match ix.and_then(|i| self.pending.remove(i)) {
                 Some(p) => {
                     self.bound.insert(sub_id.to_owned(), p.tool_call_id);
@@ -206,10 +210,8 @@ impl SubagentTracker {
                 None => {
                     // No chip candidate on the wire (yet): stash — the
                     // spawn completion's id echo binds it later.
-                    self.spawned_unbound.insert(
-                        sub_id.to_owned(),
-                        SpawnedUnbound { child_session_id },
-                    );
+                    self.spawned_unbound
+                        .insert(sub_id.to_owned(), SpawnedUnbound { child_session_id });
                     return;
                 }
             }
@@ -704,17 +706,30 @@ mod tests {
         ));
         assert!(entry_events(&json!({"type": "system", "content": "x"})).is_empty());
         assert!(
-            entry_events(&json!({"type": "user", "content": "<system-reminder>tick</system-reminder>"}))
-                .is_empty()
+            entry_events(
+                &json!({"type": "user", "content": "<system-reminder>tick</system-reminder>"})
+            )
+            .is_empty()
         );
     }
 
     #[test]
     fn grok_tool_names_type_the_common_calls() {
         let call = grok_tool_call("run_terminal_command", &json!({"command": "ls -la"}));
-        assert_eq!(call, ToolCall::Exec { command: "ls -la".into() });
+        assert_eq!(
+            call,
+            ToolCall::Exec {
+                command: "ls -la".into()
+            }
+        );
         let call = grok_tool_call("grep", &json!({"pattern": "0\\.1", "glob": "*.rs"}));
-        assert_eq!(call, ToolCall::Search { pattern: "0\\.1".into(), path: None });
+        assert_eq!(
+            call,
+            ToolCall::Search {
+                pattern: "0\\.1".into(),
+                path: None
+            }
+        );
         let call = grok_tool_call(
             "search_replace",
             &json!({"file_path": "/w/a.rs", "old_string": "a", "new_string": "b"}),
@@ -730,6 +745,8 @@ mod tests {
         let call = grok_tool_call("spawn_subagent", &json!({"description": "Scan crates"}));
         assert!(matches!(call, ToolCall::Unknown { name, .. } if name == "Agent: Scan crates"));
         let call = grok_tool_call("mystery_tool", &json!({"x": 1}));
-        assert!(matches!(call, ToolCall::Unknown { name, input: Some(_) } if name == "mystery_tool"));
+        assert!(
+            matches!(call, ToolCall::Unknown { name, input: Some(_) } if name == "mystery_tool")
+        );
     }
 }

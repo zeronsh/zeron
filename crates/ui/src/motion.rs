@@ -281,6 +281,8 @@ pub const EASE_RESORT: CubicBezier = EASE_OUT_QUINT;
 /// CSS `ease-in-out` — the transcript scroll glide (browser smooth-scroll
 /// shape: gentle start, cruise, gentle landing).
 pub const EASE_IN_OUT: CubicBezier = CubicBezier::new(0.42, 0.0, 0.58, 1.0);
+/// easings.net `easeInOutCubic` — snappy model-picker state changes.
+pub const EASE_IN_OUT_CUBIC: CubicBezier = CubicBezier::new(0.65, 0.0, 0.35, 1.0);
 
 // ---------------------------------------------------------------------------
 // Motion specs (the catalog)
@@ -379,6 +381,8 @@ pub const EASE_TAILWIND: CubicBezier = CubicBezier::new(0.4, 0.0, 0.2, 1.0);
 /// CSS `transition-colors` default: 150ms over [`EASE_TAILWIND`] — the temporal
 /// blend every interactive hover wash rides in the original.
 pub const HOVER_FADE: MotionSpec = MotionSpec::new(150, EASE_TAILWIND);
+/// Model-picker level, label, and height changes.
+pub const MODEL_PICKER_CHANGE: MotionSpec = MotionSpec::new(160, EASE_IN_OUT_CUBIC);
 /// Zeron loader pulse period: 2.4s.
 pub const ZERON_PULSE: MotionSpec = MotionSpec::new(2400, EASE);
 /// Gradient matrix spinner wave period: 750ms.
@@ -838,7 +842,14 @@ mod tests {
         // EASE_OUT_EXPO, tripping gpui's `delta ∈ [0,1]` assert (SIGABRT on
         // the user's machine). Sweep densely, including the values right
         // below 1.0 where Newton lands closest to the endpoint.
-        for curve in [EASE_OUT_EXPO, EASE_OUT, EASE, EASE_RESORT, EASE_IN_OUT] {
+        for curve in [
+            EASE_OUT_EXPO,
+            EASE_OUT,
+            EASE,
+            EASE_RESORT,
+            EASE_IN_OUT,
+            EASE_IN_OUT_CUBIC,
+        ] {
             for i in 0..=100_000u32 {
                 let x = i as f32 / 100_000.0;
                 let y = curve.eval(x);
@@ -897,7 +908,14 @@ mod tests {
 
     #[test]
     fn bezier_endpoints_and_clamping() {
-        for curve in [EASE_OUT_EXPO, EASE_OUT, EASE, EASE_RESORT, EASE_IN_OUT] {
+        for curve in [
+            EASE_OUT_EXPO,
+            EASE_OUT,
+            EASE,
+            EASE_RESORT,
+            EASE_IN_OUT,
+            EASE_IN_OUT_CUBIC,
+        ] {
             assert_eq!(curve.eval(0.0), 0.0);
             assert_eq!(curve.eval(1.0), 1.0);
             assert_eq!(curve.eval(-0.5), 0.0);
@@ -907,7 +925,14 @@ mod tests {
 
     #[test]
     fn bezier_is_monotonic_for_catalog_curves() {
-        for curve in [EASE_OUT_EXPO, EASE_OUT, EASE, EASE_RESORT, EASE_IN_OUT] {
+        for curve in [
+            EASE_OUT_EXPO,
+            EASE_OUT,
+            EASE,
+            EASE_RESORT,
+            EASE_IN_OUT,
+            EASE_IN_OUT_CUBIC,
+        ] {
             let mut last = 0.0;
             for i in 0..=100 {
                 let y = curve.eval(i as f32 / 100.0);
@@ -955,6 +980,8 @@ mod tests {
         assert_eq!(ZERON_PULSE.duration_ms, 2400);
         assert_eq!(GRADIENT_SPIN.duration_ms, 750);
         assert_eq!(EASE_OUT_EXPO, CubicBezier::new(0.16, 1.0, 0.3, 1.0));
+        assert_eq!(MODEL_PICKER_CHANGE.duration_ms, 160);
+        assert_eq!(EASE_IN_OUT_CUBIC, CubicBezier::new(0.65, 0.0, 0.35, 1.0));
         assert_eq!(EASE_OUT_QUINT, CubicBezier::new(0.22, 1.0, 0.36, 1.0));
     }
 
