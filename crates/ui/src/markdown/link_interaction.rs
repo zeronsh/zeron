@@ -3,7 +3,7 @@ use super::{
     links::*,
     render::{LinkUi, activate_link, range_rects},
 };
-use crate::theme::Theme;
+use crate::{icons, popover, theme::Theme};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ClickEvent, DispatchPhase, Element, ElementId,
     FocusHandle, GlobalElementId, InspectorElementId, LayoutId, MouseButton, Pixels, Point, Role,
@@ -306,10 +306,14 @@ impl Element for LinkRanges {
                         menu.borrow_mut().take();
                         window.refresh();
                     });
-                for (action_ix, (action, label)) in [
-                    (LinkAction::Internal, "Open in Zeron"),
-                    (LinkAction::External, "Open in external browser"),
-                    (LinkAction::Copy, "Copy link address"),
+                for (action_ix, (action, label, icon)) in [
+                    (LinkAction::Internal, "Open in Zeron", icons::GLOBE),
+                    (
+                        LinkAction::External,
+                        "Open in external browser",
+                        icons::ARROW_UP_RIGHT,
+                    ),
+                    (LinkAction::Copy, "Copy link address", icons::COPY),
                 ]
                 .into_iter()
                 .enumerate()
@@ -319,65 +323,65 @@ impl Element for LinkRanges {
                     let menu = state.menu.clone();
                     let enabled = action == LinkAction::Copy || target.navigation.is_ok();
                     card = card.child(
-                        div()
-                            .id(label)
-                            .px(px(10.))
-                            .py(px(7.))
-                            .child(label)
-                            .track_focus(&state.menu_focus[action_ix])
-                            .role(Role::Button)
-                            .aria_label(label)
-                            .when(!enabled, |el| el.opacity(0.45))
-                            .hover(|s| s.bg(theme.selection))
-                            .focus_visible(|s| s.bg(theme.selection))
-                            .on_click(move |_, window, cx| {
-                                if enabled {
-                                    activate_link(target.clone(), action, ui.as_ref(), window, cx);
-                                }
-                                menu.borrow_mut().take();
-                                window.refresh();
-                            }),
+                        popover::menu_row(
+                            &theme,
+                            false,
+                            format!("{}-link-{index}-action-{action_ix}", self.id),
+                        )
+                        .id(label)
+                        .child(icons::icon(icon).size(px(16.)).text_color(theme.text_muted))
+                        .child(label)
+                        .track_focus(&state.menu_focus[action_ix])
+                        .role(Role::Button)
+                        .aria_label(label)
+                        .when(!enabled, |el| el.opacity(0.45))
+                        .focus_visible(|s| s.bg(crate::theme::card_selected_bg()))
+                        .on_click(move |_, window, cx| {
+                            if enabled {
+                                activate_link(target.clone(), action, ui.as_ref(), window, cx);
+                            }
+                            menu.borrow_mut().take();
+                            window.refresh();
+                        }),
                     );
                 }
                 let open_in_zeron = crate::settings::current(cx).open_web_links_in_zeron;
                 let menu = state.menu.clone();
-                card = card.child(crate::popover::menu_separator()).child(
-                    div()
-                        .id("Open links in Zeron by default")
-                        .px(px(10.))
-                        .py(px(7.))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(div().flex_1().child("Open links in Zeron by default"))
-                        .child(div().w(px(14.)).flex_none().when(open_in_zeron, |el| {
-                            el.child(
-                                crate::icons::icon(crate::icons::CHECK)
-                                    .size(px(14.))
-                                    .text_color(theme.text_muted),
-                            )
-                        }))
-                        .track_focus(&state.menu_focus[3])
-                        .role(Role::Button)
-                        .aria_label(if open_in_zeron {
-                            "Open links in Zeron by default, checked"
-                        } else {
-                            "Open links in Zeron by default, unchecked"
-                        })
-                        .hover(|s| s.bg(theme.selection))
-                        .focus_visible(|s| s.bg(theme.selection))
-                        .on_click(move |_, window, cx| {
-                            crate::settings::update(
-                                crate::settings::SavePolicy::Immediate,
-                                cx,
-                                |settings| {
-                                    settings.open_web_links_in_zeron = !open_in_zeron;
-                                },
-                            );
-                            menu.borrow_mut().take();
-                            cx.refresh_windows();
-                            window.refresh();
-                        }),
+                card = card.child(popover::menu_separator()).child(
+                    popover::menu_row(
+                        &theme,
+                        false,
+                        format!("{}-link-{index}-default-destination", self.id),
+                    )
+                    .id("Open links in Zeron")
+                    .child(div().w(px(16.)).flex_none().when(open_in_zeron, |el| {
+                        el.child(
+                            icons::icon(icons::CHECK)
+                                .size(px(16.))
+                                .text_color(theme.text_muted),
+                        )
+                    }))
+                    .child("Open links in Zeron")
+                    .track_focus(&state.menu_focus[3])
+                    .role(Role::Button)
+                    .aria_label(if open_in_zeron {
+                        "Open links in Zeron, checked"
+                    } else {
+                        "Open links in Zeron, unchecked"
+                    })
+                    .focus_visible(|s| s.bg(crate::theme::card_selected_bg()))
+                    .on_click(move |_, window, cx| {
+                        crate::settings::update(
+                            crate::settings::SavePolicy::Immediate,
+                            cx,
+                            |settings| {
+                                settings.open_web_links_in_zeron = !open_in_zeron;
+                            },
+                        );
+                        menu.borrow_mut().take();
+                        cx.refresh_windows();
+                        window.refresh();
+                    }),
                 );
                 let mut popup = crate::popover::menu_at(
                     "transcript-link-actions",
