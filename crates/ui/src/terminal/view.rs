@@ -15,8 +15,9 @@
 //!   colors — paint never changes layout), and the cursor block.
 
 use gpui::{
-    App, Bounds, Entity, GlobalElementId, Hsla, LayoutId, Modifiers, PaintQuad, Pixels, ShapedLine,
-    SharedString, Style, TextRun, Window, fill, font, outline, point, px, relative, size,
+    App, Bounds, Entity, GlobalElementId, Hsla, LayoutId, Modifiers, PaintQuad, Pixels,
+    ScrollDelta, ShapedLine, SharedString, Style, TextRun, Window, fill, font, outline, point, px,
+    relative, size,
 };
 
 use crate::theme::{Appearance, Theme, rgb_to_hsl};
@@ -322,8 +323,25 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Wheel → bytes
+// Wheel → lines → bytes
 // ---------------------------------------------------------------------------
+
+/// A wheel event's vertical travel in terminal lines (positive = up).
+///
+/// AppKit moves a Shift+wheel from a physical mouse onto the X axis — that is
+/// how horizontal scrolling works for mice, and gpui passes the raw deltas
+/// through. Read it back from there so Shift keeps meaning "the scrollback,
+/// please" instead of nothing.
+pub fn wheel_lines(delta: ScrollDelta, shift: bool) -> f32 {
+    let (y, x) = match delta {
+        ScrollDelta::Lines(delta) => (delta.y, delta.x),
+        ScrollDelta::Pixels(delta) => (
+            f32::from(delta.y) / TERM_LINE_HEIGHT,
+            f32::from(delta.x) / TERM_LINE_HEIGHT,
+        ),
+    };
+    if shift && y == 0.0 { x } else { y }
+}
 
 /// `steps` wheel lines as cursor-key presses (alternate-scroll, DECSET 1007):
 /// positive = up. Same bytes the arrow keys produce, DECCKM included.
@@ -1186,6 +1204,33 @@ mod tests {
     #[test]
     fn drag_threshold_matches_the_gpui_default() {
         assert_eq!(SELECTION_DRAG_THRESHOLD, 2.0);
+    }
+
+    #[test]
+    fn wheel_lines_read_the_vertical_axis_and_shift_falls_back_to_x() {
+        // Line deltas pass through; pixel deltas divide by the row height.
+        assert_eq!(wheel_lines(ScrollDelta::Lines(point(0.0, 2.0)), false), 2.0);
+        assert_eq!(
+            wheel_lines(
+                ScrollDelta::Pixels(point(px(0.0), px(-TERM_LINE_HEIGHT * 3.0))),
+                false
+            ),
+            -3.0
+        );
+        // Without Shift a horizontal delta is ignored entirely.
+        assert_eq!(wheel_lines(ScrollDelta::Lines(point(4.0, 0.0)), false), 0.0);
+        // Shift+wheel on a mouse arrives swapped onto x (AppKit): read it
+        // back — but only when y really is empty, so a trackpad's genuine
+        // vertical travel under Shift still wins.
+        assert_eq!(wheel_lines(ScrollDelta::Lines(point(4.0, 0.0)), true), 4.0);
+        assert_eq!(
+            wheel_lines(
+                ScrollDelta::Pixels(point(px(-TERM_LINE_HEIGHT), px(0.0))),
+                true
+            ),
+            -1.0
+        );
+        assert_eq!(wheel_lines(ScrollDelta::Lines(point(4.0, 1.5)), true), 1.5);
     }
 
     #[test]
