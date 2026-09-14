@@ -11,7 +11,10 @@
 //! reconnects with exponential backoff resuming from `afterSeq`; Exit appends
 //! the "[process exited N]" line and stops. Keyboard bytes coalesce for 12 ms
 //! before `WriteTerminal`; viewport-driven resizes debounce 80 ms before
-//! `ResizeTerminal` (the emulator resizes immediately).
+//! `ResizeTerminal` (the emulator resizes immediately). The wheel scrolls the
+//! emulator's history only while no program has claimed it — with mouse
+//! reporting on, or in the alternate screen, it is encoded and written to the
+//! PTY like any other input (`on_scroll_wheel`).
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -19,8 +22,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use gpui::{
     App, Context, Entity, FocusHandle, IntoElement, KeyBinding, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, SharedString,
-    Subscription, Task, Window, actions, div, prelude::*, px,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString,
+    Subscription, Task, TouchPhase, Window, actions, div, prelude::*, px,
 };
 
 use zeron_proto::{TerminalEvent, TerminalSession};
@@ -31,10 +34,13 @@ use crate::settings::{TERMINAL_MAX_VH, TERMINAL_MIN_HEIGHT};
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 
-use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, GridPoint, SelectionType, Side};
+use super::emulator::{
+    CellSnapshot, CursorSnapshot, Emulator, GridPoint, SelectionType, Side, WheelRoute,
+};
 use super::view::{
-    COALESCE_MS, InputCoalescer, RESIZE_DEBOUNCE_MS, SELECTION_DRAG_THRESHOLD, TerminalElement,
-    cell_at, keystroke_bytes, paste_bytes, terminal_panel_bg,
+    COALESCE_MS, CellHit, InputCoalescer, RESIZE_DEBOUNCE_MS, SELECTION_DRAG_THRESHOLD,
+    TerminalElement, WheelAccumulator, cell_at, keystroke_bytes, paste_bytes, terminal_panel_bg,
+    wheel_arrow_bytes, wheel_lines, wheel_report_bytes,
 };
 
 /// Fixed tab width — drag-reorder math stays analytic.
@@ -198,6 +204,42 @@ pub struct GridGeometry {
     pub line_h: f32,
     pub cols: u16,
     pub rows: u16,
+}
+
+impl GridGeometry {
+    /// The cell under a window position (clamped into the grid — see
+    /// [`cell_at`]).
+    pub fn cell_at(&self, position: gpui::Point<Pixels>) -> CellHit {
+        cell_at(
+            f32::from(position.x - self.origin.x),
+            f32::from(position.y - self.origin.y),
+            self.cell_w,
+            self.line_h,
+            self.cols as usize,
+            self.rows as usize,
+        )
+    }
+}
+
+/// The route a wheel event actually takes: the program's own choice
+/// (`Emulator::wheel_route`), unless
+/// - the user held Shift — the scrollback, always: the one way back to history
+///   while a program owns the mouse (the xterm convention);
+/// - the program is gone — its leftover modes must not swallow the wheel;
+/// - a mouse-mode program is being viewed through history — reports carry
+///   viewport coordinates, which mean nothing there, so walk back to the live
+///   bottom first.
+fn effective_wheel_route(
+    program: WheelRoute,
+    shift: bool,
+    exited: bool,
+    display_offset: usize,
+) -> WheelRoute {
+    match program {
+        _ if shift || exited => WheelRoute::Scrollback,
+        WheelRoute::MouseReport(_) if display_offset > 0 => WheelRoute::Scrollback,
+        route => route,
+    }
 }
 
 /// An in-flight left-button gesture.
@@ -381,6 +423,11 @@ pub struct TerminalPanel {
     selection_scroll_task: Option<Task<()>>,
     /// Active scrollbar thumb/track drag.
     scrollbar_drag: Option<ScrollbarDrag>,
+    /// Sub-line wheel remainder carried between events.
+    wheel: WheelAccumulator,
+    /// The route `wheel` was collected for — a change of route drops the
+    /// remainder (see [`WheelAccumulator::reset`]).
+    wheel_route: WheelRoute,
     /// The terminal owns the cursor. The scrollbar is an on-demand affordance
     /// rather than a permanently painted rail beside the panel.
     terminal_hovered: bool,
@@ -406,6 +453,8 @@ impl TerminalPanel {
             selection_drag: None,
             selection_scroll_task: None,
             scrollbar_drag: None,
+            wheel: WheelAccumulator::default(),
+            wheel_route: WheelRoute::Scrollback,
             terminal_hovered: false,
             scrollbar_hovered: false,
             _observe: observe,
@@ -997,15 +1046,7 @@ impl TerminalPanel {
         position: gpui::Point<Pixels>,
         cx: &App,
     ) -> Option<(GridPoint, Side)> {
-        let geometry = self.geometry?;
-        let hit = cell_at(
-            f32::from(position.x - geometry.origin.x),
-            f32::from(position.y - geometry.origin.y),
-            geometry.cell_w,
-            geometry.line_h,
-            geometry.cols as usize,
-            geometry.rows as usize,
-        );
+        let hit = self.geometry?.cell_at(position);
         let point = self.with_active_emulator(cx, |emu| emu.grid_point(hit.row, hit.col))?;
         Some((point, hit.side))
     }
@@ -1161,6 +1202,56 @@ impl TerminalPanel {
         if let Some(tab) = tabs.tabs.get_mut(active) {
             tab.emulator.scroll(delta_lines);
             cx.notify();
+        }
+    }
+
+    /// Route the wheel the way a native terminal does: to the program when it
+    /// asked for the mouse or lives in the alternate screen, to our history
+    /// otherwise ([`effective_wheel_route`] has the overrides).
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shift = event.modifiers.shift;
+        let lines = wheel_lines(event.delta, shift);
+        let route = self
+            .active_tab(cx)
+            .map(|tab| {
+                effective_wheel_route(
+                    tab.emulator.wheel_route(),
+                    shift,
+                    tab.exited.is_some(),
+                    tab.emulator.display_offset(),
+                )
+            })
+            .unwrap_or(WheelRoute::Scrollback);
+        if event.touch_phase == TouchPhase::Started || route != self.wheel_route {
+            self.wheel.reset();
+            self.wheel_route = route;
+        }
+        let steps = self.wheel.push(lines);
+        if steps == 0 {
+            return;
+        }
+        match route {
+            WheelRoute::Scrollback => self.scroll_active(steps, cx),
+            WheelRoute::ArrowKeys { app_cursor } => {
+                let bytes = wheel_arrow_bytes(steps, app_cursor);
+                self.queue_input(&bytes, cx);
+            }
+            WheelRoute::MouseReport(encoding) => {
+                // No placement yet means no grid has painted — nothing to
+                // report a cell for.
+                let Some(geometry) = self.geometry else {
+                    return;
+                };
+                let hit = geometry.cell_at(event.position);
+                if let Some(bytes) = wheel_report_bytes(encoding, steps, hit.col, hit.row) {
+                    self.queue_input(&bytes, cx);
+                }
+            }
         }
     }
 
@@ -1712,16 +1803,7 @@ impl Render for TerminalPanel {
                     // the user let go of.
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                    .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
-                        let lines = match event.delta {
-                            ScrollDelta::Lines(delta) => delta.y,
-                            ScrollDelta::Pixels(delta) => {
-                                f32::from(delta.y) / super::view::TERM_LINE_HEIGHT
-                            }
-                        };
-                        let step = lines.round() as i32;
-                        this.scroll_active(step, cx);
-                    }))
+                    .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
                     .child(TerminalElement::new(cx.entity(), focused))
                     .children(scrollbar),
             )
@@ -1777,6 +1859,69 @@ mod tests {
             0
         );
         assert!(selection_scroll_lines(geometry, gpui::point(px(20.0), px(208.0))) < 0);
+    }
+
+    #[test]
+    fn wheel_report_lands_on_the_cell_under_the_pointer() {
+        use super::super::emulator::MouseEncoding;
+        let geometry = test_geometry();
+        // Origin (18, 28), 8 px cells, 20 px rows: a pointer 4 cells and 7
+        // rows in (plus a little slack inside the cell) reports 5;8.
+        let hit = geometry.cell_at(gpui::point(
+            px(18.0 + 8.0 * 4.0 + 3.0),
+            px(28.0 + 20.0 * 7.0 + 5.0),
+        ));
+        assert_eq!((hit.col, hit.row), (4, 7));
+        assert_eq!(
+            wheel_report_bytes(MouseEncoding::Sgr, 1, hit.col, hit.row),
+            Some(b"\x1b[<64;5;8M".to_vec())
+        );
+        // The first glyph's own pixel is cell 0,0; a pointer off the grid
+        // clamps to the nearest edge cell instead of reporting garbage.
+        let first = geometry.cell_at(geometry.origin);
+        assert_eq!((first.col, first.row), (0, 0));
+        let beyond = geometry.cell_at(gpui::point(px(5000.0), px(-40.0)));
+        assert_eq!((beyond.col, beyond.row), (34, 0));
+        assert_eq!(
+            wheel_report_bytes(MouseEncoding::X10, -1, beyond.col, beyond.row),
+            Some(vec![0x1b, b'[', b'M', b'a', 33 + 34, 33])
+        );
+    }
+
+    #[test]
+    fn wheel_route_overrides_for_shift_exited_and_history() {
+        use super::super::emulator::MouseEncoding;
+        let report = WheelRoute::MouseReport(MouseEncoding::Sgr);
+        let arrows = WheelRoute::ArrowKeys { app_cursor: true };
+        // The program's choice stands on the live bottom of a running tab.
+        assert_eq!(effective_wheel_route(report, false, false, 0), report);
+        assert_eq!(effective_wheel_route(arrows, false, false, 0), arrows);
+        // Shift always reaches the scrollback, whatever the program wants.
+        assert_eq!(
+            effective_wheel_route(report, true, false, 0),
+            WheelRoute::Scrollback
+        );
+        assert_eq!(
+            effective_wheel_route(arrows, true, false, 0),
+            WheelRoute::Scrollback
+        );
+        // A dead program's leftover modes must not swallow the wheel.
+        assert_eq!(
+            effective_wheel_route(report, false, true, 0),
+            WheelRoute::Scrollback
+        );
+        // Reports carry viewport coordinates: scrolled into history, the
+        // wheel walks back to the live bottom first. Arrows are unaffected
+        // (the alternate screen has no history to be in).
+        assert_eq!(
+            effective_wheel_route(report, false, false, 3),
+            WheelRoute::Scrollback
+        );
+        assert_eq!(effective_wheel_route(arrows, false, false, 3), arrows);
+        assert_eq!(
+            effective_wheel_route(WheelRoute::Scrollback, false, false, 0),
+            WheelRoute::Scrollback
+        );
     }
 
     #[test]
