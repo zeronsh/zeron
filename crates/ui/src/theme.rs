@@ -801,8 +801,9 @@ impl Theme {
     /// rides [`Self::TITLEBAR_TOP_PAD`] lower than center so the air above
     /// matches the perceived gap to the inset card below (border + card body).
     pub const TITLEBAR_HEIGHT: f32 = 38.0;
-    /// Downward shift of titlebar content within the bar.
-    pub const TITLEBAR_TOP_PAD: f32 = 2.0;
+    /// Top-only padding moves the flex center by half this value. On macOS,
+    /// 38 / 2 + 4 / 2 = 21 matches the native traffic lights' center.
+    pub const TITLEBAR_TOP_PAD: f32 = 4.0;
     /// Reserved status strip under the content outlet (zeron `h-6`) — the
     /// WorkingIndicator row; reserving it keeps the composer from shifting.
     pub const STATUS_STRIP_HEIGHT: f32 = 24.0;

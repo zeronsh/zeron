@@ -187,6 +187,7 @@ impl Element for EdgeFaded {
             bounds.origin.y += inset;
             bounds.size.height -= inset;
             bounds.size.height += px(self.outset_bottom);
+            bounds.size.height = bounds.size.height.max(px(0.0));
             EdgeFade {
                 bounds,
                 band: px(self.band),

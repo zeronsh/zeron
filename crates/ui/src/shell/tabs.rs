@@ -176,7 +176,7 @@ impl Shell {
         // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a
         // session is selected (`render_titlebar_cluster`) — this row budgets
         // one button slot so the title never sits under it.
-        let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+        let sidebar_now = self.sidebar_now();
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
 
         // Same glide as the old strip: content starts at the inset card's

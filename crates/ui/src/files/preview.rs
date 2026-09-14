@@ -34,6 +34,9 @@ use crate::{
 const PREVIEW_LINE_HEIGHT: f32 = 20.0;
 const WIDE_BREAKPOINT: f32 = 680.0;
 const TREE_SPLIT_DEFAULT: f32 = 286.0;
+const TREE_SPLIT_MIN: f32 = 220.0;
+const TREE_SPLIT_MAX: f32 = 360.0;
+pub(super) const TREE_SPLIT_HITBOX_HALF_WIDTH: f32 = 10.0;
 const EDITOR_COMMENT_CARD_WIDTH: f32 = 320.0;
 const EDITOR_COMMENT_CARD_MARGIN: f32 = 8.0;
 const EDITOR_COMMENT_CARD_MIN_ANCHORED_WIDTH: f32 = 220.0;
@@ -149,6 +152,10 @@ pub(super) struct FilePreviewState {
     tree_sidebar_dismissed: bool,
     tree_width: f32,
     tree_motion: TreeSidebarMotion,
+    tree_edge_bounce: Option<crate::motion::ResizeEdgeBounce>,
+    tree_resize_edge: Option<crate::motion::ResizeEdge>,
+    tree_resize_active: bool,
+    tree_resize_dragging: bool,
     comment_anchors: HashMap<String, HashMap<String, EditorCommentAnchor>>,
     comment_draft: Option<EditorCommentDraft>,
     active_comment: Option<String>,
@@ -181,6 +188,10 @@ impl FilePreviewState {
             tree_sidebar_dismissed: false,
             tree_width: TREE_SPLIT_DEFAULT,
             tree_motion: TreeSidebarMotion::default(),
+            tree_edge_bounce: None,
+            tree_resize_edge: None,
+            tree_resize_active: false,
+            tree_resize_dragging: false,
             comment_anchors: HashMap::new(),
             comment_draft: None,
             active_comment: None,
@@ -197,6 +208,10 @@ impl FilePreviewState {
         self.close_requested = false;
         self.tree_sidebar_visible = false;
         self.tree_motion = TreeSidebarMotion::default();
+        self.tree_edge_bounce = None;
+        self.tree_resize_edge = None;
+        self.tree_resize_active = false;
+        self.tree_resize_dragging = false;
         self.comment_anchors.clear();
         self.comment_draft = None;
         self.active_comment = None;
@@ -326,6 +341,10 @@ impl FilePreviewState {
     }
 
     fn toggle_tree_sidebar(&mut self) {
+        self.tree_edge_bounce = None;
+        self.tree_resize_edge = None;
+        self.tree_resize_active = false;
+        self.tree_resize_dragging = false;
         let previous = self.tree_sidebar_visible();
         if previous {
             self.tree_sidebar_visible = false;
@@ -381,8 +400,38 @@ impl FilePreviewState {
         openness
     }
 
-    pub(super) fn tree_width(&self) -> f32 {
-        self.tree_width
+    pub(super) fn tree_width_frame(&self, window: &mut Window, cx: &App) -> f32 {
+        let Some(bounce) = self.tree_edge_bounce else {
+            return self.tree_width;
+        };
+        if crate::motion::reduced_motion(cx) || !self.tree_sidebar_visible() {
+            return self.tree_width;
+        }
+        let total = Duration::from_millis(crate::motion::RESIZE_EDGE_BOUNCE_MS)
+            .mul_f32(crate::motion::speed_scale());
+        let raw = Instant::now()
+            .saturating_duration_since(bounce.started)
+            .as_secs_f32()
+            / total.as_secs_f32();
+        if raw >= 1.0 {
+            return self.tree_width;
+        }
+        window.request_animation_frame();
+        self.tree_width + crate::motion::resize_bounce_offset(bounce.edge, raw)
+    }
+
+    pub(super) fn tree_resize_active(&self) -> bool {
+        self.tree_resize_active
+    }
+
+    pub(super) fn tree_resize_constrained(&self) -> bool {
+        self.tree_resize_dragging && !self.tree_resize_active
+    }
+
+    fn finish_tree_resize(&mut self) {
+        self.tree_resize_active = false;
+        self.tree_resize_dragging = false;
+        self.tree_resize_edge = None;
     }
 
     pub(super) fn has_unsaved_changes(&self) -> bool {
@@ -2328,6 +2377,14 @@ impl FilesSurface {
             .tooltip_show_delay(Duration::from_millis(350));
         toolbar(theme)
             .pr(px(crate::surface_chrome::CONTROL_GAP))
+            .child(
+                crate::file_icons::icon(
+                    crate::file_icons::FileIconIdentity::file(path),
+                    theme.appearance,
+                )
+                .size(px(14.0))
+                .flex_none(),
+            )
             .child(crumbs)
             .when(markdown, |element| {
                 element.child(
@@ -3134,29 +3191,108 @@ impl FilesSurface {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let width = f32::from(event.bounds.right() - event.event.position.x);
-        self.preview.tree_width = width.clamp(220.0, 360.0);
+        let requested = f32::from(event.bounds.right() - event.event.position.x);
+        let sample = crate::motion::resize_drag_sample(
+            requested,
+            TREE_SPLIT_MIN,
+            TREE_SPLIT_MAX,
+            self.preview.tree_resize_edge,
+            crate::motion::reduced_motion(cx),
+        );
+        self.preview.tree_width = sample.width;
+        self.preview.tree_resize_dragging = true;
+        self.preview.tree_resize_active = sample.edge.is_none();
+        if sample.starts_bounce {
+            self.preview.tree_edge_bounce = sample.edge.map(crate::motion::ResizeEdgeBounce::new);
+        } else if sample.edge.is_none() {
+            self.preview.tree_edge_bounce = None;
+        }
+        self.preview.tree_resize_edge = sample.edge;
         cx.notify();
     }
 
-    pub(super) fn preview_split_handle(&self, cx: &mut Context<Self>) -> AnyElement {
-        let color = Theme::of(cx).border_strong;
+    pub(super) fn preview_split_handle(&self, right: f32, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx);
+        let fade_key = "pane-resize-files-preview-split";
+        let hover_highlight = crate::motion::hover_blend(
+            fade_key,
+            theme.border_strong.opacity(0.0),
+            theme.border_strong,
+        );
+        let highlight = if self.preview.tree_resize_constrained() {
+            theme.border_strong.opacity(0.0)
+        } else if self.preview.tree_resize_active() {
+            theme.border_strong
+        } else {
+            hover_highlight
+        };
+        let clear = highlight.opacity(0.0);
         div()
             .id("files-preview-split")
             .absolute()
-            .left(px(-3.0))
+            .right(px(right))
             .top_0()
             .bottom_0()
-            .w(px(6.0))
+            .w(px(TREE_SPLIT_HITBOX_HALF_WIDTH * 2.0))
             .occlude()
             .cursor_col_resize()
-            .hover(move |style| style.bg(color))
+            .on_hover(crate::motion::hover_listener(fade_key))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(TREE_SPLIT_HITBOX_HALF_WIDTH))
+                    .w(px(1.0))
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1().bg(gpui::linear_gradient(
+                        180.0,
+                        gpui::linear_color_stop(clear, 0.0),
+                        gpui::linear_color_stop(highlight, 1.0),
+                    )))
+                    .child(div().flex_1().bg(gpui::linear_gradient(
+                        180.0,
+                        gpui::linear_color_stop(highlight, 0.0),
+                        gpui::linear_color_stop(clear, 1.0),
+                    ))),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.preview.tree_resize_dragging = true;
+                    this.preview.tree_resize_active = true;
+                    cx.notify();
+                }),
+            )
             .on_drag(
                 PreviewSplitResize,
                 |_, _point: Point<gpui::Pixels>, _, cx| {
                     cx.stop_propagation();
                     cx.new(|_| PreviewDragGhost)
                 },
+            )
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
+                    if event.click_count == 2 {
+                        this.preview.tree_width = TREE_SPLIT_DEFAULT;
+                        this.preview.tree_edge_bounce = None;
+                    }
+                    this.preview.finish_tree_resize();
+                    crate::motion::set_hover(fade_key, false, crate::motion::reduced_motion(cx));
+                    window.refresh();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.preview.finish_tree_resize();
+                    crate::motion::set_hover(fade_key, false, crate::motion::reduced_motion(cx));
+                    window.refresh();
+                    cx.notify();
+                }),
             )
             .into_any_element()
     }
@@ -3254,6 +3390,31 @@ fn read_only_message(reason: Option<WorkspaceReadOnlyReason>) -> SharedString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tree_split_uses_the_standard_resize_geometry_and_limits() {
+        assert_eq!(TREE_SPLIT_HITBOX_HALF_WIDTH * 2.0, 20.0);
+        let min = crate::motion::resize_drag_sample(
+            TREE_SPLIT_MIN - 1.0,
+            TREE_SPLIT_MIN,
+            TREE_SPLIT_MAX,
+            None,
+            false,
+        );
+        let max = crate::motion::resize_drag_sample(
+            TREE_SPLIT_MAX + 1.0,
+            TREE_SPLIT_MIN,
+            TREE_SPLIT_MAX,
+            None,
+            false,
+        );
+        assert_eq!(min.width, TREE_SPLIT_MIN);
+        assert_eq!(min.edge, Some(crate::motion::ResizeEdge::Min));
+        assert!(min.starts_bounce);
+        assert_eq!(max.width, TREE_SPLIT_MAX);
+        assert_eq!(max.edge, Some(crate::motion::ResizeEdge::Max));
+        assert!(max.starts_bounce);
+    }
 
     fn cached_document(path: &str, text: &str) -> FileDocument {
         let mut document = FileDocument::loading(DocumentKey {

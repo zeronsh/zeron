@@ -114,16 +114,16 @@ impl Render for WorkspacePathDragGhost {
             .text_size(px(11.5))
             .text_color(theme.text)
             .opacity(0.85)
-            .child(
-                crate::icons::icon(if self.payload.is_directory {
-                    crate::icons::FOLDER
+            .child({
+                let identity = if self.payload.is_directory {
+                    crate::file_icons::FileIconIdentity::directory(&self.payload.path, false)
                 } else {
-                    crate::icons::DOCUMENT
-                })
-                .size(px(12.0))
-                .flex_none()
-                .text_color(theme.text_muted),
-            )
+                    crate::file_icons::FileIconIdentity::file(&self.payload.path)
+                };
+                crate::file_icons::icon(identity, theme.appearance)
+                    .size(px(14.0))
+                    .flex_none()
+            })
             .child(div().min_w_0().truncate().child(self.payload.title()))
     }
 }
@@ -310,14 +310,19 @@ impl Render for FilesSurface {
             .child(content);
         let is_editor = self.presentation.is_editor();
         let mut header = None;
+        let mut preview_split_right = None;
         let body = if split_editor {
             let wide = self.preview.is_wide();
             let tree_width = if wide {
-                self.preview.tree_width()
+                self.preview.tree_width_frame(window, cx)
             } else {
                 self.preview.narrow_tree_width()
             };
             let openness = self.preview.tree_sidebar_frame(window, cx);
+            if wide && self.preview.tree_sidebar_visible() {
+                preview_split_right =
+                    Some(tree_width * openness - preview::TREE_SPLIT_HITBOX_HALF_WIDTH);
+            }
             // Same arrangement as the outer right-sidebar toggle: the trigger
             // is outside the animated controls, in a permanently mounted slot.
             let toggle_width =
@@ -381,10 +386,7 @@ impl Render for FilesSurface {
                                     .border_color(theme.border)
                                     .child(tree_pane),
                             ),
-                        )
-                        .when(wide && self.preview.tree_sidebar_visible(), |pane| {
-                            pane.child(self.preview_split_handle(cx))
-                        }),
+                        ),
                 )
                 .into_any_element()
         } else {
@@ -393,6 +395,8 @@ impl Render for FilesSurface {
         let measured_width = self.preview.width_cell();
         let entity = cx.entity();
         let editor_context_menu = self.render_editor_context_menu(&theme, cx);
+        let preview_split_handle =
+            preview_split_right.map(|right| self.preview_split_handle(right, cx));
         div()
             .id(SharedString::from(format!(
                 "files-surface-{}",
@@ -425,6 +429,7 @@ impl Render for FilesSurface {
             .flex_col()
             .children(header)
             .child(div().flex_1().min_h_0().w_full().child(body))
+            .children(preview_split_handle)
             .children(editor_context_menu)
     }
 }

@@ -1,7 +1,7 @@
 //! The app shell (zeron `__root.tsx`): sidebar column + main panel + optional
 //! right "Changes" pane, plus the boot splash and the connection gate.
 //!
-//! Layout is zeron's: collapsible drag-resizable sidebar (208–400px, default
+//! Layout is zeron's: collapsible drag-resizable sidebar (224–400px, default
 //! 256) with a 200ms ease-out width transition; main panel with an h-11 header,
 //! content outlet, and a reserved h-6 status strip so later content never
 //! shifts; right pane scaffold (360px floor, default 520), hidden by default.
@@ -46,8 +46,9 @@ use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     self, CHAT_PANEL_MIN, ComposerSendBehavior, JUMP_SLOTS, KeymapConfig, RIGHT_PANE_DEFAULT,
     RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SavePolicy, ShortcutId,
-    SidebarOrganization, SidebarSort, TERMINAL_DEFAULT_HEIGHT, UiSettings, badge_combo,
-    jump_hints_visible, modifier_send_hint_visible, platform_combo,
+    SidebarOrganization, SidebarSort, TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH,
+    TERMINAL_MIN_HEIGHT, UiSettings, badge_combo, jump_hints_visible, modifier_send_hint_visible,
+    platform_combo,
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
@@ -170,8 +171,9 @@ impl SidebarDisclosureMotion {
 /// Vertical pane resize hitboxes yield the global titlebar. Keeping this in
 /// the shared constructor makes left/right seams mirror each other and avoids
 /// relying on paint order when chrome crosses an animated pane boundary.
-const PANE_RESIZE_HITBOX_HALF_WIDTH: f32 = 6.0;
+const PANE_RESIZE_HITBOX_HALF_WIDTH: f32 = 10.0;
 const PANE_RESIZE_HITBOX_TOP: f32 = Theme::TITLEBAR_HEIGHT;
+const TERMINAL_RESIZE_HITBOX_HEIGHT: f32 = 10.0;
 
 fn stable_panel_content_width(target: f32, transition: Option<(f32, f32)>) -> f32 {
     transition.map(|(from, to)| from.max(to)).unwrap_or(target)
@@ -687,10 +689,41 @@ const SIDEBAR_ARCHIVED_HARNESS_TITLE_GAP: f32 = 10.0;
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
 const SIDEBAR_GLASS_FADE_BAND: f32 = 24.0;
 
+/// New-thread controls float over the tail of a top-anchored image hero. The
+/// hero never occupies half the viewport, and its lower mask dissolves into
+/// the page before the otherwise empty lower canvas.
+const NEW_THREAD_BACKGROUND_FROSTED_OPACITY: f32 = 0.84;
+const NEW_THREAD_BACKGROUND_VIEWPORT_RATIO: f32 = 0.46;
+const NEW_THREAD_BACKGROUND_MAX_HEIGHT: f32 = 440.0;
+
 /// Drag marker for the sidebar resize handle.
 struct SidebarResize;
 /// Drag marker for the right-pane resize handle.
 struct RightPaneResize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneResizeKind {
+    Sidebar,
+    Right,
+    Terminal,
+}
+
+/// Resolve one pointer sample while keeping the persisted width legal. The
+/// edge is latched by the caller, so a held pointer produces one nudge rather
+/// than restarting the animation for every drag event.
+fn sidebar_drag_sample(
+    pointer_x: f32,
+    latched_edge: Option<motion::ResizeEdge>,
+    reduced_motion: bool,
+) -> motion::ResizeDragSample {
+    motion::resize_drag_sample(
+        pointer_x,
+        SIDEBAR_MIN,
+        SIDEBAR_MAX,
+        latched_edge,
+        reduced_motion,
+    )
+}
 
 /// The dragged surface-tab payload (strip reorder).
 struct RightTabDrag {
@@ -789,6 +822,80 @@ impl WidthTween {
             started: std::time::Instant::now(),
         }
     }
+}
+
+fn titlebar_island_vertical_geometry(progress: f32) -> (f32, f32) {
+    // Match the padded flex row's center, not the raw titlebar center.
+    // Keep the native 24px controls untouched and give them 4px of air.
+    let height = 28.0 + 4.0 * progress.clamp(0.0, 1.0);
+    let center = (Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD) * 0.5;
+    (center - height * 0.5, height)
+}
+
+fn bottom_stack_measurement_matches(
+    measured_has_composer: bool,
+    expected_has_composer: bool,
+) -> bool {
+    measured_has_composer == expected_has_composer
+}
+
+fn new_thread_background_opacity(is_frost: bool) -> f32 {
+    if is_frost {
+        NEW_THREAD_BACKGROUND_FROSTED_OPACITY
+    } else {
+        1.0
+    }
+}
+
+fn new_thread_background_height(viewport_height: f32) -> f32 {
+    (viewport_height.max(0.0) * NEW_THREAD_BACKGROUND_VIEWPORT_RATIO)
+        .min(NEW_THREAD_BACKGROUND_MAX_HEIGHT)
+}
+
+fn new_thread_background(
+    artwork: Option<std::sync::Arc<gpui::RenderImage>>,
+    viewport_height: f32,
+    hero_width: f32,
+    composer_bounds: crate::new_thread_background_mask::SurfaceBounds,
+    dissolve: f32,
+    opacity: f32,
+) -> AnyElement {
+    let Some(artwork) = artwork else {
+        return Empty.into_any_element();
+    };
+    let hero_height = new_thread_background_height(viewport_height);
+    let dissolve = dissolve.clamp(0.0, 1.0);
+    // Image and treatment share a fixed crop and fade together in place.
+    // The hero uses the full conversation canvas even while the destination
+    // right pane clips it. Navigation must never rescale the artwork.
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .w(px(hero_width))
+        .h(px(hero_height))
+        .overflow_hidden()
+        .opacity((1.0 - dissolve) * opacity)
+        // Alpha resolves into the real canvas, including translucent themes;
+        // no theme-colored overlay bleaches or darkens the source pixels.
+        .child(
+            gpui::canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _cx| {
+                    if let Some(composer) = composer_bounds.get() {
+                        crate::new_thread_background_mask::paint(
+                            artwork.clone(),
+                            bounds,
+                            composer,
+                            window,
+                        );
+                    }
+                },
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .into_any_element()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1167,15 +1274,17 @@ pub struct Shell {
     sidebar_pane: Entity<SidebarPane>,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
-    /// External image or workspace-path drag hovering the conversation
-    /// column; a drop stages an image or inserts a file-mention chip.
-    file_drag_active: bool,
     /// Measured height of the bottom chrome stack (status strip + composer +
-    /// terminal dock) the full-height transcript scrolls under — written by a
-    /// paint-time canvas each frame, read the NEXT frame for the fade inset,
-    /// the transcript's bottom clearance, and the jump pill's anchor (the
-    /// same one-frame lag every fade here rides).
+    /// terminal dock) the full-height transcript scrolls under. Paint-time
+    /// measurement schedules another frame whenever this value changes.
     bottom_stack: std::rc::Rc<std::cell::Cell<f32>>,
+    /// Whether `bottom_stack` was measured with the session composer present.
+    /// A newly selected transcript stays hidden until this matches its route,
+    /// preventing one frame at the blank canvas's stale bottom clearance.
+    bottom_stack_has_composer: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Shared route clock and measured prepaint geometry for the persistent composer.
+    composer_dock: crate::composer_dock::SharedDock,
+    new_thread_artwork_ready: crate::new_thread_background_effects::Readiness,
     /// The sidebar's archived accordion (t3code Sidebar): OPEN by default
     /// (user request), session-transient. `archived_shown` pages the
     /// expanded list ("Show more" reveals another page).
@@ -1343,7 +1452,18 @@ pub struct Shell {
     debug_gate: Option<GatePhase>,
     debug_upload: Option<String>,
     sidebar_tween: Option<WidthTween>,
+    sidebar_edge_bounce: Option<motion::ResizeEdgeBounce>,
+    /// Boundary currently held during a sidebar drag. Cleared on re-entry or
+    /// release so the next genuine edge crossing can acknowledge the limit.
+    sidebar_resize_edge: Option<motion::ResizeEdge>,
+    /// Gesture-owned resize feedback. Unlike hover, this stays active while
+    /// the seam moves away from the pointer and clears only on release or when
+    /// a constrained edge takes over with its bounce cue.
+    pane_resize_active: Option<PaneResizeKind>,
+    pane_resize_dragging: Option<PaneResizeKind>,
     right_tween: Option<WidthTween>,
+    right_edge_bounce: Option<motion::ResizeEdgeBounce>,
+    right_resize_edge: Option<motion::ResizeEdge>,
     /// Mirrors `right_tween` only for takeover entry/exit, allowing the visible
     /// right-panel contents to resize with their outer frame in that mode.
     right_takeover_content_tween: Option<WidthTween>,
@@ -1358,12 +1478,14 @@ pub struct Shell {
     /// width target and the physical ceiling for free-form resizing
     /// ([`Self::right_target`] has no `Window`).
     viewport_width: f32,
+    viewport_height: f32,
     terminal_tween: Option<WidthTween>,
     /// Last observed `window.is_fullscreen()` (`None` before first paint) —
     /// flips key the traffic-light inset tween.
     fullscreen: Option<bool>,
     /// 200ms ease-out tween of the cluster start on fullscreen toggles.
     titlebar_tween: Option<WidthTween>,
+    titlebar_island: Option<WidthTween>,
     /// Armed by mouse-down on a titlebar strip; the next mouse-move hands the
     /// drag to the compositor (zed's platform-titlebar pattern).
     titlebar_should_move: bool,
@@ -1419,6 +1541,7 @@ impl Shell {
             cx.notify();
         });
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         let links = Self::session_links(None, cx);
         transcript.update(cx, |transcript, _| {
@@ -1429,6 +1552,10 @@ impl Shell {
         let composer_events = cx.subscribe(&composer, {
             let transcript = transcript.clone();
             move |_this: &mut Shell, _, event: &ComposerEvent, cx| match event {
+                ComposerEvent::NewThreadTransitionStarted => {
+                    // Route observation drives the dock once selection commits.
+                    cx.notify();
+                }
                 ComposerEvent::Sent {
                     chat_id,
                     message_id,
@@ -1550,10 +1677,12 @@ impl Shell {
             sidebar_pane,
             transcript,
             composer,
-            file_drag_active: false,
             // Seed with the compact composer stack's rough height so the
             // first frame's clearance isn't zero (the measure corrects it).
             bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),
+            bottom_stack_has_composer: std::rc::Rc::new(std::cell::Cell::new(false)),
+            composer_dock: Default::default(),
+            new_thread_artwork_ready: Default::default(),
             archived_open: true,
             archived_shown: 0,
             archived_hover: None,
@@ -1643,14 +1772,22 @@ impl Shell {
             debug_gate,
             debug_upload,
             sidebar_tween: None,
+            sidebar_edge_bounce: None,
+            sidebar_resize_edge: None,
+            pane_resize_active: None,
+            pane_resize_dragging: None,
             right_tween: None,
+            right_edge_bounce: None,
+            right_resize_edge: None,
             right_takeover_content_tween: None,
             main_takeover_tween: None,
             right_pane_expanded: false,
             viewport_width: 1280.0,
+            viewport_height: 880.0,
             terminal_tween: None,
             fullscreen: None,
             titlebar_tween: None,
+            titlebar_island: None,
             titlebar_should_move: false,
             linux_captions: None,
             button_layout_sub: None,
@@ -2093,7 +2230,7 @@ impl Shell {
             // Manual sizing preserves a usable conversation column. Takeover
             // intentionally consumes it completely. Both ride the sidebar
             // tween so toggling it remains seamless.
-            let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+            let sidebar_now = self.sidebar_now();
             if self.right_pane_expanded {
                 right_pane_takeover_width(self.viewport_width, sidebar_now)
             } else {
@@ -2105,7 +2242,11 @@ impl Shell {
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        let from = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+        let from = self.sidebar_now();
+        self.sidebar_edge_bounce = None;
+        self.sidebar_resize_edge = None;
+        self.pane_resize_active = None;
+        self.pane_resize_dragging = None;
         self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed;
         self.sidebar_tween = Some(WidthTween::new(from, self.sidebar_target()));
         self.schedule_save(cx);
@@ -2115,7 +2256,10 @@ impl Shell {
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
         // Reverse from the visible width when toggled during an animation.
         let from = self.eval_tween(self.right_tween, self.right_target(cx));
-        let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+        self.right_edge_bounce = None;
+        self.right_resize_edge = None;
+        self.finish_pane_resize(PaneResizeKind::Right);
+        let sidebar_now = self.sidebar_now();
         let from_main = conversation_width(self.viewport_width, sidebar_now, from);
         let was_expanded = self.right_pane_expanded;
         let key = self.panel_key(cx);
@@ -3208,7 +3352,12 @@ impl Shell {
         };
         let dy = anchor_y - f32::from(event.event.position.y);
         let viewport_h = f32::from(window.viewport_size().height);
-        self.settings.terminal_height = clamp_terminal_height(anchor_h + dy, viewport_h);
+        let requested = anchor_h + dy;
+        let max = (viewport_h * TERMINAL_MAX_VH).max(TERMINAL_MIN_HEIGHT);
+        self.settings.terminal_height = clamp_terminal_height(requested, viewport_h);
+        self.pane_resize_dragging = Some(PaneResizeKind::Terminal);
+        self.pane_resize_active = (requested > TERMINAL_MIN_HEIGHT && requested < max)
+            .then_some(PaneResizeKind::Terminal);
         self.terminal_tween = None; // live drag tracks the pointer
         self.schedule_save(cx);
         cx.notify();
@@ -3221,11 +3370,34 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let x = f32::from(event.event.position.x);
-        self.settings.sidebar_width = x.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+        let sample = sidebar_drag_sample(x, self.sidebar_resize_edge, self.reduced_motion);
+        self.settings.sidebar_width = sample.width;
         self.settings.sidebar_collapsed = false;
+        self.pane_resize_dragging = Some(PaneResizeKind::Sidebar);
         self.sidebar_tween = None; // live drag tracks the pointer directly
+        if sample.starts_bounce {
+            self.sidebar_edge_bounce = sample.edge.map(motion::ResizeEdgeBounce::new);
+        } else if sample.edge.is_none() {
+            self.sidebar_edge_bounce = None;
+        }
+        self.pane_resize_active = sample.edge.is_none().then_some(PaneResizeKind::Sidebar);
+        self.sidebar_resize_edge = sample.edge;
         self.schedule_save(cx);
         cx.notify();
+    }
+
+    fn finish_pane_resize(&mut self, kind: PaneResizeKind) {
+        if self.pane_resize_active == Some(kind) {
+            self.pane_resize_active = None;
+        }
+        if self.pane_resize_dragging == Some(kind) {
+            self.pane_resize_dragging = None;
+        }
+        match kind {
+            PaneResizeKind::Sidebar => self.sidebar_resize_edge = None,
+            PaneResizeKind::Terminal => self.terminal_drag_anchor = None,
+            PaneResizeKind::Right => self.right_resize_edge = None,
+        }
     }
 
     fn on_right_pane_drag(
@@ -3239,11 +3411,30 @@ impl Shell {
         // No arbitrary percentage ceiling, but retain the chat's usable 300px
         // floor instead of allowing the conversation to collapse to zero.
         let max = right_pane_max_width(viewport, self.sidebar_target());
-        self.settings.right_pane_width = if max >= RIGHT_PANE_MIN {
-            width.clamp(RIGHT_PANE_MIN, max)
+        let sample = if max >= RIGHT_PANE_MIN {
+            motion::resize_drag_sample(
+                width,
+                RIGHT_PANE_MIN,
+                max,
+                self.right_resize_edge,
+                self.reduced_motion,
+            )
         } else {
-            max
+            motion::ResizeDragSample {
+                width: max,
+                edge: None,
+                starts_bounce: false,
+            }
         };
+        self.settings.right_pane_width = sample.width;
+        self.pane_resize_dragging = Some(PaneResizeKind::Right);
+        if sample.starts_bounce {
+            self.right_edge_bounce = sample.edge.map(motion::ResizeEdgeBounce::new);
+        } else if sample.edge.is_none() {
+            self.right_edge_bounce = None;
+        }
+        self.pane_resize_active = sample.edge.is_none().then_some(PaneResizeKind::Right);
+        self.right_resize_edge = sample.edge;
         self.right_tween = None;
         self.right_takeover_content_tween = None;
         self.main_takeover_tween = None;
@@ -3262,9 +3453,18 @@ impl Shell {
         self.settings.theme_selection = crate::appearance::themes(cx);
         self.settings.accent = crate::appearance::accent(cx);
         self.settings.surface = crate::appearance::surface(cx);
+        self.sync_background_settings(cx);
         self.settings.ui_font_family = crate::typography::requested(cx);
         self.settings.ui_font_size = crate::typography::font_size(cx);
         settings::replace(self.settings.clone(), SavePolicy::Debounced, cx);
+    }
+
+    /// Appearance owns these choices. A geometry save must never publish the
+    /// shell's older effect value over a selection made since its last render.
+    fn sync_background_settings(&mut self, cx: &App) {
+        let current = settings::current(cx);
+        self.settings.new_thread_composer_background = current.new_thread_composer_background;
+        self.settings.new_thread_background_effect = current.new_thread_background_effect;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
@@ -4394,6 +4594,41 @@ impl Shell {
         motion::lerp(from, to, RESIZE.progress(raw))
     }
 
+    fn eval_resize_edge_bounce(
+        &self,
+        bounce: Option<motion::ResizeEdgeBounce>,
+        enabled: bool,
+    ) -> f32 {
+        let Some(bounce) = bounce else {
+            return 0.0;
+        };
+        if self.reduced_motion || !enabled {
+            return 0.0;
+        }
+        let total =
+            Duration::from_millis(motion::RESIZE_EDGE_BOUNCE_MS).mul_f32(motion::speed_scale());
+        let raw = self.tween_elapsed(bounce.started).as_secs_f32() / total.as_secs_f32();
+        if raw >= 1.0 {
+            return 0.0;
+        }
+        self.motion_active.set(true);
+        motion::resize_bounce_offset(bounce.edge, raw)
+    }
+
+    pub(super) fn sidebar_now(&self) -> f32 {
+        self.eval_tween(self.sidebar_tween, self.sidebar_target())
+            + self
+                .eval_resize_edge_bounce(self.sidebar_edge_bounce, !self.settings.sidebar_collapsed)
+    }
+
+    fn right_now(&self, cx: &App) -> f32 {
+        self.eval_tween(self.right_tween, self.right_target(cx))
+            + self.eval_resize_edge_bounce(
+                self.right_edge_bounce,
+                self.right_pane_open(cx) && !self.right_pane_expanded,
+            )
+    }
+
     fn tween_active(&self, tween: Option<WidthTween>) -> bool {
         tween.is_some_and(|tween| {
             !self.reduced_motion
@@ -4411,23 +4646,6 @@ impl Shell {
             .map(|transition| (transition.from, transition.to))
     }
 
-    /// Animated width container: tweens 200ms ease-out on collapse/expand, and
-    /// clips a fixed-width inner so content never reflows mid-transition.
-    fn pane_container(
-        &self,
-        tween: Option<WidthTween>,
-        target: f32,
-        inner: AnyElement,
-    ) -> AnyElement {
-        div()
-            .h_full()
-            .flex_none()
-            .overflow_hidden()
-            .w(px(self.eval_tween(tween, target)))
-            .child(inner)
-            .into_any_element()
-    }
-
     /// Right-anchored variant for the changes pane. The outer width follows the
     /// existing shell tween, while descendants retain the larger endpoint's
     /// geometry for that 200ms transition. This mirrors the sidebar's stable
@@ -4437,19 +4655,21 @@ impl Shell {
         &self,
         tween: Option<WidthTween>,
         target: f32,
+        edge_offset: f32,
         inner: AnyElement,
     ) -> AnyElement {
         let takeover_width = self
             .active_tween_endpoints(self.right_takeover_content_tween)
             .map(|_| self.eval_tween(self.right_takeover_content_tween, target));
         let content_width =
-            right_panel_content_width(target, self.active_tween_endpoints(tween), takeover_width);
+            right_panel_content_width(target, self.active_tween_endpoints(tween), takeover_width)
+                + edge_offset;
         div()
             .h_full()
             .flex_none()
             .relative()
             .overflow_hidden()
-            .w(px(self.eval_tween(tween, target)))
+            .w(px(self.eval_tween(tween, target) + edge_offset))
             .child(
                 div()
                     .absolute()
@@ -4588,6 +4808,30 @@ impl Shell {
         // leave two competing + placements across the responsive variants.
         let plus_alpha = self.titlebar_plus_alpha(cx);
         let show_plus = plus_alpha > 0.01;
+        let island_target = if matches!(self.route, Route::Chat)
+            && self.state.read(cx).selected_chat.is_none()
+            && self.settings.sidebar_collapsed
+            && settings::current(cx)
+                .new_thread_composer_background
+                .as_ref()
+                .is_some_and(|background| std::path::Path::new(&background.path).is_file())
+        {
+            1.0
+        } else {
+            0.0
+        };
+        // Persistent manual tween: reversals start from the painted value,
+        // initial presentation is settled, and reduced motion snaps.
+        match self.titlebar_island {
+            None => self.titlebar_island = Some(WidthTween::new(island_target, island_target)),
+            Some(previous) if previous.to != island_target => {
+                let from = self.eval_tween(Some(previous), previous.to);
+                self.titlebar_island = Some(WidthTween::new(from, island_target));
+            }
+            _ => {}
+        }
+        let island = self.eval_tween(self.titlebar_island, island_target);
+        let (island_top, island_height) = titlebar_island_vertical_geometry(island);
         div()
             .absolute()
             .top_0()
@@ -4598,6 +4842,26 @@ impl Shell {
             .items_center()
             .pt(px(Theme::TITLEBAR_TOP_PAD))
             .px(px(TITLEBAR_CLUSTER_PAD))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(6.0))
+                    .right_0()
+                    .top(px(island_top))
+                    .h(px(island_height))
+                    .opacity(island)
+                    .children((island > 0.001).then(|| {
+                        crate::frost::frosted(
+                            12.0,
+                            20.0,
+                            div()
+                                .size_full()
+                                .rounded(px(12.0))
+                                .bg(theme.glass_overlay())
+                                .shadow_sm(),
+                        )
+                    })),
+            )
             .children(self.titlebar_spacer(TITLEBAR_CLUSTER_PAD))
             // Left-side Linux captions (GNOME `close:…` layouts): the
             // root-level caption overlay owns the buttons; the cluster row
@@ -4854,20 +5118,17 @@ impl Shell {
                 .h_full()
                 .flex_none(),
         );
-        let target = self.sidebar_target();
         // Transparent — the sidebar sits directly on the frost shell; the main
         // card's own border provides the separation. The content row spans the
         // full window height (the titlebar overlays it), so the column pads
         // itself below the chrome.
-        self.pane_container(
-            self.sidebar_tween,
-            target,
-            div()
-                .h_full()
-                .pt(px(Theme::TITLEBAR_HEIGHT))
-                .child(inner)
-                .into_any_element(),
-        )
+        div()
+            .h_full()
+            .flex_none()
+            .overflow_hidden()
+            .w(px(self.sidebar_now()))
+            .child(div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner))
+            .into_any_element()
     }
 
     /// Settings-mode sidebar (zeron settings-sidebar.tsx): window-control
@@ -6742,6 +7003,7 @@ impl Shell {
     fn resize_handle<T>(
         &self,
         id: &'static str,
+        kind: PaneResizeKind,
         marker: fn() -> T,
         reset: fn(&mut Shell, &mut Context<Shell>),
         cx: &mut Context<Self>,
@@ -6751,12 +7013,23 @@ impl Shell {
     {
         let theme = Theme::of(cx);
         let fade_key = format!("pane-resize-{id}");
-        let highlight = motion::hover_blend(
+        let hover_highlight = motion::hover_blend(
             &fade_key,
             theme.border_strong.opacity(0.0),
             theme.border_strong,
         );
+        let active = self.pane_resize_active == Some(kind);
+        let constrained = self.pane_resize_dragging == Some(kind) && !active;
+        let highlight = if constrained {
+            theme.border_strong.opacity(0.0)
+        } else if active {
+            theme.border_strong
+        } else {
+            hover_highlight
+        };
         let clear = highlight.opacity(0.0);
+        let release_key = fade_key.clone();
+        let release_out_key = fade_key.clone();
         div()
             .id(id)
             .absolute()
@@ -6775,7 +7048,7 @@ impl Shell {
                     .absolute()
                     .top_0()
                     .bottom_0()
-                    .left(px(6.0))
+                    .left(px(PANE_RESIZE_HITBOX_HALF_WIDTH))
                     .w(px(1.0))
                     .flex()
                     .flex_col()
@@ -6790,23 +7063,48 @@ impl Shell {
                         gpui::linear_color_stop(clear, 1.0),
                     ))),
             )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.pane_resize_dragging = Some(kind);
+                    this.pane_resize_active = Some(kind);
+                    cx.notify();
+                }),
+            )
             .on_drag(marker(), |_, _point: Point<gpui::Pixels>, _, cx| {
                 cx.stop_propagation();
                 cx.new(|_| DragGhost)
             })
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseUpEvent, _, cx| {
+                cx.listener(move |this, event: &MouseUpEvent, window, cx| {
                     if event.click_count == 2 {
                         reset(this, cx);
                         this.schedule_save(cx);
                         cx.notify();
                     }
+                    this.finish_pane_resize(kind);
+                    motion::set_hover(&release_key, false, this.reduced_motion);
+                    window.refresh();
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, _| {
+                    this.finish_pane_resize(kind);
+                    motion::set_hover(&release_out_key, false, this.reduced_motion);
+                    window.refresh();
                 }),
             )
     }
 
-    fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_main(
+        &mut self,
+        window: &mut Window,
+        main_content_width: f32,
+        transcript_width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme_owned = Theme::of(cx).clone();
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
@@ -6832,15 +7130,94 @@ impl Shell {
         let has_spaces = !self.state.read(cx).spaces.is_empty();
         let has_appshots = !self.composer.read(cx).staged_appshots().is_empty();
         let no_project = self.state.read(cx).no_project;
+        let transcript_geometry_ready = bottom_stack_measurement_matches(
+            self.bottom_stack_has_composer.get(),
+            (has_spaces || no_project || has_appshots) && has_selection,
+        );
+        let ui_settings = settings::current(cx);
+        let new_thread_background_setting = ui_settings.new_thread_composer_background;
+        let new_thread_background_effect = ui_settings.new_thread_background_effect;
+        let frame_time = self.render_time.unwrap_or_else(std::time::Instant::now);
+        // Prewarm even in an established thread. Decode/effect work is not
+        // contingent on a hero measurement or a navigation gesture.
+        let artwork = new_thread_background_setting
+            .as_ref()
+            .and_then(|background| {
+                crate::new_thread_background_effects::prepare(
+                    new_thread_background_effect,
+                    theme,
+                    std::path::Path::new(&background.path),
+                    cx,
+                )
+            });
+        let artwork_opacity = self.new_thread_artwork_ready.opacity(
+            artwork.as_ref().map(|image| image.id),
+            self.reduced_motion,
+            frame_time,
+        );
+        let dock_frame =
+            self.composer_dock
+                .borrow_mut()
+                .tick(has_selection, self.reduced_motion, frame_time);
+        if dock_frame.active {
+            self.motion_active.set(true);
+        }
+        self.composer
+            .update(cx, |composer, cx| composer.set_dock_frame(dock_frame, cx));
+        let composer_width = self.composer_dock.borrow_mut().layout_width(
+            main_content_width.min(crate::composer::COMPOSER_MAX_WIDTH),
+            self.reduced_motion,
+            frame_time,
+        );
+        self.composer.update(cx, |composer, cx| {
+            composer.set_available_width(composer_width, cx)
+        });
+        let term_h = self.eval_tween(self.terminal_tween, self.terminal_target(cx));
+        let new_thread_background_layer = (!has_selection || dock_frame.active).then(|| {
+            if artwork.is_some() && artwork_opacity < 1.0 {
+                window.request_animation_frame();
+            }
+            new_thread_background(
+                artwork,
+                self.viewport_height,
+                (self.viewport_width - self.sidebar_now()).max(0.0),
+                self.composer.read(cx).surface_bounds(),
+                dock_frame.dissolve(),
+                artwork_opacity * new_thread_background_opacity(theme.is_frost()),
+            )
+        });
 
-        // Content outlet: selected chat → transcript; nothing selected → a
-        // bare canvas (the composer stack carries the affordances); no spaces
-        // at all → the onboarding card. The composer sits below the first two
-        // (new-chat mode mints the chat id on first send).
-        let outlet: AnyElement = if has_selection {
+        // Content outlet: selected chat → transcript; nothing selected → the
+        // centered new-thread composition; no spaces at all → the onboarding
+        // card. New-chat mode mints the chat id on first send.
+        let departing_transcript = !has_selection && dock_frame.transcript() > 0.0;
+        if !has_selection && !departing_transcript {
             self.transcript
-                .clone()
-                .cached(gpui::StyleRefinement::default().size_full())
+                .update(cx, |transcript, cx| transcript.finish_route_exit(cx));
+        }
+        let outlet: AnyElement = if has_selection || departing_transcript {
+            div()
+                .relative()
+                .size_full()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .relative()
+                        .top(px(8.0 * (1.0 - dock_frame.transcript())))
+                        .size_full()
+                        .when(departing_transcript, |el| el.w(px(transcript_width)))
+                        .opacity(if transcript_geometry_ready || departing_transcript {
+                            dock_frame.transcript()
+                        } else {
+                            0.0
+                        })
+                        .child(self.transcript.clone()),
+                )
+                // A departing transcript is visual history, not an active
+                // interaction surface bound to the newly blank route.
+                .when(departing_transcript, |el| {
+                    el.child(div().absolute().inset_0().occlude())
+                })
                 .into_any_element()
         } else if !has_spaces && !no_project {
             // Onboarding (first boot / after the destructive wipe): no folders
@@ -6890,11 +7267,7 @@ impl Shell {
                 ))
                 .into_any_element()
         } else {
-            // New-chat canvas: intentionally bare (user request — no logo, no
-            // helper line). The device + project selectors live above the
-            // composer pill (composer.rs renders them via
-            // `render_target_selectors`).
-            div().size_full().into_any_element()
+            Empty.into_any_element()
         };
 
         let status = self.render_status_strip(cx);
@@ -6902,9 +7275,11 @@ impl Shell {
         // + composer, not just the pill). OS images keep using the upload
         // pipeline; workspace files/directories and file tabs become the same
         // projected file-mention chips the composer already understands.
-        // `has_active_drag` gates the veil so a drag that left the window
-        // cannot strand it.
-        let file_drag_active = self.file_drag_active && cx.has_active_drag();
+        // The veil itself uses typed `drag_over` styles below. Do not cache
+        // drag presence in shell state: the platform's `FileDrop::Exited`
+        // clears GPUI's external payload without sending one last mouse-move,
+        // so a cached bit can survive and reappear during an unrelated drag
+        // such as a pane resize.
         div()
             .id("chat-dropzone")
             .relative()
@@ -6913,52 +7288,21 @@ impl Shell {
             .h_full()
             .flex()
             .flex_col()
-            .on_drag_move::<gpui::ExternalPaths>(cx.listener(
-                |this, e: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
-                    let inside = e.bounds.contains(&e.event.position);
-                    if this.file_drag_active != inside {
-                        this.file_drag_active = inside;
-                        cx.notify();
-                    }
-                },
-            ))
             .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
-                this.file_drag_active = false;
                 let paths = paths.paths().to_vec();
                 this.composer
                     .update(cx, |composer, cx| composer.add_paths(paths, cx));
                 cx.notify();
             }))
-            .on_drag_move::<WorkspacePathDrag>(cx.listener(
-                |this, e: &gpui::DragMoveEvent<WorkspacePathDrag>, _, cx| {
-                    let inside = e.bounds.contains(&e.event.position);
-                    if this.file_drag_active != inside {
-                        this.file_drag_active = inside;
-                        cx.notify();
-                    }
-                },
-            ))
             .on_drop::<WorkspacePathDrag>(cx.listener(
                 |this, payload: &WorkspacePathDrag, window, cx| {
-                    this.file_drag_active = false;
                     this.composer.update(cx, |composer, cx| {
                         composer.add_workspace_path(&payload.path, payload.is_directory, window, cx)
                     });
                     cx.notify();
                 },
             ))
-            .on_drag_move::<RightTabDrag>(cx.listener(
-                |this, e: &gpui::DragMoveEvent<RightTabDrag>, _, cx| {
-                    let inside =
-                        e.bounds.contains(&e.event.position) && e.drag(cx).workspace_path.is_some();
-                    if this.file_drag_active != inside {
-                        this.file_drag_active = inside;
-                        cx.notify();
-                    }
-                },
-            ))
             .on_drop::<RightTabDrag>(cx.listener(|this, payload: &RightTabDrag, window, cx| {
-                this.file_drag_active = false;
                 if let Some(path) = &payload.workspace_path {
                     this.composer.update(cx, |composer, cx| {
                         composer.add_workspace_path(&path.path, path.is_directory, window, cx)
@@ -6966,6 +7310,10 @@ impl Shell {
                 }
                 cx.notify();
             }))
+            // The hero is deliberately outside the transcript EdgeFade below:
+            // it must paint under the overlaid titlebar instead of becoming
+            // fully transparent across the titlebar's inset band.
+            .children(new_thread_background_layer)
             .child(
                 // Full-height underlay: the transcript viewport spans the
                 // whole column, scrolling UNDER the titlebar above and the
@@ -6987,31 +7335,25 @@ impl Shell {
                     // tween the dock animates with; `stack_h` below is only
                     // the chrome that still overlaps the transcript (status
                     // strip + composer).
-                    let term_h = self.eval_tween(self.terminal_tween, self.terminal_target(cx));
                     let stack_h = (self.bottom_stack.get() - term_h).max(0.0);
                     // Opaque from the composer PILL's top (the reserved
                     // status strip above it is empty air), zero at the
                     // underlay's bottom edge.
                     let bottom_band = (stack_h - Theme::STATUS_STRIP_HEIGHT).max(1.0);
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .bottom(px(term_h))
-                        .child(
-                            crate::edge_fade::edge_faded(
-                                Theme::TRANSCRIPT_FADE_BAND,
-                                true,
-                                true,
-                                div().size_full().child(outlet),
-                            )
-                            // Fully faded BY the titlebar's bottom edge (the
-                            // title text is opaque — overlap read as collision),
-                            // ramping in the band just below it.
-                            .inset_top(Theme::TITLEBAR_HEIGHT)
-                            .band_top(Theme::TRANSCRIPT_FADE_BAND)
-                            .band_bottom(bottom_band),
+                    div().absolute().inset_0().bottom(px(term_h)).child(
+                        crate::edge_fade::edge_faded(
+                            Theme::TRANSCRIPT_FADE_BAND,
+                            true,
+                            true,
+                            div().size_full().child(outlet),
                         )
-                        .children(self.render_jump_to_bottom(stack_h, cx))
+                        // Fully faded BY the titlebar's bottom edge (the
+                        // title text is opaque — overlap read as collision),
+                        // ramping in the band just below it.
+                        .inset_top(Theme::TITLEBAR_HEIGHT)
+                        .band_top(Theme::TRANSCRIPT_FADE_BAND)
+                        .band_bottom(bottom_band),
+                    )
                 },
             )
             // The glass chrome stack, floating over the transcript's bottom:
@@ -7023,6 +7365,9 @@ impl Shell {
             .child(div().flex_1().min_h_0())
             .child({
                 let measured = self.bottom_stack.clone();
+                let measured_has_composer = self.bottom_stack_has_composer.clone();
+                let contains_composer = (has_spaces || no_project || has_appshots) && has_selection;
+                let composer = self.composer.clone();
                 div()
                     .flex_none()
                     .relative()
@@ -7030,57 +7375,93 @@ impl Shell {
                     .flex_col()
                     .child(
                         gpui::canvas(
-                            move |bounds, _, _| measured.set(f32::from(bounds.size.height)),
+                            move |bounds, window, cx| {
+                                // Reserve the destination footprint, never the animated height.
+                                let next_height = f32::from(bounds.size.height)
+                                    + composer.read(cx).dock_clearance_correction();
+                                let changed = (measured.get() - next_height).abs() > 0.5
+                                    || measured_has_composer.get() != contains_composer;
+                                measured.set(next_height);
+                                measured_has_composer.set(contains_composer);
+                                if changed {
+                                    window.request_animation_frame();
+                                }
+                            },
                             |_, _, _, _| {},
                         )
                         .absolute()
                         .inset_0(),
                     )
                     .child(status)
-                    .when(has_spaces || has_appshots, |el| {
-                        el.child(self.composer.clone())
+                    .when(has_spaces || no_project || has_appshots, |el| {
+                        let composer_opacity = self.composer_dock.borrow().opacity();
+                        el.child(crate::composer_dock::docked_composer(
+                            div()
+                                .id("persistent-composer")
+                                .relative()
+                                .w(px(composer_width))
+                                .opacity(composer_opacity)
+                                .mx_auto()
+                                .child(self.composer.clone())
+                                .children(if has_selection {
+                                    self.render_jump_to_bottom(cx)
+                                } else {
+                                    None
+                                }),
+                            self.composer_dock.clone(),
+                            self.viewport_height,
+                            self.reduced_motion,
+                            frame_time,
+                        ))
                     })
                     .child(self.render_terminal_container(cx))
             })
-            .when(file_drag_active, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .bg(theme.scrim().opacity(0.4 / 0.6))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .text_color(theme.text)
-                        .child("Drop to attach"),
-                )
-            })
+            .child(
+                div()
+                    .id("attachment-drop-overlay")
+                    .absolute()
+                    .inset_0()
+                    .opacity(0.0)
+                    .bg(theme.scrim().opacity(0.4 / 0.6))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(theme.text)
+                    // GPUI matches these styles against the active payload's
+                    // concrete TypeId. Resize markers therefore cannot reveal
+                    // this overlay, even after an external drag exits without
+                    // another move event.
+                    .drag_over::<gpui::ExternalPaths>(|style, _, _, _| style.opacity(1.0))
+                    .drag_over::<WorkspacePathDrag>(|style, _, _, _| style.opacity(1.0))
+                    .drag_over::<RightTabDrag>(|style, tab, _, _| {
+                        if tab.workspace_path.is_some() {
+                            style.opacity(1.0)
+                        } else {
+                            style
+                        }
+                    })
+                    .child("Drop to attach"),
+            )
             .into_any_element()
     }
 
     /// The "↓ Scroll to bottom" pill (round-9 §3): a LABELED rounded-full
     /// chip — down-arrow glyph + 13px label on a near-opaque raised surface
     /// with a hairline — horizontally centered over the transcript column and
-    /// floating a small gap above the composer. It hangs 14px below the
-    /// conversation region (through the reserved h-6 status strip, whose
-    /// content is left-aligned) so its bottom edge sits ~10px above the pill.
-    /// Shown past the transcript's 320px threshold; 180ms fade + 2px rise in.
-    /// `stack_h` is the measured bottom chrome stack the full-height
-    /// transcript scrolls under — the pill anchors just above it (the -14
-    /// carries the old status-strip overlap).
-    fn render_jump_to_bottom(
-        &mut self,
-        stack_h: f32,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    /// floating six pixels above the composer. It shares the composer's
+    /// measured dock transform and paints after it, outside the transcript fade.
+    fn render_jump_to_bottom(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.transcript.read(cx).jump_button_shown() {
             return None;
         }
         Some(
             div()
                 .absolute()
-                .bottom(px(stack_h - 14.0))
+                // Share the composer's measured translation, not its final
+                // bottom-stack target. Paint after the composer so it cannot
+                // pass over this control during docking.
+                .top(px(-36.0))
                 .left_0()
                 .right(px(10.0))
                 .flex()
@@ -7184,21 +7565,48 @@ impl Shell {
             return gpui::Empty.into_any_element();
         };
         let border = Theme::of(cx).border;
-        let handle_hover = Theme::of(cx).border_strong;
+        let handle_key = "pane-resize-terminal-resize";
+        let handle_hover = motion::hover_blend(
+            handle_key,
+            Theme::of(cx).border_strong.opacity(0.0),
+            Theme::of(cx).border_strong,
+        );
+        let terminal_active = self.pane_resize_active == Some(PaneResizeKind::Terminal);
+        let terminal_constrained =
+            self.pane_resize_dragging == Some(PaneResizeKind::Terminal) && !terminal_active;
+        let handle_highlight = if terminal_constrained {
+            Theme::of(cx).border_strong.opacity(0.0)
+        } else if terminal_active {
+            Theme::of(cx).border_strong
+        } else {
+            handle_hover
+        };
         let height = self.settings.terminal_height;
 
         let handle = div()
             .id("terminal-resize")
-            .h(px(5.0))
+            .h(px(TERMINAL_RESIZE_HITBOX_HEIGHT))
             .w_full()
             .flex_none()
             .cursor_row_resize()
-            .hover(move |s| s.bg(handle_hover))
+            .on_hover(motion::hover_listener(handle_key))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(1.0))
+                    .bg(handle_highlight),
+            )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, event: &gpui::MouseDownEvent, _, _| {
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
                     this.terminal_drag_anchor =
                         Some((f32::from(event.position.y), this.settings.terminal_height));
+                    this.pane_resize_dragging = Some(PaneResizeKind::Terminal);
+                    this.pane_resize_active = Some(PaneResizeKind::Terminal);
+                    cx.notify();
                 }),
             )
             .on_drag(TerminalResize, |_, _point: Point<gpui::Pixels>, _, cx| {
@@ -7207,19 +7615,30 @@ impl Shell {
             })
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
                     if event.click_count == 2 {
                         this.settings.terminal_height = TERMINAL_DEFAULT_HEIGHT;
                         this.schedule_save(cx);
                         cx.notify();
                     }
+                    this.finish_pane_resize(PaneResizeKind::Terminal);
+                    motion::set_hover(handle_key, false, this.reduced_motion);
+                    window.refresh();
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, window, _| {
+                    this.finish_pane_resize(PaneResizeKind::Terminal);
+                    motion::set_hover(handle_key, false, this.reduced_motion);
+                    window.refresh();
                 }),
             );
 
         // Fixed-height inner clipped by the animated container: content never
         // reflows mid-transition (same trick as the side panes). The handle
         // FLOATS over the panel's top edge (painted after, so it wins hit
-        // testing) instead of stacking above it — stacked, its 5px read as
+        // testing) instead of stacking above it — stacked, its hitbox would read as
         // dead air between the seam and the tab bar (user report).
         let inner = div()
             .h(px(height))
@@ -7450,9 +7869,14 @@ impl Shell {
             .pt(px(Theme::TITLEBAR_HEIGHT))
             .child(content);
         let target = self.right_target(cx);
+        let edge_offset = self.eval_resize_edge_bounce(
+            self.right_edge_bounce,
+            self.right_pane_open(cx) && !self.right_pane_expanded,
+        );
         self.right_pane_container(
             self.right_tween,
             target,
+            edge_offset,
             div().h_full().relative().child(panel).into_any_element(),
         )
     }
@@ -7708,6 +8132,7 @@ impl Shell {
             }));
         for (ix, (surface, title, dirty, detail)) in rows.into_iter().enumerate() {
             let is_active = surface == active;
+            let file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
             let icon_path = match surface {
                 RightSurface::Files => icons::FOLDER_WITH_FILES,
                 RightSurface::File(_) => icons::DOCUMENT,
@@ -7862,6 +8287,16 @@ impl Shell {
                                     .into_any_element()
                                 } else if let Some(favicon) = browser_favicon {
                                     gpui::img(favicon).size(px(12.0)).into_any_element()
+                                } else if matches!(surface, RightSurface::File(_)) {
+                                    crate::file_icons::icon(
+                                        crate::file_icons::FileIconIdentity::file(
+                                            file_identity_path.as_ref(),
+                                        ),
+                                        theme.appearance,
+                                    )
+                                    .size(px(14.0))
+                                    .when(!is_active, |icon| icon.opacity(0.78))
+                                    .into_any_element()
                                 } else {
                                     icon(icon_path)
                                         .size(px(12.0))
@@ -8130,7 +8565,10 @@ impl Shell {
     /// width. Rides the same width tween as open/close so the jump glides.
     fn toggle_right_pane_expand(&mut self, cx: &mut Context<Self>) {
         let from = self.right_target(cx);
-        let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+        self.right_edge_bounce = None;
+        self.right_resize_edge = None;
+        self.finish_pane_resize(PaneResizeKind::Right);
+        let sidebar_now = self.sidebar_now();
         let from_main = conversation_width(self.viewport_width, sidebar_now, from);
         self.right_pane_expanded = !self.right_pane_expanded;
         let to = self.right_target(cx);
@@ -8836,6 +9274,7 @@ impl Render for Shell {
         self.settings.theme_selection = crate::appearance::themes(cx);
         self.settings.accent = crate::appearance::accent(cx);
         self.settings.surface = crate::appearance::surface(cx);
+        self.sync_background_settings(cx);
         let theme = Theme::of(cx);
         // The shell tone (zeron `.frost`): the surface the sidebar sits on and
         // the main panel floats over as an inset rounded card. On macOS the
@@ -9111,52 +9550,84 @@ impl Render for Shell {
                 }
                 // MessageRail width gate: hide below 48rem of main-panel width.
                 let viewport = f32::from(window.viewport_size().width);
+                self.viewport_height = f32::from(window.viewport_size().height);
                 // Stamped for `right_target` — the expanded changes panel
                 // sizes itself to the viewport.
                 self.viewport_width = viewport;
+                let on_chat = matches!(self.route, Route::Chat);
+                let right_target_width = if on_chat { self.right_now(cx) } else { 0.0 };
+                let panel_handoff = self.composer_dock.borrow_mut().observe_pane(
+                    self.state.read(cx).selected_chat.is_some(),
+                    right_target_width,
+                    on_chat && !self.reduced_motion,
+                    self.render_time.unwrap_or_else(std::time::Instant::now),
+                );
+                if panel_handoff {
+                    self.motion_active.set(true);
+                }
                 let main_target_width =
-                    conversation_width(viewport, self.sidebar_target(), self.right_target(cx));
+                    conversation_width(viewport, self.sidebar_target(), right_target_width);
                 let main_transition = self.active_tween_endpoints(self.main_takeover_tween);
                 let main_content_width =
                     stable_panel_content_width(main_target_width, main_transition);
-                let main_width = (main_content_width - 10.0).max(0.0);
-                self.composer.update(cx, |composer, cx| {
-                    composer.set_available_width(main_width, cx)
-                });
+                let transcript_width = self.composer_dock.borrow_mut().transcript_width(
+                    main_content_width,
+                    self.state.read(cx).selected_chat.is_some(),
+                    panel_handoff,
+                );
+                let main_width = (transcript_width - 10.0).max(0.0);
                 // Clearance excludes the terminal dock: the transcript
                 // viewport ends at the dock's top (see the underlay in
                 // `render_main`), so only the chrome above it overlaps.
                 let term_h = self.eval_tween(self.terminal_tween, self.terminal_target(cx));
                 let stack_h = (self.bottom_stack.get() - term_h).max(0.0);
+                let expected_has_composer = {
+                    let state = self.state.read(cx);
+                    (!state.spaces.is_empty() || state.no_project) && state.selected_chat.is_some()
+                };
+                let bottom_stack_ready = bottom_stack_measurement_matches(
+                    self.bottom_stack_has_composer.get(),
+                    expected_has_composer,
+                );
                 self.transcript.update(cx, |t, cx| {
                     t.set_rail_enabled(rail::rail_visible(main_width), cx);
-                    t.set_bottom_clearance(stack_h, cx);
+                    if bottom_stack_ready && expected_has_composer {
+                        t.set_bottom_clearance(stack_h, cx);
+                    }
                 });
 
                 let sidebar = self.render_sidebar(cx);
                 let sidebar_handle = self.resize_handle(
                     "sidebar-resize",
+                    PaneResizeKind::Sidebar,
                     || SidebarResize,
-                    |shell, _| shell.settings.sidebar_width = SIDEBAR_DEFAULT,
+                    |shell, _| {
+                        shell.settings.sidebar_width = SIDEBAR_DEFAULT;
+                        shell.sidebar_edge_bounce = None;
+                    },
                     cx,
                 );
-                let main = self.render_main(window, cx);
+                let main = self.render_main(window, main_content_width, transcript_width, cx);
                 // The Changes pane is chat-scoped chrome: the Settings route
                 // never renders it (zeron __root.tsx `!isSettings && activeChat`
                 // around the diff column) — the per-session open flags stay
                 // intact for the return trip.
-                let on_chat = matches!(self.route, Route::Chat);
                 let right_open = on_chat && self.right_pane_open(cx);
                 // Takeover mode derives its width from the viewport, so a
                 // manual drag handle would fight the expanded target.
                 let right_handle = (right_open
+                    && !panel_handoff
                     && !self.right_pane_expanded
                     && !self.tween_active(self.right_tween))
                 .then(|| {
                     self.resize_handle(
                         "right-pane-resize",
+                        PaneResizeKind::Right,
                         || RightPaneResize,
-                        |shell, _| shell.settings.right_pane_width = RIGHT_PANE_DEFAULT,
+                        |shell, _| {
+                            shell.settings.right_pane_width = RIGHT_PANE_DEFAULT;
+                            shell.right_edge_bounce = None;
+                        },
                         cx,
                     )
                     // A forgiving transparent hit target centered on the
@@ -9207,7 +9678,7 @@ impl Render for Shell {
                     .h_full()
                     .flex_none()
                     .relative()
-                    .child(sidebar_handle.left(px(-6.0)));
+                    .child(sidebar_handle.left(px(-PANE_RESIZE_HITBOX_HALF_WIDTH)));
                 // Keep the right resize target outside the pane's
                 // overflow-hidden width container. This mirrors the sidebar
                 // seam and lets the target straddle both adjacent panes.
@@ -9232,7 +9703,7 @@ impl Render for Shell {
                 // through the titlebar, down to the bottom edge). Its width
                 // rides the same tween as the sidebar, so the tone melts away
                 // with the collapse instead of vanishing in a frame.
-                let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+                let sidebar_now = self.sidebar_now();
                 // Hairline on its right edge — full height like the tone,
                 // so the sidebar column reads as its own surface.
                 let sidebar_tone = div()
@@ -9351,6 +9822,107 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sidebar_drag_nudges_each_edge_once_until_rearmed() {
+        let min = sidebar_drag_sample(SIDEBAR_MIN, None, false);
+        assert_eq!(min.width, SIDEBAR_MIN);
+        assert_eq!(min.edge, Some(motion::ResizeEdge::Min));
+        assert!(min.starts_bounce);
+
+        let held_min = sidebar_drag_sample(SIDEBAR_MIN - 80.0, min.edge, false);
+        assert_eq!(held_min.width, SIDEBAR_MIN);
+        assert_eq!(held_min.edge, min.edge);
+        assert!(!held_min.starts_bounce);
+
+        let inside = sidebar_drag_sample(SIDEBAR_MIN + 1.0, held_min.edge, false);
+        assert_eq!(inside.edge, None);
+        assert!(!inside.starts_bounce);
+
+        let rearmed_min = sidebar_drag_sample(SIDEBAR_MIN - 1.0, inside.edge, false);
+        assert!(rearmed_min.starts_bounce);
+
+        let max = sidebar_drag_sample(SIDEBAR_MAX, rearmed_min.edge, false);
+        assert_eq!(max.width, SIDEBAR_MAX);
+        assert_eq!(max.edge, Some(motion::ResizeEdge::Max));
+        assert!(max.starts_bounce);
+
+        let held_max = sidebar_drag_sample(SIDEBAR_MAX + 80.0, max.edge, false);
+        assert_eq!(held_max.width, SIDEBAR_MAX);
+        assert!(!held_max.starts_bounce);
+    }
+
+    #[test]
+    fn sidebar_drag_stays_exact_in_range_and_reduced_motion_never_nudges() {
+        let middle = sidebar_drag_sample(312.0, None, false);
+        assert_eq!(middle.width, 312.0);
+        assert_eq!(middle.edge, None);
+        assert!(!middle.starts_bounce);
+
+        for pointer_x in [
+            SIDEBAR_MIN - 100.0,
+            SIDEBAR_MIN,
+            SIDEBAR_MAX,
+            SIDEBAR_MAX + 100.0,
+        ] {
+            let sample = sidebar_drag_sample(pointer_x, None, true);
+            assert!((SIDEBAR_MIN..=SIDEBAR_MAX).contains(&sample.width));
+            assert!(!sample.starts_bounce);
+        }
+    }
+
+    #[test]
+    fn right_pane_uses_the_shared_clamp_and_edge_latch() {
+        let min =
+            motion::resize_drag_sample(RIGHT_PANE_MIN - 40.0, RIGHT_PANE_MIN, 820.0, None, false);
+        assert_eq!(min.width, RIGHT_PANE_MIN);
+        assert_eq!(min.edge, Some(motion::ResizeEdge::Min));
+        assert!(min.starts_bounce);
+
+        let held = motion::resize_drag_sample(
+            RIGHT_PANE_MIN - 80.0,
+            RIGHT_PANE_MIN,
+            820.0,
+            min.edge,
+            false,
+        );
+        assert!(!held.starts_bounce);
+
+        let max = motion::resize_drag_sample(900.0, RIGHT_PANE_MIN, 820.0, None, false);
+        assert_eq!(max.width, 820.0);
+        assert_eq!(max.edge, Some(motion::ResizeEdge::Max));
+        assert!(max.starts_bounce);
+    }
+
+    #[test]
+    fn sidebar_bounce_has_rounded_out_and_return_phases() {
+        assert_eq!(
+            motion::resize_bounce_offset(motion::ResizeEdge::Max, 0.0),
+            0.0
+        );
+        assert_eq!(
+            motion::resize_bounce_offset(
+                motion::ResizeEdge::Max,
+                motion::RESIZE_EDGE_BOUNCE_OUT_FRACTION
+            ),
+            motion::RESIZE_EDGE_NUDGE
+        );
+        assert_eq!(
+            motion::resize_bounce_offset(motion::ResizeEdge::Max, 1.0),
+            0.0
+        );
+
+        let gentle_start = motion::resize_bounce_offset(motion::ResizeEdge::Max, 0.01);
+        let outbound = motion::resize_bounce_offset(motion::ResizeEdge::Max, 0.2);
+        let returning = motion::resize_bounce_offset(motion::ResizeEdge::Max, 0.7);
+        assert!(gentle_start > 0.0 && gentle_start < 0.1);
+        assert!(outbound > gentle_start && outbound < motion::RESIZE_EDGE_NUDGE);
+        assert!(returning > 0.0 && returning < motion::RESIZE_EDGE_NUDGE);
+        assert_eq!(
+            motion::resize_bounce_offset(motion::ResizeEdge::Min, 0.2),
+            -outbound
+        );
+    }
+
+    #[test]
     fn every_default_shortcut_binds_on_this_platform() {
         // `apply_keymap` silently falls back on an unparseable combo, so a
         // default gpui cannot parse would ship as a dead shortcut.
@@ -9362,6 +9934,37 @@ mod tests {
                 id.label()
             );
         }
+    }
+
+    #[test]
+    fn island_stays_centered_on_controls_while_expanding() {
+        let center = (Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD) * 0.5;
+        for step in 0..=20 {
+            let (top, height) = titlebar_island_vertical_geometry(step as f32 / 20.0);
+            assert_eq!(top + height * 0.5, center);
+            assert!((28.0..=32.0).contains(&height));
+        }
+        let (top, height) = titlebar_island_vertical_geometry(1.0);
+        assert_eq!(center, 21.0);
+        assert_eq!(center - 12.0 - top, 4.0);
+        assert_eq!(top + height - (center + 12.0), 4.0);
+    }
+
+    #[test]
+    fn new_thread_handoff_is_continuous_and_staged() {
+        assert!(bottom_stack_measurement_matches(false, false));
+        assert!(bottom_stack_measurement_matches(true, true));
+        assert!(!bottom_stack_measurement_matches(false, true));
+        assert!(!bottom_stack_measurement_matches(true, false));
+        assert_eq!(new_thread_background_opacity(false), 1.0);
+        assert_eq!(
+            new_thread_background_opacity(true),
+            NEW_THREAD_BACKGROUND_FROSTED_OPACITY
+        );
+        assert_eq!(new_thread_background_height(400.0), 184.0);
+        assert_eq!(new_thread_background_height(600.0), 276.0);
+        assert_eq!(new_thread_background_height(1_000.0), 440.0);
+        assert!(new_thread_background_height(848.0) < 848.0 / 2.0);
     }
 
     #[test]
@@ -9494,6 +10097,8 @@ mod tests {
     #[test]
     fn pane_resize_hitboxes_yield_the_titlebar_chrome() {
         assert_eq!(PANE_RESIZE_HITBOX_TOP, Theme::TITLEBAR_HEIGHT);
+        assert_eq!(PANE_RESIZE_HITBOX_HALF_WIDTH * 2.0, 20.0);
+        assert_eq!(TERMINAL_RESIZE_HITBOX_HEIGHT, 10.0);
     }
 
     #[test]
@@ -10406,6 +11011,66 @@ mod exit_regressions {
                 assert_eq!(shell.eval_tween(tween, 0.), 0.);
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn panel_saves_preserve_background_effect_selected_after_shell_creation(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        for effect in settings::NewThreadBackgroundEffect::ALL {
+            window
+                .update(cx, |shell, _, cx| {
+                    // Selection changes in Appearance, independently of the shell's
+                    // cached snapshot. Include a previously queued geometry save.
+                    shell.settings.sidebar_width = 280.0;
+                    shell.schedule_save(cx);
+                    settings::set_new_thread_background_effect(effect, cx);
+                    for step in 0..3 {
+                        shell.settings.sidebar_width = 290.0 + step as f32;
+                        shell.settings.right_pane_width = 540.0 + step as f32;
+                        shell.settings.terminal_height = 300.0 + step as f32;
+                        shell.schedule_save(cx);
+                        assert_eq!(settings::current(cx).new_thread_background_effect, effect);
+                    }
+                    settings::flush(cx);
+                    let loaded = settings::UiSettings::load(dir.path());
+                    assert_eq!(loaded.new_thread_background_effect, effect);
+                    assert_eq!(loaded.sidebar_width, 292.0);
+                    assert_eq!(loaded.right_pane_width, 542.0);
+                    assert_eq!(loaded.terminal_height, 302.0);
+                })
+                .unwrap();
+        }
     }
 
     #[gpui::test]

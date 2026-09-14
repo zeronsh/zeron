@@ -358,11 +358,13 @@ fn main() -> anyhow::Result<()> {
                     let (left,top)=first.read_with(cx,|b,_|b.fixture_origin());
                     // Real resize-handle drag, including crossing into the native page.
                     eprintln!("Browser fixture: starting resize drag");
-                    // Both halves must reach GPUI before a drag exists.
-                    for offset in [-6., -2., 0., 3., 4.5] {
+                    // The 20px shell target overlaps the native browser by 9px
+                    // after its one-point panel border. That full overlap must
+                    // reach GPUI, while content beyond it stays native.
+                    for offset in [-6., -2., 0., 3., 6., 8.5] {
                         anyhow::ensure!(!first.read_with(cx,|b,_|b.fixture_page_hit((left+offset) as f64,(top+120.) as f64)),"native page stole the resize target at offset {offset}");
                     }
-                    anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_page_hit((left+6.) as f64,(top+120.) as f64)),"resize target blocked adjacent page content");
+                    anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_page_hit((left+10.) as f64,(top+120.) as f64)),"resize target blocked adjacent page content");
                     let start=gpui::point(px(left+3.),px(top+120.));
                     gpui::AnyWindowHandle::from(window).update(cx,|_,w,cx| {w.dispatch_event(gpui::PlatformInput::MouseDown(gpui::MouseDownEvent{position:start,button:gpui::MouseButton::Left,click_count:1,..Default::default()}),cx);})?;
                     let mut widths=Vec::new();

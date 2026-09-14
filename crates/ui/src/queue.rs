@@ -77,12 +77,9 @@ const QUEUE_TEXT_SIZE: f32 = 12.5;
 const ROW_GAP: f32 = 0.0;
 const ROW_SLOT: f32 = ROW_HEIGHT + ROW_GAP;
 const ROW_PAD_X: f32 = 8.0;
+const ROW_RADIUS: f32 = 8.0;
 const PANEL_RADIUS: f32 = 16.0;
-const PANEL_BORDER: f32 = 1.0;
-const PANEL_INSET: f32 = 4.0;
-// Concentric with the tray's outer edge, including its layout border.
-const ROW_RADIUS: f32 = PANEL_RADIUS - PANEL_BORDER - PANEL_INSET;
-const PANEL_PAD_TOP: f32 = PANEL_INSET;
+const PANEL_PAD_TOP: f32 = 0.0;
 /// The custom 24px queue glyphs have quieter geometry than the legacy set, so
 /// render them slightly larger to preserve the previous optical weight.
 const QUEUE_ICON_SIZE: f32 = 13.0;
@@ -110,12 +107,17 @@ fn available_queue_primary_action(
     (!delivery_blocked && host_supports_actions).then_some(QueuePrimaryAction::SendNow)
 }
 
-fn queue_head_shortcut_visible(
+fn queue_latest_shortcut_visible(
     index: usize,
+    count: usize,
     reveal_requested: bool,
     action_available: bool,
 ) -> bool {
-    index == 0 && reveal_requested && action_available
+    index.checked_add(1) == Some(count) && reveal_requested && action_available
+}
+
+fn latest_queued_message(items: &[QueuedMessage]) -> Option<&QueuedMessage> {
+    items.last()
 }
 
 /// Translate a pointer inside the whole panel into a row slot. The top pad
@@ -226,12 +228,9 @@ fn queue_panel_surface(theme: &Theme) -> gpui::Div {
         .border_1()
         .border_color(theme.border)
         .when(!theme.is_frost(), |el| el.shadow_lg())
-        // Inset hover surfaces so they stay inside the rounded tray.
-        .px(px(PANEL_INSET))
-        .pt(px(PANEL_PAD_TOP))
-        // The overlap is hidden behind the composer; retain a visible inset
-        // below the final row, matching the top and sides.
-        .pb(px(QUEUE_COMPOSER_OVERLAP + PANEL_INSET))
+        // Keep visible rows flush with the tray; only the portion tucked behind
+        // the composer needs padding.
+        .pb(px(QUEUE_COMPOSER_OVERLAP))
         .flex()
         .flex_col()
 }
@@ -284,7 +283,7 @@ impl Composer {
     /// nesting raised cards inside it.
     pub(crate) fn render_queue_panel(
         &mut self,
-        show_head_shortcut: bool,
+        show_latest_shortcut: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -323,11 +322,12 @@ impl Composer {
                 self.queue_row(
                     &chat_id,
                     ix,
+                    count,
                     item,
                     drag,
                     &editing,
                     host_supports_actions,
-                    show_head_shortcut,
+                    show_latest_shortcut,
                     &theme,
                     cx,
                 )
@@ -383,11 +383,12 @@ impl Composer {
         &self,
         chat_id: &str,
         ix: usize,
+        count: usize,
         item: &QueuedMessage,
         drag: Option<(usize, usize, usize, usize)>,
         editing: &Option<String>,
         host_supports_actions: bool,
-        show_head_shortcut: bool,
+        show_latest_shortcut: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -442,9 +443,10 @@ impl Composer {
             &key,
             primary_action,
             resolved_primary.is_some(),
-            queue_head_shortcut_visible(
+            queue_latest_shortcut_visible(
                 ix,
-                show_head_shortcut,
+                count,
+                show_latest_shortcut,
                 resolved_primary.is_some() && !being_removed,
             ),
             theme,
@@ -1212,8 +1214,9 @@ impl Composer {
     }
 
     /// Cmd/Ctrl+Enter on an empty composer activates the same action shown on
-    /// the first queued row: Send now, interrupting the current response. An edit/review gate or an old chat host makes it a no-op.
-    pub(crate) fn queue_pop_head(&mut self, cx: &mut Context<Self>) {
+    /// the most recently queued row: Send now, interrupting the current response.
+    /// An edit/review gate or an old chat host makes it a no-op.
+    pub(crate) fn activate_latest_queued(&mut self, cx: &mut Context<Self>) {
         if self.editing_queued.is_some() {
             return;
         }
@@ -1222,7 +1225,7 @@ impl Composer {
             let Some(chat_id) = state.selected_chat.as_deref() else {
                 return;
             };
-            let Some(item) = state.queue.first() else {
+            let Some(item) = latest_queued_message(&state.queue) else {
                 return;
             };
             (
@@ -1780,9 +1783,10 @@ mod tests {
     use zeron_rpc::methods;
 
     use super::{
-        PANEL_PAD_TOP, QueuePrimaryAction, ROW_SLOT, available_queue_primary_action, one_line,
-        queue_action_needs_host, queue_drag_offsets, queue_drop_index, queue_head_shortcut_visible,
-        queue_mutation_acknowledged, queue_visible_text, visible_queue_rows,
+        PANEL_PAD_TOP, QueuePrimaryAction, ROW_SLOT, available_queue_primary_action,
+        latest_queued_message, one_line, queue_action_needs_host, queue_drag_offsets,
+        queue_drop_index, queue_latest_shortcut_visible, queue_mutation_acknowledged,
+        queue_visible_text, visible_queue_rows,
     };
 
     #[test]
@@ -1809,11 +1813,22 @@ mod tests {
     }
 
     #[test]
-    fn queue_shortcut_only_appears_on_an_actionable_head_when_revealed() {
-        assert!(queue_head_shortcut_visible(0, true, true));
-        assert!(!queue_head_shortcut_visible(1, true, true));
-        assert!(!queue_head_shortcut_visible(0, false, true));
-        assert!(!queue_head_shortcut_visible(0, true, false));
+    fn queue_shortcut_only_appears_on_the_actionable_latest_row_when_revealed() {
+        assert!(!queue_latest_shortcut_visible(0, 2, true, true));
+        assert!(queue_latest_shortcut_visible(1, 2, true, true));
+        assert!(!queue_latest_shortcut_visible(1, 2, false, true));
+        assert!(!queue_latest_shortcut_visible(1, 2, true, false));
+        assert!(!queue_latest_shortcut_visible(0, 0, true, true));
+    }
+
+    #[test]
+    fn queue_shortcut_targets_the_most_recently_added_row() {
+        let items = vec![
+            zeron_doc::QueuedMessage::new("older", "first", "device"),
+            zeron_doc::QueuedMessage::new("newer", "second", "device"),
+        ];
+        assert_eq!(latest_queued_message(&items).unwrap().id, "newer");
+        assert!(latest_queued_message(&[]).is_none());
     }
 
     #[test]

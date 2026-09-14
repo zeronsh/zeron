@@ -611,7 +611,7 @@ impl Render for ShortcutsPage {
                                     .line_height(px(17.0))
                                     .text_color(theme.text_muted.opacity(0.65))
                                     .child(SharedString::from(
-                                        "Choose whether Enter sends immediately or starts a new paragraph. Cmd/Ctrl+Enter always submits; with an empty composer it advances the queue. Shift+Enter always inserts a line break.",
+                                        "Choose whether Enter sends immediately or starts a new paragraph. Cmd/Ctrl+Enter always submits; with an empty composer it sends the most recently queued message. Shift+Enter always inserts a line break.",
                                     )),
                             ),
                     )

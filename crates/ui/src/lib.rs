@@ -23,8 +23,10 @@ pub mod changes;
 mod comment_ui;
 pub mod comments;
 pub mod composer;
+mod composer_dock;
 mod context_usage;
 pub mod edge_fade;
+pub mod file_icons;
 pub mod files;
 pub mod frost;
 pub mod history;
@@ -35,6 +37,9 @@ pub mod links;
 pub mod loaders;
 pub mod markdown;
 pub mod motion;
+mod new_thread_background_effects;
+mod new_thread_background_image;
+mod new_thread_background_mask;
 pub mod notify;
 pub mod pickers;
 pub mod popover;
@@ -287,8 +292,8 @@ fn open_main_window(
                 titlebar: Some(TitlebarOptions {
                     title: None,
                     appears_transparent: true,
-                    // Centered on the titlebar's content line (40px bar, content
-                    // shifted 4px down, lights ~12px tall → center 22).
+                    // Native lights are 14px tall: top 14 → center 21, matching
+                    // the 38px titlebar row with 4px top-only content padding.
                     traffic_light_position: Some(gpui::point(px(14.), px(14.))),
                 }),
                 // Our own titlebar strip drags the window (WindowControlArea::
