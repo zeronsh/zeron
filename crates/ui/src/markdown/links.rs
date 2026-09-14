@@ -16,6 +16,10 @@ impl LinkTarget {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkAction {
+    /// Normal click or keyboard activation; the user's persisted preference
+    /// decides whether this routes internally or externally.
+    Primary,
+    /// Explicit "Open in Zeron" context-menu action.
     Internal,
     External,
     Copy,
@@ -60,6 +64,12 @@ mod tests {
         assert_eq!(
             a.web_outcome(true),
             LinkOutcome::External("https://example.com/".into())
+        );
+        a.action = LinkAction::Primary;
+        assert_eq!(
+            a.web_outcome(true),
+            LinkOutcome::External("https://example.com/".into()),
+            "Primary must be resolved by the owning surface"
         );
     }
     #[test]

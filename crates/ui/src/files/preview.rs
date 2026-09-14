@@ -4490,7 +4490,12 @@ mod markdown_buffer_tests {
             "file preview labels are not truncated"
         );
         let target = LinkTarget::new("Different label", "https://example.com/docs?q=%C3%B1#full");
-        for action in [LinkAction::Internal, LinkAction::External, LinkAction::Copy] {
+        for action in [
+            LinkAction::Primary,
+            LinkAction::Internal,
+            LinkAction::External,
+            LinkAction::Copy,
+        ] {
             cx.update_window(window.into(), |_, window, cx| {
                 render::activate_link(target.clone(), action, Some(&ui), window, cx);
             })
@@ -4498,11 +4503,12 @@ mod markdown_buffer_tests {
         }
         cx.run_until_parked();
         let events = received.borrow();
-        assert_eq!(events.len(), 2);
-        for (event, action) in events
-            .iter()
-            .zip([LinkAction::Internal, LinkAction::External])
-        {
+        assert_eq!(events.len(), 3);
+        for (event, action) in events.iter().zip([
+            LinkAction::Primary,
+            LinkAction::Internal,
+            LinkAction::External,
+        ]) {
             assert_eq!(event.target, target);
             assert_eq!(event.action, action);
             assert_eq!(event.source_session.as_deref(), Some("owner"));
@@ -4538,7 +4544,7 @@ mod markdown_buffer_tests {
             }
         }
         cx.run_until_parked();
-        assert_eq!(received.borrow().len(), 2);
+        assert_eq!(received.borrow().len(), 3);
         assert!(cx.opened_url().is_none());
         // Mail links retain their existing OS handler.
         cx.update_window(window.into(), |_, window, cx| {

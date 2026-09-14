@@ -1121,7 +1121,7 @@ impl MarkdownPreview {
                                         .on_click(move |_, window, cx| {
                                             render::activate_link(
                                                 render::LinkTarget::new(&target, &target),
-                                                render::LinkAction::Internal,
+                                                render::LinkAction::Primary,
                                                 Some(&link),
                                                 window,
                                                 cx,
@@ -1167,7 +1167,7 @@ impl MarkdownPreview {
                                     el.cursor_pointer().on_click(move |_, window, cx| {
                                         render::activate_link(
                                             render::LinkTarget::new(&target, &target),
-                                            render::LinkAction::Internal,
+                                            render::LinkAction::Primary,
                                             Some(&link),
                                             window,
                                             cx,

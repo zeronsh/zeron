@@ -34,7 +34,7 @@ pub struct LinkRanges {
 struct Interaction {
     targets: Vec<LinkTarget>,
     focus: Vec<FocusHandle>,
-    menu_focus: [FocusHandle; 3],
+    menu_focus: [FocusHandle; 4],
     menu_focus_pending: Rc<Cell<bool>>,
     menu: Rc<RefCell<Option<(usize, Point<Pixels>)>>>,
     bounds: Bounds<Pixels>,
@@ -174,7 +174,7 @@ impl Element for LinkRanges {
                             {
                                 activate_link(
                                     click_target.clone(),
-                                    LinkAction::Internal,
+                                    LinkAction::Primary,
                                     click_ui.as_ref(),
                                     window,
                                     cx,
@@ -289,9 +289,9 @@ impl Element for LinkRanges {
                                     || (event.keystroke.key == "tab"
                                         && event.keystroke.modifiers.shift);
                                 let next = if backwards {
-                                    (current + 2) % 3
+                                    (current + menu_focus.len() - 1) % menu_focus.len()
                                 } else {
-                                    (current + 1) % 3
+                                    (current + 1) % menu_focus.len()
                                 };
                                 window.focus(&menu_focus[next], cx);
                             }
@@ -299,7 +299,7 @@ impl Element for LinkRanges {
                         }
                         cx.stop_propagation();
                     })
-                    .w(px(230.))
+                    .w(px(260.))
                     .flex()
                     .flex_col()
                     .on_mouse_down_out(move |_, window, _| {
@@ -339,6 +339,46 @@ impl Element for LinkRanges {
                             }),
                     );
                 }
+                let open_in_zeron = crate::settings::current(cx).open_web_links_in_zeron;
+                let menu = state.menu.clone();
+                card = card.child(crate::popover::menu_separator()).child(
+                    div()
+                        .id("Open links in Zeron by default")
+                        .px(px(10.))
+                        .py(px(7.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(div().flex_1().child("Open links in Zeron by default"))
+                        .child(div().w(px(14.)).flex_none().when(open_in_zeron, |el| {
+                            el.child(
+                                crate::icons::icon(crate::icons::CHECK)
+                                    .size(px(14.))
+                                    .text_color(theme.text_muted),
+                            )
+                        }))
+                        .track_focus(&state.menu_focus[3])
+                        .role(Role::Button)
+                        .aria_label(if open_in_zeron {
+                            "Open links in Zeron by default, checked"
+                        } else {
+                            "Open links in Zeron by default, unchecked"
+                        })
+                        .hover(|s| s.bg(theme.selection))
+                        .focus_visible(|s| s.bg(theme.selection))
+                        .on_click(move |_, window, cx| {
+                            crate::settings::update(
+                                crate::settings::SavePolicy::Immediate,
+                                cx,
+                                |settings| {
+                                    settings.open_web_links_in_zeron = !open_in_zeron;
+                                },
+                            );
+                            menu.borrow_mut().take();
+                            cx.refresh_windows();
+                            window.refresh();
+                        }),
+                );
                 let mut popup = crate::popover::menu_at(
                     "transcript-link-actions",
                     position,
@@ -534,8 +574,10 @@ mod rendered_tests {
     }
     #[test]
     fn context_menu_cancels_visible_and_pending_hover_tooltips() {
-        gpui_platform::headless().run(|cx| {
+        let dir = tempfile::tempdir().unwrap();
+        gpui_platform::headless().run(move |cx| {
             cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
             // Keep the headless event loop alive between scenario windows.
             cx.open_window(Default::default(), |_, cx| cx.new(|_| gpui::Empty))
                 .unwrap();
@@ -622,12 +664,17 @@ mod rendered_tests {
                                 !draw_has_tooltip(window, cx),
                                 "pending hover must not appear over the menu"
                             );
+                            let before = crate::settings::current(cx).open_web_links_in_zeron;
+                            key(window, "down", cx);
+                            key(window, "down", cx);
                             key(window, "down", cx);
                             key(window, "enter", cx);
-                            let actions = activated.borrow();
-                            assert_eq!(actions.len(), 1);
-                            assert_eq!(actions[0].action, LinkAction::External);
-                            assert_eq!(actions[0].target.original, "https://example.com/docs");
+                            assert_ne!(
+                                crate::settings::current(cx).open_web_links_in_zeron,
+                                before,
+                                "the fourth menu row toggles the default destination"
+                            );
+                            assert!(activated.borrow().is_empty());
                             window.remove_window();
                         })
                         .unwrap();
