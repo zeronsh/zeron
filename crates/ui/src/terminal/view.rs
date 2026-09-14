@@ -3,6 +3,9 @@
 //! - theme-owned background/ANSI16 plus the xterm 256-color cube/grayscale;
 //! - keystroke → PTY byte encoding (printables, control keys, arrows/nav
 //!   escape sequences, Ctrl- combos, Alt prefixing);
+//! - wheel → PTY byte encoding for programs that own the mouse (X10/UTF-8/SGR
+//!   reports) or run in the alternate screen (cursor keys), plus the
+//!   fractional-line accumulator that makes trackpads deliver whole lines;
 //! - the 12 ms input coalescer and the 80 ms resize debounce constants (the
 //!   panel drives the timers; the buffer logic here is pure);
 //! - [`TerminalElement`] — a custom gpui element that measures cell metrics
@@ -18,7 +21,7 @@ use gpui::{
 
 use crate::theme::{Appearance, Theme, rgb_to_hsl};
 
-use super::emulator::{CellColor, CellSnapshot, Side};
+use super::emulator::{CellColor, CellSnapshot, MouseEncoding, Side};
 use super::panel::TerminalPanel;
 
 /// Terminal font metrics (mono).
@@ -315,6 +318,88 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
         out
     } else {
         sanitized.into_bytes()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wheel → bytes
+// ---------------------------------------------------------------------------
+
+/// `steps` wheel lines as cursor-key presses (alternate-scroll, DECSET 1007):
+/// positive = up. Same bytes the arrow keys produce, DECCKM included.
+pub fn wheel_arrow_bytes(steps: i32, app_cursor: bool) -> Vec<u8> {
+    let key = if steps > 0 { "up" } else { "down" };
+    let press = keystroke_bytes(key, None, &Modifiers::default(), app_cursor)
+        .expect("arrow keys always encode");
+    press.repeat(steps.unsigned_abs() as usize)
+}
+
+/// `steps` wheel lines as mouse reports (xterm buttons 64 = up, 65 = down)
+/// at the 0-based viewport cell under the pointer. `None` when the cell is
+/// beyond what the encoding can carry — X10 packs each coordinate into one
+/// byte (max 223), UTF-8 mode into two (max 2015); xterm drops those too.
+pub fn wheel_report_bytes(
+    encoding: MouseEncoding,
+    steps: i32,
+    col: usize,
+    row: usize,
+) -> Option<Vec<u8>> {
+    let button: usize = if steps > 0 { 64 } else { 65 };
+    let report = match encoding {
+        MouseEncoding::Sgr => format!("\x1b[<{button};{};{}M", col + 1, row + 1).into_bytes(),
+        MouseEncoding::X10 | MouseEncoding::Utf8 => {
+            let utf8 = encoding == MouseEncoding::Utf8;
+            let max = if utf8 { 2015 } else { 223 };
+            if col >= max || row >= max {
+                return None;
+            }
+            let mut out = vec![0x1b, b'[', b'M', (32 + button) as u8];
+            for pos in [col, row] {
+                // 1-based, offset by 32 to stay printable; UTF-8 mode
+                // stretches past 0x7f with the two-byte encoding.
+                let pos = 32 + 1 + pos;
+                if utf8 && pos >= 0x80 {
+                    out.push((0xC0 | (pos >> 6)) as u8);
+                    out.push((0x80 | (pos & 0x3f)) as u8);
+                } else {
+                    out.push(pos as u8);
+                }
+            }
+            out
+        }
+    };
+    Some(report.repeat(steps.unsigned_abs() as usize))
+}
+
+/// Fractional wheel lines carried between events.
+///
+/// A trackpad delivers a stream of small pixel deltas; rounding each one on
+/// its own drops most of them (a slow drag never reaches half a line) and
+/// makes the fast ones jump. Summing first and handing out whole lines keeps
+/// every gesture proportional, wheel notches included.
+#[derive(Debug, Default)]
+pub struct WheelAccumulator {
+    pending: f32,
+}
+
+impl WheelAccumulator {
+    /// Add `lines` and take the whole lines now available (sign = direction;
+    /// positive = up). Non-finite input is ignored.
+    pub fn push(&mut self, lines: f32) -> i32 {
+        if !lines.is_finite() {
+            return 0;
+        }
+        self.pending += lines;
+        let whole = self.pending.trunc();
+        self.pending -= whole;
+        whole as i32
+    }
+
+    /// Drop the carried fraction — at a gesture boundary, or when the wheel
+    /// changes destination, so a leftover from the scrollback never becomes
+    /// a stray key press for the program.
+    pub fn reset(&mut self) {
+        self.pending = 0.0;
     }
 }
 
@@ -1101,5 +1186,97 @@ mod tests {
     #[test]
     fn drag_threshold_matches_the_gpui_default() {
         assert_eq!(SELECTION_DRAG_THRESHOLD, 2.0);
+    }
+
+    #[test]
+    fn wheel_arrows_follow_direction_count_and_decckm() {
+        assert_eq!(wheel_arrow_bytes(1, false), b"\x1b[A".to_vec());
+        assert_eq!(wheel_arrow_bytes(-1, false), b"\x1b[B".to_vec());
+        assert_eq!(wheel_arrow_bytes(2, true), b"\x1bOA\x1bOA".to_vec());
+        assert_eq!(wheel_arrow_bytes(-3, true), b"\x1bOB\x1bOB\x1bOB".to_vec());
+        assert!(wheel_arrow_bytes(0, false).is_empty());
+    }
+
+    #[test]
+    fn sgr_wheel_reports_are_one_based_and_repeat_per_step() {
+        // Column 4, row 9 (0-based) → 5;10; button 64 up, 65 down.
+        assert_eq!(
+            wheel_report_bytes(MouseEncoding::Sgr, 1, 4, 9),
+            Some(b"\x1b[<64;5;10M".to_vec())
+        );
+        assert_eq!(
+            wheel_report_bytes(MouseEncoding::Sgr, -2, 0, 0),
+            Some(b"\x1b[<65;1;1M\x1b[<65;1;1M".to_vec())
+        );
+        // SGR is decimal text: nothing caps a huge grid.
+        assert_eq!(
+            wheel_report_bytes(MouseEncoding::Sgr, 1, 500, 300),
+            Some(b"\x1b[<64;501;301M".to_vec())
+        );
+    }
+
+    #[test]
+    fn x10_wheel_reports_pack_bytes_and_cap_at_223() {
+        // 32 + 64 = '`', 32 + 65 = 'a'; coordinates are 33 + 0-based.
+        assert_eq!(
+            wheel_report_bytes(MouseEncoding::X10, 1, 0, 0),
+            Some(vec![0x1b, b'[', b'M', b'`', 33, 33])
+        );
+        assert_eq!(
+            wheel_report_bytes(MouseEncoding::X10, -1, 10, 3),
+            Some(vec![0x1b, b'[', b'M', b'a', 43, 36])
+        );
+        assert_eq!(
+            wheel_report_bytes(MouseEncoding::X10, 1, 222, 222),
+            Some(vec![0x1b, b'[', b'M', b'`', 255, 255])
+        );
+        assert_eq!(wheel_report_bytes(MouseEncoding::X10, 1, 223, 0), None);
+        assert_eq!(wheel_report_bytes(MouseEncoding::X10, 1, 0, 223), None);
+    }
+
+    #[test]
+    fn utf8_wheel_reports_widen_past_0x7f_and_cap_at_2015() {
+        // Below 0x80 the bytes match X10.
+        assert_eq!(
+            wheel_report_bytes(MouseEncoding::Utf8, 1, 94, 0),
+            Some(vec![0x1b, b'[', b'M', b'`', 127, 33])
+        );
+        // Column 95 → 128 → two-byte UTF-8 (0xC2 0x80); row stays one byte.
+        assert_eq!(
+            wheel_report_bytes(MouseEncoding::Utf8, 1, 95, 0),
+            Some(vec![0x1b, b'[', b'M', b'`', 0xC2, 0x80, 33])
+        );
+        // 2014 → 2047 = 0xDF 0xBF, the last two-byte code point.
+        assert_eq!(
+            wheel_report_bytes(MouseEncoding::Utf8, -1, 0, 2014),
+            Some(vec![0x1b, b'[', b'M', b'a', 33, 0xDF, 0xBF])
+        );
+        assert_eq!(wheel_report_bytes(MouseEncoding::Utf8, 1, 2015, 0), None);
+    }
+
+    #[test]
+    fn wheel_accumulator_hands_out_whole_lines() {
+        let mut acc = WheelAccumulator::default();
+        // A slow trackpad drag: 0.3-line deltas never rounded to anything
+        // before; now every fourth one crosses a line.
+        assert_eq!(acc.push(0.3), 0);
+        assert_eq!(acc.push(0.3), 0);
+        assert_eq!(acc.push(0.3), 0);
+        assert_eq!(acc.push(0.3), 1);
+        acc.reset();
+        // Whole notches pass straight through, sign intact.
+        assert_eq!(acc.push(-1.0), -1);
+        assert_eq!(acc.push(2.5), 2);
+        assert_eq!(acc.push(0.5), 1);
+        // Reversing direction cancels the carried fraction first.
+        assert_eq!(acc.push(0.75), 0);
+        assert_eq!(acc.push(-0.75), 0);
+        assert_eq!(acc.push(-1.0), -1);
+        // Reset drops the remainder; non-finite input is ignored.
+        acc.push(0.9);
+        acc.reset();
+        assert_eq!(acc.push(0.25), 0);
+        assert_eq!(acc.push(f32::NAN), 0);
+        assert_eq!(acc.push(0.75), 1);
     }
 }

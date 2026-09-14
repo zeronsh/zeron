@@ -11,7 +11,10 @@
 //! reconnects with exponential backoff resuming from `afterSeq`; Exit appends
 //! the "[process exited N]" line and stops. Keyboard bytes coalesce for 12 ms
 //! before `WriteTerminal`; viewport-driven resizes debounce 80 ms before
-//! `ResizeTerminal` (the emulator resizes immediately).
+//! `ResizeTerminal` (the emulator resizes immediately). The wheel scrolls the
+//! emulator's history only while no program has claimed it — with mouse
+//! reporting on, or in the alternate screen, it is encoded and written to the
+//! PTY like any other input (`on_scroll_wheel`).
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -19,8 +22,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use gpui::{
     App, Context, Entity, FocusHandle, IntoElement, KeyBinding, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, SharedString,
-    Subscription, Task, Window, actions, div, prelude::*, px,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent,
+    SharedString, Subscription, Task, TouchPhase, Window, actions, div, prelude::*, px,
 };
 
 use zeron_proto::{TerminalEvent, TerminalSession};
@@ -31,10 +34,13 @@ use crate::settings::{TERMINAL_MAX_VH, TERMINAL_MIN_HEIGHT};
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 
-use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, GridPoint, SelectionType, Side};
+use super::emulator::{
+    CellSnapshot, CursorSnapshot, Emulator, GridPoint, SelectionType, Side, WheelRoute,
+};
 use super::view::{
-    COALESCE_MS, InputCoalescer, RESIZE_DEBOUNCE_MS, SELECTION_DRAG_THRESHOLD, TerminalElement,
-    cell_at, keystroke_bytes, paste_bytes, terminal_panel_bg,
+    COALESCE_MS, InputCoalescer, RESIZE_DEBOUNCE_MS, SELECTION_DRAG_THRESHOLD, TERM_LINE_HEIGHT,
+    TerminalElement, WheelAccumulator, cell_at, keystroke_bytes, paste_bytes, terminal_panel_bg,
+    wheel_arrow_bytes, wheel_report_bytes,
 };
 
 /// Fixed tab width — drag-reorder math stays analytic.
@@ -381,6 +387,10 @@ pub struct TerminalPanel {
     selection_scroll_task: Option<Task<()>>,
     /// Active scrollbar thumb/track drag.
     scrollbar_drag: Option<ScrollbarDrag>,
+    /// Sub-line wheel remainder, and the route it was collected for — a
+    /// change of route drops it (see [`WheelAccumulator::reset`]).
+    wheel: WheelAccumulator,
+    wheel_route: WheelRoute,
     /// The terminal owns the cursor. The scrollbar is an on-demand affordance
     /// rather than a permanently painted rail beside the panel.
     terminal_hovered: bool,
@@ -406,6 +416,8 @@ impl TerminalPanel {
             selection_drag: None,
             selection_scroll_task: None,
             scrollbar_drag: None,
+            wheel: WheelAccumulator::default(),
+            wheel_route: WheelRoute::Scrollback,
             terminal_hovered: false,
             scrollbar_hovered: false,
             _observe: observe,
@@ -1164,6 +1176,72 @@ impl TerminalPanel {
         }
     }
 
+    /// Route the wheel the way a native terminal does: to the program when it
+    /// asked for the mouse or lives in the alternate screen, to our history
+    /// otherwise. Shift+wheel always reaches the history — the one way back to
+    /// scrollback while a program owns the mouse (the xterm convention).
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let lines = match event.delta {
+            ScrollDelta::Lines(delta) => delta.y,
+            ScrollDelta::Pixels(delta) => f32::from(delta.y) / TERM_LINE_HEIGHT,
+        };
+        let route = if event.modifiers.shift {
+            WheelRoute::Scrollback
+        } else {
+            self.active_tab(cx)
+                .map(|tab| {
+                    // Reports carry viewport coordinates, which mean nothing
+                    // to the program while we are scrolled into history:
+                    // walk back to the live bottom first.
+                    match tab.emulator.wheel_route() {
+                        WheelRoute::MouseReport(_) if tab.emulator.display_offset() > 0 => {
+                            WheelRoute::Scrollback
+                        }
+                        route => route,
+                    }
+                })
+                .unwrap_or(WheelRoute::Scrollback)
+        };
+        if event.touch_phase == TouchPhase::Started || route != self.wheel_route {
+            self.wheel.reset();
+            self.wheel_route = route;
+        }
+        let steps = self.wheel.push(lines);
+        if steps == 0 {
+            return;
+        }
+        match route {
+            WheelRoute::Scrollback => self.scroll_active(steps, cx),
+            WheelRoute::ArrowKeys { app_cursor } => {
+                let bytes = wheel_arrow_bytes(steps, app_cursor);
+                self.queue_input(&bytes, cx);
+            }
+            WheelRoute::MouseReport(encoding) => {
+                // No placement yet means no grid has painted — nothing to
+                // report a cell for.
+                let Some(geometry) = self.geometry else {
+                    return;
+                };
+                let hit = cell_at(
+                    f32::from(event.position.x - geometry.origin.x),
+                    f32::from(event.position.y - geometry.origin.y),
+                    geometry.cell_w,
+                    geometry.line_h,
+                    geometry.cols as usize,
+                    geometry.rows as usize,
+                );
+                if let Some(bytes) = wheel_report_bytes(encoding, steps, hit.col, hit.row) {
+                    self.queue_input(&bytes, cx);
+                }
+            }
+        }
+    }
+
     fn schedule_selection_scroll(&mut self, cx: &mut Context<Self>) {
         if self.selection_scroll_task.is_some() {
             return;
@@ -1712,16 +1790,7 @@ impl Render for TerminalPanel {
                     // the user let go of.
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                    .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
-                        let lines = match event.delta {
-                            ScrollDelta::Lines(delta) => delta.y,
-                            ScrollDelta::Pixels(delta) => {
-                                f32::from(delta.y) / super::view::TERM_LINE_HEIGHT
-                            }
-                        };
-                        let step = lines.round() as i32;
-                        this.scroll_active(step, cx);
-                    }))
+                    .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
                     .child(TerminalElement::new(cx.entity(), focused))
                     .children(scrollbar),
             )

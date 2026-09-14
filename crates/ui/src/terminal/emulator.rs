@@ -152,6 +152,35 @@ pub struct CursorSnapshot {
     pub col: usize,
 }
 
+/// Where a wheel event belongs, decided by the modes the running program set.
+///
+/// A native terminal never scrolls its own history while a program has asked
+/// for the mouse: a full-screen TUI in the alternate screen has no history to
+/// scroll, and expects the wheel as input instead. This is what a plain
+/// `scroll_display` misses (issue #361: the wheel did nothing inside `claude`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelRoute {
+    /// Nothing asked for the wheel: scroll the viewport through history.
+    Scrollback,
+    /// Alternate screen with alternate-scroll (DECSET 1007, on by default like
+    /// xterm): each wheel line becomes a cursor-key press, honoring DECCKM.
+    ArrowKeys { app_cursor: bool },
+    /// Mouse reporting is on (DECSET 1000/1002/1003): the wheel is a button
+    /// press the program reads in this encoding.
+    MouseReport(MouseEncoding),
+}
+
+/// The mouse-report wire format the program selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseEncoding {
+    /// DECSET 1006: `ESC [ < Cb ; Cx ; Cy M`, decimal, unbounded.
+    Sgr,
+    /// DECSET 1005: X10 framing with UTF-8 coordinates (reaches 2015).
+    Utf8,
+    /// The X10 default: `ESC [ M` + three bytes, coordinates capped at 223.
+    X10,
+}
+
 /// Captures `Term` callbacks. Interior-mutable because `EventListener::send_event`
 /// takes `&self`; single-threaded (the emulator lives inside a gpui entity).
 #[derive(Default, Clone)]
@@ -238,6 +267,28 @@ impl Emulator {
     /// Pastes should be wrapped in `ESC [200~` / `ESC [201~`.
     pub fn bracketed_paste_mode(&self) -> bool {
         self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
+    /// Where the wheel goes right now — see [`WheelRoute`]. Mouse reporting
+    /// wins over alternate-scroll, matching xterm's precedence.
+    pub fn wheel_route(&self) -> WheelRoute {
+        let mode = self.term.mode();
+        if mode.intersects(TermMode::MOUSE_MODE) {
+            let encoding = if mode.contains(TermMode::SGR_MOUSE) {
+                MouseEncoding::Sgr
+            } else if mode.contains(TermMode::UTF8_MOUSE) {
+                MouseEncoding::Utf8
+            } else {
+                MouseEncoding::X10
+            };
+            WheelRoute::MouseReport(encoding)
+        } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
+            WheelRoute::ArrowKeys {
+                app_cursor: mode.contains(TermMode::APP_CURSOR),
+            }
+        } else {
+            WheelRoute::Scrollback
+        }
     }
 
     /// Lines scrolled back into history (0 = pinned to the live bottom).
@@ -598,6 +649,45 @@ mod tests {
         assert!(!e.app_cursor_mode());
         e.feed(b"\x1b[?2004h");
         assert!(e.bracketed_paste_mode());
+    }
+
+    #[test]
+    fn wheel_route_follows_alt_screen_and_mouse_modes() {
+        let mut e = emu(10, 2);
+        // A plain shell: nothing asked for the wheel.
+        assert_eq!(e.wheel_route(), WheelRoute::Scrollback);
+
+        // Alternate screen alone: alternate-scroll is on by default, so the
+        // wheel turns into arrows — CSI, then SS3 once DECCKM is set.
+        e.feed(b"\x1b[?1049h");
+        assert_eq!(e.wheel_route(), WheelRoute::ArrowKeys { app_cursor: false });
+        e.feed(b"\x1b[?1h");
+        assert_eq!(e.wheel_route(), WheelRoute::ArrowKeys { app_cursor: true });
+        // A program that turns alternate-scroll off wants the history back.
+        e.feed(b"\x1b[?1007l");
+        assert_eq!(e.wheel_route(), WheelRoute::Scrollback);
+        e.feed(b"\x1b[?1007h\x1b[?1l");
+
+        // Mouse reporting takes precedence over alternate-scroll, in whichever
+        // encoding was selected — the claude/vim/less shape is 1000+1006.
+        e.feed(b"\x1b[?1000h");
+        assert_eq!(e.wheel_route(), WheelRoute::MouseReport(MouseEncoding::X10));
+        e.feed(b"\x1b[?1005h");
+        assert_eq!(
+            e.wheel_route(),
+            WheelRoute::MouseReport(MouseEncoding::Utf8)
+        );
+        e.feed(b"\x1b[?1006h");
+        assert_eq!(e.wheel_route(), WheelRoute::MouseReport(MouseEncoding::Sgr));
+        // Motion/drag tracking count as mouse mode too.
+        e.feed(b"\x1b[?1000l\x1b[?1002h");
+        assert_eq!(e.wheel_route(), WheelRoute::MouseReport(MouseEncoding::Sgr));
+        e.feed(b"\x1b[?1002l\x1b[?1003h");
+        assert_eq!(e.wheel_route(), WheelRoute::MouseReport(MouseEncoding::Sgr));
+
+        // Leaving the alt screen with tracking off restores the scrollback.
+        e.feed(b"\x1b[?1003l\x1b[?1049l");
+        assert_eq!(e.wheel_route(), WheelRoute::Scrollback);
     }
 
     #[test]
