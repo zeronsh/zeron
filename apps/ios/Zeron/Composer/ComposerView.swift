@@ -43,15 +43,19 @@ struct ComposerShell<Chips: View>: View {
     /// Screenshot rig (-focuscomposer): take keyboard focus shortly after
     /// appearing, so the keyboard-up transcript states can be driven headless.
     var autoFocus = false
+    var dictationContext = ""
+    var transcriber: (any ComposerTranscriber)? = nil
     @ViewBuilder var chips: Chips
 
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.scenePhase) private var scenePhase
     private var compact: Bool { verticalSizeClass == .compact }
     @State private var focused = false
     @State private var editor = ComposerEditorController()
+    @State private var dictation = ComposerDictation()
 
     private var expanded: Bool {
-        alwaysExpanded || keepExpanded || focused || !attachments.isEmpty
+        alwaysExpanded || keepExpanded || focused || dictation.active || !attachments.isEmpty
             || draft.contains("\n") || draft.count > 26
     }
 
@@ -72,17 +76,42 @@ struct ComposerShell<Chips: View>: View {
     }
 
     var body: some View {
-        surface
+        VStack(alignment: .leading, spacing: 6) {
+            if let status = dictationStatus {
+                Text(status)
+                    .font(Theme.sans(12))
+                    .foregroundStyle(Theme.textMuted)
+                    .padding(.horizontal, 12)
+                    .accessibilityIdentifier("composer-dictation-status")
+            }
+            surface
+        }
             // Focus-widen: margins pull in slightly while typing (chat-session.tsx).
             .padding(.horizontal, focused ? 10 : 16)
             .motionAnimation(Motion.resize, value: focused)
             .motionAnimation(Motion.resize, value: expanded)
             .onAppear {
+                if let transcriber { dictation = ComposerDictation(transcriber: transcriber) }
                 guard autoFocus else { return }
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 1_500_000_000)
                     focused = true
                 }
+            }
+            .onDisappear { dictation.cancel() }
+            .onChange(of: dictationContext) { _, _ in dictation.cancel() }
+            .onChange(of: busy) { _, value in if value { dictation.cancel() } }
+            .onChange(of: scenePhase) { _, phase in
+                // Permission sheets temporarily make the scene inactive.
+                if phase == .background { dictation.cancel() }
+            }
+            .onChange(of: dictation.state) { _, state in
+                if let status = dictationStatus {
+                    UIAccessibility.post(notification: .announcement, argument: status)
+                } else if state == .idle {
+                    UIAccessibility.post(notification: .announcement, argument: "Dictation stopped")
+                }
+                if state == .listening { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
             }
     }
 
@@ -115,10 +144,12 @@ struct ComposerShell<Chips: View>: View {
                     }
                     .scrollClipDisabled(false)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    microphoneButton
                     actionButton
                 }
                 .padding(.top, compact ? 0 : 8)
             } else {
+                microphoneButton
                 actionButton
             }
         }
@@ -143,14 +174,17 @@ struct ComposerShell<Chips: View>: View {
         ComposerEditor(text: $draft, focused: $focused, placeholder: placeholder,
                        maxLines: compact ? 2 : 7, controller: editor,
                        onModifiedSubmit: {
-                           guard !busy else { return }
-                           editor.commit()
-                           if hasContent {
-                               if sendEnabled { onSend() }
-                           } else {
-                               onAdvanceQueue()
+                           guard !busy, dictation.state != .finalizing else { return }
+                           let wasDictating = dictation.active
+                           dictation.finish {
+                               editor.commit()
+                               if hasContent {
+                                   if sendEnabled { onSend() }
+                               } else if !wasDictating {
+                                   onAdvanceQueue()
+                               }
+                               editor.apply(text: draft)
                            }
-                           editor.apply(text: draft)
                        })
             .overlay(alignment: .topLeading) {
                 if draft.isEmpty {
@@ -165,6 +199,7 @@ struct ComposerShell<Chips: View>: View {
 
     private var attachButton: some View {
         Button {
+            dictation.cancel()
             onAttach?()
         } label: {
             Image(systemName: "plus")
@@ -180,6 +215,47 @@ struct ComposerShell<Chips: View>: View {
         .accessibilityLabel("Attach photos")
     }
 
+    private var dictationStatus: String? {
+        switch dictation.state {
+        case .idle: nil
+        case .requestingPermission: "Waiting for microphone and speech permission…"
+        case .listening: "Listening on device…"
+        case .finalizing: "Finishing dictation…"
+        case .error(let error): error.message
+        }
+    }
+
+    private var microphoneButton: some View {
+        Button {
+            if dictation.active {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                dictation.finish()
+            } else {
+                focused = true
+                dictation.start(editor: editor)
+            }
+        } label: {
+            Group {
+                if dictation.state == .requestingPermission || dictation.state == .finalizing {
+                    ProgressView().controlSize(.small).tint(Theme.text)
+                } else {
+                    Image(systemName: dictation.active ? "mic.fill" : "mic")
+                        .font(.system(size: 17, weight: .medium))
+                }
+            }
+            .foregroundStyle(Theme.text)
+            .frame(width: 44, height: 44)
+            .background(whiteAlpha(dictation.active ? 0.18 : 0.06), in: Circle())
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(busy || dictation.state == .finalizing)
+        .accessibilityLabel(dictation.active ? "Stop dictation" : "Dictate message")
+        .accessibilityValue(dictationStatus ?? "Not recording")
+        .accessibilityHint("Speech is recognized on this device and added to your draft")
+        .accessibilityIdentifier("composer-dictation")
+    }
+
     /// Attachments count as content: an image-only send is a send, never a stop.
     private var hasContent: Bool {
         allowEmptySend || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -189,13 +265,16 @@ struct ComposerShell<Chips: View>: View {
     private var actionButton: some View {
         Button {
             if showStop, !hasContent {
+                dictation.cancel()
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 onStop()
             } else {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                editor.commit()
-                onSend()
-                editor.apply(text: draft)
+                dictation.finish {
+                    editor.commit()
+                    if hasContent { onSend() }
+                    editor.apply(text: draft)
+                }
             }
         } label: {
             Group {
@@ -226,6 +305,7 @@ struct ComposerShell<Chips: View>: View {
     }
 
     private var buttonActive: Bool {
+        if dictation.state == .finalizing { return false }
         if showStop, !hasContent { return true }
         return sendEnabled && hasContent && !busy
     }
@@ -361,7 +441,8 @@ struct ComposerView: View {
                 attachments: editingQueuedId == nil ? attachments : [],
                 onAttach: editingQueuedId == nil ? { showPicker = true } : nil,
                 onRemoveAttachment: { id in attachments.removeAll { $0.id == id } },
-                autoFocus: model.launchFocusComposer
+                autoFocus: model.launchFocusComposer,
+                dictationContext: "\(chat.id)/\(editingQueuedId ?? "draft")"
             ) {
                 if let pullRequest = model.changeRequest(for: chat) {
                     PullRequestBadge(summary: pullRequest, surface: .composer)

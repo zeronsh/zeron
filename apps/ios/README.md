@@ -167,4 +167,27 @@ attachment-only drafts), saves an active queue edit, or activates the first
 queued row when the composer is empty. It never skips a blocked head or stops
 the agent merely because the draft is empty.
 
+### Composer dictation
+
+The microphone button dictates into the current selection using the device's
+current locale. Zeron requires on-device recognition; if the language or device
+does not support it, the composer shows an error and keeps the draft. Audio is
+never attached to a message or sent through the mesh.
+
+Partial results replace the same dictated range. Typing, pasting, or starting
+an IME edit stops dictation before applying the edit. Stop dictation finalizes
+the text; Send and Command+Return wait for that finalization once before using
+the usual text send path. If recognition does not finish within two seconds,
+the latest partial is committed. A recognition error keeps the text for review.
+Opening attachments, switching the draft or conversation, replacing the composer
+with a question panel, and backgrounding stop capture and retain the latest text.
+
+Deterministic coverage uses `ComposerDictationTests` with an injected fake
+recognizer; it never needs microphone permission. `MobilePolishTests` covers the
+44pt control and draft preservation in portrait and landscape. Before release,
+verify on an iPhone: both permission prompts and denial/retry through Settings,
+real speech in a supported locale with networking disabled, unsupported locales,
+audio interruptions/route changes, backgrounding/navigation during capture and
+permission prompts, VoiceOver announcements, haptics, and sending to a remote host.
+
 Queue editing on iOS changes text only and preserves queued attachments, including when the text is cleared. Draft photos are hidden and the attachment picker is unavailable during editing. If the row disappears or its lease is superseded, **Copy edit and stop editing** saves the edited text to the clipboard and restores the original draft and photos.

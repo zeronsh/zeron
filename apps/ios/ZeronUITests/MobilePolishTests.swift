@@ -32,6 +32,27 @@ final class MobilePolishTests: XCTestCase {
         app.otherElements["transcript"].cells["a599#t1.0"].staticTexts.firstMatch
     }
 
+    func testDictationControlFitsComposerWithoutChangingDraft() {
+        launch(["-route", "chat:chat-tabs"])
+        let microphone = app.buttons["composer-dictation"]
+        waitUntilHittable(microphone)
+        XCTAssertGreaterThanOrEqual(microphone.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(microphone.frame.height, 44)
+        XCTAssertEqual(microphone.label, "Dictate message")
+        capture("dictation-collapsed")
+        composer.tap()
+        composer.typeText("Keep this draft")
+        for orientation in [UIDeviceOrientation.portrait, .landscapeLeft] {
+            XCUIDevice.shared.orientation = orientation
+            waitUntilHittable(microphone)
+            let send = app.buttons["composer-send"]
+            waitUntilHittable(send)
+            XCTAssertLessThanOrEqual(microphone.frame.maxX, send.frame.minX)
+            XCTAssertEqual(composer.value as? String, "Keep this draft")
+            capture("dictation-\(orientation.rawValue)")
+        }
+    }
+
     func testImmediateScrollAfterRepeatedSessionOpens() {
         launch(["-route", "chat:chat-tabs", "-huge"])
         let transcript = app.otherElements["transcript"]
