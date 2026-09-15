@@ -223,11 +223,29 @@ pub fn device_room_ws_url(
 // Token source — the auth seam
 // ---------------------------------------------------------------------------
 
-/// Fresh-bearer provider: the relay re-reads it on every (re)dial so an expired access
-/// token is never reused after a refresh. `None` = signed out (host relay idles quietly).
+/// A temporarily unreachable token service does not revoke an existing session.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TokenError {
+    #[error("signed out")]
+    SignedOut,
+    #[error("access token temporarily unavailable: {0}")]
+    TemporarilyUnavailable(String),
+}
+
+impl From<TokenError> for zeron_sync::SyncError {
+    fn from(error: TokenError) -> Self {
+        match error {
+            TokenError::SignedOut => Self::Auth("signed out".into()),
+            TokenError::TemporarilyUnavailable(reason) => Self::TemporarilyUnavailable(reason),
+        }
+    }
+}
+
+/// Fresh-bearer provider, consulted on every dial. Only `SignedOut` may tear
+/// down authenticated sockets; temporary failures keep their supervisors alive.
 #[async_trait]
 pub trait TokenSource: Send + Sync + 'static {
-    async fn token(&self) -> Option<String>;
+    async fn token(&self) -> Result<String, TokenError>;
 
     /// Changes whenever credentials become available or are replaced. Long-lived
     /// supervisors use this to retry immediately instead of waiting for backoff.
@@ -250,8 +268,8 @@ pub struct StaticToken(pub String);
 
 #[async_trait]
 impl TokenSource for StaticToken {
-    async fn token(&self) -> Option<String> {
-        Some(self.0.clone())
+    async fn token(&self) -> Result<String, TokenError> {
+        Ok(self.0.clone())
     }
 }
 
@@ -314,53 +332,59 @@ impl HostRelay {
             // failures walk the backoff.
             let mut delay = HOST_REJOIN_MIN;
             loop {
-                if let Some(token) = config.token.token().await {
-                    let url = device_room_ws_url(
-                        &config.edge_url,
-                        &config.device_id,
-                        "host",
-                        None,
-                        &token,
-                    );
-                    let started = tokio::time::Instant::now();
-                    let outcome = {
-                        let session = host_session(&url, &service, &on_nudge);
-                        tokio::pin!(session);
-                        loop {
-                            tokio::select! {
-                                outcome = &mut session => break outcome,
-                                _ = token_changed(&mut token_changes) => {
-                                    // Token rotations keep a healthy socket alive. Sign-out is
-                                    // different: dropping the session closes the authenticated
-                                    // socket and every virtual RPC connection immediately.
-                                    if config.token.token().await.is_none() {
-                                        tracing::info!(
-                                            "device-room: credentials removed; closing host session"
-                                        );
-                                        break Ok(());
+                match config.token.token().await {
+                    Ok(token) => {
+                        let url = device_room_ws_url(
+                            &config.edge_url,
+                            &config.device_id,
+                            "host",
+                            None,
+                            &token,
+                        );
+                        let started = tokio::time::Instant::now();
+                        let outcome = {
+                            let session = host_session(&url, &service, &on_nudge);
+                            tokio::pin!(session);
+                            loop {
+                                tokio::select! {
+                                    outcome = &mut session => break outcome,
+                                    _ = token_changed(&mut token_changes) => {
+                                        // Token rotations keep a healthy socket alive. Sign-out is
+                                        // different: dropping the session closes the authenticated
+                                        // socket and every virtual RPC connection immediately.
+                                        if matches!(config.token.token().await, Err(TokenError::SignedOut)) {
+                                            tracing::info!(
+                                                "device-room: credentials removed; closing host session"
+                                            );
+                                            break Ok(());
+                                        }
                                     }
                                 }
                             }
-                        }
-                    };
-                    let healthy = started.elapsed() >= HOST_HEALTHY_SESSION;
-                    match outcome {
-                        Ok(()) => {
-                            tracing::info!("device-room: host session ended; reconnecting");
-                            delay = HOST_REJOIN_MIN;
-                        }
-                        Err(err) => {
-                            tracing::warn!(error = %err, "device-room: host session failed");
-                            delay = if healthy {
-                                HOST_REJOIN_MIN
-                            } else {
-                                (delay * 2).min(config.retry)
-                            };
+                        };
+                        let healthy = started.elapsed() >= HOST_HEALTHY_SESSION;
+                        match outcome {
+                            Ok(()) => {
+                                tracing::info!("device-room: host session ended; reconnecting");
+                                delay = HOST_REJOIN_MIN;
+                            }
+                            Err(err) => {
+                                tracing::warn!(error = %err, "device-room: host session failed");
+                                delay = if healthy {
+                                    HOST_REJOIN_MIN
+                                } else {
+                                    (delay * 2).min(config.retry)
+                                };
+                            }
                         }
                     }
-                } else {
-                    // Signed out: poll for credentials at the configured pace.
-                    delay = config.retry;
+                    Err(TokenError::SignedOut) => {
+                        delay = config.retry;
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "device-room: token unavailable; retrying");
+                        delay = (delay * 2).min(config.retry);
+                    }
                 }
                 // Drain stale events (our own dial success notifies too) so
                 // only wakes/successes DURING this wait cut it short.
@@ -841,7 +865,11 @@ impl LinkCache {
                         }
                         _ = token_changed(&mut token_changes) => {
                             let Some(cache) = weak.upgrade() else { return };
-                            let signed_out = cache.config.token.token().await.is_none();
+                            let signed_out = match cache.config.token.token().await {
+                                Ok(_) => false,
+                                Err(TokenError::SignedOut) => true,
+                                Err(TokenError::TemporarilyUnavailable(_)) => continue,
+                            };
                             if signed_out {
                                 // Cached clients were authenticated when their sockets
                                 // opened. Revocation must close them even though the
@@ -1013,7 +1041,7 @@ impl LinkCache {
             .token
             .token()
             .await
-            .ok_or_else(|| RpcError::Transport("not signed in".into()))?;
+            .map_err(|e| RpcError::Transport(e.to_string()))?;
         let conn_id = uuid::Uuid::new_v4().to_string();
         let url = device_room_ws_url(
             &self.config.edge_url,

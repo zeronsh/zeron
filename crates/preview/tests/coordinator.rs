@@ -18,8 +18,8 @@ use zeron_preview::{
 struct Token(String);
 #[async_trait::async_trait]
 impl TokenSource for Token {
-    async fn token(&self) -> Option<String> {
-        Some(self.0.clone())
+    async fn token(&self) -> anyhow::Result<String> {
+        Ok(self.0.clone())
     }
 }
 struct Backend(Catalog);

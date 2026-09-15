@@ -1404,6 +1404,13 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({ "sent": sent }))
             }
             methods::PROBE_SYNC => {
+                // Focus probes remain cheap. An explicit Retry may also allow
+                // one fresh, shared auth attempt before its cooldown expires.
+                if params.get("retry").and_then(serde_json::Value::as_bool) == Some(true)
+                    && let Some(auth) = &self.auth
+                {
+                    auth.retry_refresh();
+                }
                 self.workspace.probe();
                 self.doc_host.probe_open_chats();
                 self.doc_host.probe_edge_reachability();

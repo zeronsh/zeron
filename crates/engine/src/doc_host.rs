@@ -37,6 +37,7 @@ use zeron_doc::{
 use zeron_proto::{ConversationSourceContext, HarnessId, UserInputAnswer, UserInputQuestion};
 use zeron_sync::DocsStore;
 
+use crate::http_error::describe_http_error;
 use crate::sessions::{SessionsEngine, SteerOutcome};
 use crate::workspace_host::WorkspaceHost;
 use crate::{EngineError, new_id, now_ms};
@@ -118,7 +119,7 @@ pub struct EdgeConfig {
     /// Edge base URL (`http(s)://…`); rewritten to `ws(s)` for the room socket.
     pub url: String,
     /// Fresh-bearer provider (the relay's `TokenSource`), consulted per
-    /// connect/request. `None` from the provider = signed out.
+    /// connect/request. Temporary failures preserve the signed-in session.
     pub token: Arc<dyn zeron_rpc::TokenSource>,
     /// This engine's device id, carried on room dials (`&device=`) so the
     /// edge can attribute sockets in logs. Debugging the 2026-08-04 deaf
@@ -156,8 +157,8 @@ impl EdgeConfig {
         Self::new(url, Arc::new(zeron_rpc::StaticToken(token.into())))
     }
 
-    /// The current bearer, refreshed by the provider if stale. `None` = signed out.
-    pub async fn bearer(&self) -> Option<String> {
+    /// The current bearer, or a distinct signed-out/temporarily-unavailable error.
+    pub async fn bearer(&self) -> Result<String, zeron_rpc::TokenError> {
         self.token.token().await
     }
 
@@ -190,9 +191,7 @@ impl zeron_sync::UrlProvider for EdgeRoomUrl {
         let base = self.base.clone();
         let device = self.device_id.clone();
         Box::pin(async move {
-            let token = token.token().await.ok_or_else(|| {
-                zeron_sync::SyncError::Auth("no access token (signed out)".into())
-            })?;
+            let token = token.token().await.map_err(zeron_sync::SyncError::from)?;
             let mut url = format!("{base}?token={token}");
             if !device.is_empty() {
                 url.push_str(&format!("&device={device}"));
@@ -1407,7 +1406,7 @@ impl DocHost {
                 .await;
                 match dial {
                     Ok(Ok(client)) => {
-                        if edge.bearer().await.is_none() {
+                        if matches!(edge.bearer().await, Err(zeron_rpc::TokenError::SignedOut)) {
                             return;
                         }
                         let Some(handle) = weak.upgrade() else {
@@ -1534,7 +1533,7 @@ impl DocHost {
                                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                                 },
                                 _ = crate::workspace_host::token_changed(&mut token_changes) => {
-                                    if edge.bearer().await.is_none() {
+                                    if matches!(edge.bearer().await, Err(zeron_rpc::TokenError::SignedOut)) {
                                         if let Some(handle) = weak.upgrade() {
                                             lock(&handle.chat2).take();
                                             // Keep journaling local cleanup after credentials disappear.
@@ -1688,7 +1687,7 @@ impl DocHost {
         }
         let snapshot = rebuilt.doc.export_snapshot().map_err(|e| e.to_string())?;
         let frontier = rebuilt.doc.doc().oplog_vv().encode();
-        let bearer = edge.bearer().await.ok_or("signed out")?;
+        let bearer = edge.bearer().await.map_err(|e| e.to_string())?;
         let url = format!(
             "{}/chat2/{}/checkpoint?seqCovered=0",
             edge.url.trim_end_matches('/'),
@@ -1706,7 +1705,7 @@ impl DocHost {
             .body(snapshot.clone())
             .send()
             .await
-            .map_err(|e| format!("seed checkpoint POST: {e}"))?;
+            .map_err(|e| format!("seed checkpoint POST: {}", describe_http_error(e)))?;
         if !res.status().is_success() {
             return Err(format!("seed checkpoint HTTP {}", res.status()));
         }
@@ -1900,7 +1899,7 @@ impl DocHost {
             let edge_tail = edge.clone();
             let chat = chat_id.clone();
             self.spawn_worker(async move {
-                let Some(bearer) = edge_tail.bearer().await else {
+                let Ok(bearer) = edge_tail.bearer().await else {
                     return;
                 };
                 let url = format!(
@@ -1983,7 +1982,7 @@ impl DocHost {
         let http = self.inner.http.clone();
         let weak_note = Arc::downgrade(handle);
         self.spawn_worker(async move {
-            let Some(bearer) = edge.bearer().await else {
+            let Ok(bearer) = edge.bearer().await else {
                 in_flight.store(false, Ordering::Release);
                 return;
             };
@@ -2024,6 +2023,7 @@ impl DocHost {
                         "chat2 checkpoint rejected");
                 }
                 Err(err) => {
+                    let err = describe_http_error(err);
                     tracing::warn!(chat = %chat_id, error = %err, "chat2 checkpoint POST failed");
                 }
             }
@@ -3161,9 +3161,12 @@ impl DocHost {
         let chat = chat_id.to_string();
         self.spawn_worker_on(&runtime, async move {
             // Fresh bearer per request — never the boot-time snapshot.
-            let Some(bearer) = edge.bearer().await else {
-                tracing::warn!(chat = %chat, "nudge skipped: signed out");
-                return;
+            let bearer = match edge.bearer().await {
+                Ok(bearer) => bearer,
+                Err(err) => {
+                    tracing::warn!(chat = %chat, error = %err, "nudge skipped: token unavailable");
+                    return;
+                }
             };
             let send = reqwest::Client::new()
                 .post(&url)
@@ -3179,6 +3182,7 @@ impl DocHost {
                 Ok(res) => tracing::warn!(chat = %chat, device = %host_device,
                     status = res.status().as_u16(), "nudge rejected"),
                 Err(err) => {
+                    let err = describe_http_error(err);
                     tracing::warn!(chat = %chat, error = %err, "nudge failed (best-effort)")
                 }
             }
@@ -3698,8 +3702,8 @@ impl DocHost {
             encode_part_segment(&payload.part_id)
         );
         self.spawn_worker_on(&runtime, async move {
-            let Some(bearer) = edge.bearer().await else {
-                return; // signed out; summary-only until the next session
+            let Ok(bearer) = edge.bearer().await else {
+                return; // token unavailable; serve the local summary
             };
             let mut puts: Vec<(String, &'static str, Vec<u8>)> = Vec::new();
             if let Some(output) = &payload.output {
@@ -3727,6 +3731,7 @@ impl DocHost {
                     Ok(res) => tracing::warn!(url, status = res.status().as_u16(),
                         "tool sidecar upload rejected"),
                     Err(err) => {
+                        let err = describe_http_error(err);
                         tracing::warn!(url, error = %err, "tool sidecar upload failed (best-effort)")
                     }
                 }
@@ -3757,9 +3762,7 @@ impl DocHost {
         let Some(edge) = self.inner.config.edge.clone() else {
             return Err(EngineError::Other("offline: no edge configured".into()));
         };
-        let Some(bearer) = edge.bearer().await else {
-            return Err(EngineError::Other("signed out".into()));
-        };
+        let bearer = edge.bearer().await?;
         // `valid` above guarantees the split; re-split to encode the part
         // segment for transport (PART_RE allows `#`, which a raw URL would
         // truncate as a fragment — the 2026-08-10 silent-collision bug).
@@ -3777,16 +3780,21 @@ impl DocHost {
             .bearer_auth(&bearer)
             .send()
             .await
-            .map_err(|e| EngineError::Other(format!("sidecar fetch failed: {e}")))?;
+            .map_err(|e| {
+                EngineError::Other(format!("sidecar fetch failed: {}", describe_http_error(e)))
+            })?;
         if !res.status().is_success() {
             return Err(EngineError::Other(format!(
                 "sidecar fetch: HTTP {}",
                 res.status().as_u16()
             )));
         }
-        res.text()
-            .await
-            .map_err(|e| EngineError::Other(format!("sidecar body read failed: {e}")))
+        res.text().await.map_err(|e| {
+            EngineError::Other(format!(
+                "sidecar body read failed: {}",
+                describe_http_error(e)
+            ))
+        })
     }
 
     /// §2.2 writer discipline: we host a chat iff its workspace row's `deviceId` is
