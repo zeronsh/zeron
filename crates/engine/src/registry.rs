@@ -494,8 +494,8 @@ pub fn default_registry() -> HarnessRegistry {
     // Factory Droid over ACP (`droid exec --output-format acp`), same lazy
     // pattern: the static descriptor mirrors AcpHarness::droid() exactly.
     // No steering extension (turn boundaries). Effort rides the advertised
-    // `thought_level` option (`reasoning_effort`); unattended parity picks
-    // `auto-high` on the autonomy_level mode select.
+    // `thought_level` option (`reasoning_effort`). Autonomy is a visible
+    // Permission trait defaulting to `auto-high`.
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::Droid,

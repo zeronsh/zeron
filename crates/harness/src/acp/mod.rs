@@ -333,6 +333,59 @@ fn devin_spec() -> AcpAgentSpec {
     }
 }
 
+/// Values that mean "don't stop for permission prompts". Preference-ordered
+/// so the first advertised one becomes both the Traits default and the
+/// unattended session mode.
+const NO_PROMPTS_MODE_VALUES: &[&str] = &[
+    "bypassPermissions",
+    "bypass_permissions",
+    "bypass",
+    "yolo",
+    "agent-full-access",
+    "danger-full-access",
+    "full-access",
+    // Factory Droid's autonomy_level select (category=mode).
+    "auto-high",
+    "auto_high",
+];
+
+fn no_prompts_mode(available: &[&str]) -> Option<&'static str> {
+    NO_PROMPTS_MODE_VALUES
+        .iter()
+        .copied()
+        .find(|v| available.contains(v))
+}
+
+fn droid_permission_option() -> ModelOption {
+    ModelOption {
+        id: "autonomy_level".into(),
+        label: "Permission".into(),
+        choices: vec![
+            ModelOptionChoice {
+                id: "normal".into(),
+                label: "Auto (Off)".into(),
+            },
+            ModelOptionChoice {
+                id: "spec".into(),
+                label: "Spec".into(),
+            },
+            ModelOptionChoice {
+                id: "auto-low".into(),
+                label: "Auto (Low)".into(),
+            },
+            ModelOptionChoice {
+                id: "auto-medium".into(),
+                label: "Auto (Medium)".into(),
+            },
+            ModelOptionChoice {
+                id: "auto-high".into(),
+                label: "Auto (High)".into(),
+            },
+        ],
+        default_choice: "auto-high".into(),
+    }
+}
+
 fn droid_install_paths() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
@@ -366,46 +419,42 @@ fn droid_spec() -> AcpAgentSpec {
         // Live discovery reads session/new (configOptions first). These rows
         // only enrich matching ids and name the picker when the probe fails.
         models: || {
+            let permission = droid_permission_option();
+            let effort = vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+                ReasoningLevel::Max,
+            ];
             vec![
                 Model {
                     id: "auto".into(),
                     label: "Auto Model".into(),
                     description: Some("Factory picks the model per request".into()),
                     reasoning_levels: Vec::new(),
-                    options: Vec::new(),
+                    options: vec![permission.clone()],
                 },
                 Model {
                     id: "gpt-5.6-sol".into(),
                     label: "GPT-5.6 Sol".into(),
                     description: Some("Factory Droid's default coding model".into()),
-                    reasoning_levels: vec![
-                        ReasoningLevel::Low,
-                        ReasoningLevel::Medium,
-                        ReasoningLevel::High,
-                        ReasoningLevel::XHigh,
-                        ReasoningLevel::Max,
-                    ],
-                    options: Vec::new(),
+                    reasoning_levels: effort.clone(),
+                    options: vec![permission.clone()],
                 },
                 Model {
                     id: "claude-opus-5".into(),
                     label: "Opus 5".into(),
                     description: Some("Anthropic's frontier model through Factory".into()),
-                    reasoning_levels: vec![
-                        ReasoningLevel::Low,
-                        ReasoningLevel::Medium,
-                        ReasoningLevel::High,
-                        ReasoningLevel::XHigh,
-                        ReasoningLevel::Max,
-                    ],
-                    options: Vec::new(),
+                    reasoning_levels: effort,
+                    options: vec![permission.clone()],
                 },
                 Model {
                     id: "glm-5.2".into(),
                     label: "GLM-5.2 (Droid Core)".into(),
                     description: Some("Factory-hosted GLM coding model".into()),
                     reasoning_levels: Vec::new(),
-                    options: Vec::new(),
+                    options: vec![permission],
                 },
             ]
         },
@@ -1146,23 +1195,30 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
         .collect()
 }
 
-/// A session config option surfaced as a Traits-dropdown section. Mode is
-/// zeron's own (forced to the no-prompts choice), model rides the model rows,
-/// and thought_level is the Reasoning ladder — everything else the agent
-/// advertises (fast mode, collaboration mode, agent persona, …) passes
-/// through. `currentValue` doubles as the default: it is the state the
-/// session opens in. Booleans render as an off/on select, mirroring the
-/// catalogs (zeron never declares the boolean config capability, so adapters
-/// send selects, but handle the shape defensively).
+/// A session config option surfaced as a Traits-dropdown section. Model rides
+/// the model rows and thought_level is the Reasoning ladder. Mode (Claude
+/// bypass, Codex full-access, Droid autonomy / permission) is a trait the
+/// user can see and change; the no-prompts value is the default so the chip
+/// matches the unattended session. Everything else the agent advertises
+/// (fast mode, collaboration mode, agent persona, …) passes through.
+/// `currentValue` doubles as the default when no no-prompts value exists.
+/// Booleans render as an off/on select, mirroring the catalogs (zeron never
+/// declares the boolean config capability, so adapters send selects, but
+/// handle the shape defensively).
 fn trait_from_config_option(option: &Value) -> Option<ModelOption> {
     if matches!(
         option.get("category").and_then(Value::as_str),
-        Some("mode" | "model" | "thought_level")
+        Some("model" | "thought_level")
     ) {
         return None;
     }
     let id = option.get("id").and_then(Value::as_str)?;
-    let label = option.get("name").and_then(Value::as_str).unwrap_or(id);
+    let category = option.get("category").and_then(Value::as_str);
+    let label = if category == Some("mode") && (id == "autonomy_level" || id == "autonomyLevel") {
+        "Permission"
+    } else {
+        option.get("name").and_then(Value::as_str).unwrap_or(id)
+    };
     match option.get("type").and_then(Value::as_str)? {
         "select" => {
             let choices: Vec<ModelOptionChoice> = option
@@ -1181,10 +1237,16 @@ fn trait_from_config_option(option: &Value) -> Option<ModelOption> {
                     })
                 })
                 .collect();
-            let default_choice = option
-                .get("currentValue")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
+            let available: Vec<&str> = choices.iter().map(|c| c.id.as_str()).collect();
+            let default_choice = (category == Some("mode"))
+                .then(|| no_prompts_mode(&available).map(str::to_owned))
+                .flatten()
+                .or_else(|| {
+                    option
+                        .get("currentValue")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
                 .or_else(|| choices.first().map(|c| c.id.clone()))?;
             (choices.len() > 1).then(|| ModelOption {
                 id: id.to_owned(),
@@ -1593,35 +1655,19 @@ fn config_option_sets(
             ("select", Some("model")) => model
                 .and_then(|m| pick_model_value(m, &available, context_1m))
                 .map(Value::String),
-            // Unattended parity with the retired custom adapters (claude
-            // bypassPermissions / codex approvalPolicy never): pick the
-            // no-prompts mode when the agent offers one. claude-agent-acp
-            // calls it `bypassPermissions`, codex-acp `agent-full-access`
-            // (approvalPolicy "never" + danger-full-access sandbox), Devin
-            // `bypass`. Cursor instead exposes agent/plan/ask — those arrive
-            // as a Traits "Mode" option and win when the run selected one.
-            ("select", Some("mode")) => model_options
-                .get("mode")
-                .and_then(Value::as_str)
-                .filter(|c| available.contains(c))
-                .map(|c| Value::String(c.to_owned()))
-                .or_else(|| {
-                    [
-                        "bypassPermissions",
-                        "bypass_permissions",
-                        "bypass",
-                        "yolo",
-                        "agent-full-access",
-                        "danger-full-access",
-                        "full-access",
-                        // Factory Droid's autonomy_level select (category=mode).
-                        "auto-high",
-                        "auto_high",
-                    ]
-                    .into_iter()
-                    .find(|v| available.contains(v))
-                    .map(|v| Value::String(v.to_owned()))
-                }),
+            // User pick first (Traits "Permission"/"Mode", stored under the
+            // option id or the generic `mode` key). Unattended fallback is
+            // the no-prompts value so a new chat matches the trait default.
+            ("select", Some("mode")) => ["mode", config_id]
+                .into_iter()
+                .find_map(|key| {
+                    model_options
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .filter(|c| available.contains(c))
+                        .map(|c| Value::String(c.to_owned()))
+                })
+                .or_else(|| no_prompts_mode(&available).map(|v| Value::String(v.to_owned()))),
             ("select", Some("thought_level")) => efforts
                 .iter()
                 .find(|c| available.contains(*c))
@@ -3379,16 +3425,19 @@ mod tests {
         assert_eq!(models[0].label, "GPT-5.6-Sol");
         assert_eq!(models[0].description.as_deref(), Some("Frontier"));
         assert!(models[0].reasoning_levels.contains(&ReasoningLevel::Ultra));
-        // Wire config options become traits; mode/model/thought_level do not.
+        // Wire config options become traits; model/thought_level do not.
+        // Mode is a visible permission trait whose default is the no-prompts value.
         assert_eq!(
             models[0]
                 .options
                 .iter()
                 .map(|o| o.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["fast-mode"]
+            vec!["mode", "fast-mode"]
         );
-        assert_eq!(models[0].options[0].default_choice, "off");
+        assert_eq!(models[0].options[0].label, "Mode");
+        assert_eq!(models[0].options[0].default_choice, "agent-full-access");
+        assert_eq!(models[0].options[1].default_choice, "off");
     }
 
     #[test]
@@ -3596,6 +3645,54 @@ mod tests {
         assert_eq!(
             config_option_sets(&droid, None, &[], &no_opts),
             vec![("autonomy_level".to_owned(), json!({ "value": "auto-high" }))]
+        );
+
+        let mut picked = serde_json::Map::new();
+        picked.insert("autonomy_level".into(), json!("auto-low"));
+        assert_eq!(
+            config_option_sets(&droid, None, &[], &picked),
+            vec![("autonomy_level".to_owned(), json!({ "value": "auto-low" }))]
+        );
+    }
+
+    #[test]
+    fn droid_autonomy_level_surfaces_as_a_permission_trait() {
+        let session = json!({
+            "sessionId": "s-1",
+            "configOptions": [{
+                "id": "autonomy_level",
+                "name": "Autonomy Level",
+                "category": "mode",
+                "type": "select",
+                "currentValue": "normal",
+                "options": [
+                    { "value": "normal", "name": "Auto (Off)" },
+                    { "value": "spec", "name": "Spec" },
+                    { "value": "auto-low", "name": "Auto (Low)" },
+                    { "value": "auto-medium", "name": "Auto (Medium)" },
+                    { "value": "auto-high", "name": "Auto (High)" },
+                ],
+            }, {
+                "id": "model",
+                "category": "model",
+                "type": "select",
+                "options": [{ "value": "gpt-5.6-sol", "name": "GPT-5.6 Sol" }],
+            }],
+        });
+        let models = models_from_session(&session, &[]);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].options.len(), 1);
+        let permission = &models[0].options[0];
+        assert_eq!(permission.id, "autonomy_level");
+        assert_eq!(permission.label, "Permission");
+        assert_eq!(permission.default_choice, "auto-high");
+        assert_eq!(
+            permission
+                .choices
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["normal", "spec", "auto-low", "auto-medium", "auto-high"]
         );
     }
 

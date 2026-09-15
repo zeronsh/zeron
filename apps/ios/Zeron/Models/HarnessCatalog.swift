@@ -108,17 +108,30 @@ enum HarnessCatalog {
                           description: "Devin picks the model per request", reasoningLevels: []),
             ]
         case "droid":
+            let permission = [
+                ModelOptionInfo(id: "autonomy_level", label: "Permission", choices: [
+                    ModelOptionChoiceInfo(id: "normal", label: "Auto (Off)"),
+                    ModelOptionChoiceInfo(id: "spec", label: "Spec"),
+                    ModelOptionChoiceInfo(id: "auto-low", label: "Auto (Low)"),
+                    ModelOptionChoiceInfo(id: "auto-medium", label: "Auto (Medium)"),
+                    ModelOptionChoiceInfo(id: "auto-high", label: "Auto (High)"),
+                ], defaultChoice: "auto-high"),
+            ]
             return [
                 ModelInfo(id: "auto", label: "Auto Model",
-                          description: "Factory picks the model per request", reasoningLevels: []),
+                          description: "Factory picks the model per request", reasoningLevels: [],
+                          options: permission),
                 ModelInfo(id: "gpt-5.6-sol", label: "GPT-5.6 Sol",
                           description: "Factory Droid's default coding model",
-                          reasoningLevels: ["low", "medium", "high", "xhigh", "max"]),
+                          reasoningLevels: ["low", "medium", "high", "xhigh", "max"],
+                          options: permission),
                 ModelInfo(id: "claude-opus-5", label: "Opus 5",
                           description: "Anthropic's frontier model through Factory",
-                          reasoningLevels: ["low", "medium", "high", "xhigh", "max"]),
+                          reasoningLevels: ["low", "medium", "high", "xhigh", "max"],
+                          options: permission),
                 ModelInfo(id: "glm-5.2", label: "GLM-5.2 (Droid Core)",
-                          description: "Factory-hosted GLM coding model", reasoningLevels: []),
+                          description: "Factory-hosted GLM coding model", reasoningLevels: [],
+                          options: permission),
             ]
         case "hermes":
             return [
