@@ -37,6 +37,19 @@ pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// [`crate::wake::notify_online`] so sibling sockets waiting out a reconnect
 /// backoff redial immediately instead of sleeping through the recovery.
 pub async fn connect_ws(url: &str) -> Result<WsStream, WsError> {
+    // Bound DNS, all TCP attempts, TLS and HTTP upgrade together. Some
+    // callers (notably the host relay) have no outer connection deadline.
+    tokio::time::timeout(Duration::from_secs(20), connect_ws_inner(url))
+        .await
+        .map_err(|_| {
+            WsError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "WebSocket dial timed out",
+            ))
+        })?
+}
+
+async fn connect_ws_inner(url: &str) -> Result<WsStream, WsError> {
     let request = url.into_client_request()?;
     let uri = request.uri();
     let host = uri
@@ -132,6 +145,33 @@ mod tests {
 
     fn addr(s: &str) -> SocketAddr {
         s.parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn stalled_upgrade_has_an_overall_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            accepted_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut dial = tokio::spawn(async move { connect_ws(&url).await });
+        tokio::time::timeout(Duration::from_secs(5), accepted_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        // TCP is established. The peer never answers the HTTP upgrade.
+        tokio::time::pause();
+        let result = tokio::time::timeout(Duration::from_secs(21), &mut dial).await;
+        server.abort();
+        dial.abort();
+        let err = result
+            .expect("dial remained stuck after 21 seconds")
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::TimedOut));
     }
 
     #[test]

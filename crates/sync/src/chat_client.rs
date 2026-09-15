@@ -18,17 +18,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use futures::{SinkExt, StreamExt};
-use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::chat_frames::{self as wire, frame_type};
 use crate::types::{StaticUrl, SyncError, UrlProvider};
 
-const PING_INTERVAL: Duration = Duration::from_secs(15);
-const SILENCE_LEASE: Duration = Duration::from_secs(45);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
 /// Backfill after hello must complete (rowsDone) within this deadline —
@@ -233,63 +228,21 @@ impl BinConnector for WsBinConnector {
                 .map_err(|e| SyncError::WebSocket(e.to_string()))?;
             let (out_tx, out_rx) = mpsc::channel(64);
             let (in_tx, in_rx) = mpsc::channel(64);
-            tokio::spawn(pump(ws, out_rx, in_tx));
+            tokio::spawn(crate::socket::pump(
+                ws,
+                out_rx,
+                in_tx,
+                WsMessage::Binary,
+                |frame| match frame {
+                    WsMessage::Binary(bytes) => Some(bytes),
+                    _ => None,
+                },
+            ));
             Ok(BinPipe {
                 tx: out_tx,
                 rx: in_rx,
             })
         })
-    }
-}
-
-/// Shuttle binary frames between the WebSocket and the actor's channels; the
-/// text `"ping"` keepalive rides the same socket (runtime-answered pair).
-async fn pump(
-    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
-    mut out_rx: mpsc::Receiver<Vec<u8>>,
-    in_tx: mpsc::Sender<Vec<u8>>,
-) {
-    let (mut sink, mut stream) = ws.split();
-    let mut ping = tokio::time::interval(PING_INTERVAL);
-    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ping.tick().await;
-    let mut last_rx = tokio::time::Instant::now();
-    loop {
-        tokio::select! {
-            frame = out_rx.recv() => match frame {
-                Some(bytes) => {
-                    if sink.send(WsMessage::Binary(bytes.into())).await.is_err() {
-                        break;
-                    }
-                }
-                None => {
-                    let _ = sink.send(WsMessage::Close(None)).await;
-                    break;
-                }
-            },
-            frame = stream.next() => match frame {
-                Some(Ok(WsMessage::Binary(bytes))) => {
-                    last_rx = tokio::time::Instant::now();
-                    if in_tx.send(bytes.to_vec()).await.is_err() {
-                        break;
-                    }
-                }
-                Some(Ok(_)) => {
-                    // Text pong / control frames: transport liveness only.
-                    last_rx = tokio::time::Instant::now();
-                }
-                Some(Err(_)) | None => break,
-            },
-            _ = ping.tick() => {
-                if sink.send(WsMessage::Text("ping".into())).await.is_err() {
-                    break;
-                }
-            }
-            _ = tokio::time::sleep_until(last_rx + SILENCE_LEASE) => {
-                tracing::warn!("chat2 socket silent past lease; treating as dead");
-                break;
-            }
-        }
     }
 }
 

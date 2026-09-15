@@ -101,14 +101,10 @@ impl CheckpointFetcher for FixedFetcher {
 // ── server-side script helpers ──────────────────────────────────────────────
 
 async fn expect_kind(end: &mut ServerEnd, kind: u8) -> wire::WireFrame {
-    loop {
-        let bytes = end.rx.recv().await.expect("client hung up");
-        let frame = decode(&bytes).expect("client sent undecodable frame");
-        if frame.kind == kind {
-            return frame;
-        }
-        panic!("expected frame {kind:#x}, got {:#x}", frame.kind);
-    }
+    let bytes = end.rx.recv().await.expect("client hung up");
+    let frame = decode(&bytes).expect("client sent undecodable frame");
+    assert_eq!(frame.kind, kind, "unexpected protocol frame");
+    frame
 }
 
 async fn send(end: &ServerEnd, kind: u8, header: serde_json::Value, payload: &[u8]) {
@@ -935,7 +931,7 @@ fn empty_frontier_with_real_checkpoint_is_not_contained() {
 /// Tests that flip the process-global OS-path flag or assert precise dial
 /// timing serialize through this: a park triggered by one test inflates
 /// another's measured backoff gaps.
-static PATH_AND_TIMING: Mutex<()> = Mutex::new(());
+static PATH_AND_TIMING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct FlakyConnector {
     /// One entry per dial: `Some(pipe)` connects, `None` refuses.
@@ -975,7 +971,7 @@ fn empty_state_json() -> serde_json::Value {
 /// the UI-truth signal the pill and Queued badges ride on.
 #[tokio::test(start_paused = true)]
 async fn drops_and_refused_dials_deliver_the_push_exactly_once() {
-    let _serial = lock(&PATH_AND_TIMING);
+    let _serial = PATH_AND_TIMING.lock().await;
     let (pipe1, mut end1) = pipe_pair();
     let (pipe2, mut end2) = pipe_pair();
     let sink = Arc::new(RecordingSink::default());
@@ -1069,7 +1065,7 @@ async fn drops_and_refused_dials_deliver_the_push_exactly_once() {
 /// healthy past STABLE_RESET earns the fresh 250ms base again.
 #[tokio::test(start_paused = true)]
 async fn connect_and_die_sessions_grow_backoff_until_a_stable_session_resets_it() {
-    let _serial = lock(&PATH_AND_TIMING);
+    let _serial = PATH_AND_TIMING.lock().await;
     let mut pipes = Vec::new();
     let mut ends = VecDeque::new();
     for _ in 0..5 {
@@ -1156,7 +1152,7 @@ async fn connect_and_die_sessions_grow_backoff_until_a_stable_session_resets_it(
 /// timer luck).
 #[tokio::test(start_paused = true)]
 async fn os_offline_parks_dials_and_the_online_event_unparks_immediately() {
-    let _serial = lock(&PATH_AND_TIMING);
+    let _serial = PATH_AND_TIMING.lock().await;
     let (pipe1, mut end1) = pipe_pair();
     let sink = Arc::new(RecordingSink::default());
     let (fetch, _) = fetcher(b"");
@@ -1530,4 +1526,160 @@ async fn http_catchup_crosses_a_contained_checkpoint_and_repairs_causal_gaps() {
         }
         client.shutdown().await;
     }
+}
+
+struct JournalSink(crate::DocsStore, RecordingSink);
+impl ChatDocSink for JournalSink {
+    fn pending_updates(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
+        self.0
+            .pending_chat_updates("impaired")
+            .map_err(|e| e.to_string())
+    }
+    fn persist_update(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
+        self.0
+            .enqueue_chat_update("impaired", id, bytes)
+            .map_err(|e| e.to_string())
+    }
+    fn acknowledge_update(&self, id: &str) -> Result<(), String> {
+        self.0
+            .acknowledge_chat_update("impaired", id)
+            .map_err(|e| e.to_string())
+    }
+    fn apply_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
+        self.1.apply_row(bytes, cursor)
+    }
+    fn apply_checkpoint(&self, bytes: &[u8], cursor: u64) -> Result<(), String> {
+        self.1.apply_checkpoint(bytes, cursor)
+    }
+    fn contains_frontier(&self, bytes: &[u8]) -> bool {
+        self.1.contains_frontier(bytes)
+    }
+    fn advance_cursor(&self, cursor: u64) {
+        self.1.advance_cursor(cursor);
+    }
+}
+
+/// HTTP seam fault injector. Requests cost 1.2 s; the first push commits but
+/// its acknowledgment is lost. WebSocket dials are refused independently.
+type AttemptedBatches = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
+#[derive(Default)]
+struct LostAckHttp {
+    attempts: AttemptedBatches,
+    committed: Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
+}
+impl ChatTransport for LostAckHttp {
+    fn push(&self, id: String, bytes: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+        let attempts = self.attempts.clone();
+        let committed = self.committed.clone();
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            lock(&attempts).push((id.clone(), bytes.clone()));
+            let dup = lock(&committed).insert(id.clone(), bytes).is_some();
+            if !dup {
+                return Err(SyncError::Closed);
+            }
+            Ok(serde_json::json!({"batchId": id, "seq": 2, "dup": true}).to_string())
+        })
+    }
+    fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        let committed = self.committed.clone();
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            let committed = lock(&committed);
+            let head = if committed.is_empty() { 1 } else { 2 };
+            let mut frames = vec![encode(
+                frame_type::STATE,
+                &serde_json::json!({
+                    "headSeq": head, "seqFloor": 0, "checkpointSeq": 0,
+                    "checkpointSize": 0, "rowCount": head, "rowBytes": 20
+                }),
+                &[],
+            )];
+            if after < 1 {
+                frames.push(encode(
+                    frame_type::ROW,
+                    &serde_json::json!({
+                        "seq": 1, "device": "remote", "batchId": "remote-batch"
+                    }),
+                    b"remote-row",
+                ));
+            }
+            if after < 2 {
+                for (id, bytes) in committed.iter() {
+                    frames.push(encode(
+                        frame_type::ROW,
+                        &serde_json::json!({
+                            "seq": 2, "device": "local", "batchId": id
+                        }),
+                        bytes,
+                    ));
+                }
+            }
+            frames.push(encode(
+                frame_type::ROWS_DONE,
+                &serde_json::json!({"headSeq": head}),
+                &[],
+            ));
+            let mut body = Vec::new();
+            for frame in frames {
+                body.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+                body.extend(frame);
+            }
+            Ok(body)
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn blocked_websockets_deliver_reopened_outbox_over_http_despite_lost_ack() {
+    let _serial = PATH_AND_TIMING.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = b"durable-local-row";
+    {
+        let store = crate::DocsStore::open(dir.path()).unwrap();
+        store
+            .enqueue_chat_update("impaired", "stable-batch", bytes)
+            .unwrap();
+    } // Reopen the database, as after a process restart while offline.
+    let sink = Arc::new(JournalSink(
+        crate::DocsStore::open(dir.path()).unwrap(),
+        RecordingSink::default(),
+    ));
+    let transport = Arc::new(LostAckHttp::default());
+    let blocked = FlakyConnector::new(vec![]);
+    let (fetch, _) = fetcher(b"");
+    let started = tokio::time::Instant::now();
+    let client = ChatClient::connect_with_transport(
+        blocked.clone(),
+        sink.clone(),
+        fetch,
+        "local",
+        0,
+        ChatTuning::default(),
+        Some(transport.clone()),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while client.stats().pending_pushes != 0 || client.stats().cursor != 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("HTTP fallback did not drain the durable outbox");
+    assert!(!client.stats().connected, "no WebSocket ever connected");
+    assert!(!blocked.dial_times().is_empty());
+    assert_eq!(
+        *lock(&transport.attempts),
+        vec![("stable-batch".into(), bytes.to_vec()); 2]
+    );
+    assert_eq!(lock(&transport.committed).len(), 1);
+    assert!(sink.pending_updates().unwrap().is_empty());
+    assert_eq!(lock(&sink.1.rows)[0], (b"remote-row".to_vec(), 1));
+    println!(
+        "HTTP seam: all WS refused, reopened SQLite outbox, 1.2s/request, first ACK lost; attempts=2, unique batches=1, cursor=2, pending=0, convergence={:?}",
+        started.elapsed()
+    );
+    client.shutdown().await;
 }

@@ -21,7 +21,6 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -451,58 +450,37 @@ async fn host_session(
         .await
         .map_err(|e| RpcError::Transport(format!("device room unreachable: {e}")))?;
     tracing::info!("device-room: host connected");
-    let (mut sink, mut stream) = ws.split();
-    // All writers (per-conn pumps) funnel through one outbound queue → one socket writer.
-    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(1);
+    let transport = zeron_sync::socket::pump_with_timing(
+        ws,
+        out_rx,
+        in_tx,
+        WsMessage::Binary,
+        binary_frame,
+        PING_INTERVAL,
+        SILENCE_LEASE,
+    );
     let mut conns: HashMap<String, VirtualConn> = HashMap::new();
-    let mut ping = tokio::time::interval(PING_INTERVAL);
-    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ping.tick().await; // consume the immediate first tick
-    let mut last_rx = tokio::time::Instant::now();
-
-    loop {
-        tokio::select! {
-            frame = out_rx.recv() => match frame {
-                Some(bytes) => {
-                    if sink.send(WsMessage::Binary(bytes)).await.is_err() {
-                        break;
-                    }
-                }
-                None => break, // unreachable: we hold out_tx
-            },
-            message = stream.next() => match message {
-                Some(Ok(WsMessage::Binary(bytes))) => {
-                    last_rx = tokio::time::Instant::now();
-                    handle_host_frame(&bytes, &mut conns, service, &out_tx, on_nudge).await;
-                }
-                Some(Ok(WsMessage::Close(frame))) => {
-                    if let Some(frame) = frame {
-                        tracing::info!(code = %frame.code, reason = %frame.reason,
-                            "device-room: host socket closed by relay");
-                    }
-                    break;
-                }
-                Some(Err(_)) | None => break,
-                // Text "pong" / control frames: proof of life for the lease.
-                Some(Ok(_)) => last_rx = tokio::time::Instant::now(),
-            },
-            _ = ping.tick() => {
-                if let Err(err) = sink.send(WsMessage::Text("ping".into())).await {
-                    // The usual way a silently-reaped uplink surfaces: reads
-                    // saw nothing, the keepalive write is what finds the body.
-                    tracing::warn!(error = %err, "device-room: host keepalive failed; reconnecting");
-                    break;
-                }
-            }
-            _ = tokio::time::sleep_until(last_rx + SILENCE_LEASE) => {
-                tracing::warn!("device-room: host socket silent past lease; reconnecting");
-                break;
-            }
+    let dispatch = async {
+        while let Some(bytes) = in_rx.recv().await {
+            handle_host_frame(&bytes, &mut conns, service, &out_tx, on_nudge).await;
         }
+    };
+    // Poll the transport even when a virtual RPC connection is backpressured.
+    // Ending either side drops the socket and all per-client dispatch inputs.
+    tokio::select! {
+        _ = transport => {},
+        _ = dispatch => {},
     }
-    // Dropping the conns aborts every per-client dispatch loop (terminals etc. reaped).
-    conns.clear();
     Ok(())
+}
+
+fn binary_frame(frame: WsMessage) -> Option<Vec<u8>> {
+    match frame {
+        WsMessage::Binary(bytes) => Some(bytes),
+        _ => None,
+    }
 }
 
 async fn handle_host_frame(
@@ -593,114 +571,126 @@ impl DeviceLink {
         let ws = zeron_sync::dial::connect_ws(url)
             .await
             .map_err(|e| RpcError::Transport(format!("device room unreachable: {e}")))?;
-        let (mut sink, mut stream) = ws.split();
+        Ok(Self::from_socket(ws))
+    }
+
+    fn from_socket<S>(ws: tokio_tungstenite::WebSocketStream<S>) -> Self
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let (wire_tx, wire_rx) = mpsc::channel::<Vec<u8>>(1);
+        let (wire_in, mut wire_out) = mpsc::channel::<Vec<u8>>(1);
         let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
         let (in_tx, in_rx) = mpsc::channel::<String>(256);
         let (closed_tx, closed_rx) = watch::channel::<Option<String>>(None);
 
         let pump = tokio::spawn(async move {
-            let mut ping = tokio::time::interval(client_ping_interval());
-            ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            ping.tick().await; // consume the immediate first tick
-            let mut last_rx = tokio::time::Instant::now();
-            // End-to-end liveness (see ECHO_DEADLINE): armed only once the
-            // host has echoed at least once, so old hosts keep working.
-            let mut last_echo = tokio::time::Instant::now();
-            let mut echo_seen = false;
-            let echo_frame =
-                encode_device_frame(&DeviceFrameHeader::new(ECHO_KIND, ECHO_KIND), &[])
-                    .unwrap_or_default();
-            // First echo right away: fast feature detection + instant proof
-            // the host leg is alive (the dial's readiness probe proves it
-            // too; this seeds the ongoing cadence).
-            if !echo_frame.is_empty() {
-                let _ = sink.send(WsMessage::Binary(echo_frame.clone())).await;
-            }
-            let reason = loop {
-                tokio::select! {
-                    frame = out_rx.recv() => match frame {
-                        Some(text) => {
-                            let header = DeviceFrameHeader::new(RPC_KIND, RPC_KIND);
-                            let encoded = match encode_device_frame(&header, text.as_bytes()) {
-                                Ok(bytes) => bytes,
-                                Err(err) => {
-                                    tracing::error!(error = %err, "device-room: frame encode failed");
-                                    continue;
+            let transport = zeron_sync::socket::pump_with_timing(
+                ws,
+                wire_rx,
+                wire_in,
+                WsMessage::Binary,
+                binary_frame,
+                client_ping_interval(),
+                SILENCE_LEASE,
+            );
+            let protocol = async {
+                let mut ping = tokio::time::interval(client_ping_interval());
+                ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                ping.tick().await; // consume the immediate first tick
+                // End-to-end liveness (see ECHO_DEADLINE): armed only once the
+                // host has echoed at least once, so old hosts keep working.
+                let mut last_echo = tokio::time::Instant::now();
+                let mut echo_seen = false;
+                let echo_frame =
+                    encode_device_frame(&DeviceFrameHeader::new(ECHO_KIND, ECHO_KIND), &[])
+                        .unwrap_or_default();
+                // First echo right away: fast feature detection + instant proof
+                // the host leg is alive (the dial's readiness probe proves it
+                // too; this seeds the ongoing cadence).
+                if !echo_frame.is_empty() {
+                    let _ = wire_tx.send(echo_frame.clone()).await;
+                }
+                loop {
+                    tokio::select! {
+                        frame = out_rx.recv() => match frame {
+                            Some(text) => {
+                                let header = DeviceFrameHeader::new(RPC_KIND, RPC_KIND);
+                                let encoded = match encode_device_frame(&header, text.as_bytes()) {
+                                    Ok(bytes) => bytes,
+                                    Err(err) => {
+                                        tracing::error!(error = %err, "device-room: frame encode failed");
+                                        continue;
+                                    }
+                                };
+                                if wire_tx.send(encoded).await.is_err() {
+                                    break "connection lost".to_string();
                                 }
-                            };
-                            if sink.send(WsMessage::Binary(encoded)).await.is_err() {
+                            }
+                            None => {
+                                break "closed".to_string();
+                            }
+                        },
+                        message = wire_out.recv() => match message {
+                            Some(bytes) => {
+                                match decode_device_frame(&bytes) {
+                                    Ok((header, payload)) if header.k == RELAY_KIND => {
+                                        // host_offline / host_closed: surface as link-down.
+                                        let code = relay_error_code(&payload)
+                                            .unwrap_or_else(|| "relay error".into());
+                                        tracing::info!(%code, "device-room: link down");
+                                        break code;
+                                    }
+                                    Ok((header, payload)) if header.k == RPC_KIND => {
+                                        // An RPC frame from the host proves the
+                                        // whole path just as well as an echo.
+                                        last_echo = tokio::time::Instant::now();
+                                        let text = String::from_utf8_lossy(&payload).into_owned();
+                                        if in_tx.send(text).await.is_err() {
+                                            break "client dropped".to_string();
+                                        }
+                                    }
+                                    Ok((header, _)) if header.k == ECHO_KIND => {
+                                        last_echo = tokio::time::Instant::now();
+                                        echo_seen = true;
+                                    }
+                                    Ok(_) => {}
+                                    Err(err) => {
+                                        tracing::warn!(error = %err, "device-room: malformed frame");
+                                    }
+                                }
+                            }
+                            None => {
+                                break "connection lost".to_string();
+                            }
+                        },
+                        _ = ping.tick() => {
+                            if !echo_frame.is_empty()
+                                && wire_tx.send(echo_frame.clone()).await.is_err()
+                            {
                                 break "connection lost".to_string();
                             }
                         }
-                        None => {
-                            let _ = sink.send(WsMessage::Close(None)).await;
-                            break "closed".to_string();
+                        _ = tokio::time::sleep_until(last_echo + client_echo_deadline()), if echo_seen => {
+                            tracing::warn!("device-room: host echo silent past deadline; link suspect");
+                            break "host echo silent".to_string();
                         }
-                    },
-                    message = stream.next() => match message {
-                        Some(Ok(WsMessage::Binary(bytes))) => {
-                            last_rx = tokio::time::Instant::now();
-                            match decode_device_frame(&bytes) {
-                                Ok((header, payload)) if header.k == RELAY_KIND => {
-                                    // host_offline / host_closed: surface as link-down.
-                                    let code = relay_error_code(&payload)
-                                        .unwrap_or_else(|| "relay error".into());
-                                    tracing::info!(%code, "device-room: link down");
-                                    break code;
-                                }
-                                Ok((header, payload)) if header.k == RPC_KIND => {
-                                    // An RPC frame from the host proves the
-                                    // whole path just as well as an echo.
-                                    last_echo = tokio::time::Instant::now();
-                                    let text = String::from_utf8_lossy(&payload).into_owned();
-                                    if in_tx.send(text).await.is_err() {
-                                        break "client dropped".to_string();
-                                    }
-                                }
-                                Ok((header, _)) if header.k == ECHO_KIND => {
-                                    last_echo = tokio::time::Instant::now();
-                                    echo_seen = true;
-                                }
-                                Ok(_) => {}
-                                Err(err) => {
-                                    tracing::warn!(error = %err, "device-room: malformed frame");
-                                }
-                            }
-                        }
-                        Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => {
-                            break "connection lost".to_string();
-                        }
-                        // Text "pong" / control frames: proof of life for the lease.
-                        Some(Ok(_)) => last_rx = tokio::time::Instant::now(),
-                    },
-                    _ = ping.tick() => {
-                        if sink.send(WsMessage::Text("ping".into())).await.is_err() {
-                            break "connection lost".to_string();
-                        }
-                        if !echo_frame.is_empty()
-                            && sink.send(WsMessage::Binary(echo_frame.clone())).await.is_err()
-                        {
-                            break "connection lost".to_string();
-                        }
-                    }
-                    _ = tokio::time::sleep_until(last_rx + SILENCE_LEASE) => {
-                        break "silent past lease".to_string();
-                    }
-                    _ = tokio::time::sleep_until(last_echo + client_echo_deadline()), if echo_seen => {
-                        tracing::warn!("device-room: host echo silent past deadline; link suspect");
-                        break "host echo silent".to_string();
                     }
                 }
+            };
+            let reason = tokio::select! {
+                _ = transport => "connection lost".to_string(),
+                reason = protocol => reason,
             };
             // Dropping in_tx ends the RpcClient reader → pending calls fail Closed.
             let _ = closed_tx.send(Some(reason));
         });
 
-        Ok(Self {
+        Self {
             client: Arc::new(RpcClient::new(out_tx, in_rx)),
             closed_rx,
             pump,
-        })
+        }
     }
 
     pub fn client(&self) -> Arc<RpcClient> {
@@ -1079,6 +1069,41 @@ impl LinkCache {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn blocked_relay_upload_closes_link_and_fails_pending_rpc() {
+        use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+        let (client, _peer) = tokio::io::duplex(64);
+        let socket = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let link = DeviceLink::from_socket(socket);
+        let client = link.client();
+        let request = client.call(
+            "test.upload",
+            serde_json::json!({"bytes": "x".repeat(4096)}),
+        );
+        let result = tokio::time::timeout(SILENCE_LEASE + Duration::from_secs(1), request)
+            .await
+            .expect("blocked upload stranded the RPC");
+        assert!(matches!(result, Err(RpcError::Closed)));
+        assert!(link.is_closed());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_link_releases_a_blocked_transport() {
+        use tokio::io::AsyncReadExt;
+        use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+        let (client, mut peer) = tokio::io::duplex(8);
+        let socket = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let link = DeviceLink::from_socket(socket);
+        tokio::task::yield_now().await; // initial echo fills the uplink
+        drop(link);
+        let mut received = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), peer.read_to_end(&mut received))
+            .await
+            .expect("dropping the link leaked the socket")
+            .unwrap();
+        assert!(!received.is_empty());
+    }
+
     use super::*;
 
     fn header(s: &str, k: &str) -> DeviceFrameHeader {

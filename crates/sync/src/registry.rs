@@ -18,22 +18,14 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use zeron_doc::{PendingBatch, RegistryDoc, RegistryRow, StateOutcome};
 
 use crate::types::{RoomStatsSnapshot, StaticUrl, SyncError, UrlProvider};
 
-/// Text `"ping"` keepalive interval (answered by the DO auto-response pair
-/// without waking it — transport liveness only).
-const PING_INTERVAL: Duration = Duration::from_secs(15);
-/// Transport silence lease: pongs count, so a healthy socket never trips this.
-const SILENCE_LEASE: Duration = Duration::from_secs(45);
 /// Bound on one dial attempt (URL fetch + WS handshake).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// The server must answer a hello with `state` within this deadline.
@@ -178,63 +170,21 @@ impl TextConnector for WsTextConnector {
                 .map_err(|e| SyncError::WebSocket(e.to_string()))?;
             let (out_tx, out_rx) = mpsc::channel(64);
             let (in_tx, in_rx) = mpsc::channel(64);
-            tokio::spawn(pump(ws, out_rx, in_tx));
+            tokio::spawn(crate::socket::pump(
+                ws,
+                out_rx,
+                in_tx,
+                WsMessage::Text,
+                |frame| match frame {
+                    WsMessage::Text(text) if text != "pong" => Some(text),
+                    _ => None,
+                },
+            ));
             Ok(TextPipe {
                 tx: out_tx,
                 rx: in_rx,
             })
         })
-    }
-}
-
-/// Shuttle text frames between the WebSocket and the actor's channels, plus
-/// the ping keepalive and the transport silence lease.
-async fn pump(
-    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
-    mut out_rx: mpsc::Receiver<String>,
-    in_tx: mpsc::Sender<String>,
-) {
-    let (mut sink, mut stream) = ws.split();
-    let mut ping = tokio::time::interval(PING_INTERVAL);
-    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ping.tick().await;
-    let mut last_rx = tokio::time::Instant::now();
-    loop {
-        tokio::select! {
-            frame = out_rx.recv() => match frame {
-                Some(text) => {
-                    if sink.send(WsMessage::Text(text)).await.is_err() {
-                        break;
-                    }
-                }
-                None => {
-                    let _ = sink.send(WsMessage::Close(None)).await;
-                    break;
-                }
-            },
-            frame = stream.next() => match frame {
-                Some(Ok(WsMessage::Text(text))) => {
-                    last_rx = tokio::time::Instant::now();
-                    let text = text.to_string();
-                    if text != "pong" && in_tx.send(text).await.is_err() {
-                        break;
-                    }
-                }
-                Some(Ok(_)) => {
-                    last_rx = tokio::time::Instant::now();
-                }
-                Some(Err(_)) | None => break,
-            },
-            _ = ping.tick() => {
-                if sink.send(WsMessage::Text("ping".into())).await.is_err() {
-                    break;
-                }
-            }
-            _ = tokio::time::sleep_until(last_rx + SILENCE_LEASE) => {
-                tracing::warn!("registry socket silent past lease; treating as dead");
-                break;
-            }
-        }
     }
 }
 
