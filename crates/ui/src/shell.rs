@@ -3488,6 +3488,7 @@ impl Shell {
         self.settings.theme_selection = crate::appearance::themes(cx);
         self.settings.accent = crate::appearance::accent(cx);
         self.settings.surface = crate::appearance::surface(cx);
+        self.settings.frost = crate::appearance::frost(cx);
         self.sync_independent_settings(cx);
         settings::replace(self.settings.clone(), SavePolicy::Debounced, cx);
     }

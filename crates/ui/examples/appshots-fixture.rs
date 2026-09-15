@@ -162,7 +162,7 @@ fn main() -> anyhow::Result<()> {
         gpui_tokio::init(cx); gpui_base::init(cx);
         let settings=settings::UiSettings::default(); settings::init(settings.clone(),data.clone(),cx);
         let fonts=typography::register_fonts(cx); typography::init(settings.ui_font_family.clone(), settings.ui_font_size, settings.terminal_font_family.clone(), settings.terminal_font_size, settings.code_font_family.clone(), settings.code_font_size, fonts, cx);
-        theme_library::init(data.clone(),cx); appearance::init(appearance::AppearanceMode::Dark,settings.theme_selection,settings.accent,settings.surface,cx);
+        theme_library::init(data.clone(),cx); appearance::init(appearance::AppearanceMode::Dark,settings.theme_selection,settings.accent,settings.surface,settings.frost,cx);
         history::init(settings.git_history_columns,settings.git_history_column_widths,settings.git_history_column_order,settings.git_history_author_display,cx);
         composer::init(cx,settings.composer_send_behavior); terminal::panel::init(cx); app_menus::init(cx);
         let state=cx.new(|_| { let mut s=state::AppState::new(); s.fixture_attachment_engine(handle); s.connection=zeron_proto::view::ConnectionStatus::Ready; s.workspace_scope=Some(zeron_proto::WorkspaceScope::Development); s.local_device_id=Some(device.clone()); s.devices=vec![serde_json::from_value(serde_json::json!({"id":device,"name":"This device","platform":std::env::consts::OS,"lastSeenAt":null})).unwrap()]; s.chats=chats; s.selected_chat=Some("appshots-fixture".into()); s.auto_selected=true; s.chats_synced=true; s.spaces_synced=true; s });

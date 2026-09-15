@@ -11,7 +11,7 @@ use gpui::{
 };
 use zeron_theme::vscode::{ImportReport, SourceCompilation};
 use zeron_theme::{
-    AccentPreset, AccentSelection, CustomThemeEntry, CustomThemeStatus, InstallMode,
+    AccentPreset, AccentSelection, CustomThemeEntry, CustomThemeStatus, FrostStrength, InstallMode,
     SurfacePreference, SurfaceTreatment, ThemeRegistry, ThemeSelection,
 };
 
@@ -1011,15 +1011,53 @@ fn surface_helper(surface: SurfacePreference, resolved: SurfaceTreatment) -> Str
     }
 }
 
+fn frost_label(frost: FrostStrength) -> &'static str {
+    match frost {
+        FrostStrength::Light => "Light",
+        FrostStrength::Regular => "Regular",
+        FrostStrength::Heavy => "Heavy",
+    }
+}
+
+fn frost_helper(frost: FrostStrength, resolved: SurfaceTreatment) -> &'static str {
+    if resolved == SurfaceTreatment::Opaque {
+        return "Opaque surfaces ignore blur depth.";
+    }
+    match frost {
+        FrostStrength::Light => "Backdrop stays readable through the glass.",
+        FrostStrength::Regular => "The reference blur for menus and dialogs.",
+        FrostStrength::Heavy => "Shapes survive behind the glass, detail does not.",
+    }
+}
+
 fn surface_choice(
     theme: &Theme,
     surface: SurfacePreference,
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
+    segmented_choice(
+        theme,
+        "appearance-surface",
+        surface_label(surface),
+        selected,
+    )
+}
+
+fn frost_choice(theme: &Theme, frost: FrostStrength, selected: bool) -> gpui::Stateful<gpui::Div> {
+    segmented_choice(theme, "appearance-frost", frost_label(frost), selected)
+}
+
+/// One segment of a settings segmented control, keyed `{group}-{label}`.
+fn segmented_choice(
+    theme: &Theme,
+    group: &'static str,
+    label: &'static str,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(SharedString::from(format!(
-            "appearance-surface-{}",
-            surface_label(surface).to_lowercase().replace(' ', "-")
+            "{group}-{}",
+            label.to_lowercase().replace(' ', "-")
         )))
         .h(px(30.0))
         .px(px(10.0))
@@ -1048,7 +1086,7 @@ fn surface_choice(
         .when(!selected, |control| {
             control.hover(|style| style.bg(theme.surface_raised_hover))
         })
-        .child(surface_label(surface))
+        .child(label)
 }
 
 fn background_effect_choice(
@@ -2730,6 +2768,7 @@ impl Render for AppearancePage {
         let current_themes = appearance::themes(cx);
         let current_accent = appearance::accent(cx);
         let current_surface = appearance::surface(cx);
+        let current_frost = appearance::frost(cx);
         let ui_settings = crate::settings::current(cx);
         let current_background = ui_settings.new_thread_composer_background;
         let current_background_effect = ui_settings.new_thread_background_effect;
@@ -2810,6 +2849,17 @@ impl Render for AppearancePage {
                 ))
             })
             .collect::<Vec<_>>();
+        let frost_controls = FrostStrength::ALL
+            .into_iter()
+            .map(|frost| {
+                frost_choice(&theme, frost, frost == current_frost).on_click(cx.listener(
+                    move |_, _, _, cx| {
+                        appearance::set_frost(frost, cx);
+                        cx.notify();
+                    },
+                ))
+            })
+            .collect::<Vec<_>>();
         let mut settings_rows = theme_rows;
         settings_rows.push(
             widgets::card_row(&theme, false)
@@ -2867,6 +2917,40 @@ impl Render for AppearancePage {
                         .items_center()
                         .gap(px(6.0))
                         .children(surface_controls),
+                )
+                .into_any_element(),
+        );
+        // Blur depth only reads on frosted surfaces; the row stays put on
+        // opaque so it does not appear and vanish with the Glass row above
+        // it, and says why it is inert.
+        settings_rows.push(
+            widgets::card_row(&theme, false)
+                .child(widgets::row_tile(&theme, icons::CLOUD))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Frost"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child(SharedString::from(frost_helper(
+                                        current_frost,
+                                        theme.surface_treatment,
+                                    )))
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .ml(px(10.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .children(frost_controls),
                 )
                 .into_any_element(),
         );

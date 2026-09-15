@@ -165,6 +165,7 @@ pub fn run_app(config: UiConfig) {
             ui_settings.theme_selection,
             ui_settings.accent,
             ui_settings.surface,
+            ui_settings.frost,
             cx,
         );
         history::init(

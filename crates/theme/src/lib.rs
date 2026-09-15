@@ -83,6 +83,34 @@ impl SurfacePreference {
     }
 }
 
+/// How far a frosted surface blurs its backdrop, as a multiplier on each
+/// surface's reference sigma. Only consulted once the resolved treatment is
+/// [`SurfaceTreatment::Frosted`].
+///
+/// A multiplier rather than an absolute sigma because the surfaces do not
+/// share one radius: menus blur at 44, the composer pill at 16, sticky diff
+/// headers lower still. Scaling preserves those ratios.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FrostStrength {
+    Light,
+    #[default]
+    Regular,
+    Heavy,
+}
+
+impl FrostStrength {
+    pub const ALL: [Self; 3] = [Self::Light, Self::Regular, Self::Heavy];
+
+    pub fn multiplier(self) -> f32 {
+        match self {
+            Self::Light => 0.4,
+            Self::Regular => 1.0,
+            Self::Heavy => 1.8,
+        }
+    }
+}
+
 /// A color serialized as `#rrggbb` or `#rrggbbaa`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Color {

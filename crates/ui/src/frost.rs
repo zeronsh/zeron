@@ -20,6 +20,9 @@ use crate::theme::Theme;
 /// [`Theme::glass_overlay`] tint is thin enough that a 16px blur left
 /// backdrop detail ghosting through menu rows. The composer pill keeps its
 /// own lighter 16 (`chat-composer-glass` blurs 12–16 in the reference).
+///
+/// A reference, not a final value: [`frosted`] scales every sigma it is
+/// handed by the user's [`zeron_theme::FrostStrength`].
 pub const MENU_BLUR: f32 = 44.0;
 
 /// Frost `child` (a popover card): backdrop-blurred on glass, pass-through on
@@ -83,12 +86,11 @@ impl Element for Frosted {
         cx: &mut App,
     ) {
         if Theme::of(cx).is_frost() {
+            // Every call site passes its own reference sigma; the user's
+            // strength scales all of them by one factor so their ratios hold.
+            let sigma = self.blur_radius * crate::appearance::frost(cx).multiplier();
             window.paint_layer(bounds, |window| {
-                window.paint_backdrop_blur(
-                    bounds,
-                    Corners::all(px(self.corner_radius)),
-                    px(self.blur_radius),
-                );
+                window.paint_backdrop_blur(bounds, Corners::all(px(self.corner_radius)), px(sigma));
                 self.child.paint(window, cx);
             });
         } else {
