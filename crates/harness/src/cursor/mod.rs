@@ -314,14 +314,14 @@ fn static_models() -> Vec<Model> {
             label: "Auto".into(),
             description: Some("Cursor picks the model per request".into()),
             reasoning_levels: Vec::new(),
-            options: Vec::new(),
+            options: vec![crate::permission::client()],
         },
         Model {
             id: "composer-2.5".into(),
             label: "Composer 2.5".into(),
             description: Some("Cursor's own fast coding model".into()),
             reasoning_levels: Vec::new(),
-            options: Vec::new(),
+            options: vec![crate::permission::client()],
         },
     ]
 }
@@ -404,7 +404,7 @@ fn map_model_items(items: &Value) -> Vec<Model> {
                 label,
                 description: str_of(item, "description"),
                 reasoning_levels: Vec::new(),
-                options,
+                options: crate::permission::with(options, crate::permission::client()),
             })
         })
         .collect()

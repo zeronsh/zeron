@@ -138,63 +138,63 @@ pub(crate) fn static_models() -> Vec<Model> {
             "GPT-6-Astra",
             "Our most capable model for complex, demanding work.",
             ULTRA_LADDER,
-            vec![service_tier()],
+            crate::permission::with(vec![service_tier()], crate::permission::codex()),
         ),
         model(
             "gpt-5.6-sol",
             "GPT-5.6-Sol",
             "Frontier reasoning flagship",
             ULTRA_LADDER,
-            vec![service_tier()],
+            crate::permission::with(vec![service_tier()], crate::permission::codex()),
         ),
         model(
             "gpt-5.6-terra",
             "GPT-5.6-Terra",
             "Deep multi-step agentic work",
             ULTRA_LADDER,
-            vec![service_tier()],
+            crate::permission::with(vec![service_tier()], crate::permission::codex()),
         ),
         model(
             "gpt-5.6-luna",
             "GPT-5.6-Luna",
             "Fast frontier model",
             MAX_LADDER,
-            vec![service_tier()],
+            crate::permission::with(vec![service_tier()], crate::permission::codex()),
         ),
         model(
             "gpt-daybreak-blue-latest",
             "Daybreak Blue",
             "Frontier model for defensive cybersecurity work",
             ULTRA_LADDER,
-            Vec::new(),
+            crate::permission::with(Vec::new(), crate::permission::codex()),
         ),
         model(
             "gpt-5.5",
             "GPT-5.5",
             "Previous generation flagship",
             XHIGH_LADDER,
-            vec![service_tier()],
+            crate::permission::with(vec![service_tier()], crate::permission::codex()),
         ),
         model(
             "gpt-5.4",
             "GPT-5.4",
             "Reliable general coding",
             XHIGH_LADDER,
-            vec![service_tier()],
+            crate::permission::with(vec![service_tier()], crate::permission::codex()),
         ),
         model(
             "gpt-5.4-mini",
             "GPT-5.4-Mini",
             "Small, fast and capable",
             XHIGH_LADDER,
-            vec![service_tier()],
+            crate::permission::with(vec![service_tier()], crate::permission::codex()),
         ),
         model(
             "gpt-5.3-codex-spark",
             "GPT-5.3-Codex-Spark",
             "Ultra-fast lightweight coding",
             XHIGH_LADDER,
-            vec![service_tier()],
+            crate::permission::with(vec![service_tier()], crate::permission::codex()),
         ),
     ]
 }
@@ -240,6 +240,6 @@ mod tests {
             .expect("daybreak blue in catalog");
         assert_eq!(daybreak.label, "Daybreak Blue");
         assert!(daybreak.reasoning_levels.contains(&ReasoningLevel::Ultra));
-        assert!(daybreak.options.is_empty());
+        assert!(daybreak.options.iter().any(|o| o.id == "permission"));
     }
 }

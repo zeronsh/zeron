@@ -119,6 +119,7 @@ pub mod codex;
 pub mod cursor;
 pub(crate) mod jsonrpc;
 pub mod mock;
+pub(crate) mod permission;
 pub mod opencode;
 pub mod shell_env;
 

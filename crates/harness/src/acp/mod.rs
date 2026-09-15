@@ -237,7 +237,7 @@ fn grok_spec() -> AcpAgentSpec {
                     ReasoningLevel::Medium,
                     ReasoningLevel::High,
                 ],
-                options: Vec::new(),
+                options: vec![crate::permission::client()],
             }]
         },
         // No `_session/steering` extension: steers deliver at turn boundaries.
@@ -302,21 +302,21 @@ fn devin_spec() -> AcpAgentSpec {
                     label: "SWE-1.7 Medium".into(),
                     description: Some("Devin's default coding model".into()),
                     reasoning_levels: Vec::new(),
-                    options: Vec::new(),
+                    options: vec![crate::permission::client()],
                 },
                 Model {
                     id: "claude-fable-5-1-high".into(),
                     label: "Claude Fable 5.1 High".into(),
                     description: Some("Anthropic's frontier model through Devin".into()),
                     reasoning_levels: Vec::new(),
-                    options: Vec::new(),
+                    options: vec![crate::permission::client()],
                 },
                 Model {
                     id: "adaptive".into(),
                     label: "Adaptive".into(),
                     description: Some("Devin picks the model per request".into()),
                     reasoning_levels: Vec::new(),
-                    options: Vec::new(),
+                    options: vec![crate::permission::client()],
                 },
             ]
         },
@@ -333,57 +333,11 @@ fn devin_spec() -> AcpAgentSpec {
     }
 }
 
-/// Values that mean "don't stop for permission prompts". Preference-ordered
-/// so the first advertised one becomes both the Traits default and the
-/// unattended session mode.
-const NO_PROMPTS_MODE_VALUES: &[&str] = &[
-    "bypassPermissions",
-    "bypass_permissions",
-    "bypass",
-    "yolo",
-    "agent-full-access",
-    "danger-full-access",
-    "full-access",
-    // Factory Droid's autonomy_level select (category=mode).
-    "auto-high",
-    "auto_high",
-];
-
 fn no_prompts_mode(available: &[&str]) -> Option<&'static str> {
-    NO_PROMPTS_MODE_VALUES
+    crate::permission::AUTO_VALUES
         .iter()
         .copied()
         .find(|v| available.contains(v))
-}
-
-fn droid_permission_option() -> ModelOption {
-    ModelOption {
-        id: "autonomy_level".into(),
-        label: "Permission".into(),
-        choices: vec![
-            ModelOptionChoice {
-                id: "normal".into(),
-                label: "Auto (Off)".into(),
-            },
-            ModelOptionChoice {
-                id: "spec".into(),
-                label: "Spec".into(),
-            },
-            ModelOptionChoice {
-                id: "auto-low".into(),
-                label: "Auto (Low)".into(),
-            },
-            ModelOptionChoice {
-                id: "auto-medium".into(),
-                label: "Auto (Medium)".into(),
-            },
-            ModelOptionChoice {
-                id: "auto-high".into(),
-                label: "Auto (High)".into(),
-            },
-        ],
-        default_choice: "auto-high".into(),
-    }
 }
 
 fn droid_install_paths() -> Vec<PathBuf> {
@@ -419,7 +373,7 @@ fn droid_spec() -> AcpAgentSpec {
         // Live discovery reads session/new (configOptions first). These rows
         // only enrich matching ids and name the picker when the probe fails.
         models: || {
-            let permission = droid_permission_option();
+            let permission = crate::permission::droid();
             let effort = vec![
                 ReasoningLevel::Low,
                 ReasoningLevel::Medium,
@@ -518,14 +472,14 @@ fn hermes_spec() -> AcpAgentSpec {
                     label: "Hermes 4 405B".into(),
                     description: Some("Nous Research's hybrid-reasoning flagship".into()),
                     reasoning_levels: Vec::new(),
-                    options: Vec::new(),
+                    options: vec![crate::permission::client()],
                 },
                 Model {
                     id: "hermes-4-70b".into(),
                     label: "Hermes 4 70B".into(),
                     description: Some("Faster Hermes 4 — same post-training, 70B".into()),
                     reasoning_levels: Vec::new(),
-                    options: Vec::new(),
+                    options: vec![crate::permission::client()],
                 },
             ]
         },
@@ -575,7 +529,7 @@ fn pi_spec() -> AcpAgentSpec {
                     ReasoningLevel::XHigh,
                     ReasoningLevel::Max,
                 ],
-                options: Vec::new(),
+                options: vec![crate::permission::client()],
             }]
         },
         // The adapter has no `_session/steering` extension: turn boundaries.
@@ -1130,7 +1084,7 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
         // request). Send-side, a chat that saved `default` still matches the
         // advertised value exactly.
         let has_real = raw_ids.iter().any(|id| norm_id(id) != "default");
-        return model_select
+        let mut models: Vec<Model> = model_select
             .iter()
             .filter_map(|o| {
                 let id = o.get("value").and_then(Value::as_str)?;
@@ -1172,11 +1126,13 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
                 Some(build(id, name, description, options))
             })
             .collect();
+        crate::permission::ensure_all(&mut models, crate::permission::client());
+        return models;
     }
 
     // Legacy fallback for agents predating session config options. The
     // catalog's own option sets apply here — nothing arrives on the wire.
-    session_response
+    let mut models: Vec<Model> = session_response
         .get("models")
         .and_then(|m| m.get("availableModels"))
         .and_then(Value::as_array)
@@ -1192,7 +1148,9 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
                 exact(id).map(|k| k.options.clone()).unwrap_or_default(),
             ))
         })
-        .collect()
+        .collect();
+    crate::permission::ensure_all(&mut models, crate::permission::client());
+    models
 }
 
 /// A session config option surfaced as a Traits-dropdown section. Model rides
@@ -1214,7 +1172,7 @@ fn trait_from_config_option(option: &Value) -> Option<ModelOption> {
     }
     let id = option.get("id").and_then(Value::as_str)?;
     let category = option.get("category").and_then(Value::as_str);
-    let label = if category == Some("mode") && (id == "autonomy_level" || id == "autonomyLevel") {
+    let label = if category == Some("mode") {
         "Permission"
     } else {
         option.get("name").and_then(Value::as_str).unwrap_or(id)
@@ -1658,7 +1616,7 @@ fn config_option_sets(
             // User pick first (Traits "Permission"/"Mode", stored under the
             // option id or the generic `mode` key). Unattended fallback is
             // the no-prompts value so a new chat matches the trait default.
-            ("select", Some("mode")) => ["mode", config_id]
+            ("select", Some("mode")) => ["mode", "permission", config_id]
                 .into_iter()
                 .find_map(|key| {
                     model_options
@@ -1899,6 +1857,7 @@ fn handle_server_request_live(
     method: &str,
     params: &Value,
     request_input: &std::sync::Arc<RequestInputFn>,
+    auto_allow: bool,
 ) -> Vec<AgentEvent> {
     if method != "session/request_permission" {
         return handle_server_request(client, id, method, params);
@@ -1908,7 +1867,7 @@ fn handle_server_request_live(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if !is_user_question(&options) {
+    if auto_allow && !is_user_question(&options) {
         return handle_server_request(client, id, method, params);
     }
     let names: Vec<String> = options
@@ -2093,6 +2052,7 @@ async fn run_session(session: Session) {
         interrupt,
     } = controls;
     let request_input = std::sync::Arc::new(request_input);
+    let auto_allow = crate::permission::auto_allows(&request.model_options);
 
     // ---- handshake + session (interruptible) ------------------------------
     let setup = async {
@@ -2507,6 +2467,7 @@ async fn run_session(session: Session) {
                                 &method,
                                 &params,
                                 &request_input,
+                                auto_allow,
                             ) {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -2679,6 +2640,7 @@ async fn run_session(session: Session) {
                         &method,
                         &params,
                         &request_input,
+                        auto_allow,
                     ) {
                         if !send(&event_tx, ev).await {
                             break 'main;
@@ -2788,6 +2750,7 @@ async fn run_session(session: Session) {
                                         &method,
                                         &params,
                                         &request_input,
+                                        auto_allow,
                                     ) {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -3435,7 +3398,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["mode", "fast-mode"]
         );
-        assert_eq!(models[0].options[0].label, "Mode");
+        assert_eq!(models[0].options[0].label, "Permission");
         assert_eq!(models[0].options[0].default_choice, "agent-full-access");
         assert_eq!(models[0].options[1].default_choice, "off");
     }
@@ -3468,7 +3431,7 @@ mod tests {
         );
         assert!(models[0].options.iter().any(|o| o.id == "contextWindow"));
         assert!(models[1].options.iter().any(|o| o.id == "contextWindow"));
-        assert!(models[2].options.is_empty());
+        assert!(models[2].options.iter().any(|o| o.id == "permission"));
     }
 
     #[test]
@@ -3511,9 +3474,9 @@ mod tests {
                 .iter()
                 .any(|o| o.id == "contextWindow" && o.default_choice == "1m")
         );
-        // The bare aliases stay untouched.
-        assert!(models[2].options.is_empty());
-        assert!(models[3].options.is_empty());
+        // The bare aliases keep the client-side Permission trait.
+        assert!(models[2].options.iter().any(|o| o.id == "permission"));
+        assert!(models[3].options.iter().any(|o| o.id == "permission"));
     }
 
     #[test]
@@ -3576,8 +3539,9 @@ mod tests {
         assert_eq!(models.len(), 2);
         // Catalog-matched id keeps the curated options on the legacy path…
         assert!(models[0].options.iter().any(|o| o.id == "serviceTier"));
-        // …unknown ids get none.
-        assert!(models[1].options.is_empty());
+        assert!(models[0].options.iter().any(|o| o.id == "permission"));
+        // Unknown ids still get the client-side Permission trait.
+        assert!(models[1].options.iter().any(|o| o.id == "permission"));
     }
 
     #[test]

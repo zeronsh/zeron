@@ -451,7 +451,10 @@ fn parse_model_list_page(result: &Value) -> (Vec<(Model, bool)>, Option<String>)
                     .and_then(reasoning_level)
             })
             .collect();
-        let options = model_service_tier(item).into_iter().collect();
+        let options = crate::permission::with(
+            model_service_tier(item).into_iter().collect(),
+            crate::permission::codex(),
+        );
         models.push((
             Model {
                 id: id.to_owned(),
@@ -605,18 +608,20 @@ impl CodexHarness {
         title_only: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let exe = self.resolve_executable()?;
-        // Yolo mode: danger-full-access + approvalPolicy "never" (set below) —
-        // codex's --dangerously-bypass-approvals-and-sandbox equivalent.
-        // Parity with the Claude adapter, which auto-approves every
-        // can_use_tool and so effectively grants full access. This also
-        // sidesteps codex ≤0.144.x's workspace-write bug where a linked
-        // worktree on a slash-named branch derives a malformed mount that
-        // kills every command.
+        // Permission trait maps onto Codex approvalPolicy + sandbox. Auto
+        // (High) is yolo (never + danger-full-access), matching the previous
+        // unattended default. Ask / on-failure / sandbox keep workspace-write
+        // so a linked worktree on a slash-named branch still mounts.
         request.sandbox = if title_only {
             zeron_proto::SandboxLevel::ReadOnly
         } else {
-            zeron_proto::SandboxLevel::DangerFullAccess
+            match crate::permission::selected(&request.model_options).unwrap_or("never") {
+                "untrusted" => zeron_proto::SandboxLevel::ReadOnly,
+                "never" | "auto-high" => zeron_proto::SandboxLevel::DangerFullAccess,
+                _ => zeron_proto::SandboxLevel::WorkspaceWrite,
+            }
         };
+        request.auto_approve = !title_only && crate::permission::auto_allows(&request.model_options);
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
         crate::compose_child_path(&mut cmd, &exe);
@@ -792,14 +797,15 @@ async fn run_session(session: Session) {
     let request_input = Arc::new(request_input);
 
     // ---- wire params ------------------------------------------------------
-    // Parity with the Claude adapter, which auto-approves every `can_use_tool`
-    // regardless of `auto_approve` (zeron sessions run unattended; combined
-    // with the danger-full-access override above this is codex's yolo mode):
-    // never surface wire approvals. "on-request" turned
-    // every command into a yes/no question (user report: "asking me for
-    // approval at every step"). The approval-as-input plumbing below stays for
-    // stray requests and a future explicit permission-mode setting.
-    let approval_policy = "never";
+    // Permission trait: Auto (High) → never (yolo). Ask → on-request so
+    // approvals surface as yes/no. Missing pick stays unattended.
+    let approval_policy = match crate::permission::selected(&request.model_options).unwrap_or("never")
+    {
+        "on-request" | "ask" | "default" => "on-request",
+        "on-failure" => "on-failure",
+        "untrusted" => "untrusted",
+        _ => "never",
+    };
     let effort = to_effort(request.reasoning);
     // Service tier rides thread-start and every turn (mirrors the Codex IDE
     // client). "default" means Standard — omit it entirely.
@@ -1743,8 +1749,14 @@ mod tests {
         assert_eq!(astra.description.as_deref(), Some("Most capable"));
         assert_eq!(astra.reasoning_levels, vec![ReasoningLevel::High]);
         assert!(*is_default);
-        assert_eq!(astra.options[0].choices.len(), 2);
-        assert_eq!(astra.options[0].choices[1].id, "fast");
+        assert_eq!(astra.options[0].id, "permission");
+        let tier = astra
+            .options
+            .iter()
+            .find(|o| o.id == "serviceTier")
+            .expect("serviceTier");
+        assert_eq!(tier.choices.len(), 2);
+        assert_eq!(tier.choices[1].id, "fast");
     }
 
     #[test]

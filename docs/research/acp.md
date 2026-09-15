@@ -83,8 +83,11 @@
   `auto-medium`/`auto-high`). No `_session/steering` extension → turn-boundary
   steering. Autonomy is a visible Traits **Permission** control (default
   `auto-high`, matching the unattended fallback); a saved pick rides
-  `model_options.autonomy_level`. Auth stays with Droid (`droid` login or
-  `FACTORY_API_KEY`); zeron does not copy Factory credentials.
+  `model_options.autonomy_level`. The same Permission trait is on every
+  other harness (Claude permission-mode, Codex approvalPolicy, OpenCode
+  reply, ACP Ask/Auto when the agent has no mode select). Auth stays with
+  Droid (`droid` login or `FACTORY_API_KEY`); zeron does not copy Factory
+  credentials.
 - **ACP is the source of truth for model lists** (2026-08-08; preference
   order inverted 2026-08-09): `models()` runs a short-lived probe
   (initialize → `session/new`, the `discover_commands` pattern) and reads

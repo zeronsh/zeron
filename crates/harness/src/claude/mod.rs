@@ -56,7 +56,7 @@ use zeron_proto::{
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
 use catalog::{apply_ultrathink, static_models, to_effort};
 use normalize::Normalizer;
-use wire::{ControlRequestFrame, Frame, allow_response, control_response_line};
+use wire::{ControlRequestFrame, Frame, allow_response, control_response_line, deny_response};
 
 /// Locate the device's installed Claude Code CLI: `CLAUDE_CODE_EXECUTABLE`,
 /// then our own PATH, then the login-shell PATH snapshot (the user's shell
@@ -209,14 +209,11 @@ impl ClaudeHarness {
         if let Some(effort) = to_effort(request.reasoning, request.model.as_deref()) {
             cmd.args(["--effort", effort]);
         }
-        if request.auto_approve {
-            cmd.args([
-                "--permission-mode",
-                "bypassPermissions",
-                "--dangerously-skip-permissions",
-            ]);
-        } else {
-            cmd.args(["--permission-mode", "default"]);
+        let permission = crate::permission::selected(&request.model_options)
+            .unwrap_or("bypassPermissions");
+        cmd.args(["--permission-mode", permission]);
+        if crate::permission::auto_allows(&request.model_options) {
+            cmd.arg("--dangerously-skip-permissions");
         }
         if let Some(resume) = &request.resume {
             cmd.arg(format!("--resume={resume}"));
@@ -506,6 +503,7 @@ impl ClaudeHarness {
             event_tx,
             controls,
             reasoning: request.reasoning,
+            auto_allow: crate::permission::auto_allows(&request.model_options),
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             stderr_tail,
@@ -630,6 +628,7 @@ struct Session {
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
     reasoning: Option<ReasoningLevel>,
+    auto_allow: bool,
     interrupt_grace: Duration,
     kill_grace: Duration,
     /// Rolling stderr tail for the crash message on an unexpected exit.
@@ -647,6 +646,7 @@ async fn run_session(session: Session) {
         event_tx,
         controls,
         reasoning,
+        auto_allow,
         interrupt_grace,
         kill_grace,
         stderr_tail,
@@ -688,7 +688,12 @@ async fn run_session(session: Session) {
                             }));
                             let _ = stdin_tx.send(StdinMsg::Line(line));
                         } else {
-                            handle_control_request(req, &request_input, &stdin_tx);
+                            handle_control_request(
+                                req,
+                                auto_allow,
+                                &request_input,
+                                &stdin_tx,
+                            );
                         }
                         continue;
                     }
@@ -795,15 +800,13 @@ type RequestInputFn = Box<
         + Sync,
 >;
 
-/// Serve one `can_use_tool` control request. Every tool is auto-approved
-/// (unattended parity — the CLI still blocks until SOME response arrives, so
-/// every request must be answered); `AskUserQuestion` is intercepted —
-/// surface the questions through the engine's input bridge (which owns the
-/// `InputRequested`/`InputResolved` lifecycle), wait for the user's answers
-/// (in a subtask so the frame loop keeps flowing), and hand them back keyed
-/// by question text, as the tool expects.
+/// Serve one `can_use_tool` control request. Auto (High) allows every tool
+/// (unattended parity — the CLI still blocks until SOME response arrives).
+/// Ask / Plan / Auto (edits) round-trip through the input bridge as yes/no.
+/// `AskUserQuestion` always goes to the input bridge, keyed by question text.
 fn handle_control_request(
     req: ControlRequestFrame,
+    auto_allow: bool,
     request_input: &Arc<RequestInputFn>,
     stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
 ) {
@@ -815,8 +818,40 @@ fn handle_control_request(
         return;
     }
     if req.request.tool_name != "AskUserQuestion" {
-        let line = control_response_line(&req.request_id, allow_response(req.request.input));
-        let _ = stdin_tx.send(StdinMsg::Line(line));
+        if auto_allow {
+            let line = control_response_line(&req.request_id, allow_response(req.request.input));
+            let _ = stdin_tx.send(StdinMsg::Line(line));
+            return;
+        }
+        let tool = if req.request.tool_name.is_empty() {
+            "a tool".to_owned()
+        } else {
+            format!("`{}`", req.request.tool_name)
+        };
+        let question = UserInputQuestion {
+            id: uuid::Uuid::new_v4().to_string(),
+            header: "Permission".into(),
+            question: format!("Claude Code wants to use {tool}. Allow it?"),
+            options: vec!["Yes".into(), "No".into()],
+            multi_select: false,
+        };
+        let request_input = Arc::clone(request_input);
+        let stdin_tx = stdin_tx.clone();
+        tokio::spawn(async move {
+            let answers = (request_input)(vec![question.clone()])
+                .await
+                .unwrap_or_default();
+            let allow = answers.iter().any(|a| {
+                a.question_id == question.id && a.labels.iter().any(|l| l.eq_ignore_ascii_case("yes"))
+            });
+            let response = if allow {
+                allow_response(req.request.input)
+            } else {
+                deny_response("User denied permission")
+            };
+            let line = control_response_line(&req.request_id, response);
+            let _ = stdin_tx.send(StdinMsg::Line(line));
+        });
         return;
     }
     let request_input = Arc::clone(request_input);
