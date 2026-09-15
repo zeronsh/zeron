@@ -265,6 +265,13 @@ pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
     });
 }
 
+/// Root of the active profile's data directory, for the stores that keep
+/// files beside `ui-settings.json` (see [`crate::identity`]).
+pub fn data_dir(cx: &App) -> Option<PathBuf> {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.data_dir.clone())
+}
+
 /// Latest settings, including mutations still inside the debounce window.
 pub fn current(cx: &App) -> UiSettings {
     cx.try_global::<SettingsStore>()
@@ -623,6 +630,12 @@ pub struct UiSettings {
     pub new_thread_composer_background: Option<NewThreadComposerBackground>,
     /// Non-destructive treatment composited inside the artwork's fade mask.
     pub new_thread_background_effect: NewThreadBackgroundEffect,
+    /// Chosen pictures for projects and people, keyed `space:{id}` /
+    /// `user:{id}` and valued by a file name under `{data_dir}/images`.
+    /// Device-local: the registry doc carries no picture field, so an entry
+    /// here is deliberately not synced (see [`crate::identity`]).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub images: std::collections::BTreeMap<String, String>,
     /// Pre-theme settings used `accentColor`. Read it once, migrate to
     /// [`Self::accent`], and never write it again.
     #[serde(default, rename = "accentColor", skip_serializing)]
@@ -685,6 +698,7 @@ impl Default for UiSettings {
             surface: zeron_theme::SurfacePreference::default(),
             new_thread_composer_background: None,
             new_thread_background_effect: NewThreadBackgroundEffect::None,
+            images: std::collections::BTreeMap::new(),
             legacy_accent_color: None,
         }
     }
@@ -1654,6 +1668,10 @@ mod tests {
                 name: "background.png".into(),
             }),
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
+            images: std::collections::BTreeMap::from([(
+                "space:space-1".to_string(),
+                "3a7f0c1d9b2e4f56.png".to_string(),
+            )]),
             legacy_accent_color: None,
         };
         settings.save(dir.path()).unwrap();
@@ -1667,6 +1685,7 @@ mod tests {
         assert!(json.contains(r#""terminalFontSize": 15.0"#));
         assert!(json.contains(r#""codeFontFamily": "geist""#));
         assert!(json.contains(r#""codeFontSize": 11.0"#));
+        assert!(json.contains(r#""space:space-1": "3a7f0c1d9b2e4f56.png""#));
     }
 
     #[test]
