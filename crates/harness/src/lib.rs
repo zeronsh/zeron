@@ -6,8 +6,9 @@
 //! ([`CursorHarness`]), and opencode over its own HTTP/SSE server protocol
 //! ([`OpencodeHarness`] — what the opencode desktop app speaks). The shared
 //! [`AcpHarness`] remains ONLY for agents built ground-up on ACP — Devin
-//! (`devin acp`), Grok (`grok agent stdio`) and Hermes (`hermes acp`) — plus
-//! pi via the community `pi-acp` adapter until a native driver exists.
+//! (`devin acp`), Factory Droid (`droid exec --output-format acp`), Grok
+//! (`grok agent stdio`) and Hermes (`hermes acp`) — plus pi via the community
+//! `pi-acp` adapter until a native driver exists.
 //! Adapter-mediated ACP for claude/codex/cursor was retired — and opencode's
 //! ACP layer with it: the adapters held prompt turns open for background
 //! work the CLIs themselves settle eagerly (and opencode's settles on the
@@ -118,6 +119,7 @@ pub mod codex;
 pub mod cursor;
 pub(crate) mod jsonrpc;
 pub mod mock;
+pub(crate) mod permission;
 pub mod opencode;
 pub mod shell_env;
 

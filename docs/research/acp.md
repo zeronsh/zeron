@@ -71,6 +71,23 @@
   `-32015 "already open in another process"` while a previous `devin acp`
   still holds the session — the shared driver's fresh-session fallback covers
   that, at the cost of Devin-side context.
+- **Factory Droid registered** (2026-09-14): `AcpHarness::droid()` runs Factory's
+  native ACP server (`droid exec --output-format acp`; install via
+  `curl -fsSL https://app.factory.ai/cli | sh` or `brew install --cask droid`
+  — no npm fallback, so resolution is PATH/`~/.local/bin`/`~/.factory/bin`/
+  homebrew bins only, `DROID_EXECUTABLE` overrides). Verified live against
+  CLI 0.218.2: initialize advertises `loadSession` + image prompts; session/new
+  carries a `model` config option (live catalog including BYOK custom models),
+  `thought_level` as `reasoning_effort` (none/low/medium/high/xhigh/max), and
+  a `mode` select named `autonomy_level` (`normal`/`spec`/`auto-low`/
+  `auto-medium`/`auto-high`). No `_session/steering` extension → turn-boundary
+  steering. Autonomy is a visible Traits **Permission** control (default
+  `auto-high`, matching the unattended fallback); a saved pick rides
+  `model_options.autonomy_level`. The same Permission trait is on every
+  other harness (Claude permission-mode, Codex approvalPolicy, OpenCode
+  reply, ACP Ask/Auto when the agent has no mode select). Auth stays with
+  Droid (`droid` login or `FACTORY_API_KEY`); zeron does not copy Factory
+  credentials.
 - **ACP is the source of truth for model lists** (2026-08-08; preference
   order inverted 2026-08-09): `models()` runs a short-lived probe
   (initialize → `session/new`, the `discover_commands` pattern) and reads

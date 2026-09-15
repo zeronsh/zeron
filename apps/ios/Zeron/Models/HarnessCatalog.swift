@@ -65,6 +65,7 @@ enum HarnessCatalog {
         "claude-code": "Claude Code",
         "codex": "Codex",
         "devin": "Devin",
+        "droid": "Factory Droid",
         "grok": "Grok",
         "hermes": "Hermes",
         "pi": "Pi",
@@ -77,6 +78,34 @@ enum HarnessCatalog {
         knownLabels[harness] ?? harness
     }
 
+    private static let permissionAskHigh = [
+        ModelOptionInfo(id: "permission", label: "Permission", choices: [
+            ModelOptionChoiceInfo(id: "ask", label: "Ask"),
+            ModelOptionChoiceInfo(id: "auto-high", label: "Auto (High)"),
+        ], defaultChoice: "auto-high"),
+    ]
+    private static let permissionClaude = [
+        ModelOptionInfo(id: "permission", label: "Permission", choices: [
+            ModelOptionChoiceInfo(id: "default", label: "Ask"),
+            ModelOptionChoiceInfo(id: "acceptEdits", label: "Auto (edits)"),
+            ModelOptionChoiceInfo(id: "plan", label: "Plan"),
+            ModelOptionChoiceInfo(id: "bypassPermissions", label: "Auto (High)"),
+        ], defaultChoice: "bypassPermissions"),
+    ]
+    private static let permissionCodex = [
+        ModelOptionInfo(id: "permission", label: "Permission", choices: [
+            ModelOptionChoiceInfo(id: "on-request", label: "Ask"),
+            ModelOptionChoiceInfo(id: "on-failure", label: "Auto (on failure)"),
+            ModelOptionChoiceInfo(id: "untrusted", label: "Sandbox"),
+            ModelOptionChoiceInfo(id: "never", label: "Auto (High)"),
+        ], defaultChoice: "never"),
+    ]
+    private static let permissionOpencode = [
+        ModelOptionInfo(id: "permission", label: "Permission", choices: [
+            ModelOptionChoiceInfo(id: "once", label: "Ask"),
+            ModelOptionChoiceInfo(id: "always", label: "Auto (High)"),
+        ], defaultChoice: "always"),
+    ]
     private static let fullLadder = ["low", "medium", "high", "xhigh", "max", "ultracode", "ultrathink"]
     private static let claudeXhighLadder = ["low", "medium", "high", "xhigh", "max", "ultrathink"]
     private static let codexUltraLadder = ["low", "medium", "high", "xhigh", "max", "ultra"]
@@ -95,7 +124,8 @@ enum HarnessCatalog {
             return [
                 ModelInfo(id: "grok-4.5", label: "Grok 4.5",
                           description: "xAI's coding model — 500k context",
-                          reasoningLevels: ["low", "medium", "high"]),
+                          reasoningLevels: ["low", "medium", "high"],
+                          options: permissionAskHigh),
             ]
         case "devin":
             return [
@@ -106,18 +136,47 @@ enum HarnessCatalog {
                 ModelInfo(id: "adaptive", label: "Adaptive",
                           description: "Devin picks the model per request", reasoningLevels: []),
             ]
+        case "droid":
+            let permission = [
+                ModelOptionInfo(id: "autonomy_level", label: "Permission", choices: [
+                    ModelOptionChoiceInfo(id: "normal", label: "Auto (Off)"),
+                    ModelOptionChoiceInfo(id: "spec", label: "Spec"),
+                    ModelOptionChoiceInfo(id: "auto-low", label: "Auto (Low)"),
+                    ModelOptionChoiceInfo(id: "auto-medium", label: "Auto (Medium)"),
+                    ModelOptionChoiceInfo(id: "auto-high", label: "Auto (High)"),
+                ], defaultChoice: "auto-high"),
+            ]
+            return [
+                ModelInfo(id: "auto", label: "Auto Model",
+                          description: "Factory picks the model per request", reasoningLevels: [],
+                          options: permission),
+                ModelInfo(id: "gpt-5.6-sol", label: "GPT-5.6 Sol",
+                          description: "Factory Droid's default coding model",
+                          reasoningLevels: ["low", "medium", "high", "xhigh", "max"],
+                          options: permission),
+                ModelInfo(id: "claude-opus-5", label: "Opus 5",
+                          description: "Anthropic's frontier model through Factory",
+                          reasoningLevels: ["low", "medium", "high", "xhigh", "max"],
+                          options: permission),
+                ModelInfo(id: "glm-5.2", label: "GLM-5.2 (Droid Core)",
+                          description: "Factory-hosted GLM coding model", reasoningLevels: [],
+                          options: permission),
+            ]
         case "hermes":
             return [
                 ModelInfo(id: "hermes-4-405b", label: "Hermes 4 405B",
-                          description: "Nous Research's hybrid-reasoning flagship", reasoningLevels: []),
+                          description: "Nous Research's hybrid-reasoning flagship", reasoningLevels: [],
+                          options: permissionAskHigh),
                 ModelInfo(id: "hermes-4-70b", label: "Hermes 4 70B",
-                          description: "Faster Hermes 4 — same post-training, 70B", reasoningLevels: []),
+                          description: "Faster Hermes 4 — same post-training, 70B", reasoningLevels: [],
+                          options: permissionAskHigh),
             ]
         case "pi":
             return [
                 ModelInfo(id: "default", label: "pi default",
                           description: "Runs the model configured in pi (`pi` settings)",
-                          reasoningLevels: ["minimal", "low", "medium", "high", "xhigh", "max"]),
+                          reasoningLevels: ["minimal", "low", "medium", "high", "xhigh", "max"],
+                          options: permissionAskHigh),
             ]
         case "opencode":
             // Static fallback only — a reachable host answers `listModels`
@@ -125,57 +184,66 @@ enum HarnessCatalog {
             // OpenCode Zen tier is always available, so these always run.
             return [
                 ModelInfo(id: "opencode/big-pickle", label: "Big Pickle",
-                          description: "OpenCode Zen's flagship coding model", reasoningLevels: []),
+                          description: "OpenCode Zen's flagship coding model", reasoningLevels: [],
+                          options: permissionOpencode),
                 ModelInfo(id: "opencode/mimo-v2.5-free", label: "MiMo V2.5 Free",
-                          description: "Free tier on OpenCode Zen", reasoningLevels: []),
+                          description: "Free tier on OpenCode Zen", reasoningLevels: [],
+                          options: permissionOpencode),
                 ModelInfo(id: "opencode/hy3-free", label: "Hy3 Free",
                           description: "Free tier on OpenCode Zen",
-                          reasoningLevels: ["low", "medium", "high"]),
+                          reasoningLevels: ["low", "medium", "high"],
+                          options: permissionOpencode),
             ]
         case "codex":
             return [
                 ModelInfo(id: "gpt-6-astra", label: "GPT-6-Astra",
                           description: "Our most capable model for complex, demanding work.",
-                          reasoningLevels: codexUltraLadder, options: codexServiceTier),
+                          reasoningLevels: codexUltraLadder, options: permissionCodex + codexServiceTier),
                 ModelInfo(id: "gpt-5.6-sol", label: "GPT-5.6-Sol",
                           description: "Frontier reasoning flagship", reasoningLevels: codexUltraLadder,
-                          options: codexServiceTier),
+                          options: permissionCodex + codexServiceTier),
                 ModelInfo(id: "gpt-5.6-terra", label: "GPT-5.6-Terra",
                           description: "Deep multi-step agentic work", reasoningLevels: codexUltraLadder,
-                          options: codexServiceTier),
+                          options: permissionCodex + codexServiceTier),
                 ModelInfo(id: "gpt-5.6-luna", label: "GPT-5.6-Luna",
                           description: "Fast frontier model", reasoningLevels: codexMaxLadder,
-                          options: codexServiceTier),
+                          options: permissionCodex + codexServiceTier),
                 ModelInfo(id: "gpt-daybreak-blue-latest", label: "Daybreak Blue",
                           description: "Frontier model for defensive cybersecurity work",
-                          reasoningLevels: codexUltraLadder),
+                          reasoningLevels: codexUltraLadder, options: permissionCodex),
                 ModelInfo(id: "gpt-5.5", label: "GPT-5.5",
                           description: "Previous generation flagship", reasoningLevels: codexXhighLadder,
-                          options: codexServiceTier),
+                          options: permissionCodex + codexServiceTier),
                 ModelInfo(id: "gpt-5.4", label: "GPT-5.4",
                           description: "Reliable general coding", reasoningLevels: codexXhighLadder,
-                          options: codexServiceTier),
+                          options: permissionCodex + codexServiceTier),
                 ModelInfo(id: "gpt-5.4-mini", label: "GPT-5.4-Mini",
                           description: "Small, fast and capable", reasoningLevels: codexXhighLadder,
-                          options: codexServiceTier),
+                          options: permissionCodex + codexServiceTier),
                 ModelInfo(id: "gpt-5.3-codex-spark", label: "GPT-5.3-Codex-Spark",
                           description: "Ultra-fast lightweight coding", reasoningLevels: codexXhighLadder,
-                          options: codexServiceTier),
+                          options: permissionCodex + codexServiceTier),
             ]
         default:  // claude-code (mock shares it)
             return [
                 ModelInfo(id: "claude-fable-5", label: "Fable 5",
-                          description: "Most intelligent model for building agents", reasoningLevels: fullLadder),
+                          description: "Most intelligent model for building agents", reasoningLevels: fullLadder,
+                          options: permissionClaude),
                 ModelInfo(id: "claude-opus-5", label: "Opus 5",
-                          description: "Powerful model for complex work", reasoningLevels: fullLadder),
+                          description: "Powerful model for complex work", reasoningLevels: fullLadder,
+                          options: permissionClaude),
                 ModelInfo(id: "claude-opus-4-8", label: "Opus 4.8",
-                          description: "Previous generation Opus", reasoningLevels: fullLadder),
+                          description: "Previous generation Opus", reasoningLevels: fullLadder,
+                          options: permissionClaude),
                 ModelInfo(id: "claude-opus-4-7", label: "Opus 4.7",
-                          description: "Older generation Opus", reasoningLevels: claudeXhighLadder),
+                          description: "Older generation Opus", reasoningLevels: claudeXhighLadder,
+                          options: permissionClaude),
                 ModelInfo(id: "claude-sonnet-5", label: "Sonnet 5",
-                          description: "Balanced speed and intelligence", reasoningLevels: claudeXhighLadder),
+                          description: "Balanced speed and intelligence", reasoningLevels: claudeXhighLadder,
+                          options: permissionClaude),
                 ModelInfo(id: "claude-haiku-4-5", label: "Haiku 4.5",
-                          description: "Fastest model for everyday tasks", reasoningLevels: []),
+                          description: "Fastest model for everyday tasks", reasoningLevels: [],
+                          options: permissionClaude),
             ]
         }
     }

@@ -491,6 +491,30 @@ pub fn default_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::AcpHarness::devin().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::devin()) as Arc<dyn Harness>)),
     );
+    // Factory Droid over ACP (`droid exec --output-format acp`), same lazy
+    // pattern: the static descriptor mirrors AcpHarness::droid() exactly.
+    // No steering extension (turn boundaries). Effort rides the advertised
+    // `thought_level` option (`reasoning_effort`). Autonomy is a visible
+    // Permission trait defaulting to `auto-high`.
+    registry.register_lazy(
+        HarnessDescriptor {
+            id: HarnessId::Droid,
+            name: "Factory Droid".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::TurnBoundary,
+            reasoning_levels: vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+                ReasoningLevel::Max,
+            ],
+            installed: true,
+            enabled: None,
+        },
+        Box::new(|| zeron_harness::AcpHarness::droid().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::droid()) as Arc<dyn Harness>)),
+    );
     // Grok Build over ACP, same lazy pattern: the static descriptor mirrors
     // AcpHarness::grok() exactly. No `_session/steering` extension yet, so
     // steers deliver at turn boundaries; the effort ladder applies per
@@ -652,6 +676,7 @@ mod tests {
                 HarnessId::Codex,
                 HarnessId::Cursor,
                 HarnessId::Devin,
+                HarnessId::Droid,
                 HarnessId::Grok,
                 HarnessId::Hermes,
                 HarnessId::Pi,
@@ -678,7 +703,7 @@ mod tests {
                 ReasoningLevel::High
             ]
         );
-        // Cursor, Devin, Hermes and Pi mirror their specs the same way.
+        // Cursor, Devin, Droid, Hermes and Pi mirror their specs the same way.
         let cursor = registry.resolve(HarnessId::Cursor).unwrap();
         assert_eq!(cursor.id(), HarnessId::Cursor);
         assert_eq!(cursor.display_name(), "Cursor");
@@ -689,6 +714,20 @@ mod tests {
         assert_eq!(devin.display_name(), "Devin");
         assert_eq!(devin.steering_mode(), SteeringMode::TurnBoundary);
         assert!(devin.reasoning_levels().is_empty());
+        let droid = registry.resolve(HarnessId::Droid).unwrap();
+        assert_eq!(droid.id(), HarnessId::Droid);
+        assert_eq!(droid.display_name(), "Factory Droid");
+        assert_eq!(droid.steering_mode(), SteeringMode::TurnBoundary);
+        assert_eq!(
+            droid.reasoning_levels(),
+            &[
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+                ReasoningLevel::Max,
+            ]
+        );
         let hermes = registry.resolve(HarnessId::Hermes).unwrap();
         assert_eq!(hermes.id(), HarnessId::Hermes);
         assert_eq!(hermes.display_name(), "Hermes");

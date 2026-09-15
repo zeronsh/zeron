@@ -10,6 +10,8 @@ pub enum HarnessId {
     Cursor,
     /// Cognition's Devin agent, driven over ACP (`devin acp`).
     Devin,
+    /// Factory's Droid agent, driven over ACP (`droid exec --output-format acp`).
+    Droid,
     /// xAI's Grok Build agent, driven over ACP (`grok agent stdio`).
     Grok,
     /// Nous Research's Hermes Agent, driven over ACP (`hermes acp`).
@@ -567,6 +569,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&HarnessId::ClaudeCode).unwrap(),
             "\"claude-code\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HarnessId::Droid).unwrap(),
+            "\"droid\""
         );
     }
 }

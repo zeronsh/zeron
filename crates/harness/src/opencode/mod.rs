@@ -742,7 +742,7 @@ fn models_from_providers(providers: &ProviderCatalog) -> Vec<Model> {
                     label,
                     description: Some(provider_name.to_owned()),
                     reasoning_levels: levels,
-                    options: Vec::new(),
+                    options: vec![crate::permission::opencode()],
                 }
             })
             .collect();
@@ -1359,6 +1359,7 @@ async fn run_session(session: Session) {
                             dir,
                             event_tx: &event_tx,
                             request_input: &request_input,
+                            auto_allow: crate::permission::auto_allows(&request.model_options),
                             main_feed: &mut main_feed,
                             children: &mut children,
                             pending_spawns: &mut pending_spawns,
@@ -1584,6 +1585,7 @@ struct BusCtx<'a> {
     dir: Option<&'a str>,
     event_tx: &'a mpsc::Sender<Result<AgentEvent, HarnessError>>,
     request_input: &'a Arc<RequestInput>,
+    auto_allow: bool,
     main_feed: &'a mut SessionFeed,
     children: &'a mut HashMap<String, ChildRun>,
     pending_spawns: &'a mut VecDeque<PendingSpawn>,
@@ -1635,6 +1637,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
         dir,
         event_tx,
         request_input,
+        auto_allow,
         main_feed,
         children,
         pending_spawns,
@@ -1935,10 +1938,6 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             BusOutcome::Continue
         }
         "permission.asked" => {
-            // Parity with every other driver: sessions run unattended, so
-            // permissions auto-approve ("always" also whitelists the
-            // pattern, cutting future asks). Child sessions included — the
-            // ACP layer silently dropped those and subagents hung.
             let Some(id) = props.get("id").and_then(Value::as_str) else {
                 return BusOutcome::Continue;
             };
@@ -1948,6 +1947,44 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             let base = server.base.clone();
             let auth = server.auth.clone();
             let dir_owned = dir.map(str::to_owned);
+            if auto_allow {
+                tokio::spawn(async move {
+                    let server = Server {
+                        child: None,
+                        base,
+                        auth,
+                        client: http_client(),
+                        stderr_tail: crate::StderrTail::default(),
+                    };
+                    if server
+                        .post_json(
+                            &reply_path,
+                            dir_owned.as_deref(),
+                            &json!({ "reply": "always" }),
+                        )
+                        .await
+                        .is_err()
+                    {
+                        let _ = server
+                            .post_json(
+                                &fallback_path,
+                                dir_owned.as_deref(),
+                                &json!({ "response": "always" }),
+                            )
+                            .await;
+                    }
+                });
+                return BusOutcome::Continue;
+            }
+            let permission_id = id.to_owned();
+            let question = zeron_proto::UserInputQuestion {
+                id: permission_id.clone(),
+                header: "Permission".into(),
+                question: "OpenCode wants to run a tool. Allow it?".into(),
+                options: vec!["Yes".into(), "No".into()],
+                multi_select: false,
+            };
+            let rx = (request_input)(vec![question.clone()]);
             tokio::spawn(async move {
                 let server = Server {
                     child: None,
@@ -1956,11 +1993,19 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     client: http_client(),
                     stderr_tail: crate::StderrTail::default(),
                 };
+                let allow = match rx.await {
+                    Ok(answers) => answers.iter().any(|a| {
+                        a.question_id == question.id
+                            && a.labels.iter().any(|l| l.eq_ignore_ascii_case("yes"))
+                    }),
+                    Err(_) => false,
+                };
+                let reply = if allow { "once" } else { "reject" };
                 if server
                     .post_json(
                         &reply_path,
                         dir_owned.as_deref(),
-                        &json!({ "reply": "always" }),
+                        &json!({ "reply": reply }),
                     )
                     .await
                     .is_err()
@@ -1969,7 +2014,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                         .post_json(
                             &fallback_path,
                             dir_owned.as_deref(),
-                            &json!({ "response": "always" }),
+                            &json!({ "response": reply }),
                         )
                         .await;
                 }

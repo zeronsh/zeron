@@ -594,6 +594,22 @@ fn hermes_and_pi_descriptor_surfaces_match_registry_expectations() {
     assert_eq!(devin.steering_mode(), SteeringMode::TurnBoundary);
     assert!(devin.reasoning_levels().is_empty());
 
+    let droid = AcpHarness::droid();
+    assert_eq!(droid.id(), HarnessId::Droid);
+    assert_eq!(droid.display_name(), "Factory Droid");
+    assert!(droid.supports_steering());
+    assert_eq!(droid.steering_mode(), SteeringMode::TurnBoundary);
+    assert_eq!(
+        droid.reasoning_levels(),
+        &[
+            zeron_proto::ReasoningLevel::Low,
+            zeron_proto::ReasoningLevel::Medium,
+            zeron_proto::ReasoningLevel::High,
+            zeron_proto::ReasoningLevel::XHigh,
+            zeron_proto::ReasoningLevel::Max,
+        ]
+    );
+
     let hermes = AcpHarness::hermes();
     assert_eq!(hermes.id(), HarnessId::Hermes);
     assert_eq!(hermes.display_name(), "Hermes");
@@ -627,6 +643,21 @@ async fn devin_spec_drives_the_shared_acp_wire() {
     assert!(events.iter().any(|event| matches!(
         event,
         AgentEvent::SessionStarted { harness, .. } if *harness == HarnessId::Devin
+    )));
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "Hello".into()
+    }));
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn droid_spec_drives_the_shared_acp_wire() {
+    let droid = AcpHarness::droid().with_executable(fixture_path());
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&droid, request("scenario:happy"), controls).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::SessionStarted { harness, .. } if *harness == HarnessId::Droid
     )));
     assert!(events.contains(&AgentEvent::TextDelta {
         text: "Hello".into()
