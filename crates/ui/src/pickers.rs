@@ -572,6 +572,7 @@ impl Pickers {
             | ComposerInputEvent::PastedPaths(_)
             | ComposerInputEvent::CursorMoved
             | ComposerInputEvent::ViewportChanged
+            | ComposerInputEvent::ExitDown
             | ComposerInputEvent::MentionNavigate(_)
             | ComposerInputEvent::MentionAccept
             | ComposerInputEvent::MentionDismiss => {}

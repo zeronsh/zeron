@@ -54,6 +54,7 @@ use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
     format_time_ago, org_name_valid, parse_orgs, sort_memberships,
 };
+use crate::subagent_navigator::AgentTarget;
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
 use crate::theme::Theme;
 use crate::transcript::{self, Transcript, TranscriptEvent};
@@ -1248,9 +1249,17 @@ struct SubagentTab {
     doc_id: String,
     title: SharedString,
     transcript: Entity<Transcript>,
-    /// Keeps a frozen-blob fetch alive (it falls back to a live doc watch).
-    _fetch: Option<Task<()>>,
     /// Spawn chips INSIDE the subagent transcript open their own tabs.
+    _events: Subscription,
+}
+
+/// The conversation column showing one agent instead of the session: a
+/// transcript pinned to that agent's doc. Its feed belongs to the agent rail
+/// — this is only the view, and dropping it tears the view down.
+struct AgentView {
+    doc_id: SharedString,
+    transcript: Entity<Transcript>,
+    /// Spawn chips inside an agent's transcript open tabs like any other.
     _events: Subscription,
 }
 
@@ -1354,6 +1363,9 @@ pub struct Shell {
     /// [`Transcript`] pinned to its subagent doc.
     subagent_tabs: std::collections::HashMap<u64, SubagentTab>,
     subagent_seq: u64,
+    /// The agent the conversation column is showing, when it isn't the
+    /// session. At most one: the rail replaces it rather than stacking.
+    agent_view: Option<AgentView>,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
@@ -1572,7 +1584,8 @@ impl Shell {
         // reply's space below it (notes-app parity).
         let composer_events = cx.subscribe(&composer, {
             let transcript = transcript.clone();
-            move |_this: &mut Shell, _, event: &ComposerEvent, cx| match event {
+            move |this: &mut Shell, _, event: &ComposerEvent, cx| match event {
+                ComposerEvent::FocusAgent(target) => this.show_agent(target.clone(), cx),
                 ComposerEvent::NewThreadTransitionStarted => {
                     // Route observation drives the dock once selection commits.
                     cx.notify();
@@ -1727,6 +1740,7 @@ impl Shell {
             diff_seq: 0,
             subagent_tabs: std::collections::HashMap::new(),
             subagent_seq: 0,
+            agent_view: None,
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
@@ -2997,6 +3011,46 @@ impl Shell {
         }
     }
 
+    /// Swap the conversation column between the session and one agent. The
+    /// rail already holds that agent's doc feed open; this is the view alone.
+    fn show_agent(&mut self, target: AgentTarget, cx: &mut Context<Self>) {
+        match target {
+            AgentTarget::Main => self.agent_view = None,
+            AgentTarget::Agent { doc_id, frozen, .. } => {
+                if self.agent_view.as_ref().is_some_and(|v| v.doc_id == doc_id) {
+                    return;
+                }
+                // A live agent follows its streaming end (the session
+                // transcript's feel); a finished one reads top-down.
+                let transcript = cx.new(|cx| {
+                    Transcript::for_doc(self.state.clone(), doc_id.to_string(), !frozen, cx)
+                });
+                let links = Self::session_links(Some(self.active_chat.clone()), cx);
+                transcript.update(cx, |transcript, _| {
+                    transcript.set_workspace_link_handler(links)
+                });
+                let events = cx.subscribe(&transcript, Self::on_transcript_event);
+                self.agent_view = Some(AgentView {
+                    doc_id,
+                    transcript,
+                    _events: events,
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    /// The transcript the conversation column is rendering — the focused
+    /// agent's, else the session's. Everything anchored to the column (the
+    /// jump pill, the composer-stack clearance) reads it, so the two can
+    /// never drift apart.
+    fn active_transcript(&self) -> &Entity<Transcript> {
+        match &self.agent_view {
+            Some(view) => &view.transcript,
+            None => &self.transcript,
+        }
+    }
+
     /// A spawn chip's "Open subagent": focus the existing tab for that doc,
     /// or open one. `frozen` (subagent done/failed) tries the uploaded
     /// transcript blob first and falls back to the live doc watch; running
@@ -3033,20 +3087,15 @@ impl Shell {
             transcript.set_workspace_link_handler(links)
         });
         let events = cx.subscribe(&transcript, Self::on_transcript_event);
-        let fetch = if frozen {
-            self.spawn_subagent_snapshot_fetch(&chat_id, &doc_id, cx)
-        } else {
-            self.state
-                .update(cx, |s, cx| s.watch_subagent_doc(doc_id.clone(), cx));
-            None
-        };
+        self.state.update(cx, |s, cx| {
+            s.open_subagent_feed(&chat_id, doc_id.clone(), frozen, cx)
+        });
         self.subagent_tabs.insert(
             id,
             SubagentTab {
                 doc_id,
                 title: title.into(),
                 transcript,
-                _fetch: fetch,
                 _events: events,
             },
         );
@@ -3056,46 +3105,6 @@ impl Shell {
             .or_default()
             .push(RightSurface::Subagent(id));
         self.set_right_active(RightSurface::Subagent(id), cx);
-    }
-
-    /// Fetch a finished subagent's frozen transcript blob
-    /// (`{chat_id}/{doc_id}`); on ANY failure fall back to watching the doc
-    /// — the blob upload is best-effort engine-side.
-    fn spawn_subagent_snapshot_fetch(
-        &self,
-        chat_id: &str,
-        doc_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Option<Task<()>> {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.state
-                .update(cx, |s, cx| s.watch_subagent_doc(doc_id.to_string(), cx));
-            return None;
-        };
-        let blob_ref = format!("{chat_id}/{doc_id}");
-        let state = self.state.clone();
-        let doc_id = doc_id.to_string();
-        Some(cx.spawn(async move |_, cx| {
-            let reply = crate::attachments::call_with_timeout(
-                &engine,
-                cx.background_executor(),
-                methods::FETCH_TOOL_BLOB,
-                serde_json::json!({ "blobRef": blob_ref }),
-                Duration::from_secs(20),
-            )
-            .await;
-            let entries: Option<Vec<zeron_doc::SessionMessageEntry>> = reply.ok().and_then(|v| {
-                let text = v.get("text")?.as_str()?.to_owned();
-                serde_json::from_str(&text).ok()
-            });
-            state.update(cx, |s, cx| {
-                match entries {
-                    Some(entries) => s.set_subagent_snapshot(doc_id, entries),
-                    None => s.watch_subagent_doc(doc_id, cx),
-                }
-                cx.notify();
-            });
-        }))
     }
 
     /// A surface tab's ✕. The active fallback happens naturally through
@@ -3153,7 +3162,7 @@ impl Shell {
                 // watch and unpins the subagent doc from the engine LRU.
                 if let Some(tab) = self.subagent_tabs.remove(&id) {
                     self.state
-                        .update(cx, |s, _| s.unwatch_subagent_doc(&tab.doc_id));
+                        .update(cx, |s, _| s.close_subagent_feed(&tab.doc_id));
                 }
             }
             RightSurface::Picker => {}
@@ -7404,7 +7413,7 @@ impl Shell {
                         } else {
                             0.0
                         })
-                        .child(self.transcript.clone()),
+                        .child(self.active_transcript().clone()),
                 )
                 // A departing transcript is visual history, not an active
                 // interaction surface bound to the newly blank route.
@@ -7645,7 +7654,8 @@ impl Shell {
     /// floating six pixels above the composer. It shares the composer's
     /// measured dock transform and paints after it, outside the transcript fade.
     fn render_jump_to_bottom(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.transcript.read(cx).jump_button_shown() {
+        let transcript = self.active_transcript().clone();
+        if !transcript.read(cx).jump_button_shown() {
             return None;
         }
         Some(
@@ -7659,7 +7669,7 @@ impl Shell {
                 .right(px(10.0))
                 .flex()
                 .justify_center()
-                .child(self.jump_pill("jump-to-bottom", "jump-pill", self.transcript.clone(), cx))
+                .child(self.jump_pill("jump-to-bottom", "jump-pill", transcript, cx))
                 .into_any_element(),
         )
     }
@@ -9808,7 +9818,7 @@ impl Render for Shell {
                     self.bottom_stack_has_composer.get(),
                     expected_has_composer,
                 );
-                self.transcript.update(cx, |t, cx| {
+                self.active_transcript().clone().update(cx, |t, cx| {
                     t.set_rail_enabled(rail::rail_visible(main_width), cx);
                     if bottom_stack_ready && expected_has_composer {
                         t.set_bottom_clearance(stack_h, cx);
