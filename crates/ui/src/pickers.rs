@@ -4006,6 +4006,8 @@ pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gp
         HarnessId::Cursor => (crate::icons::CURSOR_MARK, None),
         // Cognition's mark (the Devin product icon), monochrome.
         HarnessId::Devin => (crate::icons::DEVIN_MARK, None),
+        // Factory's mark (hex ring), monochrome.
+        HarnessId::Droid => (crate::icons::DROID_MARK, None),
         // Monochrome mark, tinted by the surface like OpenAI's.
         HarnessId::Grok => (crate::icons::GROK_MARK, None),
         // Nous Research's mark (the Hermes product icon), monochrome.

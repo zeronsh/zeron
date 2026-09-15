@@ -196,6 +196,7 @@ async fn real_all_harnesses_quiet_survey() {
         .unwrap_or(3);
     let agents: Vec<(&str, fn() -> AcpHarness)> = vec![
         ("devin", AcpHarness::devin),
+        ("droid", AcpHarness::droid),
         ("grok", AcpHarness::grok),
         ("hermes", AcpHarness::hermes),
         ("pi", AcpHarness::pi),

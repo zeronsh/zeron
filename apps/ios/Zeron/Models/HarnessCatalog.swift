@@ -65,6 +65,7 @@ enum HarnessCatalog {
         "claude-code": "Claude Code",
         "codex": "Codex",
         "devin": "Devin",
+        "droid": "Factory Droid",
         "grok": "Grok",
         "hermes": "Hermes",
         "pi": "Pi",
@@ -105,6 +106,19 @@ enum HarnessCatalog {
                           description: "Anthropic's frontier model through Devin", reasoningLevels: []),
                 ModelInfo(id: "adaptive", label: "Adaptive",
                           description: "Devin picks the model per request", reasoningLevels: []),
+            ]
+        case "droid":
+            return [
+                ModelInfo(id: "auto", label: "Auto Model",
+                          description: "Factory picks the model per request", reasoningLevels: []),
+                ModelInfo(id: "gpt-5.6-sol", label: "GPT-5.6 Sol",
+                          description: "Factory Droid's default coding model",
+                          reasoningLevels: ["low", "medium", "high", "xhigh", "max"]),
+                ModelInfo(id: "claude-opus-5", label: "Opus 5",
+                          description: "Anthropic's frontier model through Factory",
+                          reasoningLevels: ["low", "medium", "high", "xhigh", "max"]),
+                ModelInfo(id: "glm-5.2", label: "GLM-5.2 (Droid Core)",
+                          description: "Factory-hosted GLM coding model", reasoningLevels: []),
             ]
         case "hermes":
             return [

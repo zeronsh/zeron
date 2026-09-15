@@ -263,6 +263,7 @@ fn harness_from_env() -> zeron_engine::HarnessId {
         Ok("codex") => zeron_engine::HarnessId::Codex,
         Ok("cursor") => zeron_engine::HarnessId::Cursor,
         Ok("devin") => zeron_engine::HarnessId::Devin,
+        Ok("droid") => zeron_engine::HarnessId::Droid,
         Ok("grok") => zeron_engine::HarnessId::Grok,
         Ok("hermes") => zeron_engine::HarnessId::Hermes,
         Ok("pi") => zeron_engine::HarnessId::Pi,

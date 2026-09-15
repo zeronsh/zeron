@@ -2,7 +2,8 @@
 //! stdio, protocol v1) and maps its session updates onto [`AgentEvent`]s.
 //!
 //! KEPT ONLY for agents built ground-up on ACP: Grok ([`AcpHarness::grok`],
-//! `grok agent stdio`), Devin ([`AcpHarness::devin`], `devin acp`) and Hermes
+//! `grok agent stdio`), Devin ([`AcpHarness::devin`], `devin acp`), Factory
+//! Droid ([`AcpHarness::droid`], `droid exec --output-format acp`) and Hermes
 //! ([`AcpHarness::hermes`], `hermes acp`) — plus pi
 //! ([`AcpHarness::pi`]) via the community `pi-acp` adapter until a native
 //! driver exists. Claude, Codex and Cursor moved to native drivers
@@ -332,6 +333,102 @@ fn devin_spec() -> AcpAgentSpec {
     }
 }
 
+fn droid_install_paths() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        dirs.push(home.join(".local").join("bin").join("droid"));
+        dirs.push(home.join(".factory").join("bin").join("droid"));
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin/droid"));
+    dirs.push(PathBuf::from("/usr/local/bin/droid"));
+    dirs
+}
+
+fn droid_spec() -> AcpAgentSpec {
+    AcpAgentSpec {
+        id: HarnessId::Droid,
+        display_name: "Factory Droid",
+        executable: "droid",
+        env_override: "DROID_EXECUTABLE",
+        // Native ACP server — same command Zed/JetBrains spawn. Session
+        // model, autonomy, and effort come from JSON-RPC config options,
+        // not these flags.
+        args: &["exec", "--output-format", "acp"],
+        npm_package: None,
+        extra_paths: droid_install_paths,
+        cli_executable: "droid",
+        cli_extra_paths: droid_install_paths,
+        install_hint: "droid (searched PATH, the login shell's PATH, ~/.local/bin, \
+             ~/.factory/bin, /opt/homebrew/bin, and /usr/local/bin; install with \
+             `curl -fsSL https://app.factory.ai/cli | sh` or \
+             `brew install --cask droid`, then run `droid` once to sign in; set \
+             DROID_EXECUTABLE to override)",
+        // Live discovery reads session/new (configOptions first). These rows
+        // only enrich matching ids and name the picker when the probe fails.
+        models: || {
+            vec![
+                Model {
+                    id: "auto".into(),
+                    label: "Auto Model".into(),
+                    description: Some("Factory picks the model per request".into()),
+                    reasoning_levels: Vec::new(),
+                    options: Vec::new(),
+                },
+                Model {
+                    id: "gpt-5.6-sol".into(),
+                    label: "GPT-5.6 Sol".into(),
+                    description: Some("Factory Droid's default coding model".into()),
+                    reasoning_levels: vec![
+                        ReasoningLevel::Low,
+                        ReasoningLevel::Medium,
+                        ReasoningLevel::High,
+                        ReasoningLevel::XHigh,
+                        ReasoningLevel::Max,
+                    ],
+                    options: Vec::new(),
+                },
+                Model {
+                    id: "claude-opus-5".into(),
+                    label: "Opus 5".into(),
+                    description: Some("Anthropic's frontier model through Factory".into()),
+                    reasoning_levels: vec![
+                        ReasoningLevel::Low,
+                        ReasoningLevel::Medium,
+                        ReasoningLevel::High,
+                        ReasoningLevel::XHigh,
+                        ReasoningLevel::Max,
+                    ],
+                    options: Vec::new(),
+                },
+                Model {
+                    id: "glm-5.2".into(),
+                    label: "GLM-5.2 (Droid Core)".into(),
+                    description: Some("Factory-hosted GLM coding model".into()),
+                    reasoning_levels: Vec::new(),
+                    options: Vec::new(),
+                },
+            ]
+        },
+        // No `_session/steering` extension: steers deliver at turn boundaries.
+        steering_mode: SteeringMode::TurnBoundary,
+        // reasoning_effort is advertised as thought_level (none/low/medium/
+        // high/xhigh/max). "none" has no zeron tier and stays the agent default.
+        reasoning_levels: &[
+            ReasoningLevel::Low,
+            ReasoningLevel::Medium,
+            ReasoningLevel::High,
+            ReasoningLevel::XHigh,
+            ReasoningLevel::Max,
+        ],
+        prompt_transform: identity_transform,
+        effort_values: default_effort_values,
+        ladder_extras: &[],
+        prompt_complete_extension: false,
+        prompt_stall: None,
+        stall_hint: "The agent process is likely wedged.",
+    }
+}
+
 fn hermes_install_paths() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
@@ -555,6 +652,11 @@ impl AcpHarness {
     /// Devin (`devin acp`) — Cognition's native ACP server.
     pub fn devin() -> Self {
         Self::with_spec(devin_spec())
+    }
+
+    /// Factory Droid (`droid exec --output-format acp`) — Factory's native ACP server.
+    pub fn droid() -> Self {
+        Self::with_spec(droid_spec())
     }
 
     /// Grok Build (`grok agent stdio`) — xAI's native ACP agent.
@@ -1512,6 +1614,9 @@ fn config_option_sets(
                         "agent-full-access",
                         "danger-full-access",
                         "full-access",
+                        // Factory Droid's autonomy_level select (category=mode).
+                        "auto-high",
+                        "auto_high",
                     ]
                     .into_iter()
                     .find(|v| available.contains(v))
@@ -3470,6 +3575,27 @@ mod tests {
         assert_eq!(
             config_option_sets(&codex, None, &[], &no_opts),
             vec![("mode".to_owned(), json!({ "value": "agent-full-access" }))]
+        );
+
+        let droid = json!({
+            "sessionId": "s-1",
+            "configOptions": [{
+                "id": "autonomy_level",
+                "category": "mode",
+                "type": "select",
+                "currentValue": "normal",
+                "options": [
+                    { "value": "normal" },
+                    { "value": "spec" },
+                    { "value": "auto-low" },
+                    { "value": "auto-medium" },
+                    { "value": "auto-high" },
+                ],
+            }],
+        });
+        assert_eq!(
+            config_option_sets(&droid, None, &[], &no_opts),
+            vec![("autonomy_level".to_owned(), json!({ "value": "auto-high" }))]
         );
     }
 
