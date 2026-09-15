@@ -34,6 +34,8 @@ const EXITED_TTL: Duration = Duration::from_secs(30 * 60);
 const REAPER_INTERVAL: Duration = Duration::from_secs(60);
 
 struct LiveTerminal {
+    // Keep the private script alive until the shell exits or the tab is closed.
+    initial_script: Option<tempfile::NamedTempFile>,
     master: Box<dyn portable_pty::MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
@@ -67,6 +69,7 @@ impl LiveTerminal {
         }
         self.subscribers.retain(|tx| tx.send(event.clone()).is_ok());
         if matches!(event, TerminalEvent::Exit { .. }) {
+            self.initial_script.take();
             self.exited = true;
             self.subscribers.clear();
         }
@@ -138,7 +141,18 @@ impl Terminals {
     /// Open a login shell in `cwd`. The PTY outlives every subscriber; it dies on
     /// [`Self::close`], shell exit + TTL, or engine shutdown.
     pub fn open(&self, cwd: &str, cols: u16, rows: u16) -> Result<TerminalSession, EngineError> {
-        self.open_with_shell(cwd, cols, rows, None)
+        self.open_with_environment(cwd, cols, rows, &HashMap::new())
+    }
+
+    /// Open a login shell with host-resolved environment overrides.
+    pub fn open_with_environment(
+        &self,
+        cwd: &str,
+        cols: u16,
+        rows: u16,
+        environment: &HashMap<String, String>,
+    ) -> Result<TerminalSession, EngineError> {
+        self.open_with_shell_and_environment(cwd, cols, rows, None, environment)
     }
 
     /// Explicit shell override (tests use `/bin/sh`).
@@ -148,6 +162,44 @@ impl Terminals {
         cols: u16,
         rows: u16,
         shell: Option<&str>,
+    ) -> Result<TerminalSession, EngineError> {
+        self.open_with_shell_and_environment(cwd, cols, rows, shell, &HashMap::new())
+    }
+
+    /// Explicit shell and environment override for focused integration tests.
+    pub fn open_with_shell_and_environment(
+        &self,
+        cwd: &str,
+        cols: u16,
+        rows: u16,
+        shell: Option<&str>,
+        environment: &HashMap<String, String>,
+    ) -> Result<TerminalSession, EngineError> {
+        self.open_session(cwd, cols, rows, shell, environment, None)
+    }
+
+    /// Run an exact command in a fresh interactive login shell. On Unix, only a
+    /// short bootstrap crosses the PTY's limited initial canonical line buffer.
+    pub fn open_with_command(
+        &self,
+        cwd: &str,
+        cols: u16,
+        rows: u16,
+        environment: &HashMap<String, String>,
+        command: &str,
+    ) -> Result<TerminalSession, EngineError> {
+        self.open_session(cwd, cols, rows, None, environment, Some(command))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_session(
+        &self,
+        cwd: &str,
+        cols: u16,
+        rows: u16,
+        shell: Option<&str>,
+        environment: &HashMap<String, String>,
+        command: Option<&str>,
     ) -> Result<TerminalSession, EngineError> {
         if lock(&self.inner.sessions).len() >= MAX_TERMINALS {
             return Err(EngineError::Other(format!(
@@ -178,6 +230,32 @@ impl Terminals {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "Zeron");
+        for (name, value) in environment {
+            cmd.env(name, value);
+        }
+        let mut initial_script = None;
+        let mut bootstrap = None;
+        if let Some(command) = command {
+            if cfg!(windows) {
+                // ConPTY has no Unix canonical line buffer. Preserve interactive
+                // cmd syntax and avoid imposing PowerShell script execution policy.
+                bootstrap = Some(format!("{command}\r"));
+            } else {
+                let (suffix, source) = match shell_name.as_str() {
+                    "fish" => (".fish", "source \"$ZERON_ACTION_SCRIPT\"\r"),
+                    _ => (".sh", ". \"$ZERON_ACTION_SCRIPT\"\r"),
+                };
+                let mut script = tempfile::Builder::new()
+                    .prefix("zeron-action-")
+                    .suffix(suffix)
+                    .tempfile()?;
+                script.write_all(command.as_bytes())?;
+                script.flush()?;
+                cmd.env("ZERON_ACTION_SCRIPT", script.path());
+                initial_script = Some(script);
+                bootstrap = Some(source.to_string());
+            }
+        }
         let mut child = pair
             .slave
             .spawn_command(cmd)
@@ -195,6 +273,7 @@ impl Terminals {
 
         let id = new_id();
         let session = Arc::new(Mutex::new(LiveTerminal {
+            initial_script,
             master: pair.master,
             writer,
             killer,
@@ -215,6 +294,13 @@ impl Terminals {
             .map_err(|e| EngineError::Other(format!("pty reader thread: {e}")))?;
         let wait = tokio::task::spawn_blocking(move || child.wait());
         tokio::spawn(pump_output(Arc::downgrade(&session), raw_rx, wait));
+
+        if let Some(bootstrap) = bootstrap
+            && let Err(err) = self.write_bytes(&id, bootstrap.as_bytes())
+        {
+            let _ = self.close(&id);
+            return Err(err);
+        }
 
         Ok(TerminalSession {
             id,
@@ -263,6 +349,11 @@ impl Terminals {
         let bytes = BASE64
             .decode(data)
             .unwrap_or_else(|_| data.as_bytes().to_vec());
+        self.write_bytes(terminal_id, &bytes)
+    }
+
+    /// Write trusted host-side bytes without applying the RPC base64 decoder.
+    pub fn write_bytes(&self, terminal_id: &str, bytes: &[u8]) -> Result<(), EngineError> {
         if bytes.len() > MAX_INPUT_BYTES {
             return Err(EngineError::Other("Terminal input is too large".into()));
         }
@@ -325,6 +416,7 @@ fn dispose(session: &Arc<Mutex<LiveTerminal>>, kill: bool) {
     {
         tracing::debug!(error = %err, "terminal kill failed (already exited?)");
     }
+    session.initial_script.take();
 }
 
 /// Blocking PTY reader: forwards raw chunks until EOF. A closed PTY reads as an
@@ -419,5 +511,119 @@ async fn reaper_task(inner: Weak<TerminalsInner>) {
             let session = lock(session);
             !(session.exited && session.last_active_at.elapsed() > EXITED_TTL)
         });
+    }
+}
+
+#[cfg(all(test, unix))]
+mod initial_command_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn long_command_survives_delayed_shell_startup_and_script_is_cleaned_up() {
+        let root = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
+            if !std::path::Path::new(shell).exists() {
+                continue;
+            }
+            // Deliberately leave the PTY in canonical mode while the bootstrap
+            // is written, instead of relying on a scheduler-dependent race.
+            let wrapper = root.path().join("slow-shell");
+            std::fs::write(
+                &wrapper,
+                format!("#!/bin/sh\nsleep 0.2\nexec {shell} \"$@\"\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let output = root.path().join("result");
+            let payload = "a".repeat(6000);
+            let command = format!("printf '%s' '{payload}' > result");
+            let session = terminals
+                .open_session(
+                    root.path().to_str().unwrap(),
+                    80,
+                    24,
+                    wrapper.to_str(),
+                    &HashMap::new(),
+                    Some(&command),
+                )
+                .unwrap();
+            let script = lock(&terminals.session(&session.id).unwrap())
+                .initial_script
+                .as_ref()
+                .unwrap()
+                .path()
+                .to_path_buf();
+            assert_eq!(std::fs::read_to_string(&script).unwrap(), command);
+            assert_eq!(
+                std::fs::metadata(&script).unwrap().permissions().mode() & 0o077,
+                0
+            );
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if std::fs::read(&output).ok().as_deref() == Some(payload.as_bytes()) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("long command did not execute in {shell}"));
+            terminals.close(&session.id).unwrap();
+            assert!(
+                !script.exists(),
+                "closing the terminal must remove the script"
+            );
+            std::fs::remove_file(output).unwrap();
+        }
+        assert!(!terminals.any_open());
+    }
+
+    #[tokio::test]
+    async fn initial_script_is_removed_on_shell_exit_and_spawn_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        let session = terminals
+            .open_session(
+                root.path().to_str().unwrap(),
+                80,
+                24,
+                Some("/bin/sh"),
+                &HashMap::new(),
+                Some("sleep 0.1; exit 7"),
+            )
+            .unwrap();
+        let script = lock(&terminals.session(&session.id).unwrap())
+            .initial_script
+            .as_ref()
+            .unwrap()
+            .path()
+            .to_path_buf();
+        let mut rx = terminals.subscribe(&session.id, None).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, TerminalEvent::Exit { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!script.exists());
+        terminals.close(&session.id).unwrap();
+        assert!(
+            terminals
+                .open_session(
+                    root.path().to_str().unwrap(),
+                    80,
+                    24,
+                    Some("/nonexistent/zeron-test-shell"),
+                    &HashMap::new(),
+                    Some("echo test"),
+                )
+                .is_err()
+        );
+        assert!(!terminals.any_open());
     }
 }

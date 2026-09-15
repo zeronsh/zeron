@@ -450,6 +450,7 @@ final class AppModel {
             return demo.createWorktree(spacePath: space.path, base: base)
         }
         return await workspace?.createWorktree(deviceId: space.deviceId,
+                                               spaceId: space.id,
                                                repoPath: space.path, branch: base)
     }
 
