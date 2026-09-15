@@ -7860,9 +7860,15 @@ impl Render for Composer {
                                 .items_center()
                                 .opacity(session_chrome_opacity)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
-                                .child(div().flex_none().pr(px(10.0)).child(
-                                    crate::context_usage::render(usage, self.state.clone(), &theme),
-                                )),
+                                .children(crate::context_usage::has_window(usage).then(|| {
+                                    div().flex_none().pr(px(10.0)).child(
+                                        crate::context_usage::render(
+                                            usage,
+                                            self.state.clone(),
+                                            &theme,
+                                        ),
+                                    )
+                                })),
                         )
                     }),
             )

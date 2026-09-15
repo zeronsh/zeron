@@ -56,11 +56,11 @@ impl NpmPin {
     }
 }
 
-const OK_MARKER: &str = ".zeron-install-ok";
+pub(crate) const OK_MARKER: &str = ".zeron-install-ok";
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// `$ZERON_ADAPTERS_DIR`, else `~/.zeron/adapters`.
-fn adapters_root() -> Option<PathBuf> {
+pub(crate) fn adapters_root() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("ZERON_ADAPTERS_DIR").filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
@@ -154,7 +154,7 @@ fn describe_npm_exit(status: Option<std::process::ExitStatus>) -> String {
 
 /// One installer at a time per process; installs are rare and npm handles
 /// its own intra-install parallelism.
-fn install_lock() -> &'static tokio::sync::Mutex<()> {
+pub(crate) fn install_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }

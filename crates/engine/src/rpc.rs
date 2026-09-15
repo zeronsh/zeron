@@ -1196,9 +1196,19 @@ impl RpcService for EngineRpc {
             }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
+                let was_enabled = self.registry.enabled_set().contains(&p.harness);
                 self.registry
                     .set_enabled(p.harness, p.enabled)
                     .map_err(RpcError::Failed)?;
+                // turning Antigravity on is how it gets signed in, so turning
+                // it off signs it out and the next enable asks again
+                if was_enabled
+                    && !p.enabled
+                    && p.harness == HarnessId::Antigravity
+                    && let Err(error) = zeron_harness::AcpHarness::antigravity().sign_out().await
+                {
+                    tracing::warn!(%error, "signing out of Antigravity after disabling it failed");
+                }
                 // Fresh catalog in the reply: the page repaints from it in one
                 // round trip, and a refused/raced toggle self-corrects.
                 RpcReply::value(&self.registry.descriptors())

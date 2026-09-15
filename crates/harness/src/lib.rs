@@ -113,6 +113,7 @@ pub trait Harness: Send + Sync {
 
 pub mod acp;
 pub(crate) mod adapter_install;
+pub(crate) mod archive_install;
 pub mod claude;
 pub mod codex;
 pub mod cursor;

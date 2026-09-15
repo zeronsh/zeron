@@ -214,14 +214,30 @@ enum LoginFlow {
         /// `Some(code)` once the child exited (`None` code = killed by signal).
         exit: Arc<Mutex<Option<Option<i32>>>>,
     },
+    /// A sign-in the engine drives itself (Antigravity's ACP `authenticate`);
+    /// the task reports the browser url and its outcome through `state`.
+    Task {
+        harness: HarnessId,
+        started_at: Instant,
+        state: Arc<Mutex<TaskLoginState>>,
+        /// Aborting drops the sign-in future, which kills its agent child.
+        handle: tokio::task::JoinHandle<()>,
+    },
+}
+
+#[derive(Default)]
+struct TaskLoginState {
+    url: Option<String>,
+    message: Option<String>,
+    outcome: Option<Result<(), String>>,
 }
 
 impl LoginFlow {
     fn started_at(&self) -> Instant {
         match self {
-            LoginFlow::Claude { started_at, .. } | LoginFlow::Spawned { started_at, .. } => {
-                *started_at
-            }
+            LoginFlow::Claude { started_at, .. }
+            | LoginFlow::Spawned { started_at, .. }
+            | LoginFlow::Task { started_at, .. } => *started_at,
         }
     }
 }
@@ -525,6 +541,7 @@ impl AgentAccounts {
             HarnessId::ClaudeCode => Ok(self.start_claude_login()),
             HarnessId::Codex => self.start_codex_login().await,
             HarnessId::Cursor => self.start_cursor_login().await,
+            HarnessId::Antigravity => Ok(self.start_antigravity_login()),
             other => Err(EngineError::Other(format!(
                 "agent logins are not supported for {other:?}"
             ))),
@@ -570,7 +587,13 @@ impl AgentAccounts {
     fn reap_spawned_flows(&self, harness: HarnessId) {
         let stale: Vec<String> = lock(&self.inner.flows)
             .iter()
-            .filter(|(_, f)| matches!(f, LoginFlow::Spawned { harness: h, .. } if *h == harness))
+            .filter(|(_, f)| {
+                matches!(
+                    f,
+                    LoginFlow::Spawned { harness: h, .. } | LoginFlow::Task { harness: h, .. }
+                        if *h == harness
+                )
+            })
             .map(|(id, _)| id.clone())
             .collect();
         for id in stale {
@@ -641,6 +664,58 @@ impl AgentAccounts {
             url,
             mode: AgentLoginMode::Browser,
         })
+    }
+
+    /// Antigravity: the ACP server's own Google sign-in, run when the agent is
+    /// turned on rather than mid-chat. The start replies at once because a
+    /// first sign-in downloads a large server; polls carry the browser url
+    /// once the server prints it.
+    fn start_antigravity_login(&self) -> AgentLoginStart {
+        self.reap_spawned_flows(HarnessId::Antigravity);
+        let login_id = new_id();
+        let state = Arc::new(Mutex::new(TaskLoginState::default()));
+        #[cfg(unix)]
+        let browser = {
+            let root = self.inner.config.root_dir();
+            std::fs::create_dir_all(&root)
+                .ok()
+                .and_then(|()| ensure_noop_browser(&root))
+        };
+        #[cfg(not(unix))]
+        let browser = None;
+        let task_state = state.clone();
+        let handle = tokio::spawn(async move {
+            let progress_state = task_state.clone();
+            let outcome = zeron_harness::AcpHarness::antigravity()
+                .sign_in(browser, move |progress| {
+                    let mut state = lock(&progress_state);
+                    match progress {
+                        zeron_harness::acp::SignInProgress::Installing => {
+                            state.message = Some("Downloading Antigravity…".into());
+                        }
+                        zeron_harness::acp::SignInProgress::OpenBrowser(url) => {
+                            state.message = Some("Finish signing in in your browser.".into());
+                            state.url = Some(url);
+                        }
+                    }
+                })
+                .await;
+            lock(&task_state).outcome = Some(outcome.map_err(|e| e.to_string()));
+        });
+        lock(&self.inner.flows).insert(
+            login_id.clone(),
+            LoginFlow::Task {
+                harness: HarnessId::Antigravity,
+                started_at: Instant::now(),
+                state,
+                handle,
+            },
+        );
+        AgentLoginStart {
+            login_id,
+            url: String::new(),
+            mode: AgentLoginMode::Browser,
+        }
     }
 
     /// Cursor: the SDK's own PKCE browser flow, driven through the zeron shim
@@ -859,6 +934,9 @@ impl AgentAccounts {
 
     pub async fn poll_login(&self, login_id: &str) -> Result<AgentLoginPoll, EngineError> {
         self.sweep_flows();
+        if let Some(poll) = self.poll_task_login(login_id) {
+            return Ok(poll);
+        }
         let (harness, home, exit, output) = match lock(&self.inner.flows).get(login_id) {
             None => {
                 return Err(EngineError::Other(
@@ -869,8 +947,10 @@ impl AgentAccounts {
                 return Ok(AgentLoginPoll {
                     status: AgentLoginStatus::Pending,
                     message: None,
+                    url: None,
                 });
             }
+            Some(LoginFlow::Task { .. }) => unreachable!("task logins poll above"),
             Some(LoginFlow::Spawned {
                 harness,
                 home,
@@ -900,6 +980,7 @@ impl AgentAccounts {
             return Ok(AgentLoginPoll {
                 status: AgentLoginStatus::Done,
                 message: None,
+                url: None,
             });
         }
         let exited = *lock(&exit);
@@ -923,12 +1004,46 @@ impl AgentAccounts {
             return Ok(AgentLoginPoll {
                 status: AgentLoginStatus::Error,
                 message: Some(message),
+                url: None,
             });
         }
         Ok(AgentLoginPoll {
             status: AgentLoginStatus::Pending,
             message: None,
+            url: None,
         })
+    }
+
+    /// Poll an engine-driven sign-in; `None` when `login_id` isn't one.
+    fn poll_task_login(&self, login_id: &str) -> Option<AgentLoginPoll> {
+        let state = match lock(&self.inner.flows).get(login_id) {
+            Some(LoginFlow::Task { state, .. }) => state.clone(),
+            _ => return None,
+        };
+        let poll = {
+            let state = lock(&state);
+            match &state.outcome {
+                None => {
+                    return Some(AgentLoginPoll {
+                        status: AgentLoginStatus::Pending,
+                        message: state.message.clone(),
+                        url: state.url.clone(),
+                    });
+                }
+                Some(Ok(())) => AgentLoginPoll {
+                    status: AgentLoginStatus::Done,
+                    message: None,
+                    url: None,
+                },
+                Some(Err(message)) => AgentLoginPoll {
+                    status: AgentLoginStatus::Error,
+                    message: Some(message.clone()),
+                    url: None,
+                },
+            }
+        };
+        lock(&self.inner.flows).remove(login_id);
+        Some(poll)
     }
 
     /// Drop a flow: kill a pending login child (`codex login` holds the fixed
@@ -936,11 +1051,15 @@ impl AgentAccounts {
     /// reclaim its throwaway home dir. Idempotent.
     pub fn cancel_login(&self, login_id: &str) {
         let flow = lock(&self.inner.flows).remove(login_id);
-        if let Some(LoginFlow::Spawned { child, home, .. }) = flow {
-            if let Some(c) = lock(&child).as_mut() {
-                let _ = c.start_kill();
+        match flow {
+            Some(LoginFlow::Spawned { child, home, .. }) => {
+                if let Some(c) = lock(&child).as_mut() {
+                    let _ = c.start_kill();
+                }
+                let _ = std::fs::remove_dir_all(&home);
             }
-            let _ = std::fs::remove_dir_all(&home);
+            Some(LoginFlow::Task { handle, .. }) => handle.abort(),
+            _ => {}
         }
     }
 
@@ -1495,6 +1614,7 @@ fn harness_slug(harness: HarnessId) -> &'static str {
         HarnessId::Hermes => "hermes",
         HarnessId::Pi => "pi",
         HarnessId::Opencode => "opencode",
+        HarnessId::Antigravity => "antigravity",
         HarnessId::Mock => "mock",
     }
 }
