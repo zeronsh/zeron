@@ -22,6 +22,7 @@ pub enum NotificationsEvent {
         attention_sound: bool,
         desktop: bool,
         background_only: bool,
+        agent_updates: bool,
     },
 }
 
@@ -33,6 +34,7 @@ pub struct NotificationsPage {
     attention_sound: bool,
     desktop: bool,
     background_only: bool,
+    agent_updates: bool,
 }
 
 impl EventEmitter<NotificationsEvent> for NotificationsPage {}
@@ -45,6 +47,7 @@ enum NotificationPreference {
     AttentionSound,
     Desktop,
     BackgroundOnly,
+    AgentUpdates,
 }
 
 fn is_switch_activation(key: &str, is_held: bool) -> bool {
@@ -80,6 +83,7 @@ impl NotificationsPage {
         attention_sound: bool,
         desktop: bool,
         background_only: bool,
+        agent_updates: bool,
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -90,6 +94,7 @@ impl NotificationsPage {
             attention_sound,
             desktop,
             background_only,
+            agent_updates,
         }
     }
 
@@ -101,6 +106,7 @@ impl NotificationsPage {
             attention_sound: self.attention_sound,
             desktop: self.desktop,
             background_only: self.background_only,
+            agent_updates: self.agent_updates,
         });
     }
 
@@ -112,6 +118,7 @@ impl NotificationsPage {
             NotificationPreference::AttentionSound => &mut self.attention_sound,
             NotificationPreference::Desktop => &mut self.desktop,
             NotificationPreference::BackgroundOnly => &mut self.background_only,
+            NotificationPreference::AgentUpdates => &mut self.agent_updates,
         };
         *value = !*value;
         self.emit(cx);
@@ -145,6 +152,7 @@ impl Render for NotificationsPage {
         let attention_sound = self.attention_sound;
         let desktop = self.desktop;
         let background_only = self.background_only;
+        let agent_updates = self.agent_updates;
         let toggle = |id: &'static str, label: &'static str, enabled: bool, interactive: bool| {
             // Keep the familiar 32×18 visual inside a 40×40 activation target.
             // Disabled subordinate controls remain named switches in the
@@ -344,6 +352,43 @@ impl Render for NotificationsPage {
                             NotificationPreference::Desktop,
                             cx,
                         ),
+                    ),
+            )
+            .child(
+                widgets::card_row(&theme, false)
+                    .when(!desktop, |el| el.opacity(0.55))
+                    .child(widgets::row_tile(&theme, icons::REFRESH))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(widgets::row_title(&theme, "Agent updates"))
+                            .child(widgets::meta_line(
+                                &theme,
+                                vec![div()
+                                    .child(SharedString::from(
+                                        "Show a banner when monitored agent CLIs have updates.",
+                                    ))
+                                    .into_any_element()],
+                            )),
+                    )
+                    .child(
+                        toggle(
+                            "notifications-agent-updates-toggle",
+                            "Agent update notifications",
+                            agent_updates,
+                            desktop,
+                        )
+                        .when(desktop, |el| {
+                            interactive_switch(
+                                el,
+                                accent,
+                                NotificationPreference::AgentUpdates,
+                                cx,
+                            )
+                        }),
                     ),
             )
             .child(

@@ -1663,6 +1663,16 @@ impl Harness for AcpHarness {
         find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)()).is_some()
     }
 
+    fn executable_path(&self) -> Option<PathBuf> {
+        if let Some(path) = &self.executable {
+            return Some(path.clone());
+        }
+        if let Some(path) = std::env::var_os(self.spec.env_override).filter(|p| !p.is_empty()) {
+            return Some(PathBuf::from(path));
+        }
+        find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)())
+    }
+
     /// Devin refreshes through its native catalog command on each request.
     /// Other ACP agents use a fresh session probe, with the spec's static
     /// catalog as fallback when they advertise nothing or probing fails.
@@ -2694,6 +2704,7 @@ async fn run_session(session: Session) {
         stderr_tail,
     } = session;
     let RunControls {
+        execution_lease: _execution_lease,
         request_input,
         mut steering,
         interrupt,

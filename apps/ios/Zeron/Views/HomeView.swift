@@ -9,6 +9,7 @@ enum Route: Hashable {
     case space(String)
     case chat(String)
     case newSession(NewSessionDestination)
+    case agentUpdates(String)
 
     // Keep existing project navigation and launch/deep-link call sites valid.
     static func newSession(spaceId: String) -> Route {
@@ -21,6 +22,12 @@ struct HomeView: View {
     @State private var path: [Route] = []
     @State private var showNewSpace = false
     @State private var showProjectlessDevices = false
+    @State private var deviceUpdatesPresentation: DeviceUpdatesPresentation?
+
+    private struct DeviceUpdatesPresentation: Identifiable {
+        var deviceId: String? = nil
+        var id: String { deviceId ?? "devices" }
+    }
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
 
@@ -50,6 +57,7 @@ struct HomeView: View {
                 case .space(let id): SpaceView(spaceId: id, path: $path)
                 case .chat(let id): SessionView(chatId: id)
                 case .newSession(let destination): NewSessionView(destination: destination, path: $path)
+                case .agentUpdates(let deviceId): HarnessUpdatesView(deviceId: deviceId)
                 }
             }
             .toolbar {
@@ -103,10 +111,20 @@ struct HomeView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
-                        if model.demo != nil {
-                            Text("Demo mode")
+                        Section {
+                            Button {
+                                deviceUpdatesPresentation = DeviceUpdatesPresentation()
+                            } label: {
+                                Label("Devices", systemImage: "laptopcomputer")
+                            }
+                        } header: {
+                            if model.demo != nil { Text("Demo mode") }
                         }
-                        Button("Sign out", role: .destructive) { model.signOut() }
+                        Section {
+                            Button(role: .destructive) { model.signOut() } label: {
+                                Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
+                            }
+                        }
                     } label: {
                         Image(systemName: "person.circle")
                     }
@@ -116,6 +134,9 @@ struct HomeView: View {
                 NewSpaceSheet { spaceId in
                     path.append(.space(spaceId))
                 }
+            }
+            .sheet(item: $deviceUpdatesPresentation) { presentation in
+                DeviceUpdatesList(initialDeviceId: presentation.deviceId)
             }
             .sheet(isPresented: $showProjectlessDevices) {
                 SessionHostPickerSheet { deviceId in
@@ -131,7 +152,9 @@ struct HomeView: View {
                     model.launchRoute = nil
                     // Push the whole stack atomically — appending from a child's
                     // onAppear mid-transition gets dropped by NavigationStack.
-                    if case .space(let id) = route, model.launchSheet == "newsession" {
+                    if case .agentUpdates(let id) = route {
+                        deviceUpdatesPresentation = DeviceUpdatesPresentation(deviceId: id)
+                    } else if case .space(let id) = route, model.launchSheet == "newsession" {
                         model.launchSheet = nil
                         path = [route, .newSession(spaceId: id)]
                     } else {
@@ -141,6 +164,10 @@ struct HomeView: View {
                 if model.launchSheet == "newspace" {
                     model.launchSheet = nil
                     showNewSpace = true
+                }
+                if model.launchSheet == "devices" {
+                    model.launchSheet = nil
+                    deviceUpdatesPresentation = DeviceUpdatesPresentation()
                 }
             }
         }

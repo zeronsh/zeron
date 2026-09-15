@@ -166,6 +166,10 @@ impl TitleGenerator {
         if !zeron_harness::supports_titles(harness_id) {
             return None;
         }
+        // Order this entire isolated subprocess against a queued update for
+        // the same CLI. The fair registry gate prevents late title work from
+        // jumping ahead of an accepted writer.
+        let execution_lease = Arc::new(self.inner.registry.execution_lease(harness_id).await);
         // No repository instructions, files, or active coding-session context.
         let scratch = tempfile::tempdir().ok()?;
         let harness = match self.inner.registry.resolve(harness_id) {
@@ -205,7 +209,7 @@ impl TitleGenerator {
             };
             match tokio::time::timeout(
                 std::time::Duration::from_secs(30),
-                collect_text(harness.as_ref(), request),
+                collect_text(harness.as_ref(), request, Some(execution_lease.clone())),
             )
             .await
             .unwrap_or_else(|_| Err(EngineError::Other("title generation timed out".into())))
@@ -261,11 +265,13 @@ fn clean_title(raw: &str) -> String {
 async fn collect_text(
     harness: &dyn zeron_harness::Harness,
     request: RunRequest,
+    execution_lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
 ) -> Result<String, EngineError> {
     let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerMessage>(1);
     let interrupt = CancellationToken::new();
     let _cancel_on_drop = interrupt.clone().drop_guard();
     let controls = RunControls {
+        execution_lease,
         request_input: Box::new(|_questions: Vec<UserInputQuestion>| {
             let (tx, rx) = tokio::sync::oneshot::channel::<Vec<UserInputAnswer>>();
             let _ = tx.send(Vec::new());
@@ -368,7 +374,7 @@ mod tests {
             attachments: vec![],
             worktree: None,
         };
-        let result = collect_text(&harness, request).await;
+        let result = collect_text(&harness, request, None).await;
         assert!(
             result
                 .unwrap_err()

@@ -135,6 +135,13 @@ pub struct HarnessRegistry {
     prefs: Mutex<HarnessPrefsFile>,
     /// Where the prefs persist; `None` (tests, bare registries) skips writes.
     prefs_path: Mutex<Option<PathBuf>>,
+    /// Fair per-harness execution gates. Runs and title generation hold a
+    /// shared lease; an accepted update queues an exclusive lease. Tokio's
+    /// write-preferring FIFO policy prevents a stream of new runs from
+    /// starving an update that is already waiting.
+    gates: Mutex<HashMap<HarnessId, Arc<tokio::sync::RwLock<()>>>>,
+    pending_updates: Mutex<std::collections::HashSet<HarnessId>>,
+    update_generation: tokio::sync::watch::Sender<u64>,
 }
 
 impl Default for HarnessRegistry {
@@ -145,11 +152,96 @@ impl Default for HarnessRegistry {
 
 impl HarnessRegistry {
     pub fn new() -> Self {
+        let (update_generation, _) = tokio::sync::watch::channel(0);
         Self {
             slots: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
             prefs: Mutex::new(HarnessPrefsFile::default()),
             prefs_path: Mutex::new(None),
+            gates: Mutex::new(HashMap::new()),
+            pending_updates: Mutex::new(std::collections::HashSet::new()),
+            update_generation,
+        }
+    }
+
+    fn gate(&self, id: HarnessId) -> Arc<tokio::sync::RwLock<()>> {
+        self.gates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(id)
+            .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(())))
+            .clone()
+    }
+
+    /// Shared lease held for the full lifetime of a harness subprocess.
+    pub async fn execution_lease(&self, id: HarnessId) -> tokio::sync::OwnedRwLockReadGuard<()> {
+        let mut updates = self.update_generation.subscribe();
+        loop {
+            // The marker closes the small begin-update → writer-future polling
+            // gap. Watch retains a generation change, so an update finishing
+            // between this check and `changed()` cannot lose the wakeup.
+            if self.update_pending(id) {
+                let _ = updates.changed().await;
+                continue;
+            }
+            let lease = self.gate(id).read_owned().await;
+            if !self.update_pending(id) {
+                return lease;
+            }
+            drop(lease);
+        }
+    }
+
+    /// Exclusive lease held from immediately before update mutation through
+    /// post-install verification.
+    pub async fn update_lease(&self, id: HarnessId) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        self.gate(id).write_owned().await
+    }
+
+    /// Mark an accepted update before queueing its writer. Existing persistent
+    /// runtimes use this signal to retire at their next turn boundary instead
+    /// of parking indefinitely while the writer waits.
+    pub fn begin_update(&self, id: HarnessId) {
+        self.pending_updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id);
+    }
+
+    pub fn end_update(&self, id: HarnessId) {
+        self.pending_updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        self.update_generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    pub fn update_pending(&self, id: HarnessId) -> bool {
+        self.pending_updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&id)
+    }
+
+    /// Run a synchronous dispatch-boundary action only if no update has been
+    /// accepted for this harness. Holding the marker lock through the action
+    /// gives direct steering a strict order against `begin_update`: either the
+    /// prompt is accepted first and belongs to the existing run, or it waits
+    /// behind the update through the ordinary dispatch path.
+    pub(crate) fn while_update_clear<T>(
+        &self,
+        id: HarnessId,
+        action: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let pending = self
+            .pending_updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if pending.contains(&id) {
+            None
+        } else {
+            Some(action())
         }
     }
 
@@ -1094,5 +1186,69 @@ mod title_tests {
         let prefs: HarnessPrefsFile = serde_json::from_str(r#"{"disabled":["codex"]}"#).unwrap();
         assert_eq!(prefs.titles, TitleSettings::default());
         assert_eq!(prefs.disabled, vec![HarnessId::Codex]);
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn queued_update_writer_precedes_later_dispatches() {
+        let registry = Arc::new(HarnessRegistry::new());
+        let running = registry.execution_lease(HarnessId::Codex).await;
+        registry.begin_update(HarnessId::Codex);
+        assert!(registry.update_pending(HarnessId::Codex));
+
+        let writer_registry = registry.clone();
+        let (writer_acquired_tx, writer_acquired_rx) = tokio::sync::oneshot::channel();
+        let (release_writer_tx, release_writer_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _writer = writer_registry.update_lease(HarnessId::Codex).await;
+            let _ = writer_acquired_tx.send(());
+            let _ = release_writer_rx.await;
+        });
+        tokio::task::yield_now().await;
+
+        let reader_registry = registry.clone();
+        let (reader_acquired_tx, reader_acquired_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _reader = reader_registry.execution_lease(HarnessId::Codex).await;
+            let _ = reader_acquired_tx.send(());
+        });
+
+        drop(running);
+        writer_acquired_rx.await.unwrap();
+        let mut reader_acquired_rx = Box::pin(reader_acquired_rx);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                &mut reader_acquired_rx
+            )
+            .await
+            .is_err(),
+            "later reader jumped ahead of the queued update writer"
+        );
+        let _ = release_writer_tx.send(());
+        registry.end_update(HarnessId::Codex);
+        reader_acquired_rx.await.unwrap();
+        assert!(!registry.update_pending(HarnessId::Codex));
+    }
+
+    #[test]
+    fn update_marker_rejects_new_boundary_actions() {
+        let registry = HarnessRegistry::new();
+        assert_eq!(
+            registry.while_update_clear(HarnessId::Codex, || 42),
+            Some(42)
+        );
+        registry.begin_update(HarnessId::Codex);
+        let mut called = false;
+        assert_eq!(
+            registry.while_update_clear(HarnessId::Codex, || called = true),
+            None
+        );
+        assert!(!called);
+        registry.end_update(HarnessId::Codex);
     }
 }

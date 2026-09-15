@@ -363,6 +363,11 @@ impl SessionsEngine {
         request.cwd = expand_home(&request.cwd);
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
+        // A short shared lease orders this dispatch against an already queued
+        // update writer. A new runtime shares it with the subprocess task so
+        // it survives `drive_run` until the child is reaped; a routed steer
+        // releases its short lease once accepted.
+        let execution_lease = Arc::new(self.inner.registry.execution_lease(harness_id).await);
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
@@ -375,22 +380,27 @@ impl SessionsEngine {
         if let Some((run_id, steerable, same_runtime, steer_tx, ledger)) = routed {
             let user_id = message_id.clone().unwrap_or_else(new_id);
             let accepted = if steerable && same_runtime {
-                // Warm dispatch uses the same mailbox as explicit steering.
-                // Register acceptance before a fast boundary can retire it.
-                let mut pending = lock(&ledger);
-                let message = SteerMessage {
-                    prompt: request.prompt.clone(),
-                    message_id: Some(user_id.clone()),
-                };
-                if steer_tx.try_send(message).is_ok() {
-                    pending.push_back(RoutedSteer {
-                        prompt: request.prompt.clone(),
-                        message_id: user_id.clone(),
-                    });
-                    true
-                } else {
-                    false
-                }
+                self.inner
+                    .registry
+                    .while_update_clear(harness_id, || {
+                        // Warm dispatch uses the same mailbox as explicit
+                        // steering. Register acceptance before a fast boundary
+                        // can retire it, atomically with the update marker.
+                        let mut pending = lock(&ledger);
+                        let message = SteerMessage {
+                            prompt: request.prompt.clone(),
+                            message_id: Some(user_id.clone()),
+                        };
+                        if steer_tx.try_send(message).is_err() {
+                            return false;
+                        }
+                        pending.push_back(RoutedSteer {
+                            prompt: request.prompt.clone(),
+                            message_id: user_id.clone(),
+                        });
+                        true
+                    })
+                    .unwrap_or(false)
             } else {
                 false
             };
@@ -479,6 +489,7 @@ impl SessionsEngine {
         };
         let interrupt_token = CancellationToken::new();
         let controls = RunControls {
+            execution_lease: Some(execution_lease.clone()),
             request_input,
             steering: steer_rx,
             interrupt: interrupt_token.clone(),
@@ -522,6 +533,7 @@ impl SessionsEngine {
             controls,
             engine_rx,
             cancel_rx,
+            execution_lease,
             RunResumeState {
                 user_message_id: user_id,
                 resume_injected,
@@ -545,11 +557,12 @@ impl SessionsEngine {
             .map(|h| {
                 (
                     h.run_id.clone(),
+                    h.runtime_config.harness_id,
                     h.steer_tx.clone(),
                     h.routed_steers.clone(),
                 )
             });
-        let Some((run_id, steer_tx, ledger)) = target else {
+        let Some((run_id, harness_id, steer_tx, ledger)) = target else {
             return Ok(SteerOutcome::NotSteerable);
         };
         let user_id = message_id.unwrap_or_else(new_id);
@@ -557,17 +570,21 @@ impl SessionsEngine {
             prompt: prompt.to_string(),
             message_id: Some(user_id.clone()),
         };
-        {
+        let accepted = self.inner.registry.while_update_clear(harness_id, || {
             // Serialize mailbox acceptance with confirmation and Done-time
             // inspection: a fast consumer must never outrun its ledger entry.
             let mut pending = lock(&ledger);
             if steer_tx.try_send(message).is_err() {
-                return Ok(SteerOutcome::NotSteerable);
+                return false;
             }
             pending.push_back(RoutedSteer {
                 prompt: prompt.to_string(),
                 message_id: user_id.clone(),
             });
+            true
+        });
+        if accepted != Some(true) {
+            return Ok(SteerOutcome::NotSteerable);
         }
         let handle = self.doc_handle(chat_id)?;
         handle.write_user_message(&user_id, prompt, now_ms())?;
@@ -1484,6 +1501,7 @@ async fn drive_run(
     controls: RunControls,
     mut engine_rx: mpsc::UnboundedReceiver<AgentEvent>,
     mut cancel_rx: watch::Receiver<bool>,
+    _execution_lease: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
     resume_state: RunResumeState,
 ) {
     let device_id = inner.device_id.clone();
@@ -1686,6 +1704,22 @@ async fn drive_run(
                 _ = live_heartbeat.tick() => {
                     inner.touch_session(&chat_id);
                     continue;
+                }
+                // An accepted update must not wait behind a warm between-turn
+                // child for the full idle-reaper window. The completed turn is
+                // already durable, so retire the parked process cleanly and let
+                // the queued exclusive lease proceed.
+                _ = tokio::time::sleep_until(tokio::time::Instant::now()),
+                    if idle_since.is_some() && inner.registry.update_pending(harness_id) =>
+                {
+                    if let Some(token) = lock(&inner.runs)
+                        .get(&chat_id)
+                        .filter(|h| h.run_id == run_id)
+                        .map(|h| h.interrupt_token.clone())
+                    {
+                        token.cancel();
+                    }
+                    break SessionStatus::Idle;
                 }
                 // Idle reaper (zeron SESSION_IDLE_MS): a parked persistent session
                 // nobody returned to in 30 minutes releases its child. The turn
@@ -2351,7 +2385,11 @@ async fn drive_run(
             // PERSISTENT SESSION: a cleanly completed turn on a steerable
             // harness PARKS instead of ending — child + mailbox stay warm for
             // the next routed dispatch; per-turn state resets for it.
-            if *status == DoneStatus::Completed && steerable && !interrupted {
+            if *status == DoneStatus::Completed
+                && steerable
+                && !interrupted
+                && !inner.registry.update_pending(harness_id)
+            {
                 folded.clear();
                 dirty = false;
                 entry_id = new_id();
