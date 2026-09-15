@@ -532,6 +532,13 @@ pub struct UiSettings {
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
+    /// Device-local pinned session ids, NEWEST pin first: index 0 renders at
+    /// the top of the sidebar, so this list's order IS the pin-time order.
+    /// Never synced — a pin is this device's viewport preference, and
+    /// different devices generally track different sessions. Archiving a chat
+    /// removes its id here (see `Shell::set_chat_archived`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned_chats: Vec<String>,
     /// Legacy: per-space tab order, from when tabs were the selected space's
     /// non-archived sessions. Kept for file compatibility; no longer read.
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -642,6 +649,7 @@ impl Default for UiSettings {
             last_space_id: None,
             open_tabs: None,
             space_filter: None,
+            pinned_chats: Vec::new(),
             tab_order: std::collections::HashMap::new(),
             space_order: Vec::new(),
             sound_enabled: true,
@@ -1545,6 +1553,7 @@ mod tests {
             last_space_id: Some("space-1".into()),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
+            pinned_chats: vec!["c".to_string(), "b".to_string()],
             tab_order: std::collections::HashMap::from([(
                 "space-1".to_string(),
                 vec!["b".to_string(), "a".to_string()],
@@ -1617,6 +1626,33 @@ mod tests {
         assert!(json.contains(r#""codeFencesFitContent": true"#));
         assert!(json.contains(r#""openWebLinksInZeron": false"#));
         assert!(json.contains(r#""newThreadBackgroundEffect": "ascii""#));
+    }
+
+    #[test]
+    fn pinned_chats_round_trip_in_pin_order() {
+        let dir = tempfile::tempdir().unwrap();
+        // Newest pin first — the array order is the render order.
+        let settings = UiSettings {
+            pinned_chats: vec!["newest".into(), "middle".into(), "oldest".into()],
+            ..Default::default()
+        };
+        settings.save(dir.path()).unwrap();
+        assert_eq!(
+            UiSettings::load(dir.path()).pinned_chats,
+            vec![
+                "newest".to_string(),
+                "middle".to_string(),
+                "oldest".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_pinned_chats_are_omitted_from_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        UiSettings::default().save(dir.path()).unwrap();
+        let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
+        assert!(!json.contains("pinnedChats"));
     }
 
     #[test]

@@ -22,19 +22,29 @@ struct ActiveChatRow {
     group: Option<(String, String)>,
 }
 
+/// Sidebar order. Pinned chats float above unpinned ones; among pins the
+/// `pinned_rank` (0 = most recently pinned) decides, so the last pin lands on
+/// top. Unpinned chats keep the user's `SidebarSort`. `pinned_rank` only ranks
+/// ids present in the drawn list, so an archived pin never floats.
 fn compare_sidebar_chats(
     sort: SidebarSort,
+    pinned_rank: &std::collections::HashMap<String, usize>,
     left: &zeron_proto::Chat,
     right: &zeron_proto::Chat,
 ) -> std::cmp::Ordering {
-    let primary = match sort {
+    let base = |left: &zeron_proto::Chat, right: &zeron_proto::Chat| match sort {
         SidebarSort::Created => right.created_at.cmp(&left.created_at),
         SidebarSort::LastUpdated => right
             .last_message_at
             .unwrap_or(right.created_at)
             .cmp(&left.last_message_at.unwrap_or(left.created_at)),
     };
-    primary.then_with(|| left.id.cmp(&right.id))
+    match (pinned_rank.get(&left.id), pinned_rank.get(&right.id)) {
+        (Some(left_rank), Some(right_rank)) => left_rank.cmp(right_rank),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => base(left, right).then_with(|| left.id.cmp(&right.id)),
+    }
 }
 
 /// The space-filter dropdown, `Some` while open. The same searchable-menu
@@ -1130,6 +1140,25 @@ impl Shell {
             .into_any_element()
     }
 
+    /// Pin rank for the sidebar's current list: pinned chat id -> rank, where
+    /// 0 is the most recently pinned and renders highest. Only ids present in
+    /// `active` are ranked, so a pin whose chat is archived (or otherwise not
+    /// in this list) never floats. Device-local — reads `ui-settings.json`'s
+    /// `pinnedChats`, never the registry.
+    fn pinned_rank<'a>(
+        &self,
+        active: impl Iterator<Item = &'a zeron_proto::Chat>,
+    ) -> std::collections::HashMap<String, usize> {
+        let ids: std::collections::HashSet<&str> = active.map(|chat| chat.id.as_str()).collect();
+        self.settings
+            .pinned_chats
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| ids.contains(id.as_str()))
+            .map(|(rank, id)| (id.clone(), rank))
+            .collect()
+    }
+
     /// Flat top-to-bottom chat ids exactly as [`Self::render_active_rows`]
     /// draws them — the user's sort, device grouping, and local-device
     /// promotion applied. The jump shortcuts and session cycling read THIS
@@ -1143,7 +1172,10 @@ impl Shell {
             .into_iter()
             .map(|(_, chat)| chat.clone())
             .collect();
-        chats.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
+        let pinned = self.pinned_rank(chats.iter());
+        chats.sort_by(|left, right| {
+            compare_sidebar_chats(self.settings.sidebar_sort, &pinned, left, right)
+        });
         if self.settings.sidebar_organization != SidebarOrganization::ByDevice {
             return chats.into_iter().map(|chat| chat.id).collect();
         }
@@ -1181,8 +1213,9 @@ impl Shell {
                 .into_iter()
                 .map(|(status, chat)| (status, chat.clone()))
                 .collect();
+            let pinned = self.pinned_rank(chats.iter().map(|(_, chat)| chat));
             chats.sort_by(|left, right| {
-                compare_sidebar_chats(self.settings.sidebar_sort, &left.1, &right.1)
+                compare_sidebar_chats(self.settings.sidebar_sort, &pinned, &left.1, &right.1)
             });
             chats
                 .into_iter()
@@ -1409,7 +1442,15 @@ impl Shell {
                 .cloned()
                 .collect()
         };
-        rows.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
+        // Archived rows are never pinned: no pins participate in this list.
+        rows.sort_by(|left, right| {
+            compare_sidebar_chats(
+                self.settings.sidebar_sort,
+                &std::collections::HashMap::new(),
+                left,
+                right,
+            )
+        });
         if rows.is_empty() {
             return None;
         }
@@ -1555,6 +1596,8 @@ impl Shell {
                                     chat_id: menu_id.clone(),
                                     position: event.position,
                                     page: ChatMenuPage::Root,
+                                    // Archived shelf rows cannot be pinned.
+                                    archived: true,
                                 });
                                 cx.notify();
                             }),
@@ -3128,6 +3171,13 @@ mod tests {
         (Some((device.into(), device.into())), vec![value])
     }
 
+    fn pinned_rank(ids: &[&str]) -> std::collections::HashMap<String, usize> {
+        ids.iter()
+            .enumerate()
+            .map(|(rank, id)| ((*id).to_string(), rank))
+            .collect()
+    }
+
     fn chat(id: &str) -> zeron_proto::Chat {
         zeron_proto::Chat {
             id: id.into(),
@@ -3154,8 +3204,33 @@ mod tests {
     fn equal_sidebar_timestamps_sort_by_stable_chat_id() {
         let alpha = chat("alpha");
         let beta = chat("beta");
-        assert!(compare_sidebar_chats(SidebarSort::Created, &alpha, &beta).is_lt());
-        assert!(compare_sidebar_chats(SidebarSort::LastUpdated, &alpha, &beta).is_lt());
+        let none = std::collections::HashMap::new();
+        assert!(compare_sidebar_chats(SidebarSort::Created, &none, &alpha, &beta).is_lt());
+        assert!(compare_sidebar_chats(SidebarSort::LastUpdated, &none, &alpha, &beta).is_lt());
+    }
+
+    #[test]
+    fn pinned_chats_float_above_unpinned_ones() {
+        let alpha = chat("alpha");
+        let mut beta = chat("beta");
+        // beta is newer, so it leads unpinned...
+        beta.last_message_at = Some(Utc.timestamp_opt(50, 0).unwrap());
+        let none = std::collections::HashMap::new();
+        assert!(compare_sidebar_chats(SidebarSort::LastUpdated, &none, &beta, &alpha).is_lt());
+        // ...but pinning alpha floats it above.
+        let pinned = pinned_rank(&["alpha"]);
+        assert!(compare_sidebar_chats(SidebarSort::LastUpdated, &pinned, &alpha, &beta).is_lt());
+        assert!(compare_sidebar_chats(SidebarSort::LastUpdated, &pinned, &beta, &alpha).is_gt());
+    }
+
+    #[test]
+    fn most_recently_pinned_chat_sorts_first() {
+        let oldest = chat("oldest");
+        let newest = chat("newest");
+        // Rank 0 is the most recent pin; index order is the render order.
+        let pinned = pinned_rank(&["newest", "oldest"]);
+        assert!(compare_sidebar_chats(SidebarSort::LastUpdated, &pinned, &newest, &oldest).is_lt());
+        assert!(compare_sidebar_chats(SidebarSort::LastUpdated, &pinned, &oldest, &newest).is_gt());
     }
 
     #[test]

@@ -130,6 +130,9 @@ struct ChatMenuState {
     chat_id: String,
     position: Point<Pixels>,
     page: ChatMenuPage,
+    /// Archived rows never show Pin (archived sessions cannot be pinned, and
+    /// archiving already cleared any pin).
+    archived: bool,
 }
 
 /// Interruptible height tween for the sidebar's device/archive disclosures.
@@ -1889,6 +1892,30 @@ impl Shell {
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.sidebar_notice = Some(notice.into());
+        }
+        // A pin whose chat was archived on another device must stop floating.
+        // Only archived ids are pruned — never merely-absent ones, since a
+        // workspace profile switch legitimately hides every other profile's
+        // chats (those pins must survive the switch).
+        {
+            let stale: Vec<String> = {
+                let state = state.read(cx);
+                self.settings
+                    .pinned_chats
+                    .iter()
+                    .filter(|id| {
+                        state
+                            .chats
+                            .iter()
+                            .any(|chat| &chat.id == *id && chat.archived)
+                    })
+                    .cloned()
+                    .collect()
+            };
+            if !stale.is_empty() {
+                self.settings.pinned_chats.retain(|id| !stale.contains(id));
+                self.schedule_save(cx);
+            }
         }
         let next_sync_flow = {
             let state = state.read(cx);
@@ -3953,10 +3980,41 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.close_chat_menu(cx);
+        if archived {
+            // Archiving un-pins: a shelved session must not float, and
+            // unarchiving must not resurrect the old pin.
+            let before = self.settings.pinned_chats.len();
+            self.settings.pinned_chats.retain(|id| id != &chat_id);
+            if self.settings.pinned_chats.len() != before {
+                self.schedule_save(cx);
+            }
+        }
         self.mutate(
             serde_json::json!({ "op": "setChatArchived", "chatId": chat_id, "archived": archived }),
             cx,
         );
+        cx.notify();
+    }
+
+    /// Toggle this device's local pin for a chat. Pins are device-local
+    /// (`ui-settings.json` `pinnedChats`) and never synced: different devices
+    /// track different sessions, so a pin is the viewport preference of ONE
+    /// device. The newest pin is inserted at the front, so the last pinned
+    /// session renders on top.
+    pub(super) fn toggle_chat_pinned(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.close_chat_menu(cx);
+        match self
+            .settings
+            .pinned_chats
+            .iter()
+            .position(|id| id == &chat_id)
+        {
+            Some(pos) => {
+                self.settings.pinned_chats.remove(pos);
+            }
+            None => self.settings.pinned_chats.insert(0, chat_id),
+        }
+        self.schedule_save(cx);
         cx.notify();
     }
 
@@ -5463,6 +5521,12 @@ impl Shell {
         // ARCHIVE button (UNARCHIVE on rows in the sidebar's archived
         // accordion), t3code's settle-on-hover.
         let corner_hovered = self.chat_status_hover.as_deref() == Some(id.as_str());
+        // Device-local pin: the row wears an accent pin while it is pinned.
+        let pinned = self
+            .settings
+            .pinned_chats
+            .iter()
+            .any(|pinned_id| pinned_id == &id);
         // Send-truth overrides: a send unadopted past the grace window is
         // FAILED (explicit, with the transcript's retry affordance); a send
         // whose delivery path is degraded is QUEUED, not Working — the
@@ -5705,6 +5769,7 @@ impl Shell {
                         chat_id: menu_id.clone(),
                         position: event.position,
                         page: ChatMenuPage::Root,
+                        archived: false,
                     });
                     cx.notify();
                 }),
@@ -5749,6 +5814,14 @@ impl Shell {
                             )
                         },
                     )
+                    .when(pinned, |el| {
+                        el.child(
+                            icon(icons::PIN)
+                                .size(px(12.0))
+                                .flex_none()
+                                .text_color(theme.accent),
+                        )
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -6910,10 +6983,22 @@ impl Shell {
         if let Some(menu_state) = self.chat_menu.get().cloned() {
             let chat_id = menu_state.chat_id;
             let position = menu_state.position;
+            let archived = menu_state.archived;
             let chat_menu_closing = self.chat_menu.closing_since();
             let rename_id = chat_id.clone();
             let archive_id = chat_id.clone();
             let delete_id = chat_id.clone();
+            let pin_id = chat_id.clone();
+            let pinned = self.settings.pinned_chats.iter().any(|id| id == &chat_id);
+            // Only used by the Root page; a visible row hides Pin on archived
+            // sessions (they cannot be pinned).
+            let pin_row = popover::menu_row(&theme, false, format!("chat-menu-pin-{chat_id}"))
+                .id("chat-menu-pin")
+                .on_click(
+                    cx.listener(move |this, _, _, cx| this.toggle_chat_pinned(pin_id.clone(), cx)),
+                )
+                .child(icon(icons::PIN).size(px(16.0)).text_color(theme.accent))
+                .child(SharedString::from(if pinned { "Unpin" } else { "Pin" }));
             let menu = popover::popover_card(&theme)
                 .w(px(216.0))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -6932,6 +7017,7 @@ impl Shell {
                             .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
                             .child(SharedString::from("Rename…")),
                     )
+                    .when(!archived, |menu| menu.child(pin_row))
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-archive-{chat_id}"))
                             .id("chat-menu-archive")
