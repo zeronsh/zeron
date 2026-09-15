@@ -329,6 +329,15 @@ fn sync_ns_appearance(_mode: AppearanceMode) {}
 
 /// Push the theme's window background appearance onto every open window.
 pub fn reapply_window_background(cx: &mut App) {
+    // The window handling a settings click is temporarily taken out of App.
+    // Wait until it is returned before updating its native Windows backdrop.
+    #[cfg(target_os = "windows")]
+    cx.defer(apply_window_background);
+    #[cfg(not(target_os = "windows"))]
+    apply_window_background(cx);
+}
+
+fn apply_window_background(cx: &mut App) {
     let Some(wanted) = cx
         .try_global::<Theme>()
         .map(|theme| theme.window_background_appearance())

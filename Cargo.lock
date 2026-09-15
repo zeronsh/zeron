@@ -7856,9 +7856,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.43"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "once_cell",
  "ring",
@@ -11712,6 +11712,7 @@ version = "0.2.65"
 dependencies = [
  "anyhow",
  "clap",
+ "embed-resource",
  "libc",
  "mimalloc",
  "serde_json",
@@ -11719,6 +11720,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
  "zeron-engine",
  "zeron-rpc",
  "zeron-ui",
@@ -11767,6 +11769,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
  "zeron-doc",
  "zeron-harness",
  "zeron-preview",
@@ -11794,6 +11797,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
  "zeron-proto",
 ]
 
@@ -11979,6 +11983,7 @@ dependencies = [
  "url",
  "usvg",
  "uuid",
+ "windows-sys 0.61.2",
  "wry",
  "x11rb 0.14.0",
  "zeron-doc",
@@ -12004,6 +12009,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

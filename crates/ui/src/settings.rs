@@ -1611,7 +1611,14 @@ mod tests {
             composer_send_behavior: ComposerSendBehavior::ModEnter,
             appshots_enabled: false,
             appshot_sound_enabled: true,
-            appshot_destination: crate::appshots::AppshotDestination::NewSession,
+            // The destination is only persisted where Appshots exist (macOS and
+            // Linux); elsewhere the field is `serde(skip)` and reloads as the
+            // default, so the round trip must expect exactly that.
+            appshot_destination: if cfg!(any(target_os = "macos", target_os = "linux")) {
+                crate::appshots::AppshotDestination::NewSession
+            } else {
+                crate::appshots::AppshotDestination::Automatic
+            },
             appearance: crate::appearance::AppearanceMode::Light,
             git_history_columns: GitHistoryColumns {
                 author: false,

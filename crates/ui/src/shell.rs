@@ -6091,9 +6091,9 @@ impl Shell {
         if self.update_dismissed.as_deref() == Some(latest.as_str()) {
             return None;
         }
-        let mac_app = matches!(self.install, zeron_update::InstallKind::MacApp { .. });
+        let desktop_update = self.install.supports_desktop_update();
 
-        let (label, clickable): (SharedString, bool) = if mac_app {
+        let (label, clickable): (SharedString, bool) = if desktop_update {
             match &self.update_flow {
                 UpdateFlow::Idle => (format!("Update available — v{latest}").into(), true),
                 UpdateFlow::Downloading => (format!("Downloading v{latest}…").into(), false),
@@ -6144,7 +6144,7 @@ impl Shell {
     /// Idle → download; Ready → swap + relaunch; Failed → retry; advisory
     /// installs → dismiss for this version.
     fn on_update_strip_click(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.install, zeron_update::InstallKind::MacApp { .. }) {
+        if !self.install.supports_desktop_update() {
             self.update_dismissed = self
                 .state
                 .read(cx)
@@ -6166,10 +6166,11 @@ impl Shell {
     fn begin_update_download(&mut self, cx: &mut Context<Self>) {
         let edge_url = self.boot.edge_url.clone();
         let data_dir = self.data_dir.clone();
+        let install = self.install.clone();
         self.update_flow = UpdateFlow::Downloading;
         let download = Tokio::spawn(cx, async move {
             let manifest = zeron_update::fetch_latest(&edge_url).await?;
-            zeron_update::stage_mac_app(&edge_url, &manifest, &data_dir).await
+            install.stage_desktop(&edge_url, &manifest, &data_dir).await
         });
         self.update_task = Some(cx.spawn(async move |this, cx| {
             let outcome = match download.await {
@@ -6199,12 +6200,8 @@ impl Shell {
         if !self.prepare_exit(PendingExit::InstallUpdate(staged.clone()), cx) {
             return;
         }
-        let zeron_update::InstallKind::MacApp { bundle } = self.install.clone() else {
-            return;
-        };
-        match zeron_update::apply_mac_app(&staged, &bundle) {
+        match self.install.apply_desktop(&staged) {
             Ok(()) => {
-                zeron_update::relaunch_app_after_exit(&bundle);
                 crate::app_menus::quit_after_save(cx);
             }
             Err(err) => {
@@ -8313,6 +8310,10 @@ impl Shell {
             .min_w_0()
             .overflow_x_scroll()
             .track_scroll(&self.right_tab_scroll)
+            // Windows caption hit-testing includes the scroll-only hitboxes
+            // behind each chip. Stop at the scroller so the titlebar cannot
+            // claim tab clicks, while wheel events still reach this scroller.
+            .when(cfg!(target_os = "windows"), |strip| strip.occlude())
             .on_drag_move::<RightTabDrag>(cx.listener(
                 move |this, event: &gpui::DragMoveEvent<RightTabDrag>, _, cx| {
                     let payload = event.drag(cx);
@@ -8402,6 +8403,7 @@ impl Shell {
             };
             let chip = div()
                 .id(("right-surface-tab", ix))
+                .debug_selector(|| format!("right-surface-tab-{ix}"))
                 .group(group.clone())
                 .h(px(24.0))
                 .w(px(CHIP_W))
@@ -8452,29 +8454,39 @@ impl Shell {
                         this.close_right_surface(surface, window, cx);
                     }),
                 )
-                .on_drag(
-                    RightTabDrag {
-                        panel_key: self.panel_key(cx),
-                        from: ix,
-                        title: ghost_title,
-                        workspace_path,
-                    },
-                    |payload, _point, _, cx| {
-                        let title = payload.title.clone();
-                        cx.stop_propagation();
-                        cx.new(|_| SurfaceTabGhost { title })
-                    },
-                )
+                .when(crate::click_activation_drag_enabled(), |el| {
+                    el.on_drag(
+                        RightTabDrag {
+                            panel_key: self.panel_key(cx),
+                            from: ix,
+                            title: ghost_title,
+                            workspace_path,
+                        },
+                        |payload, _point, _, cx| {
+                            let title = payload.title.clone();
+                            cx.stop_propagation();
+                            cx.new(|_| SurfaceTabGhost { title })
+                        },
+                    )
+                })
                 .child(
                     // Leading slot: icon normally, ✕ on tab hover — two
                     // stacked layers opacity-swapped by the group hover.
                     div()
                         .id(("right-surface-close", ix))
+                        .debug_selector(|| format!("right-surface-close-{ix}"))
                         .flex_none()
                         .size(px(18.0))
                         .rounded(px(4.0))
                         .relative()
                         .hover(|s| s.bg(crate::theme::wash(0.12)))
+                        // The tab owns a drag payload. Claim the close press
+                        // before it reaches that parent or GPUI starts a tab
+                        // drag instead of delivering the close click.
+                        .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             this.close_right_surface(surface, window, cx);
@@ -9487,11 +9499,8 @@ impl Render for Shell {
         self.settings.surface = crate::appearance::surface(cx);
         self.sync_independent_settings(cx);
         let theme = Theme::of(cx);
-        // The shell tone (zeron `.frost`): the surface the sidebar sits on and
-        // the main panel floats over as an inset rounded card. On macOS the
-        // window background is the blurred desktop (lib.rs `Blurred`), so the
-        // frost paints translucent — the sidebar and card margins read as
-        // glass while the opaque card keeps text off it.
+        // The shell frost sits over native desktop blur on macOS and Windows.
+        // Content surfaces add their own backgrounds over this shared tint.
         let (frost, text, font) = (theme.glass(), theme.text, theme.font_sans.clone());
         let (workspace_scope, auth) = {
             let state = self.state.read(cx);
@@ -12073,6 +12082,9 @@ impl Shell {
             self.close_right_plus(cx);
         }
     }
+    pub fn fixture_browser_menu_mounted(&self) -> bool {
+        self.right_plus.get().is_some()
+    }
     pub fn fixture_expand_browser(&mut self, cx: &mut Context<Self>) {
         self.toggle_right_pane_expand(cx);
     }
@@ -12091,6 +12103,168 @@ impl Shell {
     pub fn fixture_resize_browser(&mut self, width: f32, cx: &mut Context<Self>) {
         self.settings.right_pane_width = width;
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod right_tab_mouse_regressions {
+    use super::*;
+    use gpui::{AppContext, TestAppContext, VisualTestContext};
+
+    // Render the production strip and use its real Shell callbacks, without
+    // starting an engine or rendering the rest of the desktop application.
+    struct TabHost {
+        shell: Entity<Shell>,
+        _data_dir: tempfile::TempDir,
+    }
+
+    impl Render for TabHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.shell.update(cx, |shell, cx| {
+                let tabs = shell.render_right_tab_strip(cx);
+                shell.titlebar_drag_region(
+                    "right-tab-test-titlebar",
+                    div().w(px(400.)).h(px(40.)).child(tabs),
+                    cx,
+                )
+            })
+        }
+    }
+
+    fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            let shell = cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.active_chat = "parent".into();
+                for id in ["first", "second"] {
+                    shell.add_subagent_surface("parent".into(), id.into(), id.into(), false, cx);
+                }
+                shell
+            });
+            TabHost {
+                shell,
+                _data_dir: dir,
+            }
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+        (shell, cx)
+    }
+
+    #[gpui::test]
+    fn subagent_close_press_does_not_start_parent_drag(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        let start = cx.debug_bounds("right-surface-close-0").unwrap().center();
+        let end = start + gpui::point(px(6.), px(0.));
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.update(|_, cx| assert!(!cx.has_active_drag(), "close press started a tab drag"));
+        cx.simulate_mouse_up(end, MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            assert!(!shell.subagent_tabs.contains_key(&1));
+            assert!(shell.subagent_tabs.contains_key(&2));
+            assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(2));
+        });
+    }
+
+    #[gpui::test]
+    fn tab_strip_scrolls_over_chips_inside_titlebar(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            for id in ["third", "fourth", "fifth", "sixth"] {
+                shell.add_subagent_surface("parent".into(), id.into(), id.into(), false, cx);
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                    position: start,
+                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(-100.), px(0.))),
+                    modifiers: gpui::Modifiers::default(),
+                    touch_phase: gpui::TouchPhase::Moved,
+                }),
+                cx,
+            );
+        });
+        shell.read_with(cx, |shell, _| {
+            assert!(
+                shell.right_tab_scroll.offset().x < px(0.),
+                "tab strip did not scroll"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn subagent_tab_body_still_selects_drags_and_middle_closes(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
+        cx.simulate_click(start, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(1));
+        });
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(8.), px(0.)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.has_active_drag(),
+                crate::click_activation_drag_enabled(),
+                "tab drag policy does not match the current platform"
+            )
+        });
+        cx.simulate_mouse_up(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_down(start, MouseButton::Middle, gpui::Modifiers::default());
+        cx.simulate_mouse_up(start, MouseButton::Middle, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| {
+            assert!(!shell.subagent_tabs.contains_key(&1));
+            assert!(shell.subagent_tabs.contains_key(&2));
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn subagent_tab_click_jitter_selects_without_starting_a_drag(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
+        let end = start + gpui::point(px(8.), px(0.));
+
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.update(|_, cx| {
+            assert!(
+                !cx.has_active_drag(),
+                "ordinary Windows click jitter started a tab drag"
+            )
+        });
+        cx.simulate_mouse_up(end, MouseButton::Left, gpui::Modifiers::default());
+
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(1));
+        });
     }
 }
 

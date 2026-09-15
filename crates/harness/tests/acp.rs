@@ -1,6 +1,8 @@
 //! AcpHarness integration tests against the fake ACP agent in
 //! `tests/fixtures/fake-acp.sh` (no real `grok` binary involved).
 
+#![cfg(unix)]
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -550,10 +552,32 @@ async fn models_enrich_from_the_static_catalog_on_id_match() {
 
 #[tokio::test]
 async fn models_fall_back_to_the_static_catalog_when_the_probe_fails() {
-    let harness = AcpHarness::pi().with_executable("/nonexistent/never-a-pi-acp");
+    // An agent that exists but cannot speak ACP: the discovery probe fails
+    // after launch, and the static catalog is served instead.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let broken = dir.path().join("broken-pi-acp");
+    std::fs::write(&broken, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let harness = AcpHarness::pi().with_executable(broken);
+    assert!(harness.installed());
     let models = harness.models().await.expect("static fallback");
     let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(ids, vec!["default"], "{models:?}");
+}
+
+#[tokio::test]
+async fn missing_override_is_not_installed_and_fails_discovery() {
+    // An override that points at nothing is not an installed agent: the
+    // registry must not offer it, and discovery names the problem instead of
+    // quietly serving a catalog for a binary that can never launch.
+    let harness = AcpHarness::pi().with_executable("/nonexistent/never-a-pi-acp");
+    assert!(!harness.installed());
+    let err = harness.models().await.expect_err("missing override");
+    assert!(
+        matches!(err, zeron_harness::HarnessError::NotInstalled(_)),
+        "{err:?}"
+    );
 }
 
 #[cfg(unix)]
