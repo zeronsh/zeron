@@ -46,6 +46,7 @@ pub mod pickers;
 pub mod popover;
 pub mod queue;
 pub mod rail;
+pub mod remote_desktop;
 pub mod settings;
 pub mod shell;
 pub mod sound;
@@ -117,7 +118,8 @@ impl gpui::Global for ReopenState {}
 /// connect-or-embed), 1320×880 window (min 900×600) with [`shell::Shell`] as the
 /// root view, boot splash overlaid until the engine reports ready.
 pub fn run_app(config: UiConfig) {
-    let app = gpui_platform::application().with_assets(icons::Assets);
+    let platform = gpui_platform::current_platform(false);
+    let app = gpui::Application::with_platform(platform.clone()).with_assets(icons::Assets);
     let (url_tx, mut url_rx) = futures::channel::mpsc::unbounded::<String>();
     let callback_tx = url_tx.clone();
     app.on_open_urls(move |urls| {
@@ -140,6 +142,7 @@ pub fn run_app(config: UiConfig) {
         }
     });
     app.run(move |cx: &mut App| {
+        remote_desktop::cursor::init(platform, cx);
         // NB: pinned-rev API — `gpui_tokio::init(cx)` free function (not `Tokio::init`).
         gpui_tokio::init(cx);
         gpui_base::init(cx);

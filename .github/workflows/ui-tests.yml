@@ -9,6 +9,9 @@ on:
       - 'crates/**'
       - 'scripts/test-linux-browser.sh'
       - 'scripts/run-macos-browser-fixture.sh'
+      - 'scripts/test-remote-desktop.sh'
+      - 'scripts/test-rdp-xrdp.sh'
+      - 'scripts/collect-rdp-licenses.py'
       - 'dist/macos/Info.plist'
       - 'apps/ios/**'
       - '.github/workflows/ui-tests.yml'
@@ -21,6 +24,9 @@ on:
       - 'crates/**'
       - 'scripts/test-linux-browser.sh'
       - 'scripts/run-macos-browser-fixture.sh'
+      - 'scripts/test-remote-desktop.sh'
+      - 'scripts/test-rdp-xrdp.sh'
+      - 'scripts/collect-rdp-licenses.py'
       - 'dist/macos/Info.plist'
       - 'apps/ios/**'
       - '.github/workflows/ui-tests.yml'
@@ -34,6 +40,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  rdp-protocol:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Protocol, TLS, input, clipboard and lifecycle contracts
+        run: cargo test --locked -p zeron-rdp
+      - name: Build direct interoperability probe
+        run: cargo build --release --locked -p zeron-rdp --example probe
+      - name: Real xrdp login, Unicode input, clipboard and reactivation
+        timeout-minutes: 5
+        env:
+          CONTAINER_RUNTIME: docker
+        run: scripts/test-rdp-xrdp.sh "$RUNNER_TEMP/rdp-protocol"
+      - name: Upload RDP interoperability evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-protocol
+          path: ${{ runner.temp }}/rdp-protocol
+          if-no-files-found: warn
+
   session-sync-regressions:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -99,6 +130,18 @@ jobs:
       - name: Native notification click regressions
         run: |
           cargo test --release --locked -p zeron-ui --lib notify::tests:: -- --test-threads=1
+      - name: Native Remote Desktop contracts and rendering
+        run: |
+          cargo test --release --locked -p zeron-ui remote_desktop -- --test-threads=1
+          cargo build --release --locked -p zeron-ui --example remote-desktop-fixture --features remote-desktop-fixture
+          scripts/test-remote-desktop.sh "$RUNNER_TEMP/rdp-native"
+      - name: Upload macOS Remote Desktop rendering evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-native-macos
+          path: ${{ runner.temp }}/rdp-native
+          if-no-files-found: warn
       - name: Build native browser fixture
         run: cargo build --release --locked -p zeron-ui --example browser-fixture --example preview-fixture --features browser-fixture
       - name: Native browser regression and screenshots
@@ -188,6 +231,17 @@ jobs:
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      - name: Native Remote Desktop rendering on X11 and Wayland
+        run: |
+          cargo build --release --locked -p zeron-ui --example remote-desktop-fixture --features remote-desktop-fixture
+          scripts/test-remote-desktop.sh "$RUNNER_TEMP/rdp-native"
+      - name: Upload Linux Remote Desktop rendering evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-native-linux
+          path: ${{ runner.temp }}/rdp-native
+          if-no-files-found: warn
       - name: Build browser fixture
         run: cargo build --release --locked -p zeron-ui --example browser-fixture --features browser-fixture
       - name: X11 and Wayland browser regressions

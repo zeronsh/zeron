@@ -7,6 +7,7 @@ publish.workspace = true
 
 [features]
 browser-fixture = []
+remote-desktop-fixture = []
 appshots-fixture = ["gpui_platform/test-support"]
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
 
@@ -29,6 +30,7 @@ required-features = ["appshots-fixture"]
 [dependencies]
 url = "2"
 zeron-proto.workspace = true
+zeron-rdp.workspace = true
 similar.workspace = true
 zeron-doc.workspace = true
 zeron-engine.workspace = true
@@ -94,3 +96,7 @@ gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 mimalloc.workspace = true
 tracing-subscriber.workspace = true
+
+[[example]]
+name = "remote-desktop-fixture"
+required-features = ["remote-desktop-fixture"]

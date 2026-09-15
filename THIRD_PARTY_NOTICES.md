@@ -141,3 +141,23 @@ Zeron code.
 The Zui native overlay renderer adapts Apache-2.0 GPUI code from
 [`egoist/zed` at `57bd4fe`](https://github.com/egoist/zed/tree/57bd4fe181639797d395978d5de17bc9e10a6219/crates/gpui_macos).
 Attribution is retained in the pinned Zui dependency’s `NOTICE`.
+
+
+## Native Remote Desktop
+
+Remote Desktop uses [IronRDP](https://github.com/Devolutions/IronRDP) 0.17.0 and
+its connector, session, graphics, input, PDU, Tokio, clipboard, dynamic channel
+and display control components (MIT OR Apache-2.0), by Devolutions Inc. and the
+IronRDP contributors. NLA authentication uses [sspi-rs](https://github.com/Devolutions/sspi-rs)
+0.21.3 (MIT OR Apache-2.0). Zeron's display control, TLS decision, GPUI and keyring
+adapters are independently written code.
+
+TLS uses tokio-rustls (MIT OR Apache-2.0), rustls (Apache-2.0 OR ISC OR MIT), ring
+(Apache-2.0 AND ISC, with bundled BoringSSL notices), rustls-native-certs (Apache-2.0 OR ISC OR MIT) and
+RustCrypto x509-cert/sha2/zeroize (Apache-2.0 OR MIT). Exact component and
+transitive versions are fixed in `Cargo.lock`. No OpenH264 or external RDP viewer
+is distributed by this feature.
+
+The package's `licenses/rdp` directory contains the resolved dependency inventory
+and the license/notice files supplied by those packages. Linux and macOS package
+scripts collect them using `scripts/collect-rdp-licenses.py`.
