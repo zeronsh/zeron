@@ -388,8 +388,13 @@ pub fn apply_keymap(
 }
 
 /// The settings sections (feature-inventory §1.5 routes).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Persisted as [`crate::settings::UiSettings::settings_section`] so reopening
+/// settings lands where it was left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SettingsSection {
+    #[default]
     Devices,
     /// Which harnesses the composer offers (enable/disable toggles).
     Harnesses,
@@ -1026,6 +1031,9 @@ impl SyncFlow {
 enum ShellEscapeOutcome {
     OtherKey,
     Blocked,
+    /// Escape reached the shell with the settings route open and nothing
+    /// nearer (a page dialog, a menu) claiming it: leave the route.
+    CloseSettings,
     InterruptChat(String),
     Ignored,
 }
@@ -1043,7 +1051,9 @@ fn resolve_shell_escape(
         ShellEscapeOutcome::OtherKey
     } else if blocking_overlay {
         ShellEscapeOutcome::Blocked
-    } else if !escape_stops_active_agent || !matches!(route, Route::Chat) || interrupting {
+    } else if matches!(route, Route::Settings(_)) {
+        ShellEscapeOutcome::CloseSettings
+    } else if !escape_stops_active_agent || interrupting {
         ShellEscapeOutcome::Ignored
     } else if matches!(indicator, Indicator::Working | Indicator::AwaitingInput) {
         selected_chat
@@ -3599,9 +3609,21 @@ impl Shell {
         }
         self.route = Route::Settings(section);
         self.nav.push(NavEntry::Settings(section));
+        self.remember_settings_section(section, cx);
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
+    }
+
+    /// Rides the shell's own settings copy: [`Self::schedule_save`] replaces
+    /// the whole file from it, so a write that skipped this copy would be
+    /// undone by the next geometry save.
+    fn remember_settings_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        if self.settings.settings_section == section {
+            return;
+        }
+        self.settings.settings_section = section;
+        self.schedule_save(cx);
     }
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
@@ -3641,6 +3663,7 @@ impl Shell {
             }
             NavEntry::Settings(section) => {
                 self.route = Route::Settings(section);
+                self.remember_settings_section(section, cx);
             }
         }
         self.close_user_menu(cx);
@@ -6396,7 +6419,7 @@ impl Shell {
                     popover::menu_row(theme, false, "user-menu-settings")
                         .id("user-menu-settings")
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.open_settings(SettingsSection::Devices, cx)
+                            this.open_settings(this.settings.settings_section, cx)
                         }))
                         .child(
                             icon(icons::SETTINGS_MINIMALISTIC)
@@ -6848,6 +6871,26 @@ impl Shell {
         if self.right_plus.get().is_some() {
             return true;
         }
+        // Only the routed page is asked, so a dialog left open on a page
+        // navigated away from cannot swallow the key.
+        let settings_dialog = match self.route {
+            Route::Settings(SettingsSection::Devices) => self
+                .devices_page
+                .as_ref()
+                .is_some_and(|page| page.update(cx, |page, cx| page.handle_escape(cx))),
+            Route::Settings(SettingsSection::Agents) => self
+                .accounts_page
+                .as_ref()
+                .is_some_and(|page| page.update(cx, |page, cx| page.handle_escape(cx))),
+            Route::Settings(SettingsSection::Appearance) => self
+                .appearance_page
+                .as_ref()
+                .is_some_and(|page| page.update(cx, |page, cx| page.handle_escape(cx))),
+            _ => false,
+        };
+        if settings_dialog {
+            return true;
+        }
         self.active_changes(cx)
             .is_some_and(|changes| changes.update(cx, |changes, cx| changes.handle_escape(cx)))
     }
@@ -6905,6 +6948,10 @@ impl Shell {
             interrupting,
         ) {
             ShellEscapeOutcome::Blocked => cx.stop_propagation(),
+            ShellEscapeOutcome::CloseSettings => {
+                cx.stop_propagation();
+                self.close_settings(cx);
+            }
             ShellEscapeOutcome::InterruptChat(chat_id) => {
                 cx.stop_propagation();
                 self.composer
@@ -9674,9 +9721,9 @@ impl Render for Shell {
             // to chat itself, so Settings is not a dead spot.
             .on_action(cx.listener(|this, _: &NewSession, _, cx| this.open_new_session(cx)))
             // Native Settings menu item and the platform convention (Cmd+, on
-            // macOS, Ctrl+, elsewhere) always land on the default section.
+            // macOS, Ctrl+, elsewhere) reopen the section last used.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
-                this.open_settings(SettingsSection::Devices, cx)
+                this.open_settings(this.settings.settings_section, cx)
             }))
             // Chat-scoped, unlike new-session — `cycle_session` holds the guard
             // and says why.
@@ -10269,12 +10316,6 @@ mod tests {
             (Route::Chat, Some("chat-a"), Indicator::None, false),
             (Route::Chat, None, Indicator::Working, false),
             (Route::Chat, Some("chat-a"), Indicator::Working, true),
-            (
-                Route::Settings(SettingsSection::Devices),
-                Some("chat-a"),
-                Indicator::Working,
-                false,
-            ),
         ] {
             assert_eq!(
                 resolve_shell_escape(
@@ -10316,6 +10357,39 @@ mod tests {
                 false,
             ),
             ShellEscapeOutcome::Ignored
+        );
+    }
+
+    #[test]
+    fn escape_leaves_settings_regardless_of_the_live_chat_behind_it() {
+        // The route wins over the agent interrupt: a live chat behind the
+        // settings page is not what the user is looking at. A blocking
+        // overlay still comes first.
+        for (opt_in, indicator) in [(true, Indicator::Working), (false, Indicator::None)] {
+            assert_eq!(
+                resolve_shell_escape(
+                    "escape",
+                    false,
+                    opt_in,
+                    Route::Settings(SettingsSection::Appearance),
+                    Some("chat-a"),
+                    indicator,
+                    false,
+                ),
+                ShellEscapeOutcome::CloseSettings
+            );
+        }
+        assert_eq!(
+            resolve_shell_escape(
+                "escape",
+                true,
+                true,
+                Route::Settings(SettingsSection::Appearance),
+                Some("chat-a"),
+                Indicator::Working,
+                false,
+            ),
+            ShellEscapeOutcome::Blocked
         );
     }
 

@@ -664,6 +664,17 @@ impl AppearancePage {
         }
     }
 
+    /// Close the topmost dialog. The shell asks in capture phase before it
+    /// leaves the settings route on Escape, so cancelling an import never also
+    /// closes Settings under it. Returns whether a dialog was open.
+    pub(crate) fn handle_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.review_entry.take().is_some() || self.import_dialog.take().is_some() {
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
     fn open_import(&mut self, cx: &mut Context<Self>) {
         let input = cx.new(|cx| {
             ComposerInput::with_context(
@@ -2410,16 +2421,14 @@ impl AppearancePage {
             .p(px(0.0))
             .overflow_hidden()
             .track_focus(&focus)
+            // Escape is the shell's: it asks [`Self::handle_escape`] in capture
+            // phase, before this card or its path input see the key.
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 match popover::classify_key(
                     event.keystroke.key.as_str(),
                     event.keystroke.modifiers.platform,
                     event.keystroke.modifiers.control,
                 ) {
-                    popover::MenuKey::Escape => {
-                        this.import_dialog = None;
-                        cx.notify();
-                    }
                     popover::MenuKey::Enter | popover::MenuKey::ModEnter => {
                         if this
                             .import_dialog
