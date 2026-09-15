@@ -87,6 +87,24 @@ pub const SPLIT_MARKER_WIDTH: f32 = 18.0;
 pub const SPLIT_DIVIDER_WIDTH: f32 = 1.0;
 const DIFF_TEXT_SIZE: f32 = 12.0;
 const DIFF_TAB_SIZE: usize = 4;
+/// One shared `code_font_size` setting drives several surfaces that never
+/// agreed on a size historically. Each scales off its own baseline so the
+/// default setting reproduces the size that surface always had, and a
+/// user-chosen size moves them all while keeping those proportions.
+const DIFF_TEXT_SIZE_RATIO: f32 = DIFF_TEXT_SIZE / crate::typography::CODE_FONT_SIZE_DEFAULT;
+
+/// Size of the painted diff body text, and the size the column measurement in
+/// [`DiffHorizontalGeometry::resolve`] must use: they desync otherwise.
+fn diff_text_size(theme: &Theme) -> f32 {
+    crate::typography::clamp_font_size(theme.code_font_size * DIFF_TEXT_SIZE_RATIO)
+}
+
+/// The row box and the painted line box must agree, or code clips once the
+/// user moves the code font size off [`DIFF_TEXT_SIZE`].
+fn diff_line_height(theme: &Theme) -> f32 {
+    diff_text_size(theme) * (DIFF_LINE_HEIGHT / DIFF_TEXT_SIZE)
+}
+
 const UNIFIED_CODE_PADDING_LEFT: f32 = 12.0;
 const SPLIT_CODE_PADDING_LEFT: f32 = 6.0;
 /// Breathing room after the widest source line when scrolled fully right.
@@ -283,25 +301,40 @@ impl DiffHorizontalGeometry {
             max_gutter_width,
         }
     }
+}
 
-    fn resolve(self, theme: &Theme, window: &Window) -> DiffHorizontalMetrics {
-        let mono = font(theme.font_mono.clone());
-        let font_id = window.text_system().resolve_font(&mono);
-        let column_width = window
-            .text_system()
-            .ch_advance(font_id, px(DIFF_TEXT_SIZE))
-            .unwrap_or(px(DIFF_TEXT_SIZE * 0.6))
-            .as_f32();
-        DiffHorizontalMetrics {
-            max_text_width: self.max_code_columns as f32 * column_width,
-            max_gutter_width: self.max_gutter_width,
-        }
-    }
+/// Measure the same runs the row paints. Color boundaries can break kerning
+/// and ligatures on native platforms even when every run uses the same font.
+fn max_shaped_text_width(
+    file: &FileDiff,
+    highlights: Option<&DiffHighlights>,
+    theme: &Theme,
+    text_system: &gpui::WindowTextSystem,
+) -> f32 {
+    let mono = font(theme.font_mono.clone());
+    let size = px(diff_text_size(theme));
+    let column_width = text_system
+        .ch_advance(text_system.resolve_font(&mono), size)
+        .unwrap_or(size * 0.6)
+        .as_f32();
+    file.hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .fold(0.0f32, |widest, line| {
+            let runs = line_runs(line, highlights, theme);
+            let shaped = text_system
+                .shape_line(line.text.clone().into(), size, &runs, None)
+                .width()
+                .as_f32();
+            // Preserve the old column estimate as a floor, including tab stops.
+            widest
+                .max(shaped)
+                .max(visual_columns(&line.text) as f32 * column_width)
+        })
 }
 
 /// Count terminal-style display columns, including tab stops and wide
-/// Unicode glyphs. Syntax runs only recolour the shared mono font, so this is
-/// the stable width input for every virtualized row.
+/// Unicode glyphs. This is only a floor; actual shaped runs determine the extent.
 fn visual_columns(text: &str) -> usize {
     text.chars().fold(0usize, |columns, ch| {
         if ch == '\t' {
@@ -613,7 +646,7 @@ pub fn truncate_file_lines(file: &mut FileDiff, max_lines: usize) {
 /// Analytic expanded-body height — drives the 180 ms fold tween without
 /// measurement.
 pub fn body_height(file: &FileDiff) -> f32 {
-    body_height_with(file, &[], None, DiffMode::Unified)
+    body_height_with(file, &[], None, DiffMode::Unified, DIFF_LINE_HEIGHT)
 }
 
 pub fn body_height_with(
@@ -621,10 +654,11 @@ pub fn body_height_with(
     comments: &[ReviewComment],
     draft: Option<(CommentSide, u32)>,
     mode: DiffMode,
+    line_h: f32,
 ) -> f32 {
     body_rows(0, file, comments, draft, mode)
         .iter()
-        .map(|row| row.height(comments))
+        .map(|row| row.height(comments, line_h))
         .sum()
 }
 
@@ -1136,9 +1170,18 @@ fn full_highlights(
 // Entity
 // ---------------------------------------------------------------------------
 
+struct MeasuredDiffWidth {
+    key: (u32, u32, u32, SharedString),
+    // Retaining the Arc makes pointer identity safe against allocator reuse.
+    highlights: Option<Arc<DiffHighlights>>,
+    width: f32,
+}
+
 struct FileHorizontalState {
     geometry: DiffHorizontalGeometry,
     scroll: gpui::ScrollHandle,
+    /// Shape once per file, typography/theme, and highlight revision.
+    measured: std::cell::RefCell<Option<MeasuredDiffWidth>>,
 }
 
 impl FileHorizontalState {
@@ -1146,6 +1189,48 @@ impl FileHorizontalState {
         Self {
             geometry: DiffHorizontalGeometry::from_file(file),
             scroll: gpui::ScrollHandle::new(),
+            measured: std::cell::RefCell::new(None),
+        }
+    }
+
+    fn metrics(
+        &self,
+        file: &FileDiff,
+        highlights: Option<&Arc<DiffHighlights>>,
+        theme: &Theme,
+        text_system: &gpui::WindowTextSystem,
+        generation: u32,
+    ) -> DiffHorizontalMetrics {
+        let key = (
+            generation,
+            crate::theme::style_generation(),
+            diff_text_size(theme).to_bits(),
+            theme.font_mono.clone(),
+        );
+        let mut cached = self.measured.borrow_mut();
+        let current = cached.as_ref().is_some_and(|cached| {
+            cached.key == key
+                && match (cached.highlights.as_ref(), highlights) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                    _ => false,
+                }
+        });
+        if !current {
+            *cached = Some(MeasuredDiffWidth {
+                key,
+                highlights: highlights.cloned(),
+                width: max_shaped_text_width(
+                    file,
+                    highlights.map(AsRef::as_ref),
+                    theme,
+                    text_system,
+                ),
+            });
+        }
+        DiffHorizontalMetrics {
+            max_text_width: cached.as_ref().unwrap().width,
+            max_gutter_width: self.geometry.max_gutter_width,
         }
     }
 }
@@ -1238,12 +1323,12 @@ impl DiffRow {
 
     /// `FoldingBody` is height-animated, so it reports 0 and never lands in a
     /// height sum.
-    fn height(self, comments: &[ReviewComment]) -> f32 {
+    fn height(self, comments: &[ReviewComment], line_h: f32) -> f32 {
         match self {
             DiffRow::FileHeader { .. } => FILE_HEADER_HEIGHT,
             DiffRow::Notice { .. } => NOTICE_HEIGHT,
             DiffRow::HunkHeader { .. } => HUNK_HEADER_HEIGHT,
-            DiffRow::Line { .. } | DiffRow::SplitLine { .. } => DIFF_LINE_HEIGHT,
+            DiffRow::Line { .. } | DiffRow::SplitLine { .. } => line_h,
             DiffRow::CommentCard { card, .. } => comments
                 .get(card as usize)
                 .map(|comment| comments::card_height(&comment.body))
@@ -2230,9 +2315,10 @@ impl Changes {
                 // The uniform hint keeps offsets for never-rendered rows
                 // sane (most rows ARE lines); real heights land as rows
                 // render.
+                let row_height = px(diff_line_height(Theme::of(cx)));
                 changes
                     .list
-                    .reset_with_uniform_height(rows.len(), px(DIFF_LINE_HEIGHT));
+                    .reset_with_uniform_height(rows.len(), row_height);
                 changes.rows = rows;
                 changes.row_ranges = ranges;
                 changes.parsed = Some(ParsedDiff {
@@ -2326,6 +2412,7 @@ impl Changes {
             &self.comments_for(&file.path, cx),
             self.draft_anchor_in(&file.path),
             self.mode,
+            diff_line_height(Theme::of(cx)),
         );
         let fold = self.folds.entry(file.path.clone()).or_default();
         let currently_collapsed = fold.collapsed;
@@ -2561,8 +2648,8 @@ impl Changes {
             self.mode,
             |ix| collapsed.get(ix).copied().unwrap_or(false),
         );
-        self.list
-            .reset_with_uniform_height(rows.len(), px(DIFF_LINE_HEIGHT));
+        let row_height = px(diff_line_height(Theme::of(cx)));
+        self.list.reset_with_uniform_height(rows.len(), row_height);
         self.rows = rows;
         self.row_ranges = ranges;
         if let Some(start) = anchor_file
@@ -3072,11 +3159,19 @@ impl Changes {
             return gpui::Empty.into_any_element();
         };
         let theme = Theme::of(cx).clone();
-        let horizontal = &parsed.horizontal[row.file()];
-        let code_width = if self.wrap_lines {
-            DiffCodeWidth::Wrapped
-        } else {
-            DiffCodeWidth::Scrollable(horizontal.geometry.resolve(&theme, window))
+        let highlight = files
+            .get(row.file())
+            .and_then(|file| self.request_highlight(file, &parsed_key, cx));
+        let horizontal = &self.parsed.as_ref().unwrap().horizontal[row.file()];
+        let code_width = match files.get(row.file()) {
+            Some(file) if !self.wrap_lines => DiffCodeWidth::Scrollable(horizontal.metrics(
+                file,
+                highlight.as_ref(),
+                &theme,
+                window.text_system(),
+                crate::typography::generation(cx),
+            )),
+            _ => DiffCodeWidth::Wrapped,
         };
         let code_scroll = DiffCodeScrollContext {
             handle: horizontal.scroll.clone(),
@@ -3116,7 +3211,6 @@ impl Changes {
                 let Some(file_diff) = files.get(file as usize) else {
                     return gpui::Empty.into_any_element();
                 };
-                let highlight = self.request_highlight(file_diff, &parsed_key, cx);
                 let Some(line) = file_diff
                     .hunks
                     .get(hunk as usize)
@@ -3174,7 +3268,6 @@ impl Changes {
                 let Some(file_diff) = files.get(file as usize) else {
                     return gpui::Empty.into_any_element();
                 };
-                let highlight = self.request_highlight(file_diff, &parsed_key, cx);
                 let Some(lines) = file_diff.hunks.get(hunk as usize).map(|h| &h.lines) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -3256,7 +3349,7 @@ impl Changes {
                     (Some(cell), None) => cell.into_any_element(),
                     (None, _) => split_filler().into_any_element(),
                 };
-                split_row(left, right, self.wrap_lines).into_any_element()
+                split_row(left, right, self.wrap_lines, &theme).into_any_element()
             }
             DiffRow::CommentCard { file, card } => {
                 let Some(file_diff) = files.get(file as usize) else {
@@ -3306,7 +3399,6 @@ impl Changes {
                     return gpui::Empty.into_any_element();
                 };
                 let fold = self.folds.get(&file_diff.path).copied().unwrap_or_default();
-                let highlight = self.request_highlight(file_diff, &parsed_key, cx);
                 let (from, to) = (fold.from, fold.to);
                 // Only the revealable slice is built — the tween never pays
                 // for lines it cannot show.
@@ -4194,8 +4286,8 @@ fn code_text_viewport(
         })
         .pl(px(padding_left))
         .font_family(theme.font_mono.clone())
-        .text_size(px(DIFF_TEXT_SIZE))
-        .line_height(px(DIFF_LINE_HEIGHT))
+        .text_size(px(diff_text_size(theme)))
+        .line_height(px(diff_line_height(theme)))
         .map(|el| {
             if wrapped {
                 el.whitespace_normal()
@@ -4207,7 +4299,7 @@ fn code_text_viewport(
     let viewport = div()
         .flex_1()
         .min_w_0()
-        .min_h(px(DIFF_LINE_HEIGHT))
+        .min_h(px(diff_line_height(theme)))
         .overflow_hidden()
         .child(content);
     if wrapped {
@@ -4282,7 +4374,7 @@ fn diff_line_row(
             .flex_none()
             .font_family(theme.font_mono.clone())
             .text_size(px(11.0))
-            .line_height(px(DIFF_LINE_HEIGHT))
+            .line_height(px(diff_line_height(theme)))
             .text_color(color)
             .flex()
             .justify_end()
@@ -4308,9 +4400,9 @@ fn diff_line_row(
     div()
         .map(|el| {
             if wrapped {
-                el.min_h(px(DIFF_LINE_HEIGHT))
+                el.min_h(px(diff_line_height(theme)))
             } else {
-                el.h(px(DIFF_LINE_HEIGHT))
+                el.h(px(diff_line_height(theme)))
             }
         })
         .w_full()
@@ -4350,8 +4442,8 @@ fn diff_line_row(
                 .flex_none()
                 .flex()
                 .justify_center()
-                .text_size(px(DIFF_TEXT_SIZE))
-                .line_height(px(DIFF_LINE_HEIGHT))
+                .text_size(px(diff_text_size(theme)))
+                .line_height(px(diff_line_height(theme)))
                 .text_color(marker_color)
                 .font_family(theme.font_mono.clone())
                 .child(SharedString::from(marker)),
@@ -4373,7 +4465,7 @@ fn diff_line_row(
 /// mode it spans both halves.
 fn meta_line_row(text: &str, theme: &Theme, pad_left: f32) -> AnyElement {
     div()
-        .h(px(DIFF_LINE_HEIGHT))
+        .h(px(diff_line_height(theme)))
         .w_full()
         .flex_none()
         .flex()
@@ -4474,7 +4566,7 @@ fn split_line_cell(
                 .flex_none()
                 .font_family(theme.font_mono.clone())
                 .text_size(px(11.0))
-                .line_height(px(DIFF_LINE_HEIGHT))
+                .line_height(px(diff_line_height(theme)))
                 .text_color(number_color)
                 .flex()
                 .justify_end()
@@ -4489,8 +4581,8 @@ fn split_line_cell(
                 .flex_none()
                 .flex()
                 .justify_center()
-                .text_size(px(DIFF_TEXT_SIZE))
-                .line_height(px(DIFF_LINE_HEIGHT))
+                .text_size(px(diff_text_size(theme)))
+                .line_height(px(diff_line_height(theme)))
                 .text_color(marker_color)
                 .font_family(theme.font_mono.clone())
                 .child(SharedString::from(marker)),
@@ -4518,13 +4610,13 @@ fn split_filler() -> gpui::Div {
 }
 
 /// Compose the two halves with the centre hairline.
-fn split_row(left: AnyElement, right: AnyElement, wrapped: bool) -> gpui::Div {
+fn split_row(left: AnyElement, right: AnyElement, wrapped: bool, theme: &Theme) -> gpui::Div {
     div()
         .map(|el| {
             if wrapped {
-                el.min_h(px(DIFF_LINE_HEIGHT))
+                el.min_h(px(diff_line_height(theme)))
             } else {
-                el.h(px(DIFF_LINE_HEIGHT))
+                el.h(px(diff_line_height(theme)))
             }
         })
         .w_full()
@@ -4693,14 +4785,14 @@ fn render_file_body_upto(
                                 .as_ref()
                                 .map(|scroll| scroll.slot(format_args!("{hunk_ix}-{line_ix}"))),
                         ));
-                        y += DIFF_LINE_HEIGHT;
+                        y += diff_line_height(theme);
                     }
                 }
                 DiffMode::Split => {
                     // Pair only what the clip can still reveal: the unified
                     // arm breaks out of a lazy walk, so the split arm must not
                     // materialize the whole hunk first.
-                    let budget = ((max_px - y) / DIFF_LINE_HEIGHT).ceil().max(0.0) as usize;
+                    let budget = ((max_px - y) / diff_line_height(theme)).ceil().max(0.0) as usize;
                     for (pair_ix, (left, right)) in split_pairs_upto(&hunk.lines, budget)
                         .into_iter()
                         .enumerate()
@@ -4739,10 +4831,10 @@ fn render_file_body_upto(
                                 theme,
                                 2.0 * (ACCENT_BAR_WIDTH + gutter_px),
                             ),
-                            None => split_row(cell(left, true), cell(right, false), wrapped)
+                            None => split_row(cell(left, true), cell(right, false), wrapped, theme)
                                 .into_any_element(),
                         });
-                        y += DIFF_LINE_HEIGHT;
+                        y += diff_line_height(theme);
                     }
                 }
             }
@@ -5413,7 +5505,7 @@ rename to new_name.rs
 
         // Heights stay analytic — the fold tween needs no measurement.
         assert_eq!(
-            body_height_with(&files[0], &[], None, DiffMode::Split),
+            body_height_with(&files[0], &[], None, DiffMode::Split, DIFF_LINE_HEIGHT),
             2.0 * HUNK_HEADER_HEIGHT + 6.0 * DIFF_LINE_HEIGHT + BODY_BOTTOM_PAD
         );
     }
@@ -5621,6 +5713,99 @@ rename to new_name.rs
             ACCENT_BAR_WIDTH + gutter + SPLIT_MARKER_WIDTH + metrics.split_content_width(gutter)
         };
         assert_eq!(split_total(narrow), split_total(wide));
+    }
+
+    /// Uses the native font backend, not TestAppContext's simulated metrics.
+    #[test]
+    fn native_diff_font_geometry() {
+        let platform = gpui_platform::current_platform(true);
+        let text_system =
+            gpui::WindowTextSystem::new(Arc::new(gpui::TextSystem::new(platform.text_system())));
+        text_system
+            .add_fonts(
+                crate::typography::bundled_font_faces()
+                    .map(std::borrow::Cow::Borrowed)
+                    .collect(),
+            )
+            .unwrap();
+        let mut theme = Theme::dark();
+        theme.font_mono = "Geist".into();
+        let wide = "W".repeat(100);
+        let source = format!("{wide}\n{}\n\t漢字🙂e\u{301}\n", "WWW(WWW);".repeat(200));
+        let patch = format!(
+            "diff --git a/x.ts b/x.ts\n@@ -0,0 +1,3 @@\n+{}",
+            source.trim_end_matches('\n').replace('\n', "\n+")
+        );
+        let files = parse_patch(&patch);
+        let file = &files[0];
+        let state = FileHorizontalState::new(file);
+        let highlight = Arc::new(DiffHighlights {
+            old: None,
+            new: Some(Arc::new(
+                zeron_syntax::highlight(zeron_syntax::HighlightRequest {
+                    source: &source,
+                    path: Some("x.ts"),
+                    fence_tag: None,
+                })
+                .unwrap(),
+            )),
+        });
+        let mono = font(theme.font_mono.clone());
+        let column = text_system
+            .ch_advance(text_system.resolve_font(&mono), px(12.))
+            .unwrap()
+            .as_f32();
+        let line = &file.hunks[0].lines[0];
+        let width = text_system
+            .shape_line(wide.into(), px(12.), &line_runs(line, None, &theme), None)
+            .width()
+            .as_f32();
+        assert!(
+            width > 100. * column * 1.1,
+            "requires a real proportional font: {width} vs {}",
+            100. * column
+        );
+
+        // Simulate plain -> excerpt -> full highlighting, including replacement
+        // while an old cached Arc is still alive. Every paint must be reachable.
+        for size in [12.5, 32., 8.] {
+            theme.code_font_size = size;
+            for highlights in [
+                None,
+                Some(highlight.clone()),
+                Some(Arc::new(DiffHighlights {
+                    old: None,
+                    new: highlight.new.clone(),
+                })),
+            ] {
+                let metrics = state.metrics(file, highlights.as_ref(), &theme, &text_system, 0);
+                for line in &file.hunks[0].lines {
+                    let runs = line_runs(line, highlights.as_deref(), &theme);
+                    let painted = text_system
+                        .shape_line(
+                            line.text.clone().into(),
+                            px(diff_text_size(&theme)),
+                            &runs,
+                            None,
+                        )
+                        .width()
+                        .as_f32();
+                    assert!(metrics.max_text_width >= painted);
+                    assert!(
+                        metrics.unified_content_width(gutter_width(file))
+                            >= UNIFIED_CODE_PADDING_LEFT + painted
+                    );
+                    assert!(
+                        metrics.split_content_width(gutter_width(file))
+                            >= SPLIT_CODE_PADDING_LEFT + painted
+                    );
+                }
+                assert_eq!(
+                    state.metrics(file, highlights.as_ref(), &theme, &text_system, 0),
+                    metrics
+                );
+            }
+        }
     }
 
     #[test]
@@ -5997,6 +6182,31 @@ rename to new_name.rs
                 .iter()
                 .any(|span| span.kind == zeron_syntax::HighlightKind::Function)
         );
+    }
+
+    /// The regression this guards: rendering the diff at the raw shared
+    /// setting silently enlarged it from 12.0 to 12.5 on a fresh install.
+    #[test]
+    fn the_default_code_font_size_reproduces_the_historical_diff_size() {
+        let theme = Theme::dark();
+        assert_eq!(
+            theme.code_font_size,
+            crate::typography::CODE_FONT_SIZE_DEFAULT
+        );
+        assert_eq!(diff_text_size(&theme), DIFF_TEXT_SIZE);
+        assert_eq!(diff_line_height(&theme), DIFF_LINE_HEIGHT);
+    }
+
+    #[test]
+    fn scaled_diff_sizes_keep_their_proportions_and_stay_clamped() {
+        let mut theme = Theme::dark();
+        theme.code_font_size = 2.0 * crate::typography::CODE_FONT_SIZE_DEFAULT;
+        assert_eq!(diff_text_size(&theme), 2.0 * DIFF_TEXT_SIZE);
+        assert_eq!(diff_line_height(&theme), 2.0 * DIFF_LINE_HEIGHT);
+
+        theme.code_font_size = crate::typography::FONT_SIZE_MAX;
+        assert!(diff_text_size(&theme) <= crate::typography::FONT_SIZE_MAX);
+        assert!(diff_text_size(&theme) >= crate::typography::FONT_SIZE_MIN);
     }
 
     #[test]

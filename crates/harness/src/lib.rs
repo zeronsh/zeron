@@ -174,7 +174,7 @@ pub fn compose_login_shell_path(cmd: &mut tokio::process::Command) {
 /// are `#!/usr/bin/env node` scripts whose `node` lives beside them in the
 /// version manager's bin dir, and the CLIs themselves shell out to tools
 /// (git, rg, node) that a GUI/service launch's own PATH may lack.
-pub(crate) fn compose_child_path(cmd: &mut tokio::process::Command, exe: &std::path::Path) {
+pub fn compose_child_path(cmd: &mut tokio::process::Command, exe: &std::path::Path) {
     compose_path(cmd, exe.parent().filter(|d| !d.as_os_str().is_empty()));
 }
 

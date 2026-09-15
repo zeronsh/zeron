@@ -72,7 +72,7 @@ use normalize::{
 /// PATH in ways a GUI/service launch never sees — see [`crate::shell_env`]),
 /// then known install locations as a last resort. Resolved per call — cheap
 /// after the snapshot is cached.
-fn resolve_codex_executable() -> Option<PathBuf> {
+pub fn resolve_codex_executable() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CODEX_EXECUTABLE")
         && !p.is_empty()
     {

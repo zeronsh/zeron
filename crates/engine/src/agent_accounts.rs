@@ -580,6 +580,11 @@ impl AgentAccounts {
 
     async fn start_codex_login(&self) -> Result<AgentLoginStart, EngineError> {
         self.reap_spawned_flows(HarnessId::Codex);
+        let exe = zeron_harness::codex::resolve_codex_executable().ok_or_else(|| {
+            EngineError::Other(
+                "The `codex` CLI was not found on this device — install it first.".into(),
+            )
+        })?;
         let login_id = new_id();
         // A throwaway CODEX_HOME isolates the new login completely — the live
         // ~/.codex session is never touched until the user explicitly switches.
@@ -589,7 +594,8 @@ impl AgentAccounts {
             .root_dir()
             .join(format!(".login-{login_id}"));
         std::fs::create_dir_all(&home)?;
-        let mut command = tokio::process::Command::new("codex");
+        let mut command = tokio::process::Command::new(&exe);
+        zeron_harness::compose_child_path(&mut command, &exe);
         command
             .arg("login")
             .env("CODEX_HOME", &home)

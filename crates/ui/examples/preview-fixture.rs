@@ -160,7 +160,7 @@ fn main() -> anyhow::Result<()> {
     gpui_platform::application().with_assets(icons::Assets).run(move |cx| {
         gpui_tokio::init(cx); gpui_base::init(cx);
         let settings = settings::UiSettings::default(); settings::init(settings.clone(), data.clone(), cx);
-        let fonts = typography::register_fonts(cx); typography::init(settings.ui_font_family.clone(), settings.ui_font_size, fonts, cx);
+        let fonts = typography::register_fonts(cx); typography::init(settings.ui_font_family.clone(), settings.ui_font_size, settings.terminal_font_family.clone(), settings.terminal_font_size, settings.code_font_family.clone(), settings.code_font_size, fonts, cx);
         theme_library::init(data.clone(), cx); appearance::init(appearance::AppearanceMode::Dark, settings.theme_selection, settings.accent, settings.surface, cx);
         history::init(settings.git_history_columns, settings.git_history_column_widths, settings.git_history_column_order, settings.git_history_author_display, cx);
         composer::init(cx, settings.composer_send_behavior); terminal::panel::init(cx); app_menus::init(cx);

@@ -1700,8 +1700,15 @@ impl Render for TerminalPanel {
                     .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
                         let lines = match event.delta {
                             ScrollDelta::Lines(delta) => delta.y,
+                            // Against the measured row height, not the default:
+                            // a user-chosen font size changes how many lines a
+                            // pixel delta covers.
                             ScrollDelta::Pixels(delta) => {
-                                f32::from(delta.y) / super::view::TERM_LINE_HEIGHT
+                                let line_h = this
+                                    .geometry
+                                    .map(|g| g.line_h)
+                                    .unwrap_or(super::view::TERM_LINE_HEIGHT);
+                                f32::from(delta.y) / line_h
                             }
                         };
                         let step = lines.round() as i32;

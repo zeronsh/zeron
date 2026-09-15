@@ -36,7 +36,7 @@ use crate::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT, TAB
 use crate::popover::{self, Loadable};
 use crate::rail;
 use crate::settings::accounts::AccountsPage;
-use crate::settings::appearance::AppearancePage;
+use crate::settings::appearance::{AppearancePage, AppearanceSettingsEvent};
 use crate::settings::archived::ArchivedPage;
 use crate::settings::devices::DevicesPage;
 use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
@@ -1382,6 +1382,7 @@ pub struct Shell {
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
     files_settings_sub: Option<Subscription>,
+    appearance_settings_sub: Option<Subscription>,
     /// Session-row context menu, including the Copy submenu.
     chat_menu: popover::Popup<ChatMenuState>,
     rename_dialog: Option<RenameChatDialog>,
@@ -1747,6 +1748,7 @@ impl Shell {
             shortcuts_sub: None,
             notifications_sub: None,
             files_settings_sub: None,
+            appearance_settings_sub: None,
             chat_menu: popover::Popup::default(),
             rename_dialog: None,
             delete_confirm: None,
@@ -2562,8 +2564,11 @@ impl Shell {
         cx.notify();
     }
 
-    fn set_files_editor_font_size(&mut self, editor_font_size: f32, cx: &mut Context<Self>) {
-        self.settings.files_editor_font_size = editor_font_size;
+    /// Push a new code size into every open file surface. Called by the
+    /// Appearance settings page, which owns the control. The typography
+    /// global is the canonical store and persists on its own; this only
+    /// propagates the change to already-open surfaces.
+    pub(crate) fn set_code_font_size(&mut self, code_font_size: f32, cx: &mut Context<Self>) {
         let surfaces = self
             .files
             .values()
@@ -2572,10 +2577,9 @@ impl Shell {
             .collect::<Vec<_>>();
         for surface in surfaces {
             surface.update(cx, |surface, cx| {
-                surface.set_editor_font_size(editor_font_size, cx)
+                surface.set_editor_font_size(code_font_size, cx)
             });
         }
-        self.schedule_save(cx);
         cx.notify();
     }
 
@@ -2738,7 +2742,7 @@ impl Shell {
         if !self.files.contains_key(&key) {
             let autosave_enabled = self.settings.files_autosave_enabled;
             let delay = self.settings.files_autosave_delay_ms;
-            let editor_font_size = self.settings.files_editor_font_size;
+            let editor_font_size = crate::typography::code_font_size(cx);
             let word_wrap = self.settings.files_word_wrap;
             let show_all_files = self.settings.files_show_all;
             let files = cx.new(|cx| {
@@ -2814,7 +2818,7 @@ impl Shell {
                 path.clone(),
                 self.settings.files_autosave_enabled,
                 self.settings.files_autosave_delay_ms,
-                self.settings.files_editor_font_size,
+                crate::typography::code_font_size(cx),
                 self.settings.files_word_wrap,
                 self.settings.files_show_all,
                 cx,
@@ -3485,18 +3489,25 @@ impl Shell {
         self.settings.accent = crate::appearance::accent(cx);
         self.settings.surface = crate::appearance::surface(cx);
         self.sync_independent_settings(cx);
-        self.settings.ui_font_family = crate::typography::requested(cx);
-        self.settings.ui_font_size = crate::typography::font_size(cx);
         settings::replace(self.settings.clone(), SavePolicy::Debounced, cx);
     }
 
     /// Controls outside the Shell mutate these choices directly. A geometry
     /// save must never publish the Shell's older values over those selections.
+    /// The typography globals own the font choices but persist every change
+    /// immediately, so the central store is an equally canonical read and
+    /// keeps this block on a single source.
     fn sync_independent_settings(&mut self, cx: &App) {
         let current = settings::current(cx);
         self.settings.new_thread_composer_background = current.new_thread_composer_background;
         self.settings.new_thread_background_effect = current.new_thread_background_effect;
         self.settings.open_web_links_in_zeron = current.open_web_links_in_zeron;
+        self.settings.ui_font_family = current.ui_font_family;
+        self.settings.ui_font_size = current.ui_font_size;
+        self.settings.terminal_font_family = current.terminal_font_family;
+        self.settings.terminal_font_size = current.terminal_font_size;
+        self.settings.code_font_family = current.code_font_family;
+        self.settings.code_font_size = current.code_font_size;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
@@ -3677,7 +3688,16 @@ impl Shell {
             }
             SettingsSection::Appearance => {
                 if self.appearance_page.is_none() {
-                    self.appearance_page = Some(cx.new(AppearancePage::new));
+                    let page = cx.new(AppearancePage::new);
+                    self.appearance_settings_sub = Some(cx.subscribe(
+                        &page,
+                        |this: &mut Shell, _, event: &AppearanceSettingsEvent, cx| match *event {
+                            AppearanceSettingsEvent::CodeFontSizeChanged(size) => {
+                                this.set_code_font_size(size, cx);
+                            }
+                        },
+                    ));
+                    self.appearance_page = Some(page);
                 }
                 match &self.appearance_page {
                     Some(page) => page.clone().into_any_element(),
@@ -3690,7 +3710,6 @@ impl Shell {
                         FilesSettingsPage::new(
                             self.settings.files_autosave_enabled,
                             self.settings.files_autosave_delay_ms,
-                            self.settings.files_editor_font_size,
                             self.settings.files_word_wrap,
                             self.settings.files_show_all,
                             cx,
@@ -3723,9 +3742,6 @@ impl Shell {
                                 }
                                 this.schedule_save(cx);
                                 cx.notify();
-                            }
-                            FilesSettingsEvent::EditorFontSizeChanged(editor_font_size) => {
-                                this.set_files_editor_font_size(editor_font_size, cx);
                             }
                             FilesSettingsEvent::WordWrapChanged(word_wrap) => {
                                 this.set_files_word_wrap(word_wrap, window, cx);
@@ -11274,6 +11290,18 @@ mod exit_regressions {
             .enumerate()
         {
             let open_links_in_zeron = index % 2 == 0;
+            let terminal_family = if open_links_in_zeron {
+                crate::typography::UiFontFamily::System
+            } else {
+                crate::typography::UiFontFamily::Geist
+            };
+            let code_family = if open_links_in_zeron {
+                crate::typography::UiFontFamily::Geist
+            } else {
+                crate::typography::UiFontFamily::System
+            };
+            let terminal_size = 15.0 + index as f32;
+            let code_size = 11.0 + index as f32;
             window
                 .update(cx, |shell, _, cx| {
                     // Selection changes in Appearance, independently of the shell's
@@ -11283,22 +11311,32 @@ mod exit_regressions {
                     settings::set_new_thread_background_effect(effect, cx);
                     settings::update(settings::SavePolicy::Immediate, cx, |settings| {
                         settings.open_web_links_in_zeron = open_links_in_zeron;
+                        settings.terminal_font_family = terminal_family.clone();
+                        settings.terminal_font_size = terminal_size;
+                        settings.code_font_family = code_family.clone();
+                        settings.code_font_size = code_size;
                     });
                     for step in 0..3 {
                         shell.settings.sidebar_width = 290.0 + step as f32;
                         shell.settings.right_pane_width = 540.0 + step as f32;
                         shell.settings.terminal_height = 300.0 + step as f32;
                         shell.schedule_save(cx);
-                        assert_eq!(settings::current(cx).new_thread_background_effect, effect);
-                        assert_eq!(
-                            settings::current(cx).open_web_links_in_zeron,
-                            open_links_in_zeron
-                        );
+                        let current = settings::current(cx);
+                        assert_eq!(current.new_thread_background_effect, effect);
+                        assert_eq!(current.open_web_links_in_zeron, open_links_in_zeron);
+                        assert_eq!(current.terminal_font_family, terminal_family);
+                        assert_eq!(current.terminal_font_size, terminal_size);
+                        assert_eq!(current.code_font_family, code_family);
+                        assert_eq!(current.code_font_size, code_size);
                     }
                     settings::flush(cx);
                     let loaded = settings::UiSettings::load(dir.path());
                     assert_eq!(loaded.new_thread_background_effect, effect);
                     assert_eq!(loaded.open_web_links_in_zeron, open_links_in_zeron);
+                    assert_eq!(loaded.terminal_font_family, terminal_family);
+                    assert_eq!(loaded.terminal_font_size, terminal_size);
+                    assert_eq!(loaded.code_font_family, code_family);
+                    assert_eq!(loaded.code_font_size, code_size);
                     assert_eq!(loaded.sidebar_width, 292.0);
                     assert_eq!(loaded.right_pane_width, 542.0);
                     assert_eq!(loaded.terminal_height, 302.0);
