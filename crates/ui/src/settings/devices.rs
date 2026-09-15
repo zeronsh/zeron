@@ -134,6 +134,17 @@ impl DevicesPage {
         cx.notify();
     }
 
+    /// Close the rename dialog. The shell asks in capture phase before it
+    /// leaves the settings route on Escape, so cancelling a rename never also
+    /// closes Settings under it. Returns whether the dialog was open.
+    pub(crate) fn handle_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.rename.take().is_none() {
+            return false;
+        }
+        cx.notify();
+        true
+    }
+
     fn copy_id(&mut self, device_id: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(device_id.clone()));
         self.copied = Some(device_id);

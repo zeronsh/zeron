@@ -57,7 +57,7 @@ fn main() -> anyhow::Result<()> {
             typography::init(settings.ui_font_family.clone(), settings.ui_font_size, settings.terminal_font_family.clone(), settings.terminal_font_size, settings.code_font_family.clone(), settings.code_font_size, fonts, cx);
             theme_library::init(data.clone(), cx);
             appearance::init(appearance::AppearanceMode::Dark, settings.theme_selection,
-                settings.accent, settings.surface, cx);
+                settings.accent, settings.surface, settings.frost, cx);
             composer::init(cx, zeron_ui::settings::ComposerSendBehavior::default());
             terminal::panel::init(cx);
             app_menus::init(cx);

@@ -265,6 +265,13 @@ pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
     });
 }
 
+/// Root of the active profile's data directory, for the stores that keep
+/// files beside `ui-settings.json` (see [`crate::identity`]).
+pub fn data_dir(cx: &App) -> Option<PathBuf> {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.data_dir.clone())
+}
+
 /// Latest settings, including mutations still inside the debounce window.
 pub fn current(cx: &App) -> UiSettings {
     cx.try_global::<SettingsStore>()
@@ -573,6 +580,9 @@ pub struct UiSettings {
     /// Whether bare Escape stops the active agent after contextual consumers
     /// decline it. Device-local and opt-in.
     pub escape_stops_active_agent: bool,
+    /// The section settings reopens on: Cmd-, and the user menu return to the
+    /// last one used rather than always landing on Devices.
+    pub settings_section: crate::shell::SettingsSection,
     /// Light/dark preference. Defaults to following the OS.
     pub appearance: crate::appearance::AppearanceMode,
     /// Optional columns shown in every Git History pane.
@@ -618,11 +628,20 @@ pub struct UiSettings {
     pub accent: zeron_theme::AccentSelection,
     /// Glass policy, independent from the selected appearance, theme, and accent.
     pub surface: zeron_theme::SurfacePreference,
+    /// How strongly frosted surfaces blur what sits behind them. Only read
+    /// when the resolved treatment is frosted.
+    pub frost: zeron_theme::FrostStrength,
     /// Optional device-local artwork behind the blank new-thread composer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_thread_composer_background: Option<NewThreadComposerBackground>,
     /// Non-destructive treatment composited inside the artwork's fade mask.
     pub new_thread_background_effect: NewThreadBackgroundEffect,
+    /// Chosen pictures for projects and people, keyed `space:{id}` /
+    /// `user:{id}` and valued by a file name under `{data_dir}/images`.
+    /// Device-local: the registry doc carries no picture field, so an entry
+    /// here is deliberately not synced (see [`crate::identity`]).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub images: std::collections::BTreeMap<String, String>,
     /// Pre-theme settings used `accentColor`. Read it once, migrate to
     /// [`Self::accent`], and never write it again.
     #[serde(default, rename = "accentColor", skip_serializing)]
@@ -657,6 +676,7 @@ impl Default for UiSettings {
             terminal_open: false,
             keymap: KeymapConfig::default(),
             escape_stops_active_agent: false,
+            settings_section: crate::shell::SettingsSection::default(),
             composer_send_behavior: ComposerSendBehavior::default(),
             appshots_enabled: false,
             appshot_sound_enabled: true,
@@ -683,8 +703,10 @@ impl Default for UiSettings {
             files_show_all: false,
             accent: zeron_theme::AccentSelection::default(),
             surface: zeron_theme::SurfacePreference::default(),
+            frost: zeron_theme::FrostStrength::default(),
             new_thread_composer_background: None,
             new_thread_background_effect: NewThreadBackgroundEffect::None,
+            images: std::collections::BTreeMap::new(),
             legacy_accent_color: None,
         }
     }
@@ -1608,6 +1630,7 @@ mod tests {
                 ..KeymapConfig::default()
             },
             escape_stops_active_agent: true,
+            settings_section: crate::shell::SettingsSection::Appearance,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
             appshots_enabled: false,
             appshot_sound_enabled: true,
@@ -1649,11 +1672,16 @@ mod tests {
             files_show_all: true,
             accent: zeron_theme::AccentSelection::Preset(zeron_theme::AccentPreset::Cyan),
             surface: zeron_theme::SurfacePreference::Frosted,
+            frost: zeron_theme::FrostStrength::Heavy,
             new_thread_composer_background: Some(NewThreadComposerBackground {
                 path: "/tmp/zeron/new-thread-background.png".into(),
                 name: "background.png".into(),
             }),
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
+            images: std::collections::BTreeMap::from([(
+                "space:space-1".to_string(),
+                "3a7f0c1d9b2e4f56.png".to_string(),
+            )]),
             legacy_accent_color: None,
         };
         settings.save(dir.path()).unwrap();
@@ -1667,6 +1695,38 @@ mod tests {
         assert!(json.contains(r#""terminalFontSize": 15.0"#));
         assert!(json.contains(r#""codeFontFamily": "geist""#));
         assert!(json.contains(r#""codeFontSize": 11.0"#));
+        assert!(json.contains(r#""settingsSection": "appearance""#));
+        assert!(json.contains(r#""frost": "heavy""#));
+        assert!(json.contains(r#""space:space-1": "3a7f0c1d9b2e4f56.png""#));
+    }
+
+    #[test]
+    fn a_file_predating_the_settings_section_reopens_on_devices() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarWidth": 300, "surface": "frosted"}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.sidebar_width, 300.0);
+        assert_eq!(
+            loaded.settings_section,
+            crate::shell::SettingsSection::Devices
+        );
+    }
+
+    #[test]
+    fn a_file_predating_frost_blurs_at_the_regular_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarWidth": 300, "surface": "frosted"}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.surface, zeron_theme::SurfacePreference::Frosted);
+        assert_eq!(loaded.frost, zeron_theme::FrostStrength::Regular);
     }
 
     #[test]

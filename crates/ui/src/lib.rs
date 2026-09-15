@@ -12,6 +12,7 @@
 //! - [`shell`] — sidebar + main panel + right-pane scaffold + gate;
 //! - [`loaders`] — zeron pulse loader, gradient spinner, boot splash.
 
+pub mod account_usage;
 pub mod app_menus;
 pub mod appearance;
 pub mod appshots;
@@ -31,6 +32,7 @@ pub mod files;
 pub mod frost;
 pub mod history;
 pub mod icons;
+pub mod identity;
 pub(crate) mod image_media;
 pub(crate) mod image_viewer;
 pub mod links;
@@ -46,10 +48,12 @@ pub mod pickers;
 pub mod popover;
 pub mod queue;
 pub mod rail;
+pub mod rewind;
 pub mod settings;
 pub mod shell;
 pub mod sound;
 pub mod state;
+pub mod subagent_navigator;
 pub(crate) mod surface_chrome;
 pub mod syntax_cache;
 pub mod terminal;
@@ -165,6 +169,7 @@ pub fn run_app(config: UiConfig) {
             ui_settings.theme_selection,
             ui_settings.accent,
             ui_settings.surface,
+            ui_settings.frost,
             cx,
         );
         history::init(
