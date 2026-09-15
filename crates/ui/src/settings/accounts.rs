@@ -185,13 +185,11 @@ pub struct AccountsPage {
     /// accounts RPCs are relay-forwardable, CLI logins are per-device).
     target_device: Option<String>,
     device_menu: popover::Popup<()>,
-    snapshot: Loadable<AgentAccountsSnapshot>,
     /// Account id with an in-flight Switch/Forget.
     busy_account: Option<String>,
     login: Option<LoginFlow>,
     error: Option<SharedString>,
     code_input: Entity<ComposerInput>,
-    load_task: Option<Task<()>>,
     action_task: Option<Task<()>>,
     poll_task: Option<Task<()>>,
     _observe: Subscription,
@@ -212,12 +210,10 @@ impl AccountsPage {
             scroll: widgets::PageScroll::default(),
             target_device: None,
             device_menu: popover::Popup::default(),
-            snapshot: Loadable::Idle,
             busy_account: None,
             login: None,
             error: None,
             code_input,
-            load_task: None,
             action_task: None,
             poll_task: None,
             _observe: observe,
@@ -436,30 +432,13 @@ impl AccountsPage {
         trigger.into_any_element()
     }
 
+    /// Delegate to the shared snapshot on [`AppState`], so this page and the
+    /// composer's account chip cost one provider probe between them.
     fn load(&mut self, force_usage: bool, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.snapshot = Loadable::Error("Engine not connected".into());
-            return;
-        };
-        self.snapshot = Loadable::Loading;
-        let params = self.params(serde_json::json!({ "forceUsage": force_usage }));
-        self.load_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::LIST_AGENT_ACCOUNTS, params)
-                .await;
-            this.update(cx, |page, cx| {
-                page.snapshot = match result {
-                    Ok(value) => match serde_json::from_value::<AgentAccountsSnapshot>(value) {
-                        Ok(snapshot) => Loadable::Ready(snapshot),
-                        Err(err) => Loadable::Error(err.to_string()),
-                    },
-                    Err(err) => Loadable::Error(err.to_string()),
-                };
-                cx.notify();
-            })
-            .ok();
-        }));
+        let target = self.target_device.clone();
+        self.state.update(cx, |state, cx| {
+            state.load_agent_accounts(target, force_usage, cx)
+        });
         cx.notify();
     }
 
@@ -695,8 +674,9 @@ impl AccountsPage {
     // ---- render pieces ----
 
     /// One usage window (zeron settings.agents.tsx `UsageMeter`): label ·
-    /// 5px rounded-full bar (indigo → amber ≥80% → red ≥95%) · "NN% used" ·
-    /// quiet reset time.
+    /// 5px rounded-full bar (indigo → amber ≥80% → red ≥95%) · "NN% left" ·
+    /// quiet reset time. Says what is left rather than what is spent — the
+    /// reading people act on — and the bar drains to match.
     fn render_usage_meter(
         &self,
         window: &zeron_proto::AgentUsageWindow,
@@ -733,13 +713,14 @@ impl AccountsPage {
                     .rounded_full()
                     .overflow_hidden()
                     .bg(crate::theme::ink(0.07))
-                    .when(fraction > 0.0, |el| {
+                    .when(fraction < 1.0, |el| {
                         el.child(
                             div()
                                 .h_full()
-                                // A 1.5% floor keeps tiny non-zero usage
-                                // visible (zeron `max(used, 1.5)%`).
-                                .w(gpui::relative(fraction.max(0.015)))
+                                // Draws what is LEFT, matching the label; the
+                                // 1.5% floor keeps a nearly-spent window from
+                                // reading as an empty track.
+                                .w(gpui::relative((1.0 - fraction).max(0.015)))
                                 .rounded_full()
                                 .bg(fill),
                         )
@@ -750,10 +731,7 @@ impl AccountsPage {
                     .w(px(64.0))
                     .flex_none()
                     .text_right()
-                    .child(SharedString::from(format!(
-                        "{}% used",
-                        (fraction * 100.0).round() as u32
-                    ))),
+                    .child(crate::account_usage::remaining_label(fraction)),
             )
             .when_some(reset, |el, reset| {
                 el.child(
@@ -1221,9 +1199,11 @@ impl Render for AccountsPage {
         let theme = Theme::of(cx).clone();
         let now = Utc::now();
         let dialog = self.render_login_dialog(window.viewport_size(), cx);
-        let refreshing = matches!(self.snapshot, Loadable::Loading);
-        let account_count = self
-            .snapshot
+        // Owned for the frame: the rows below need `&mut Context` for their
+        // listeners, which rules out holding a borrow of the shared state.
+        let snapshot = self.state.read(cx).agent_accounts.clone();
+        let refreshing = matches!(snapshot, Loadable::Loading);
+        let account_count = snapshot
             .ready()
             .map(|s| s.accounts.len())
             .filter(|&n| n > 0);
@@ -1260,7 +1240,7 @@ impl Render for AccountsPage {
 
         // One section per provider (zeron settings.agents.tsx `ProviderSection`):
         // brand header + Add account, then the account rows card.
-        let sections: Vec<AnyElement> = match &self.snapshot {
+        let sections: Vec<AnyElement> = match &snapshot {
             Loadable::Idle | Loadable::Loading => PROVIDERS
                 .into_iter()
                 .map(|(harness, name, _cli)| {

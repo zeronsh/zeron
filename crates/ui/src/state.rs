@@ -20,6 +20,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -28,11 +29,12 @@ use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
 use crate::comments::ReviewComment;
+use crate::popover::Loadable;
 use zeron_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 use zeron_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
 use zeron_proto::{
-    AuthState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus, Device,
-    EngineInfo, HarnessId, Session, Space, WorkspaceScope,
+    AgentAccount, AgentAccountsSnapshot, AuthState, ChangeRequestSummary, Chat, ChatIndicator,
+    CheckoutChangeRequestStatus, Device, EngineInfo, HarnessId, Session, Space, WorkspaceScope,
 };
 use zeron_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
 
@@ -684,6 +686,23 @@ pub struct AppState {
     pub local_device_id: Option<String>,
     /// Latest `UpdateStatus` frame — drives the sidebar update strip.
     pub update: Option<zeron_update::UpdateStatus>,
+    /// CLI provider logins + their rate-limit meters. One snapshot serves both
+    /// readers (Settings → Accounts and the composer's account chip): a
+    /// second fetch path would double the provider probes behind the engine's
+    /// 60s cache.
+    pub agent_accounts: Loadable<AgentAccountsSnapshot>,
+    /// Which device [`Self::agent_accounts`] describes; `None` = this one.
+    /// Settings can retarget the list at another device, and another device's
+    /// meters must not leak into the chip, which speaks only for the local
+    /// engine.
+    pub agent_accounts_target: Option<String>,
+    /// Single-flight guard for [`Self::load_agent_accounts`]. Holding the task
+    /// here also cancels an in-flight load when the state drops.
+    agent_accounts_task: Option<Task<()>>,
+    /// When the last load *that probed the providers* returned. Drives the
+    /// chip's staleness check, so a window refocus does not re-probe a
+    /// snapshot that is seconds old.
+    agent_accounts_probed_at: Option<Instant>,
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
@@ -757,6 +776,10 @@ impl AppState {
             review_comment_flushes: HashMap::new(),
             local_device_id: None,
             update: None,
+            agent_accounts: Loadable::Idle,
+            agent_accounts_target: None,
+            agent_accounts_task: None,
+            agent_accounts_probed_at: None,
             data_dir: None,
             engine: None,
             watch_tasks: Vec::new(),
@@ -1606,6 +1629,100 @@ impl AppState {
         self.engine.as_ref()
     }
 
+    /// How long a probed snapshot stays fresh. Matches the engine's usage TTL
+    /// (`engine/src/agent_accounts.rs` `USAGE_TTL`): probing faster than that
+    /// re-serves the same cached windows at the cost of a round trip.
+    pub const AGENT_USAGE_TTL: Duration = Duration::from_secs(60);
+
+    /// Whether a forced load would actually reach the providers rather than
+    /// re-read a still-warm cache.
+    pub fn agent_usage_stale(&self) -> bool {
+        self.agent_accounts_probed_at
+            .is_none_or(|at| at.elapsed() >= Self::AGENT_USAGE_TTL)
+    }
+
+    /// Load the provider logins into [`Self::agent_accounts`].
+    ///
+    /// `force_usage` asks the engine to probe the providers; without it the
+    /// reply carries usage only while the engine's cache is warm, so every
+    /// caller that wants live meters must force. Single-flight: a load already
+    /// in flight wins, which collapses "settings page mounted" and "poll
+    /// fired" into one probe.
+    ///
+    /// Retargeting at another device drops the old snapshot rather than
+    /// showing one device's meters under another's name.
+    pub fn load_agent_accounts(
+        &mut self,
+        target: Option<String>,
+        force_usage: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.agent_accounts_target != target {
+            self.agent_accounts_target = target.clone();
+            self.agent_accounts = Loadable::Idle;
+            self.agent_accounts_probed_at = None;
+            // Drop the in-flight load: it answers for the previous device.
+            self.agent_accounts_task = None;
+        } else if self.agent_accounts_task.is_some() {
+            return;
+        }
+        let Some(engine) = self.engine.clone() else {
+            self.agent_accounts = Loadable::Error("Engine not connected".into());
+            return;
+        };
+        // Keep the last good snapshot on screen across a refresh; only a cold
+        // load shows the skeleton.
+        if !matches!(self.agent_accounts, Loadable::Ready(_)) {
+            self.agent_accounts = Loadable::Loading;
+        }
+        let mut params = serde_json::json!({ "forceUsage": force_usage });
+        if let Some(device) = target.clone() {
+            params["targetDeviceId"] = serde_json::Value::String(device);
+        }
+        self.agent_accounts_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::LIST_AGENT_ACCOUNTS, params)
+                .await;
+            this.update(cx, |state, cx| {
+                state.agent_accounts_task = None;
+                // A retarget raced this reply; it describes the wrong device.
+                if state.agent_accounts_target != target {
+                    return;
+                }
+                // A failed probe counts too: the chip's render-time staleness
+                // check would otherwise re-fire it every frame.
+                if force_usage {
+                    state.agent_accounts_probed_at = Some(Instant::now());
+                }
+                state.agent_accounts = match result {
+                    Ok(value) => match serde_json::from_value::<AgentAccountsSnapshot>(value) {
+                        Ok(snapshot) => Loadable::Ready(snapshot),
+                        Err(err) => Loadable::Error(err.to_string()),
+                    },
+                    Err(err) => Loadable::Error(err.to_string()),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// The live account driving `harness` — what a chat on that harness spends
+    /// against. `None` while the snapshot describes another device, so the
+    /// chip never attributes a remote login to this one.
+    pub fn active_account_for(&self, harness: HarnessId) -> Option<&AgentAccount> {
+        if self.agent_accounts_target.is_some() {
+            return None;
+        }
+        self.agent_accounts
+            .ready()?
+            .accounts
+            .iter()
+            .find(|a| a.harness == harness && a.active)
+    }
+
     /// Drop every account-scoped view and subscription after its runtime has
     /// stopped. The next bootstrap must never render rows from the previous
     /// account while the local profile is opening.
@@ -1613,6 +1730,12 @@ impl AppState {
         self.engine = None;
         self.watch_tasks.clear();
         self.transcript_task = None;
+        // The next runtime's logins are a different accounts world; a reply
+        // from this one must not land under its name.
+        self.agent_accounts = Loadable::Idle;
+        self.agent_accounts_target = None;
+        self.agent_accounts_task = None;
+        self.agent_accounts_probed_at = None;
         self.change_request_tasks.clear();
         self.change_requests = ChangeRequestClientState::default();
         self.connection = ConnectionStatus::Connecting;
