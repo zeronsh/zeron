@@ -92,6 +92,8 @@ pub struct BrowserSurface {
     presentation: Presentation,
     #[cfg(target_os = "macos")]
     resize_inset: gpui::Pixels,
+    #[cfg(target_os = "macos")]
+    right_occlusion: gpui::Pixels,
     _input_sub: Subscription,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     native: Option<native::NativePage>,
@@ -168,6 +170,8 @@ impl BrowserSurface {
             presentation: Presentation::Hidden,
             #[cfg(target_os = "macos")]
             resize_inset: gpui::px(0.0),
+            #[cfg(target_os = "macos")]
+            right_occlusion: gpui::px(0.0),
             _input_sub: input_sub,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             native: None,
@@ -217,6 +221,15 @@ impl BrowserSurface {
     pub fn set_resize_inset(&mut self, inset: gpui::Pixels, cx: &mut Context<Self>) {
         if self.resize_inset != inset {
             self.resize_inset = inset;
+            cx.notify();
+        }
+    }
+
+    /// Crop a GPUI overlay out of both native painting and native hit testing.
+    #[cfg(target_os = "macos")]
+    pub fn set_right_occlusion(&mut self, width: gpui::Pixels, cx: &mut Context<Self>) {
+        if self.right_occlusion != width {
+            self.right_occlusion = width;
             cx.notify();
         }
     }
