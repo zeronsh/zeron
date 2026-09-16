@@ -1401,7 +1401,7 @@ impl Shell {
             state
                 .chats
                 .iter()
-                .filter(|c| c.archived)
+                .filter(|c| c.archived && c.parent_chat_id.is_none())
                 .filter(|chat| match &filter {
                     Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
                     None => true,
@@ -1552,6 +1552,7 @@ impl Shell {
                             MouseButton::Right,
                             cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                                 this.chat_menu.open(ChatMenuState {
+                                    tab: None,
                                     chat_id: menu_id.clone(),
                                     position: event.position,
                                     page: ChatMenuPage::Root,
@@ -3147,6 +3148,7 @@ mod tests {
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            parent_chat_id: None,
         }
     }
 

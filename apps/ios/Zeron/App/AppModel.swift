@@ -305,7 +305,7 @@ final class AppModel {
     var overviewChats: [Chat] {
         if let demo {
             let liveIds = Set(demo.spaces.map(\.id))
-            let live = demo.chats.filter { !$0.archived && ($0.spaceId.map(liveIds.contains) ?? true) }
+            let live = demo.chats.filter { !$0.archived && $0.parentChatId == nil && ($0.spaceId.map(liveIds.contains) ?? true) }
             return sortActive(live)
         }
         return workspace?.overviewChats ?? []
@@ -313,7 +313,7 @@ final class AppModel {
 
     func chats(in spaceId: String) -> [Chat] {
         if let demo {
-            return sortActive(demo.chats.filter { !$0.archived && $0.spaceId == spaceId })
+            return sortActive(demo.chats.filter { !$0.archived && $0.parentChatId == nil && $0.spaceId == spaceId })
         }
         return workspace?.chats(in: spaceId) ?? []
     }
@@ -515,7 +515,7 @@ final class AppModel {
     func archivedChats(in spaceId: String? = nil) -> [Chat] {
         if let demo {
             return sortActive(demo.chats.filter {
-                $0.archived && (spaceId == nil || $0.spaceId == spaceId)
+                $0.archived && $0.parentChatId == nil && (spaceId == nil || $0.spaceId == spaceId)
             })
         }
         return workspace?.archivedChats(in: spaceId) ?? []

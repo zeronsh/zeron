@@ -882,6 +882,7 @@ impl WorkspaceHost {
                 // to seed, no migration race to lose. Only pre-existing chats
                 // go through the seed+flip path (the host migration sweep).
                 room_gen: Some(2),
+                parent_chat_id: None,
                 harness_session_cwd: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,

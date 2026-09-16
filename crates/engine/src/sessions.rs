@@ -1444,6 +1444,44 @@ async fn drive_run(
         resume: None,
         ..request.clone()
     });
+    // A side chat owns a fresh provider session. Bootstrap it from the frozen
+    // conversation, never resume (and mutate) the parent's provider session.
+    let mut request = request;
+    if request.resume.is_none()
+        && inner
+            .workspace()
+            .and_then(|ws| ws.chat(&chat_id).ok().flatten())
+            .is_some_and(|chat| chat.parent_chat_id.is_some())
+    {
+        let history: Vec<_> = doc
+            .read_entries()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| entry.id != resume_state.user_message_id)
+            .map(|entry| {
+                let text = entry
+                    .parts
+                    .into_iter()
+                    .filter_map(|part| match part {
+                        zeron_doc::MessagePart::Text { text, .. } => Some(text),
+                        zeron_doc::MessagePart::Tool { call, output, .. } => Some(format!(
+                            "Tool: {}\n{}",
+                            serde_json::to_string(&call).unwrap_or_default(),
+                            output.unwrap_or_default()
+                        )),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                serde_json::json!({ "role": entry.role, "text": text })
+            })
+            .collect();
+        request.prompt = format!(
+            "Continue this side conversation using the following prior conversation as context.\n<conversation>\n{}\n</conversation>\n\n{}",
+            serde_json::to_string(&history).unwrap_or_default(),
+            request.prompt
+        );
+    }
     let mut stream = match harness.run(request, controls).await {
         Ok(stream) => stream,
         Err(err) => {

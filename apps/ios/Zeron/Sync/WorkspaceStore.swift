@@ -360,7 +360,8 @@ final class WorkspaceStore {
                         createdAt: f["createdAt"]?.int64Value ?? 0,
                         spaceId: f["spaceId"]?.stringValue,
                         lastSeenAt: f["lastSeenAt"]?.int64Value,
-                        roomGen: f["roomGen"]?.int64Value.map(Int.init))
+                        roomGen: f["roomGen"]?.int64Value.map(Int.init),
+                        parentChatId: f["parentChatId"]?.stringValue)
         }
 
         var rows: [String: SessionRow] = [:]
@@ -384,7 +385,7 @@ final class WorkspaceStore {
     /// attention-sorted.
     var overviewChats: [Chat] {
         let liveSpaceIds = Set(spaces.map(\.id))
-        let live = chats.filter { !$0.archived && ($0.spaceId.map(liveSpaceIds.contains) ?? true) }
+        let live = chats.filter { !$0.archived && $0.parentChatId == nil && ($0.spaceId.map(liveSpaceIds.contains) ?? true) }
         return sortActive(live)
     }
 
@@ -395,7 +396,7 @@ final class WorkspaceStore {
     /// no tabs — a space opens into the same list, with the same rows, as the
     /// Sessions section — so it follows that list's ordering instead.
     func chats(in spaceId: String) -> [Chat] {
-        sortActive(chats.filter { !$0.archived && $0.spaceId == spaceId })
+        sortActive(chats.filter { !$0.archived && $0.parentChatId == nil && $0.spaceId == spaceId })
     }
 
     /// Archived chats under an optional space scope, recency order — feeds the
@@ -403,7 +404,7 @@ final class WorkspaceStore {
     /// `overviewChats`, a live space is not required: an archived session of a
     /// deleted space should still be reachable for unarchive.
     func archivedChats(in spaceId: String? = nil) -> [Chat] {
-        sortActive(chats.filter { $0.archived && (spaceId == nil || $0.spaceId == spaceId) })
+        sortActive(chats.filter { $0.archived && $0.parentChatId == nil && (spaceId == nil || $0.spaceId == spaceId) })
     }
 
     func indicator(for chat: Chat) -> ChatIndicator {
