@@ -37,6 +37,10 @@
     </array>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Zeron uses your microphone to dictate text into your message draft on this Mac.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Zeron transcribes speech on this Mac into editable message text. Audio is not sent to your agents.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <!-- Browser tabs load user-selected HTTP dev servers. Keep the exception

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build and run an isolated macOS development bundle. Zeron.app may remain
 # open: this bundle has a separate LaunchServices/TCC identity, data directory,
-# and engine IPC port.
+# and engine IPC port. Set ZERON_DEV_BUILD_ONLY=1 to inspect the signed bundle
+# without launching it (for example when verifying privacy metadata).
 
 set -euo pipefail
 
@@ -13,6 +14,7 @@ APP="$DEV_ROOT/Zeron Dev.app"
 CONTENTS="$APP/Contents"
 DATA_DIR="${ZERON_DEV_DATA_DIR:-$DEV_ROOT/data}"
 IPC_PORT="${ZERON_DEV_IPC_PORT:-49777}"
+BUILD_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 
 if pgrep -f -x "$CONTENTS/MacOS/zeron" >/dev/null 2>&1; then
   echo "Zeron Dev is already running. Quit it before rebuilding the signed bundle." >&2
@@ -23,7 +25,7 @@ cd "$ROOT"
 cargo build -p zeron
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$DATA_DIR"
-install -m 755 "$ROOT/target/debug/zeron" "$CONTENTS/MacOS/zeron"
+install -m 755 "$BUILD_TARGET_DIR/debug/zeron" "$CONTENTS/MacOS/zeron"
 sed "s/__VERSION__/$VERSION/g" "$ROOT/dist/macos/Info-dev.plist" >"$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.ZERON_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.ZERON_IPC_PORT -string "$IPC_PORT" "$CONTENTS/Info.plist"
@@ -47,10 +49,15 @@ if [[ -z "$IDENTITY" ]]; then
   IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)"
 fi
 if [[ -n "$IDENTITY" ]]; then
-  codesign --force --sign "$IDENTITY" --identifier sh.zeron.app.dev "$APP"
+  codesign --entitlements "$ROOT/dist/macos/Dictation.entitlements" --force --sign "$IDENTITY" --identifier sh.zeron.app.dev "$APP"
 else
-  codesign --force --sign - --identifier sh.zeron.app.dev "$APP"
+  codesign --entitlements "$ROOT/dist/macos/Dictation.entitlements" --force --sign - --identifier sh.zeron.app.dev "$APP"
   echo "warning: no Apple Development signing identity found; macOS may ask for permissions again after a rebuild" >&2
+fi
+
+if [[ "${ZERON_DEV_BUILD_ONLY:-0}" == "1" ]]; then
+  echo "built Zeron Dev: $APP" >&2
+  exit 0
 fi
 
 echo "running Zeron Dev (bundle sh.zeron.app.dev, data $DATA_DIR, IPC $IPC_PORT)" >&2

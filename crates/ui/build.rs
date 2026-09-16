@@ -1,6 +1,55 @@
 use std::{env, path::PathBuf, process::Command};
 
+fn build_dictation() {
+    println!("cargo:rerun-if-changed=src/dictation/macos.m");
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let object = out.join("dictation.o");
+    let arch = match env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
+        "aarch64" => "arm64",
+        "x86_64" => "x86_64",
+        other => panic!("Unsupported macOS architecture: {other}"),
+    };
+    let minimum = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "12.0".into());
+    let status = Command::new("xcrun")
+        .args([
+            "clang",
+            "-arch",
+            arch,
+            "-fobjc-arc",
+            "-fblocks",
+            "-Wall",
+            "-Wextra",
+            "-Wno-unused-parameter",
+            "-O2",
+        ])
+        .arg(format!("-mmacosx-version-min={minimum}"))
+        .args(["-c", "src/dictation/macos.m", "-o"])
+        .arg(&object)
+        .status()
+        .expect("Xcode command line tools are required for macOS dictation");
+    assert!(
+        status.success(),
+        "macOS dictation bridge compilation failed"
+    );
+    let status = Command::new("xcrun")
+        .args(["ar", "crs"])
+        .arg(out.join("libzeron_dictation.a"))
+        .arg(object)
+        .status()
+        .unwrap();
+    assert!(status.success(), "macOS dictation bridge archive failed");
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=zeron_dictation");
+    for framework in ["Speech", "AVFoundation", "AppKit"] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
+}
+
 fn main() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        build_dictation();
+    }
     println!("cargo:rerun-if-changed=src/browser/linux/helper.c");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
         return;

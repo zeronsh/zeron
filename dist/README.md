@@ -55,7 +55,7 @@ installed builds can update into Zeron. CI runs this on tags
    ```
 4. Sign + notarize (required for distribution):
    ```sh
-   codesign --deep --force --options runtime --sign "Developer ID Application: …" Zeron.app
+   codesign --entitlements dist/macos/Dictation.entitlements --deep --force --options runtime --sign "Developer ID Application: …" Zeron.app
    xcrun notarytool submit Zeron.zip --keychain-profile … --wait
    xcrun stapler staple Zeron.app
    ```
