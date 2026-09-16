@@ -20,6 +20,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -28,17 +29,22 @@ use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
 use crate::comments::ReviewComment;
+use crate::popover::Loadable;
 use zeron_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 use zeron_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
 use zeron_proto::{
-    AuthState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus, Device,
-    EngineInfo, HarnessId, Session, Space, WorkspaceScope,
+    AgentAccount, AgentAccountsSnapshot, AuthState, ChangeRequestSummary, Chat, ChatIndicator,
+    CheckoutChangeRequestStatus, Device, EngineInfo, HarnessId, Session, Space, WorkspaceScope,
 };
 use zeron_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
 
 use crate::change_requests::{
     ChangeRequestClientState, ChangeRequestWatchKey, desired_watch_targets, watch_params,
 };
+
+/// A frozen subagent's transcript blob is one RPC; past this the fetch gives
+/// up and the live doc watch takes over.
+const SUBAGENT_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(20);
 
 // ---------------------------------------------------------------------------
 // Engine handle
@@ -688,6 +694,23 @@ pub struct AppState {
     pub local_device_id: Option<String>,
     /// Latest `UpdateStatus` frame — drives the sidebar update strip.
     pub update: Option<zeron_update::UpdateStatus>,
+    /// CLI provider logins + their rate-limit meters. One snapshot serves both
+    /// readers (Settings → Accounts and the composer's account chip): a
+    /// second fetch path would double the provider probes behind the engine's
+    /// 60s cache.
+    pub agent_accounts: Loadable<AgentAccountsSnapshot>,
+    /// Which device [`Self::agent_accounts`] describes; `None` = this one.
+    /// Settings can retarget the list at another device, and another device's
+    /// meters must not leak into the chip, which speaks only for the local
+    /// engine.
+    pub agent_accounts_target: Option<String>,
+    /// Single-flight guard for [`Self::load_agent_accounts`]. Holding the task
+    /// here also cancels an in-flight load when the state drops.
+    agent_accounts_task: Option<Task<()>>,
+    /// When the last load *that probed the providers* returned. Drives the
+    /// chip's staleness check, so a window refocus does not re-probe a
+    /// snapshot that is seconds old.
+    agent_accounts_probed_at: Option<Instant>,
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
@@ -704,9 +727,16 @@ pub struct AppState {
     sub_transcripts: HashMap<String, Vec<SessionMessageEntry>>,
     /// One watch task per live subagent doc (single-flight per key).
     /// Dropping a task cancels the engine-side watch and unpins the doc from
-    /// the engine LRU — closing a tab MUST go through
-    /// [`Self::unwatch_subagent_doc`].
+    /// the engine LRU — every reader MUST release through
+    /// [`Self::close_subagent_feed`].
     sub_watch_tasks: HashMap<String, Task<()>>,
+    /// Readers holding each subagent doc open — a right-pane tab, the agent
+    /// rail's scope path or its focus. The rows and the feed live while any
+    /// reader does, so one closing cannot blank what another still shows.
+    sub_feed_refs: HashMap<String, usize>,
+    /// A frozen subagent's blob fetch in flight; dropping it cancels the
+    /// fetch, and completion falls back to the live watch on any failure.
+    sub_fetch_tasks: HashMap<String, Task<()>>,
 }
 
 /// Text/reasoning growth changes the transcript without changing session
@@ -761,6 +791,10 @@ impl AppState {
             review_comment_flushes: HashMap::new(),
             local_device_id: None,
             update: None,
+            agent_accounts: Loadable::Idle,
+            agent_accounts_target: None,
+            agent_accounts_task: None,
+            agent_accounts_probed_at: None,
             data_dir: None,
             engine: None,
             watch_tasks: Vec::new(),
@@ -771,6 +805,8 @@ impl AppState {
             change_requests_visible: true,
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
+            sub_feed_refs: HashMap::new(),
+            sub_fetch_tasks: HashMap::new(),
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
@@ -1193,10 +1229,89 @@ impl AppState {
             .unwrap_or(&[])
     }
 
+    /// Open a subagent doc feed for one reader. A running subagent watches
+    /// its doc directly; a `frozen` one (done/failed) reads the uploaded
+    /// transcript blob (`{chat_id}/{doc_id}`) once and falls back to the
+    /// live watch on ANY failure, since the upload is best-effort
+    /// engine-side. Refcounted: a second reader of the same doc shares the
+    /// feed already running, and the rows survive until the last reader
+    /// closes.
+    pub fn open_subagent_feed(
+        &mut self,
+        chat_id: &str,
+        doc_id: String,
+        frozen: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let refs = self.sub_feed_refs.entry(doc_id.clone()).or_insert(0);
+        *refs += 1;
+        if *refs > 1 {
+            return;
+        }
+        if !frozen {
+            self.watch_subagent_doc(doc_id, cx);
+            return;
+        }
+        let Some(engine) = self.engine.clone() else {
+            self.watch_subagent_doc(doc_id, cx);
+            return;
+        };
+        let blob_ref = format!("{chat_id}/{doc_id}");
+        let task = cx.spawn({
+            let doc_id = doc_id.clone();
+            async move |this, cx| {
+                let reply = crate::attachments::call_with_timeout(
+                    &engine,
+                    cx.background_executor(),
+                    methods::FETCH_TOOL_BLOB,
+                    serde_json::json!({ "blobRef": blob_ref }),
+                    SUBAGENT_SNAPSHOT_TIMEOUT,
+                )
+                .await;
+                let entries: Option<Vec<SessionMessageEntry>> = reply.ok().and_then(|value| {
+                    let text = value.get("text")?.as_str()?.to_owned();
+                    serde_json::from_str(&text).ok()
+                });
+                this.update(cx, |state, cx| {
+                    // Every reader let go while the blob was in flight.
+                    if !state.sub_feed_refs.contains_key(&doc_id) {
+                        return;
+                    }
+                    state.sub_fetch_tasks.remove(&doc_id);
+                    match entries {
+                        Some(entries) => state.set_subagent_snapshot(doc_id, entries),
+                        None => state.watch_subagent_doc(doc_id, cx),
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        });
+        self.sub_fetch_tasks.insert(doc_id, task);
+    }
+
+    /// Release one reader. The last one out drops the watch task (cancelling
+    /// the engine-side watch and unpinning the doc from the engine LRU), any
+    /// blob fetch still in flight, and the rows.
+    pub fn close_subagent_feed(&mut self, doc_id: &str) {
+        let Some(refs) = self.sub_feed_refs.get_mut(doc_id) else {
+            return;
+        };
+        *refs -= 1;
+        if *refs > 0 {
+            return;
+        }
+        self.sub_feed_refs.remove(doc_id);
+        self.sub_fetch_tasks.remove(doc_id);
+        self.sub_watch_tasks.remove(doc_id);
+        self.sub_transcripts.remove(doc_id);
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+    }
+
     /// Watch a SUBAGENT doc (`WatchDocMessages` works for any doc id).
     /// Single-flight per key; a frozen snapshot already in place wins — the
     /// watch would race the (complete) blob with a possibly-purged live doc.
-    pub fn watch_subagent_doc(&mut self, doc_id: String, cx: &mut Context<Self>) {
+    fn watch_subagent_doc(&mut self, doc_id: String, cx: &mut Context<Self>) {
         if self.sub_watch_tasks.contains_key(&doc_id) {
             return;
         }
@@ -1208,17 +1323,9 @@ impl AppState {
         self.sub_watch_tasks.insert(doc_id, task);
     }
 
-    /// Tab closed: drop the watch task (cancels the engine-side watch and
-    /// unpins the doc from the engine LRU) and the rows.
-    pub fn unwatch_subagent_doc(&mut self, doc_id: &str) {
-        self.transcript_revision = self.transcript_revision.wrapping_add(1);
-        self.sub_watch_tasks.remove(doc_id);
-        self.sub_transcripts.remove(doc_id);
-    }
-
     /// Frozen-blob path: the finished subagent's uploaded transcript, no
     /// watch needed (and any in-flight watch is superseded).
-    pub fn set_subagent_snapshot(&mut self, doc_id: String, entries: Vec<SessionMessageEntry>) {
+    fn set_subagent_snapshot(&mut self, doc_id: String, entries: Vec<SessionMessageEntry>) {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.sub_watch_tasks.remove(&doc_id);
         self.sub_transcripts.insert(doc_id, entries);
@@ -1610,6 +1717,111 @@ impl AppState {
         self.engine.as_ref()
     }
 
+    /// How long a probed snapshot stays fresh. Matches the engine's usage TTL
+    /// (`engine/src/agent_accounts.rs` `USAGE_TTL`): probing faster than that
+    /// re-serves the same cached windows at the cost of a round trip.
+    pub const AGENT_USAGE_TTL: Duration = Duration::from_secs(60);
+
+    /// Whether a forced load would actually reach the providers rather than
+    /// re-read a still-warm cache.
+    pub fn agent_usage_stale(&self) -> bool {
+        self.agent_accounts_probed_at
+            .is_none_or(|at| at.elapsed() >= Self::AGENT_USAGE_TTL)
+    }
+
+    /// Load the provider logins into [`Self::agent_accounts`].
+    ///
+    /// `force_usage` asks the engine to probe the providers; without it the
+    /// reply carries usage only while the engine's cache is warm, so every
+    /// caller that wants live meters must force. Single-flight: a load already
+    /// in flight wins, which collapses "settings page mounted" and "poll
+    /// fired" into one probe.
+    ///
+    /// Retargeting at another device drops the old snapshot rather than
+    /// showing one device's meters under another's name.
+    pub fn load_agent_accounts(
+        &mut self,
+        target: Option<String>,
+        force_usage: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.agent_accounts_target != target {
+            self.agent_accounts_target = target.clone();
+            self.agent_accounts = Loadable::Idle;
+            self.agent_accounts_probed_at = None;
+            // Drop the in-flight load: it answers for the previous device.
+            self.agent_accounts_task = None;
+        } else if self.agent_accounts_task.is_some() {
+            return;
+        }
+        let Some(engine) = self.engine.clone() else {
+            self.agent_accounts = Loadable::Error("Engine not connected".into());
+            return;
+        };
+        // Keep the last good snapshot on screen across a refresh; only a cold
+        // load shows the skeleton.
+        if !matches!(self.agent_accounts, Loadable::Ready(_)) {
+            self.agent_accounts = Loadable::Loading;
+        }
+        let mut params = serde_json::json!({ "forceUsage": force_usage });
+        if let Some(device) = target.clone() {
+            params["targetDeviceId"] = serde_json::Value::String(device);
+        }
+        self.agent_accounts_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::LIST_AGENT_ACCOUNTS, params)
+                .await;
+            this.update(cx, |state, cx| {
+                state.agent_accounts_task = None;
+                // A retarget raced this reply; it describes the wrong device.
+                if state.agent_accounts_target != target {
+                    return;
+                }
+                // A failed probe counts too: the chip's render-time staleness
+                // check would otherwise re-fire it every frame.
+                if force_usage {
+                    state.agent_accounts_probed_at = Some(Instant::now());
+                }
+                state.agent_accounts = match result {
+                    Ok(value) => match serde_json::from_value::<AgentAccountsSnapshot>(value) {
+                        Ok(snapshot) => Loadable::Ready(snapshot),
+                        Err(err) => Loadable::Error(err.to_string()),
+                    },
+                    Err(err) => Loadable::Error(err.to_string()),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// The device whose CLI logins the selected chat spends: `None` for this
+    /// one (no passthrough), else the chat's host. Every account read and
+    /// mutation for the open chat routes through this — a chat running on
+    /// another machine must never read or swap the credentials on this one.
+    pub fn selected_chat_account_target(&self) -> Option<String> {
+        let chat = self.selected_chat_row()?;
+        (Some(chat.device_id.as_str()) != self.local_device_id.as_deref())
+            .then(|| chat.device_id.clone())
+    }
+
+    /// The live account driving `harness` — what a chat on that harness spends
+    /// against. `None` while the snapshot describes a different device than
+    /// the chat does, so the chip never attributes one machine's login to
+    /// another.
+    pub fn active_account_for(&self, harness: HarnessId) -> Option<&AgentAccount> {
+        if self.agent_accounts_target != self.selected_chat_account_target() {
+            return None;
+        }
+        self.agent_accounts
+            .ready()?
+            .accounts
+            .iter()
+            .find(|a| a.harness == harness && a.active)
+    }
+
     /// Drop every account-scoped view and subscription after its runtime has
     /// stopped. The next bootstrap must never render rows from the previous
     /// account while the local profile is opening.
@@ -1617,6 +1829,12 @@ impl AppState {
         self.engine = None;
         self.watch_tasks.clear();
         self.transcript_task = None;
+        // The next runtime's logins are a different accounts world; a reply
+        // from this one must not land under its name.
+        self.agent_accounts = Loadable::Idle;
+        self.agent_accounts_target = None;
+        self.agent_accounts_task = None;
+        self.agent_accounts_probed_at = None;
         self.change_request_tasks.clear();
         self.change_requests = ChangeRequestClientState::default();
         self.connection = ConnectionStatus::Connecting;
@@ -3054,6 +3272,55 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_chats_accounts_never_resolve_against_this_device() {
+        // The whole point of the target: a chat hosted elsewhere must not
+        // read — or, through `switch_account`, overwrite — the CLI login on
+        // this machine.
+        let mut state = AppState::new();
+        state.local_device_id = Some("local".into());
+        let mut remote = chat("c1", 0, None);
+        remote.device_id = "remote".into();
+        state.chats = vec![remote];
+        state.selected_chat = Some("c1".into());
+        assert_eq!(
+            state.selected_chat_account_target().as_deref(),
+            Some("remote")
+        );
+
+        let account = AgentAccount {
+            id: "a1".into(),
+            harness: HarnessId::ClaudeCode,
+            email: Some("someone@example.test".into()),
+            plan_label: None,
+            active: true,
+            usage_windows: Vec::new(),
+            display_name: None,
+            organization: None,
+            auth_kind: None,
+            switchable: true,
+            saved_at: None,
+        };
+        state.agent_accounts = Loadable::Ready(AgentAccountsSnapshot {
+            accounts: vec![account],
+            warnings: Vec::new(),
+        });
+
+        // A local snapshot answers for the local device, not this chat.
+        state.agent_accounts_target = None;
+        assert!(state.active_account_for(HarnessId::ClaudeCode).is_none());
+        // Once it describes the chat's own host, it is the right answer.
+        state.agent_accounts_target = Some("remote".into());
+        assert!(state.active_account_for(HarnessId::ClaudeCode).is_some());
+        // And a third device's snapshot is not, either.
+        state.agent_accounts_target = Some("other".into());
+        assert!(state.active_account_for(HarnessId::ClaudeCode).is_none());
+
+        // A chat on this device carries no passthrough.
+        state.chats[0].device_id = "local".into();
+        assert_eq!(state.selected_chat_account_target(), None);
+    }
+
+    #[test]
     fn transcript_revision_tracks_replay_echoes_and_subagent_content() {
         let mut state = AppState::new();
         state.selected_chat = Some("c".into());
@@ -3092,10 +3359,16 @@ mod tests {
         );
 
         let before_subagent = state.transcript_revision;
+        state.sub_feed_refs.insert("sub".into(), 2);
         state.set_subagent_snapshot("sub".into(), vec![user_entry("nested")]);
         assert_ne!(state.transcript_revision, before_subagent);
+        // Two readers (a tab and the rail): the first closing keeps the rows
+        // for the second, the last one out drops them.
         let before_close = state.transcript_revision;
-        state.unwatch_subagent_doc("sub");
+        state.close_subagent_feed("sub");
+        assert_eq!(state.sub_transcript("sub").len(), 1);
+        assert_eq!(state.transcript_revision, before_close);
+        state.close_subagent_feed("sub");
         assert!(state.sub_transcript("sub").is_empty());
         assert_ne!(state.transcript_revision, before_close);
     }

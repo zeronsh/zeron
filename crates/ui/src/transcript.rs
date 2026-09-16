@@ -7316,7 +7316,7 @@ fn strip_spawn_prefix(text: &str) -> &str {
 /// a fixed-width tab spent on "Agent: " never shows the task, so the genus
 /// is stripped here and the call input's description/prompt fields back up
 /// a bare name (older docs); "Subagent" only as the last resort.
-fn subagent_tab_title(call: &ToolCall) -> SharedString {
+pub(crate) fn subagent_tab_title(call: &ToolCall) -> SharedString {
     let (name, input) = match call {
         ToolCall::Unknown { name, input } => (name.as_str(), input.as_ref()),
         ToolCall::Mcp { tool, input, .. } => (tool.as_str(), input.as_ref()),
