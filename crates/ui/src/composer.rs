@@ -528,9 +528,9 @@ pub const APPSHOT_IMAGE_MAX_WIDTH: f32 = 320.0;
 pub const APPSHOT_IMAGE_MAX_HEIGHT: f32 = 132.0;
 pub const APPSHOT_TILE_HEIGHT: f32 = 192.0;
 
-struct AppshotActionTooltip(SharedString);
+struct ComposerActionTooltip(SharedString);
 
-impl Render for AppshotActionTooltip {
+impl Render for ComposerActionTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
         div()
@@ -4350,11 +4350,9 @@ impl Composer {
                 .collect();
             if std::env::var("ZERON_ATTACH_PREVIEW").is_ok_and(|v| v == "1")
                 && let Some(first) = staged.first()
+                && let Some(image) = first.image()
             {
-                composer.preview = Some(attachments::PreviewImage::new(
-                    first.name.clone(),
-                    first.image.clone(),
-                ));
+                composer.preview = Some(attachments::PreviewImage::new(first.name.clone(), image));
                 composer.preview_focus_pending = true;
             }
             if !staged.is_empty() {
@@ -4502,15 +4500,11 @@ impl Composer {
         cx.notify();
     }
 
-    /// Stage image files (picker / drop / pasted paths). Non-images are
-    /// skipped silently (matching the original's `image/*` filter); read
-    /// failures and oversize files surface in the failure notice.
+    /// Stage regular files from the picker, drops, and pasted paths. Report
+    /// read failures and oversize files through the failure notice.
     pub(crate) fn add_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let mut staged = Vec::new();
         for path in &paths {
-            if attachments::format_by_extension(path).is_none() {
-                continue;
-            }
             match attachments::stage_file(path) {
                 Ok(att) => staged.push(att),
                 Err(message) => {
@@ -4653,7 +4647,9 @@ impl Composer {
             .pt(px(STRIP_PAD_TOP));
         for (ix, att) in staged.iter().enumerate() {
             let group: SharedString = format!("composer-att-{}", att.id).into();
-            let preview = attachments::PreviewImage::new(att.name.clone(), att.image.clone());
+            let preview = att
+                .image()
+                .map(|image| attachments::PreviewImage::new(att.name.clone(), image));
             let remove_id = att.id.clone();
             strip = strip.child(
                 div()
@@ -4668,15 +4664,24 @@ impl Composer {
                             .overflow_hidden()
                             .border_1()
                             .border_color(crate::theme::hairline(0.10))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                preview.viewer.reset();
-                                this.preview = Some(preview.clone());
-                                this.preview_focus_pending = true;
-                                cx.notify();
-                            }))
-                            .child(
-                                img(att.image.clone())
+                            .tooltip({
+                                let name = att.name.clone();
+                                move |_, cx| {
+                                    cx.new(|_| ComposerActionTooltip(name.clone().into()))
+                                        .into()
+                                }
+                            })
+                            .when_some(preview, |el, preview| {
+                                el.cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        preview.viewer.reset();
+                                        this.preview = Some(preview.clone());
+                                        this.preview_focus_pending = true;
+                                        cx.notify();
+                                    }))
+                            })
+                            .child(match att.image() {
+                                Some(image) => img(image)
                                     // EXPLICIT dims, not size_full: img layout
                                     // honors the image's intrinsic aspect
                                     // ratio over a percent height (gpui
@@ -4690,8 +4695,10 @@ impl Composer {
                                     // Own radii — the frame's rounding only
                                     // clips rectangularly (7 = 8 - border).
                                     .rounded(px(7.0))
-                                    .object_fit(ObjectFit::Cover),
-                            ),
+                                    .object_fit(ObjectFit::Cover)
+                                    .into_any_element(),
+                                None => attachments::file_tile(&att.name, theme).into_any_element(),
+                            }),
                     )
                     // Own layer: inside the frosted pill everything shares one
                     // draw order and images render last, so without it the
@@ -4757,7 +4764,7 @@ impl Composer {
             let group: SharedString = format!("composer-appshot-{}", appshot.id).into();
             let preview = crate::attachments::PreviewImage::new(
                 appshot.screenshot.name.clone(),
-                appshot.screenshot.image.clone(),
+                appshot.screenshot.image().expect("Appshot screenshot"),
             );
             let preview_on_key = preview.clone();
             let preview_on_a11y = preview.clone();
@@ -4795,7 +4802,7 @@ impl Composer {
                 .cursor_pointer()
                 .hover(|style| style.bg(crate::theme::ink(0.045)))
                 .tooltip(move |_, cx| {
-                    cx.new(|_| AppshotActionTooltip(preview_label.clone()))
+                    cx.new(|_| ComposerActionTooltip(preview_label.clone()))
                         .into()
                 })
                 .role(gpui::Role::Button)
@@ -4856,7 +4863,7 @@ impl Composer {
                                     44.0,
                                     false,
                                     true,
-                                    img(appshot.screenshot.image.clone())
+                                    img(appshot.screenshot.image().expect("Appshot screenshot"))
                                         .w(px(image_width))
                                         .h(px(image_height))
                                         .object_fit(ObjectFit::Contain),
@@ -4913,7 +4920,7 @@ impl Composer {
                     .opacity(0.0)
                     .group_hover(group, |style| style.opacity(1.0))
                     .tooltip(move |_, cx| {
-                        cx.new(|_| AppshotActionTooltip(remove_label.clone()))
+                        cx.new(|_| ComposerActionTooltip(remove_label.clone()))
                             .into()
                     })
                     .role(gpui::Role::Button)
@@ -4959,14 +4966,13 @@ impl Composer {
         Some(strip.into_any_element())
     }
 
-    /// Paperclip: the native image picker (the original's hidden
-    /// `<input type=file accept=image/* multiple>`).
+    /// Paperclip: select one or more regular files with the native picker.
     fn open_file_picker(&mut self, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: true,
-            prompt: Some("Attach".into()),
+            prompt: Some("Attach files".into()),
         });
         self.picker_task = Some(cx.spawn(async move |this, cx| {
             let result = rx.await;
@@ -6122,30 +6128,22 @@ impl Composer {
         // rewrite instead of blanking into a reload skeleton.
         if queued_flow {
             for (upload_id, att) in upload_ids.iter().zip(&staged) {
-                attachments::seed_attachment_alias(
-                    &device_id,
-                    upload_id,
-                    &att.name,
-                    att.image.clone(),
-                );
+                let Some(image) = att.image() else { continue };
+                attachments::seed_attachment_alias(&device_id, upload_id, &att.name, image.clone());
                 if let Some(local) = local_device_id.as_deref()
                     && local != device_id
                 {
-                    attachments::seed_attachment_alias(
-                        local,
-                        upload_id,
-                        &att.name,
-                        att.image.clone(),
-                    );
+                    attachments::seed_attachment_alias(local, upload_id, &att.name, image.clone());
                 }
             }
         }
         for (path, att) in echo_paths.iter().zip(&staged) {
-            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
+            let Some(image) = att.image() else { continue };
+            attachments::seed_attachment(&device_id, path, &att.name, image.clone());
             if let Some(local) = local_device_id.as_deref()
                 && local != device_id
             {
-                attachments::seed_attachment(local, path, &att.name, att.image.clone());
+                attachments::seed_attachment(local, path, &att.name, image.clone());
             }
         }
 
@@ -6297,9 +6295,10 @@ impl Composer {
                     // Attachment in the original send path).
                     let seed_device = host_device_id.clone().unwrap_or_else(|| device_id.clone());
                     for (path, att) in attachment_paths.iter().zip(&staged) {
-                        attachments::seed_attachment(&seed_device, path, &att.name, att.image.clone());
+                        let Some(image) = att.image() else { continue };
+                        attachments::seed_attachment(&seed_device, path, &att.name, image.clone());
                         if seed_device != device_id {
-                            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
+                            attachments::seed_attachment(&device_id, path, &att.name, image.clone());
                         }
                     }
                     let appshot_paths: HashMap<String, String> = staged
@@ -6471,7 +6470,7 @@ impl Composer {
                     let queue_text = if !clean_queue_attachment_text {
                         content.as_str()
                     } else if queue_body.trim().is_empty() && !attachment_paths.is_empty() {
-                        attachments::ATTACHMENT_ONLY_TEXT
+                        attachments::attachment_only_text(&attachment_paths)
                     } else {
                         queue_body.as_str()
                     };
@@ -7545,8 +7544,7 @@ impl Render for Composer {
         });
 
         let send_button = self.render_send_button(mode, cx);
-        // Attach button — opens the native image picker (the original's hidden
-        // `<input type=file accept="image/*" multiple>`); paste/drop also feed
+        // Attach button opens the native file picker; paste/drop also feed
         // the same strip. The parent action cluster owns the spacing: adding a
         // second margin here made the picker→attachment gap twice as wide as
         // attachment→send and made the paperclip look detached.
@@ -7566,6 +7564,12 @@ impl Render for Composer {
                 crate::theme::ink(0.10),
             ))
             .on_hover(motion::hover_listener("composer-attach"))
+            .role(gpui::Role::Button)
+            .aria_label("Attach files")
+            .tooltip(|_, cx| {
+                cx.new(|_| ComposerActionTooltip("Attach files".into()))
+                    .into()
+            })
             .on_click(cx.listener(|this, _, _, cx| this.open_file_picker(cx)))
             .child(
                 crate::icons::icon(crate::icons::PAPERCLIP)
@@ -7985,6 +7989,46 @@ mod tests {
                     assert!((composer.last_rendered_height - motion::lerp(COMPOSER_MIN_HEIGHT, COMPACT_TOTAL_HEIGHT, amount)).abs() < 0.1);
                 }).unwrap();
             }
+        }
+    }
+
+    #[gpui::test]
+    fn composer_file_picker_accepts_documents_and_mixed_files(cx: &mut gpui::TestAppContext) {
+        let (dir, handle) = composer_focus_window(cx);
+        let text_path = dir.path().join("notes.txt");
+        let image_path = dir.path().join("image.svg");
+        std::fs::write(&text_path, "attachment fixture").unwrap();
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/zeron-logo.svg"),
+            &image_path,
+        )
+        .unwrap();
+
+        for paths in [vec![text_path.clone()], vec![image_path, text_path]] {
+            handle
+                .update(cx, |composer, _, cx| {
+                    composer
+                        .input
+                        .update(cx, |input, cx| input.set_text("Keep my draft", cx));
+                    composer.attachments.clear();
+                    composer.open_file_picker(cx);
+                })
+                .unwrap();
+            let expected_files = paths.len();
+            cx.simulate_path_prompt_response(move |_| Some(paths));
+            cx.run_until_parked();
+            handle
+                .read_with(cx, |composer, cx| {
+                    assert_eq!(composer.staged().len(), expected_files);
+                    assert_eq!(
+                        composer.staged().last().unwrap().bytes(),
+                        b"attachment fixture"
+                    );
+                    assert!(composer.staged().last().unwrap().image().is_none());
+                    assert_eq!(composer.input.read(cx).text(), "Keep my draft");
+                    assert!(composer.failure.is_none());
+                })
+                .unwrap();
         }
     }
 

@@ -719,6 +719,10 @@ pub(crate) fn restore_queued_appshots(
         .split("\n\nAttached images (local files")
         .next()
         .unwrap_or(context);
+    let context = context
+        .split("\n\nAttached files (local files")
+        .next()
+        .unwrap_or(context);
     let xml = format!("<appshots>{context}</appshots>");
     let doc = roxmltree::Document::parse_with_options(
         &xml,
@@ -747,11 +751,16 @@ pub(crate) fn restore_queued_appshots(
             return Err(invalid());
         }
         let mut screenshot = attachments[index].clone();
+        if screenshot.image().is_none() {
+            return Err(invalid());
+        }
         // Older captures may already have backing-surface padding stored in
         // their PNG. Normalize their bytes too, without changing attachment IDs.
         if png_dimensions(screenshot.bytes()).is_some() {
             if let Some(bytes) = trim_appshot_padding(screenshot.bytes()).map_err(|_| invalid())? {
-                screenshot.image = Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes));
+                screenshot.content = crate::attachments::AttachmentContent::Image(Arc::new(
+                    gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes),
+                ));
             }
         }
         let content = node.text().unwrap_or_default();
@@ -863,6 +872,10 @@ pub fn presentations(text: &str) -> HashMap<String, AppshotPresentation> {
         .split("\n\nAttached images (local files")
         .next()
         .unwrap_or("");
+    let context = context
+        .split("\n\nAttached files (local files")
+        .next()
+        .unwrap_or(context);
     let xml = format!("<appshots>{context}</appshots>");
     let Ok(doc) = roxmltree::Document::parse_with_options(
         &xml,
@@ -938,7 +951,10 @@ pub(crate) mod tests {
             screenshot: StagedAttachment {
                 id: "image-1".into(),
                 name: "Safari Appshot.png".into(),
-                image: Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new())),
+                content: crate::attachments::AttachmentContent::Image(Arc::new(Image::from_bytes(
+                    ImageFormat::Png,
+                    Vec::new(),
+                ))),
             },
             screenshot_dimensions: Some((1440, 900)),
             app_icon: None,

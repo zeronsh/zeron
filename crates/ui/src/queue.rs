@@ -183,7 +183,7 @@ fn one_line(text: &str) -> SharedString {
 fn queue_visible_text(text: &str, attachments: &[String]) -> String {
     let text = crate::appshots::strip_context_for_display(text);
     if text.trim().is_empty() && !attachments.is_empty() {
-        return crate::attachments::ATTACHMENT_ONLY_TEXT.to_string();
+        return crate::attachments::attachment_only_text(attachments).to_string();
     }
     if attachments.is_empty() {
         return text.to_string();
@@ -199,7 +199,7 @@ fn queue_visible_text(text: &str, attachments: &[String]) -> String {
         return text.to_string();
     }
     if parsed.text.trim().is_empty() {
-        crate::attachments::ATTACHMENT_ONLY_TEXT.to_string()
+        crate::attachments::attachment_only_text(attachments).to_string()
     } else {
         parsed.text
     }
@@ -544,7 +544,11 @@ impl Composer {
                 } else {
                     labels.join(" · ")
                 };
-                let only_images = text.as_ref() == crate::attachments::ATTACHMENT_ONLY_TEXT;
+                let only_images = matches!(
+                    text.as_ref(),
+                    crate::attachments::ATTACHMENT_ONLY_TEXT
+                        | crate::attachments::FILE_ATTACHMENT_ONLY_TEXT
+                );
                 let title = if only_images {
                     summary.clone().into()
                 } else {
@@ -696,6 +700,7 @@ impl Composer {
         let keys: std::collections::HashSet<_> = items[visible]
             .iter()
             .flat_map(|item| item.attachments.iter().take(self.queue_preview_limit()))
+            .filter(|path| attachments::format_by_extension(std::path::Path::new(path)).is_some())
             .map(|path| (device.clone(), path.clone()))
             .take(64)
             .collect();
@@ -826,6 +831,12 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         use crate::attachments;
+        if attachments::format_by_extension(std::path::Path::new(path)).is_none() {
+            return attachments::file_tile(path.rsplit('/').next().unwrap_or(path), &Theme::of(cx))
+                .w(px(40.0))
+                .h(px(28.0))
+                .into_any_element();
+        }
         let device = self
             .state
             .read(cx)
@@ -1307,14 +1318,11 @@ impl Composer {
                     .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok());
                 let mut load_failed = paths.is_none();
                 for path in paths.unwrap_or_default() {
-                    let loaded = crate::attachments::read_attachment_image(
+                    let loaded = crate::attachments::read_attachment_file(
                         &engine, cx.background_executor(), Some(&host_device_id), &path,
-                        None,
                     ).await;
                     match loaded {
-                        Some(loaded) => loaded_attachments.push(crate::attachments::StagedAttachment {
-                            id: uuid::Uuid::new_v4().to_string(), name: loaded.name, image: loaded.image,
-                        }),
+                        Some(loaded) => loaded_attachments.push(loaded),
                         None => { load_failed = true; break; }
                     }
                 }
@@ -1368,7 +1376,7 @@ impl Composer {
                             .to_string();
                         let attachments: Vec<String> = serde_json::from_value(reply["attachments"].clone()).unwrap_or_default();
                         let text = queue_visible_text(&raw_text, &attachments);
-                        let text = if !attachments.is_empty() && text == crate::attachments::ATTACHMENT_ONLY_TEXT {
+                        let text = if !attachments.is_empty() && matches!(text.as_str(), crate::attachments::ATTACHMENT_ONLY_TEXT | crate::attachments::FILE_ATTACHMENT_ONLY_TEXT) {
                             String::new()
                         } else { text };
                         let selected_matches = composer.state.read(cx).selected_chat.as_deref()
@@ -1541,7 +1549,7 @@ impl Composer {
                         params["text"].as_str().unwrap_or_default(), &staged_appshots, &appshot_paths,
                     ).into();
                     if params["text"].as_str().is_some_and(|text| text.trim().is_empty()) && !paths.is_empty() {
-                        params["text"] = crate::attachments::ATTACHMENT_ONLY_TEXT.into();
+                        params["text"] = crate::attachments::attachment_only_text(&paths).into();
                     }
                     params["attachments"] = serde_json::json!(paths);
                 }

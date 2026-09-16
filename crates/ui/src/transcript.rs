@@ -5072,6 +5072,26 @@ impl Transcript {
             .pt(px(4.0))
             .pb(px(6.0));
         for (aix, att) in atts.iter().enumerate() {
+            if crate::attachments::format_by_extension(std::path::Path::new(&att.path)).is_none() {
+                let sending =
+                    att.path.starts_with("pending://") || att.path.starts_with("pending/");
+                let theme = Theme::of(cx);
+                strip = strip.child(
+                    div()
+                        .w(px(ATT_THUMB_W))
+                        .h(px(ATT_THUMB_H))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(crate::theme::hairline(0.11))
+                        .flex()
+                        .flex_col()
+                        .child(crate::attachments::file_tile(&att.name, &theme))
+                        .when(sending, |el| {
+                            el.child(div().text_size(px(10.0)).child("Uploading…"))
+                        }),
+                );
+                continue;
+            }
             let state = self.attachment_state(&device_ids, &att.path, None, cx);
             // The in-flight send's progress belongs ON the thumbnail
             // (2026-08-18 user request). Two ref shapes mean "still

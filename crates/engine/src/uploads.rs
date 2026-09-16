@@ -339,12 +339,15 @@ impl Uploads {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let allowed = std::iter::once(&self.inner.dir)
+        let in_uploads = std::iter::once(&self.inner.dir)
             .chain(read_roots.iter())
-            .chain(extra_roots.iter())
             .filter_map(|root| std::fs::canonicalize(root).ok())
             .any(|root| resolved.starts_with(&root) && resolved != root);
-        if !allowed {
+        let in_workspace = extra_roots
+            .iter()
+            .filter_map(|root| std::fs::canonicalize(root).ok())
+            .any(|root| resolved.starts_with(&root) && resolved != root);
+        if !in_uploads && !in_workspace {
             return Err(outside());
         }
         let meta = std::fs::metadata(&resolved)?;
@@ -354,8 +357,23 @@ impl Uploads {
         if meta.len() > MAX_BYTES {
             return Err(EngineError::Other("Attachment is too large".into()));
         }
-        let mime_type = mime_by_ext(&resolved)
-            .ok_or_else(|| EngineError::Other("Attachment is not a supported image".into()))?;
+        // Opaque files are served only from the attachment store. Keep the
+        // existing image-only workspace read surface and canonical path jail.
+        let mime_type = match mime_by_ext(&resolved) {
+            Some(mime) => mime,
+            None if in_uploads => match resolved.extension().and_then(|ext| ext.to_str()) {
+                Some("md" | "markdown") => "text/markdown",
+                Some("txt") => "text/plain",
+                Some("json") => "application/json",
+                Some("pdf") => "application/pdf",
+                _ => "application/octet-stream",
+            },
+            None => {
+                return Err(EngineError::Other(
+                    "Attachment is not a supported image".into(),
+                ));
+            }
+        };
         Ok(InspectedFile {
             name: resolved
                 .file_name()
@@ -433,7 +451,7 @@ fn sanitize(file_name: &str) -> String {
     }
 }
 
-fn mime_by_ext(path: &Path) -> Option<&'static str> {
+pub(crate) fn mime_by_ext(path: &Path) -> Option<&'static str> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "png" => Some("image/png"),
         "jpg" | "jpeg" => Some("image/jpeg"),
