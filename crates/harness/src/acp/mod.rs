@@ -1664,11 +1664,15 @@ impl Harness for AcpHarness {
     }
 
     fn executable_path(&self) -> Option<PathBuf> {
-        if let Some(path) = &self.executable {
-            return Some(path.clone());
-        }
-        if let Some(path) = std::env::var_os(self.spec.env_override).filter(|p| !p.is_empty()) {
-            return Some(PathBuf::from(path));
+        // Overrides select the ACP transport. Pi's transport is pi-acp,
+        // whereas version checks and self-updates must target the pi CLI.
+        if self.spec.executable == self.spec.cli_executable {
+            if let Some(path) = &self.executable {
+                return Some(path.clone());
+            }
+            if let Some(path) = std::env::var_os(self.spec.env_override).filter(|p| !p.is_empty()) {
+                return Some(PathBuf::from(path));
+            }
         }
         find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)())
     }
@@ -4088,6 +4092,50 @@ mod tests {
             sign_in_url("Open http://127.0.0.1:8080/callback"),
             Some("http://127.0.0.1:8080/callback".into())
         );
+    }
+
+    #[test]
+    fn cli_update_path_does_not_use_a_separate_acp_adapter_override() {
+        let adapter = PathBuf::from("/test/custom-pi-acp");
+        let pi = AcpHarness::pi().with_executable(&adapter);
+        assert_eq!(
+            pi.executable_path(),
+            find_on_paths(pi.spec.cli_executable, (pi.spec.cli_extra_paths)())
+        );
+        assert_ne!(pi.executable_path(), Some(adapter.clone()));
+        // Native ACP agents use the same executable for both roles.
+        assert_eq!(
+            AcpHarness::grok()
+                .with_executable(&adapter)
+                .executable_path(),
+            Some(adapter)
+        );
+    }
+
+    #[test]
+    fn cli_update_path_ignores_pi_acp_environment_override() {
+        const ADAPTER: &str = "/test/environment-pi-acp";
+        if std::env::var("PI_ACP_EXECUTABLE").as_deref() != Ok(ADAPTER) {
+            // Run with a private environment; do not mutate process-global
+            // variables while other harness tests are running.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "acp::tests::cli_update_path_ignores_pi_acp_environment_override",
+                    "--nocapture",
+                ])
+                .env("PI_ACP_EXECUTABLE", ADAPTER)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            return;
+        }
+        let pi = AcpHarness::pi();
+        assert_eq!(
+            pi.executable_path(),
+            find_on_paths("pi", (pi.spec.cli_extra_paths)())
+        );
+        assert_ne!(pi.executable_path(), Some(PathBuf::from(ADAPTER)));
     }
 
     #[test]

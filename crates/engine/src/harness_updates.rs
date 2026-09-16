@@ -1530,6 +1530,19 @@ async fn run_command(executable: &Path, args: &[&str], timeout: Duration) -> Res
         .map(drop)
 }
 
+/// Unix updaters can delegate installation to npm, pip, or a shell. Own
+/// their process group as well as the leader, including on future cancellation.
+#[cfg(unix)]
+struct UpdateProcessGroup(libc::pid_t);
+
+#[cfg(unix)]
+impl Drop for UpdateProcessGroup {
+    fn drop(&mut self) {
+        // SAFETY: spawn creates a private group whose ID is this child's PID.
+        unsafe { libc::kill(-self.0, libc::SIGKILL) };
+    }
+}
+
 async fn run_command_output(
     executable: &Path,
     args: &[&str],
@@ -1544,10 +1557,50 @@ async fn run_command_output(
         .kill_on_drop(true)
         .env("NO_COLOR", "1");
     zeron_harness::compose_child_path(&mut command, executable);
-    let output = tokio::time::timeout(timeout, command.output())
-        .await
-        .map_err(|_| format!("{} timed out", executable.display()))?
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
+        .spawn()
         .map_err(|error| format!("could not run {}: {error}", executable.display()))?;
+    #[cfg(unix)]
+    let group =
+        UpdateProcessGroup(child.id().expect("newly spawned updater has a PID") as libc::pid_t);
+    let mut stdout = child.stdout.take().expect("updater stdout is piped");
+    let mut stderr = child.stderr.take().expect("updater stderr is piped");
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let result = {
+        use tokio::io::AsyncReadExt as _;
+        tokio::time::timeout(timeout, async {
+            tokio::try_join!(
+                child.wait(),
+                stdout.read_to_end(&mut stdout_bytes),
+                stderr.read_to_end(&mut stderr_bytes),
+            )
+        })
+        .await
+    };
+    // Stop descendants before returning and releasing the execution lease,
+    // including when the leader exited but a descendant kept its pipes open.
+    #[cfg(unix)]
+    drop(group);
+    let status = match result {
+        Ok(Ok((status, _, _))) => status,
+        error => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(match error {
+                Err(_) => format!("{} timed out", executable.display()),
+                Ok(Err(error)) => format!("could not run {}: {error}", executable.display()),
+                Ok(Ok(_)) => unreachable!(),
+            });
+        }
+    };
+    let output = std::process::Output {
+        status,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    };
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     if !output.status.success() {
@@ -1616,6 +1669,81 @@ mod tests {
     use crate::registry::HarnessRegistry;
 
     struct ExecutableHarness(PathBuf, HarnessId);
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn updater_timeout_stops_descendants_before_returning() {
+        for leader_exits in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let marker = temp.path().join("mutated");
+            let ready = temp.path().join("ready");
+            let script = format!(
+                "echo $$ > \"$2\"; /bin/sh -c 'sleep 0.5; echo mutated > \"$1\"' sh \"$1\" & {}",
+                if leader_exits { "exit 0" } else { "wait" }
+            );
+            let result = super::run_command_output(
+                std::path::Path::new("/bin/sh"),
+                &[
+                    "-c",
+                    &script,
+                    "sh",
+                    marker.to_str().unwrap(),
+                    ready.to_str().unwrap(),
+                ],
+                Duration::from_millis(250),
+            )
+            .await;
+            assert!(result.unwrap_err().contains("timed out"));
+            let pid: i32 = std::fs::read_to_string(&ready)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            // The direct child must already be reaped, not merely signalled.
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            assert!(
+                !marker.exists(),
+                "installer descendant outlived its execution lease"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_update_probe_stops_descendants() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("mutated");
+        let ready = temp.path().join("ready");
+        let args = [
+            "-c",
+            "/bin/sh -c 'echo ready > \"$2\"; sleep 0.5; echo mutated > \"$1\"' sh \"$1\" \"$2\" & wait",
+            "sh",
+            marker.to_str().unwrap(),
+            ready.to_str().unwrap(),
+        ];
+        let mut probe = Box::pin(super::run_command_output(
+            std::path::Path::new("/bin/sh"),
+            &args,
+            Duration::from_secs(10),
+        ));
+        tokio::select! {
+            result = &mut probe => panic!("probe ended early: {result:?}"),
+            _ = async {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !ready.exists() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                }).await.unwrap();
+            } => {}
+        }
+        drop(probe);
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            !marker.exists(),
+            "cancelled probe left an installer running"
+        );
+    }
 
     #[async_trait]
     impl Harness for ExecutableHarness {
