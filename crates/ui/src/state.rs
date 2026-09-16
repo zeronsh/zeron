@@ -20,6 +20,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -28,11 +29,12 @@ use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
 use crate::comments::ReviewComment;
+use crate::popover::Loadable;
 use zeron_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 use zeron_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
 use zeron_proto::{
-    AuthState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus, Device,
-    EngineInfo, HarnessId, Session, Space, WorkspaceScope,
+    AgentAccount, AgentAccountsSnapshot, AuthState, ChangeRequestSummary, Chat, ChatIndicator,
+    CheckoutChangeRequestStatus, Device, EngineInfo, HarnessId, Session, Space, WorkspaceScope,
 };
 use zeron_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
 
@@ -688,6 +690,23 @@ pub struct AppState {
     pub local_device_id: Option<String>,
     /// Latest `UpdateStatus` frame — drives the sidebar update strip.
     pub update: Option<zeron_update::UpdateStatus>,
+    /// CLI provider logins + their rate-limit meters. One snapshot serves both
+    /// readers (Settings → Accounts and the composer's account chip): a
+    /// second fetch path would double the provider probes behind the engine's
+    /// 60s cache.
+    pub agent_accounts: Loadable<AgentAccountsSnapshot>,
+    /// Which device [`Self::agent_accounts`] describes; `None` = this one.
+    /// Settings can retarget the list at another device, and another device's
+    /// meters must not leak into the chip, which speaks only for the local
+    /// engine.
+    pub agent_accounts_target: Option<String>,
+    /// Single-flight guard for [`Self::load_agent_accounts`]. Holding the task
+    /// here also cancels an in-flight load when the state drops.
+    agent_accounts_task: Option<Task<()>>,
+    /// When the last load *that probed the providers* returned. Drives the
+    /// chip's staleness check, so a window refocus does not re-probe a
+    /// snapshot that is seconds old.
+    agent_accounts_probed_at: Option<Instant>,
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
@@ -761,6 +780,10 @@ impl AppState {
             review_comment_flushes: HashMap::new(),
             local_device_id: None,
             update: None,
+            agent_accounts: Loadable::Idle,
+            agent_accounts_target: None,
+            agent_accounts_task: None,
+            agent_accounts_probed_at: None,
             data_dir: None,
             engine: None,
             watch_tasks: Vec::new(),
@@ -1610,6 +1633,111 @@ impl AppState {
         self.engine.as_ref()
     }
 
+    /// How long a probed snapshot stays fresh. Matches the engine's usage TTL
+    /// (`engine/src/agent_accounts.rs` `USAGE_TTL`): probing faster than that
+    /// re-serves the same cached windows at the cost of a round trip.
+    pub const AGENT_USAGE_TTL: Duration = Duration::from_secs(60);
+
+    /// Whether a forced load would actually reach the providers rather than
+    /// re-read a still-warm cache.
+    pub fn agent_usage_stale(&self) -> bool {
+        self.agent_accounts_probed_at
+            .is_none_or(|at| at.elapsed() >= Self::AGENT_USAGE_TTL)
+    }
+
+    /// Load the provider logins into [`Self::agent_accounts`].
+    ///
+    /// `force_usage` asks the engine to probe the providers; without it the
+    /// reply carries usage only while the engine's cache is warm, so every
+    /// caller that wants live meters must force. Single-flight: a load already
+    /// in flight wins, which collapses "settings page mounted" and "poll
+    /// fired" into one probe.
+    ///
+    /// Retargeting at another device drops the old snapshot rather than
+    /// showing one device's meters under another's name.
+    pub fn load_agent_accounts(
+        &mut self,
+        target: Option<String>,
+        force_usage: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.agent_accounts_target != target {
+            self.agent_accounts_target = target.clone();
+            self.agent_accounts = Loadable::Idle;
+            self.agent_accounts_probed_at = None;
+            // Drop the in-flight load: it answers for the previous device.
+            self.agent_accounts_task = None;
+        } else if self.agent_accounts_task.is_some() {
+            return;
+        }
+        let Some(engine) = self.engine.clone() else {
+            self.agent_accounts = Loadable::Error("Engine not connected".into());
+            return;
+        };
+        // Keep the last good snapshot on screen across a refresh; only a cold
+        // load shows the skeleton.
+        if !matches!(self.agent_accounts, Loadable::Ready(_)) {
+            self.agent_accounts = Loadable::Loading;
+        }
+        let mut params = serde_json::json!({ "forceUsage": force_usage });
+        if let Some(device) = target.clone() {
+            params["targetDeviceId"] = serde_json::Value::String(device);
+        }
+        self.agent_accounts_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::LIST_AGENT_ACCOUNTS, params)
+                .await;
+            this.update(cx, |state, cx| {
+                state.agent_accounts_task = None;
+                // A retarget raced this reply; it describes the wrong device.
+                if state.agent_accounts_target != target {
+                    return;
+                }
+                // A failed probe counts too: the chip's render-time staleness
+                // check would otherwise re-fire it every frame.
+                if force_usage {
+                    state.agent_accounts_probed_at = Some(Instant::now());
+                }
+                state.agent_accounts = match result {
+                    Ok(value) => match serde_json::from_value::<AgentAccountsSnapshot>(value) {
+                        Ok(snapshot) => Loadable::Ready(snapshot),
+                        Err(err) => Loadable::Error(err.to_string()),
+                    },
+                    Err(err) => Loadable::Error(err.to_string()),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// The device whose CLI logins the selected chat spends: `None` for this
+    /// one (no passthrough), else the chat's host. Every account read and
+    /// mutation for the open chat routes through this — a chat running on
+    /// another machine must never read or swap the credentials on this one.
+    pub fn selected_chat_account_target(&self) -> Option<String> {
+        let chat = self.selected_chat_row()?;
+        (Some(chat.device_id.as_str()) != self.local_device_id.as_deref())
+            .then(|| chat.device_id.clone())
+    }
+
+    /// The live account driving `harness` — what a chat on that harness spends
+    /// against. `None` while the snapshot describes a different device than
+    /// the chat does, so the chip never attributes one machine's login to
+    /// another.
+    pub fn active_account_for(&self, harness: HarnessId) -> Option<&AgentAccount> {
+        if self.agent_accounts_target != self.selected_chat_account_target() {
+            return None;
+        }
+        self.agent_accounts
+            .ready()?
+            .accounts
+            .iter()
+            .find(|a| a.harness == harness && a.active)
+    }
+
     /// Drop every account-scoped view and subscription after its runtime has
     /// stopped. The next bootstrap must never render rows from the previous
     /// account while the local profile is opening.
@@ -1617,6 +1745,12 @@ impl AppState {
         self.engine = None;
         self.watch_tasks.clear();
         self.transcript_task = None;
+        // The next runtime's logins are a different accounts world; a reply
+        // from this one must not land under its name.
+        self.agent_accounts = Loadable::Idle;
+        self.agent_accounts_target = None;
+        self.agent_accounts_task = None;
+        self.agent_accounts_probed_at = None;
         self.change_request_tasks.clear();
         self.change_requests = ChangeRequestClientState::default();
         self.connection = ConnectionStatus::Connecting;
@@ -3051,6 +3185,55 @@ mod tests {
             status: None,
             continuation_of: None,
         }
+    }
+
+    #[test]
+    fn a_remote_chats_accounts_never_resolve_against_this_device() {
+        // The whole point of the target: a chat hosted elsewhere must not
+        // read — or, through `switch_account`, overwrite — the CLI login on
+        // this machine.
+        let mut state = AppState::new();
+        state.local_device_id = Some("local".into());
+        let mut remote = chat("c1", 0, None);
+        remote.device_id = "remote".into();
+        state.chats = vec![remote];
+        state.selected_chat = Some("c1".into());
+        assert_eq!(
+            state.selected_chat_account_target().as_deref(),
+            Some("remote")
+        );
+
+        let account = AgentAccount {
+            id: "a1".into(),
+            harness: HarnessId::ClaudeCode,
+            email: Some("someone@example.test".into()),
+            plan_label: None,
+            active: true,
+            usage_windows: Vec::new(),
+            display_name: None,
+            organization: None,
+            auth_kind: None,
+            switchable: true,
+            saved_at: None,
+        };
+        state.agent_accounts = Loadable::Ready(AgentAccountsSnapshot {
+            accounts: vec![account],
+            warnings: Vec::new(),
+        });
+
+        // A local snapshot answers for the local device, not this chat.
+        state.agent_accounts_target = None;
+        assert!(state.active_account_for(HarnessId::ClaudeCode).is_none());
+        // Once it describes the chat's own host, it is the right answer.
+        state.agent_accounts_target = Some("remote".into());
+        assert!(state.active_account_for(HarnessId::ClaudeCode).is_some());
+        // And a third device's snapshot is not, either.
+        state.agent_accounts_target = Some("other".into());
+        assert!(state.active_account_for(HarnessId::ClaudeCode).is_none());
+
+        // A chat on this device carries no passthrough.
+        state.chats[0].device_id = "local".into();
+        assert_eq!(state.selected_chat_account_target(), None);
     }
 
     #[test]

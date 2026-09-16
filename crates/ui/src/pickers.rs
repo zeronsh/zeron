@@ -459,11 +459,21 @@ pub enum PickerKind {
     /// New-session canvas only: the device project-less sessions run on (a
     /// project pick implies its own host and overrides this).
     Device,
+    /// Plan usage for the login this chat is spending: every window with its
+    /// reset, the other logins (one click from being live), and a way out to
+    /// Settings.
+    Account,
 }
 
 pub(crate) struct ReturnComposerFocus;
 
 impl gpui::EventEmitter<ReturnComposerFocus> for Pickers {}
+
+/// "Manage accounts" in the account card: the settings page owns forgetting
+/// and adding, so the card links there rather than growing a second copy.
+pub(crate) struct OpenAccountSettings;
+
+impl gpui::EventEmitter<OpenAccountSettings> for Pickers {}
 
 pub struct Pickers {
     state: Entity<AppState>,
@@ -479,6 +489,16 @@ pub struct Pickers {
     draft_owner: Option<String>,
     /// Space the branch draft/cache belong to (see the state observer).
     space_owner: Option<String>,
+    /// Account id with an in-flight switch, so its row can say so and the
+    /// list can refuse a second click while the CLI swaps credentials.
+    switching_account: Option<String>,
+    switch_account_task: Option<Task<()>>,
+    /// Last activation failure, shown in the card until the next attempt: a
+    /// locked credential store must not read as an ignored click.
+    account_error: Option<SharedString>,
+    /// The switch list is revealed by its own button, so the card opens on
+    /// the one account you are spending.
+    account_switch_open: bool,
     device_owner: Option<String>,
     target_generation: u64,
     open: popover::Popup<PickerKind>,
@@ -648,6 +668,10 @@ impl Pickers {
         Self {
             state,
             space_owner,
+            switching_account: None,
+            switch_account_task: None,
+            account_error: None,
+            account_switch_open: false,
             device_owner,
             target_generation: 0,
             config: DraftConfig::default(),
@@ -974,6 +998,8 @@ impl Pickers {
             PickerKind::HarnessModel => self.selected_model_index(cx),
             PickerKind::Space => self.selected_space_index(cx),
             PickerKind::Device => self.selected_device_index(cx),
+            // The account card is not a row list — nothing to highlight.
+            PickerKind::Account => NO_ACTIVE_ROW,
         };
         if kind == PickerKind::HarnessModel {
             // scroll_to_item below may land anywhere; the first note of the
@@ -1031,6 +1057,16 @@ impl Pickers {
                 // cold start. Revalidate on every open instead of pinning a
                 // timeout/fallback result until the application restarts.
                 self.prefetch_models(true, cx);
+            }
+            // Non-forcing: the footer chip keeps the snapshot warm, and
+            // opening a card must never make the provider probe.
+            PickerKind::Account => {
+                self.account_error = None;
+                self.account_switch_open = false;
+                self.state.update(cx, |state, cx| {
+                    let target = state.selected_chat_account_target();
+                    state.load_agent_accounts(target, false, cx);
+                });
             }
             // Projects and devices are already synced state — nothing to load.
             PickerKind::Space | PickerKind::Device => {}
@@ -2215,7 +2251,7 @@ impl Pickers {
                     Some(PickerKind::HarnessModel) => self.model_rows_len(cx),
                     Some(PickerKind::Space) => self.filtered_space_rows(cx).len() + 1,
                     Some(PickerKind::Device) => self.filtered_device_rows(cx).len(),
-                    None => 0,
+                    Some(PickerKind::Account) | None => 0,
                 };
                 let current = (self.active != NO_ACTIVE_ROW).then_some(self.active);
                 self.active = popover::menu_step(current, count, delta).unwrap_or(0);
@@ -2274,6 +2310,7 @@ impl Pickers {
             PickerKind::HarnessModel => "picker-model",
             PickerKind::Space => "picker-space",
             PickerKind::Device => "picker-device",
+            PickerKind::Account => "picker-account",
         };
         let open = self.open_kind() == Some(kind);
         // Ghost pill (zeron composer/styles.tsx `pill`): `h-8 rounded-lg px-2.5
@@ -2625,50 +2662,70 @@ impl Pickers {
         };
 
         if let Some(chat) = &session {
+            // The account chip carries its own card, mounted on the chip —
+            // this branch returns before the draft overlay plumbing below.
+            let account_chip = self.render_account_chip(&theme, cx).map(|chip| {
+                let mut overlay = (self.mounted_kind() == Some(PickerKind::Account)).then(|| {
+                    let content = self.render_account_popover(cx);
+                    (PickerKind::Account, self.popover_frame(296.0, content, cx))
+                });
+                attach_overlay(
+                    chip,
+                    &mut overlay,
+                    PickerKind::Account,
+                    "account-popover",
+                    self.open.closing_since(),
+                )
+            });
             // Sessions never move: read-only checkout-kind + ref labels,
             // LEFT-aligned, only when the session's project has git. The
-            // target (project @ device) lives in the titlebar now.
-            let Some(space) = space.as_ref().filter(|s| s.git_detected) else {
+            // target (project @ device) lives in the titlebar now. A
+            // project without git still gets the trailing status group.
+            let git_space = space.as_ref().filter(|s| s.git_detected);
+            if git_space.is_none() && account_chip.is_none() {
                 return None;
-            };
-            let is_worktree = chat.cwd.as_deref().is_some_and(|cwd| cwd != space.path);
-            let (icon_path, label) = if is_worktree {
-                (crate::icons::FOLDER_WITH_FILES, "Worktree")
-            } else {
-                (crate::icons::FOLDER, "Local checkout")
-            };
-            // Keep the same reading order and leading edge as the draft.
-            let left = div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .min_w_0()
-                .child(Self::footer_label(
-                    icon_path,
-                    SharedString::from(label),
-                    &theme,
-                ));
-            let right = div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .min_w_0()
-                .child(Self::footer_label(
-                    crate::icons::GIT_BRANCH,
-                    chat.branch
-                        .clone()
-                        .map(SharedString::from)
-                        .unwrap_or_else(|| SharedString::from("No ref")),
-                    &theme,
-                ));
+            }
+            let checkout = git_space.map(|space| {
+                let is_worktree = chat.cwd.as_deref().is_some_and(|cwd| cwd != space.path);
+                let (icon_path, label) = if is_worktree {
+                    (crate::icons::FOLDER_WITH_FILES, "Worktree")
+                } else {
+                    (crate::icons::FOLDER, "Local checkout")
+                };
+                // Keep the same reading order and leading edge as the draft.
+                let left =
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .min_w_0()
+                        .child(Self::footer_label(
+                            icon_path,
+                            SharedString::from(label),
+                            &theme,
+                        ));
+                let right = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
+                    .min_w_0()
+                    .child(Self::footer_label(
+                        crate::icons::GIT_BRANCH,
+                        chat.branch
+                            .clone()
+                            .map(SharedString::from)
+                            .unwrap_or_else(|| SharedString::from("No ref")),
+                        &theme,
+                    ));
+                (left, right)
+            });
             // Checkout + branch stay together. PR and usage form the trailing
             // status group, independently of the branch label's length.
             return Some(
                 row()
                     .pr_0()
-                    .child(left)
-                    .child(right)
+                    .when_some(checkout, |el, (left, right)| el.child(left).child(right))
                     .child(div().flex_1().min_w_0())
                     .when_some(change_request, |el, summary| {
                         el.child(div().flex_none().child(
@@ -2680,6 +2737,7 @@ impl Pickers {
                             ),
                         ))
                     })
+                    .children(account_chip)
                     .into_any_element(),
             );
         }
@@ -2754,6 +2812,429 @@ impl Pickers {
                 closing,
             ));
         Some(row().child(left).child(right).into_any_element())
+    }
+
+    /// The login this chat is spending: the active account for the chat's
+    /// harness. No chat, or no login for that harness, means no honest claim
+    /// to make, so the footer stays quiet rather than guessing.
+    fn usage_account(&self, cx: &Context<Self>) -> Option<zeron_proto::AgentAccount> {
+        let state = self.state.read(cx);
+        let harness = state
+            .selected_chat_row()
+            .and_then(|c| c.config.as_ref())
+            .map(|config| config.harness)?;
+        state.active_account_for(harness).cloned()
+    }
+
+    /// Footer chip: brand mark and what is left of the headline window.
+    ///
+    /// The colour keys off the window being *shown*, so the number and its
+    /// tint always tell one story — a calm "91% left" reads calm. A tighter
+    /// window elsewhere on the plan is one click away in the card.
+    fn render_account_chip(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        use crate::account_usage as usage;
+        let account = self.usage_account(cx)?;
+        let headline = usage::headline_window(&account.usage_windows)?;
+        let open = self.open_kind() == Some(PickerKind::Account);
+        Some(
+            div()
+                .id("picker-account")
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(5.0))
+                .px(px(6.0))
+                .py(px(3.0))
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .when(open, |el| el.bg(theme.glass_hover()))
+                .when(!open, |el| {
+                    el.hover(|st| st.bg(theme.glass_hover().opacity(0.7)))
+                })
+                // Same press-guard every other footer chip uses: the card's
+                // `on_mouse_down_out` already began closing on this press, so
+                // without recording it the click reads the popup as closed and
+                // reopens it — the chip would never close on a second click.
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, _| {
+                        this.open
+                            .note_trigger_press_matching(|open| *open == PickerKind::Account)
+                    }),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle(PickerKind::Account, window, cx);
+                }))
+                .child(usage::brand_mark(account.harness, 12.0, theme))
+                .child(
+                    // Neutral, like every other footer chip: the meter in the
+                    // card is where a low window speaks up.
+                    div()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child(usage::remaining_label(headline.used_fraction)),
+                ),
+        )
+    }
+
+    /// The card behind the chip: every window in full, the other logins, and
+    /// the way out to the page that owns forgetting.
+    fn render_account_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::account_usage as usage;
+        use crate::settings::widgets;
+        let theme = Theme::of(cx).clone();
+        let now = chrono::Utc::now();
+        let Some(account) = self.usage_account(cx) else {
+            return div().into_any_element();
+        };
+
+        let meters: Vec<AnyElement> = account
+            .usage_windows
+            .iter()
+            .map(|window| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .w(px(44.0))
+                                    .flex_none()
+                                    .truncate()
+                                    .child(SharedString::from(window.label.clone())),
+                            )
+                            .child(usage::meter(window.used_fraction, 4.0, &theme))
+                            .child(
+                                div()
+                                    .w(px(52.0))
+                                    .flex_none()
+                                    .text_right()
+                                    .child(usage::remaining_label(window.used_fraction)),
+                            ),
+                    )
+                    // The reset sits under its own meter, quiet: it answers
+                    // "when does this come back", not "how much is left".
+                    .when_some(
+                        crate::settings::accounts::format_reset(window.resets_at, now),
+                        |el, reset| {
+                            el.child(
+                                div()
+                                    .pl(px(52.0))
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(10.0))
+                                    .text_color(theme.text_faint)
+                                    .child(SharedString::from(reset)),
+                            )
+                        },
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        let others: Vec<zeron_proto::AgentAccount> = self
+            .state
+            .read(cx)
+            .agent_accounts
+            .ready()
+            .map(|snapshot| {
+                snapshot
+                    .accounts
+                    .iter()
+                    .filter(|a| a.id != account.id)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let has_others = !others.is_empty();
+        let switch_open = self.account_switch_open;
+        let switch_label = if switch_open {
+            "Hide accounts"
+        } else {
+            "Switch account"
+        };
+        let other_rows: Vec<AnyElement> = if switch_open { others } else { Vec::new() }
+            .into_iter()
+            .enumerate()
+            .map(|(ix, other)| self.render_account_switch_row(other, ix, &theme, now, cx))
+            .collect();
+
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px(px(10.0))
+                    .pt(px(9.0))
+                    .pb(px(8.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(7.0))
+                            .child(usage::brand_mark(account.harness, 14.0, &theme))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(usage::account_label(&account)),
+                            )
+                            .when_some(account.plan_label.clone(), |el, plan| {
+                                el.child(widgets::badge(&theme, plan))
+                            }),
+                    )
+                    .map(|el| {
+                        if meters.is_empty() {
+                            el.child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .text_color(theme.text_faint)
+                                    .child(SharedString::from("Usage unavailable")),
+                            )
+                        } else {
+                            el.child(div().flex().flex_col().gap(px(5.0)).children(meters))
+                        }
+                    }),
+            )
+            .when_some(self.account_error.clone(), |el, error| {
+                // A failed activation left the old account live — say so
+                // where the click happened, not nowhere.
+                el.child(
+                    div()
+                        .px(px(10.0))
+                        .pb(px(8.0))
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.danger.opacity(0.9))
+                        .child(error),
+                )
+            })
+            // Identity and usage first, actions last.
+            .when(has_others, |el| {
+                el.child(popover::menu_separator()).child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(7.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(
+                            popover::btn_ghost(&theme, switch_label, "picker-account-switch")
+                                .id("picker-account-switch")
+                                .border_1()
+                                .border_color(theme.border)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.account_switch_open = !this.account_switch_open;
+                                    cx.notify();
+                                })),
+                        )
+                        .when(switch_open, |el| {
+                            el.child(
+                                // Capped so a long login list scrolls in the
+                                // card rather than growing past the window.
+                                div()
+                                    .id("picker-account-others")
+                                    .max_h(px(168.0))
+                                    .overflow_y_scroll()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(1.0))
+                                    .children(other_rows),
+                            )
+                        }),
+                )
+            })
+            .child(popover::menu_separator())
+            .child(
+                div().p(px(2.0)).child(
+                    popover::menu_row(&theme, false, "picker-account-manage")
+                        .id("picker-account-manage")
+                        .text_color(theme.text_muted)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.close(cx);
+                            cx.emit(OpenAccountSettings);
+                        }))
+                        .child(
+                            crate::icons::icon(crate::icons::SETTINGS_MINIMALISTIC)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from("Manage accounts")),
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// One switchable login. An unswitchable one (credentials we could not
+    /// read) stays listed but inert — hiding it would misrepresent which
+    /// logins exist on the machine.
+    fn render_account_switch_row(
+        &self,
+        account: zeron_proto::AgentAccount,
+        ix: usize,
+        theme: &Theme,
+        now: chrono::DateTime<chrono::Utc>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use crate::account_usage as usage;
+        let busy = self.switching_account.as_deref() == Some(account.id.as_str());
+        let blocked = self.switching_account.is_some() || !account.switchable;
+        let headline = usage::headline_window(&account.usage_windows);
+        let target = account.clone();
+        div()
+            .id(("picker-account-switch", ix))
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(px(6.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(7.0))
+            .when(!blocked, |el| {
+                el.cursor_pointer()
+                    .hover(|st| st.bg(theme.glass_hover().opacity(0.7)))
+            })
+            .when(blocked, |el| el.opacity(0.55))
+            .on_click(cx.listener(move |this, _, _, cx| this.switch_account(&target, cx)))
+            .child(usage::brand_mark(account.harness, 12.0, theme))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(11.5))
+                                    .text_color(theme.text_muted)
+                                    .child(usage::account_label(&account)),
+                            )
+                            .when(busy, |el| {
+                                el.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(crate::typography::ui_rems(10.5))
+                                        .text_color(theme.text_faint)
+                                        .child(SharedString::from("Switching…")),
+                                )
+                            })
+                            .when_some(headline.filter(|_| !busy), |el, window| {
+                                el.child(
+                                    div()
+                                        .flex_none()
+                                        .w(px(52.0))
+                                        .text_right()
+                                        .text_size(crate::typography::ui_rems(11.0))
+                                        .text_color(theme.text_muted)
+                                        .child(usage::remaining_label(window.used_fraction)),
+                                )
+                            }),
+                    )
+                    .map(|el| match headline {
+                        Some(window) => el.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(usage::meter(window.used_fraction, 3.0, theme))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(crate::typography::ui_rems(10.0))
+                                        .text_color(theme.text_faint)
+                                        .child(usage::window_caption(window, now)),
+                                ),
+                        ),
+                        None => el.child(
+                            div()
+                                .text_size(crate::typography::ui_rems(10.0))
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from(if account.switchable {
+                                    "Usage unavailable"
+                                } else {
+                                    "Credentials unavailable"
+                                })),
+                        ),
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// Make `account` the active login for its provider, then re-list so the
+    /// chip and card show the swap. Same RPC Settings → Accounts uses: a
+    /// second entry point to one action, not a second implementation.
+    fn switch_account(&mut self, account: &zeron_proto::AgentAccount, cx: &mut Context<Self>) {
+        if self.switching_account.is_some() || account.active || !account.switchable {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.switching_account = Some(account.id.clone());
+        self.account_error = None;
+        // The chat's own device, so a remote chat swaps ITS credentials and
+        // never the ones on this machine.
+        let target = self.state.read(cx).selected_chat_account_target();
+        // Tolerant param shape, matching settings/accounts.rs.
+        let mut params = serde_json::json!({
+            "id": account.id,
+            "accountId": account.id,
+            "harness": account.harness,
+        });
+        if let Some(device) = target.clone() {
+            params["targetDeviceId"] = serde_json::Value::String(device);
+        }
+        self.switch_account_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(zeron_rpc::methods::ACTIVATE_AGENT_ACCOUNT, params)
+                .await;
+            this.update(cx, |pickers, cx| {
+                pickers.switching_account = None;
+                match result {
+                    // Activate already refreshed the credentials; the usage
+                    // behind them is still warm, so ride the engine cache
+                    // rather than re-probing the provider.
+                    Ok(_) => pickers.state.update(cx, |state, cx| {
+                        state.load_agent_accounts(target, false, cx);
+                    }),
+                    Err(err) => pickers.account_error = Some(err.to_string().into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     fn popover_frame(&self, width: f32, content: AnyElement, cx: &mut Context<Self>) -> AnyElement {
@@ -2855,8 +3336,9 @@ impl Pickers {
                             this.catalog_rev += 1;
                             this.ensure_harnesses(false, cx);
                         }
-                        // Projects/devices load nothing; no retry surface exists.
-                        PickerKind::Space | PickerKind::Device => {}
+                        // Projects/devices/accounts load nothing through
+                        // this surface; no retry exists for them.
+                        PickerKind::Space | PickerKind::Device | PickerKind::Account => {}
                     }))
                     .child(SharedString::from("Retry")),
             )
@@ -4233,7 +4715,8 @@ impl Render for Pickers {
             Some(PickerKind::Branch)
             | Some(PickerKind::Checkout)
             | Some(PickerKind::Space)
-            | Some(PickerKind::Device) => None,
+            | Some(PickerKind::Device)
+            | Some(PickerKind::Account) => None,
             Some(PickerKind::HarnessModel) => {
                 let content = self.render_harness_model_popover(cx);
                 Some((

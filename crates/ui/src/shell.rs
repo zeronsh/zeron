@@ -1553,6 +1553,13 @@ pub struct Shell {
     /// The primary transcript's spawn-chip events (subagent tabs).
     _transcript_events: Subscription,
     _transcript_invalidation: Subscription,
+    /// "Manage accounts" in the composer's account card.
+    _picker_events: Subscription,
+    /// Heartbeat that re-renders once per usage TTL so the account chip's
+    /// staleness check runs while nothing else is changing. Dropped whenever
+    /// the chip has nothing to show or the window loses focus — see
+    /// [`Shell::drive_account_usage`].
+    account_usage_poll: Option<Task<()>>,
 }
 
 impl Shell {
@@ -1597,6 +1604,13 @@ impl Shell {
         });
         // Spawn chips open their subagent's transcript as a right-pane tab.
         let transcript_events = cx.subscribe(&transcript, Self::on_transcript_event);
+        // The settings page owns adding and forgetting; the card links there.
+        let picker_events = cx.subscribe(
+            &composer.read(cx).pickers().clone(),
+            |this: &mut Shell, _, _: &crate::pickers::OpenAccountSettings, cx| {
+                this.open_settings(SettingsSection::Agents, cx);
+            },
+        );
         // Working-indicator heartbeat: notify once a second while a session is
         // live so elapsed time and the flavour word stay fresh.
         let ticker = cx.spawn(async move |this, cx| {
@@ -1829,6 +1843,8 @@ impl Shell {
             _state_observation: observation,
             _composer_events: composer_events,
             _transcript_events: transcript_events,
+            _picker_events: picker_events,
+            account_usage_poll: None,
             _transcript_invalidation: transcript_invalidation,
         }
     }
@@ -3646,6 +3662,52 @@ impl Shell {
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
+    }
+
+    /// Keep the account chip's numbers current without probing providers for
+    /// a chip nobody can see.
+    ///
+    /// Three gates, cheapest first: the chip is hidden unless a chat is on
+    /// screen (Settings may be viewing another device's logins, which must
+    /// not be yanked back), a background window is not worth provider
+    /// traffic, and a snapshot younger than the engine's usage TTL would only
+    /// re-serve its own cache. Past those, the heartbeat re-renders once per
+    /// TTL so this check runs again while the app sits idle.
+    fn drive_account_usage(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let showing = matches!(self.route, Route::Chat)
+            && self
+                .state
+                .read(cx)
+                .selected_chat_row()
+                .and_then(|c| c.config.as_ref())
+                .is_some();
+        if !showing || !window.is_window_active() {
+            self.account_usage_poll = None;
+            return;
+        }
+        // Settings may have pointed the snapshot at another device; the chip
+        // speaks for the chat's own, so take it back rather than wait out the
+        // TTL.
+        let state = self.state.read(cx);
+        let target = state.selected_chat_account_target();
+        if state.agent_usage_stale() || state.agent_accounts_target != target {
+            self.state
+                .update(cx, |state, cx| state.load_agent_accounts(target, true, cx));
+        }
+        if self.account_usage_poll.is_none() {
+            self.account_usage_poll = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(AppState::AGENT_USAGE_TTL)
+                        .await;
+                    // The refresh decision lives in one place (above); the
+                    // heartbeat only asks for another pass at it.
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
     }
 
     /// Lazily create the entity for a settings section and return it renderable.
@@ -9598,9 +9660,13 @@ impl Render for Shell {
                             composer.set_queue_shortcut_revealed(false, cx)
                         });
                     }
+                    // Tears the usage heartbeat down on blur and picks it back
+                    // up on focus, refreshing if the snapshot went stale away.
+                    this.drive_account_usage(window, cx);
                 },
             ));
         }
+        self.drive_account_usage(window, cx);
 
         // A live handle can refer to an unmounted element. Recover against
         // the completed frame so newly mounted dialogs can claim focus first.
