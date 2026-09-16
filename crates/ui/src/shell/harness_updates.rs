@@ -96,8 +96,7 @@ fn update_progress(
             tint: theme.accent,
         })
     };
-    // Keep the track and the cached activity fill in one paint layer, including
-    // the clipping at the chip's rounded lower edge.
+    // Keep the track and the cached activity fill in one paint layer.
     crate::frost::layered(track).into_any_element()
 }
 
@@ -660,15 +659,6 @@ impl Shell {
                                         .child(label),
                                 ),
                         )
-                        .when(active(status), |el| {
-                            el.child(loaders::mini_glyph_spinner(
-                                format!("update-row-activity-{:?}", status.harness),
-                                2.0,
-                                theme.glyph,
-                                cx.entity_id(),
-                                cx,
-                            ))
-                        })
                         .when(status.phase == Phase::Updated, |el| {
                             el.child(icon(icons::CHECK).size(px(14.0)).text_color(theme.success))
                         })
@@ -748,7 +738,8 @@ impl Shell {
             .child(summary)
             .children(rows)
             .when(!multiple && active(status), |el| {
-                el.child(update_progress(status, 0.0, 0.0, 0.0, &theme))
+                // Inset within the pill so the track clears its rounded border.
+                el.child(update_progress(status, 16.0, 16.0, 4.0, &theme))
             });
         Some(crate::frost::frosted(radius, 16.0, card).into_any_element())
     }
