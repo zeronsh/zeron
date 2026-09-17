@@ -38,6 +38,7 @@ use crate::notice::{NoticeChipIcon, notice_chip};
 use crate::pickers::Pickers;
 use crate::settings::{ComposerSendBehavior, platform_combo};
 use crate::state::{AppState, Indicator};
+use crate::subagent_navigator::{AgentTarget, NavigatorEvent, SubagentNavigator};
 use crate::theme::Theme;
 
 // ---------------------------------------------------------------------------
@@ -1614,6 +1615,9 @@ pub enum ComposerInputEvent {
     PastedImages(Vec<gpui::Image>),
     /// File paths pasted from the clipboard (a file manager "Copy").
     PastedPaths(Vec<PathBuf>),
+    /// ↓ with the caret already at the end: focus leaves the text for the
+    /// agent rail below the pill.
+    ExitDown,
 }
 
 /// Shaping inputs excluding mutable viewport and selection geometry.
@@ -2347,6 +2351,12 @@ impl ComposerInput {
         start..end
     }
 
+    /// Type text at the caret from outside the input — the agent rail handing
+    /// back a keystroke that was never a rail gesture.
+    pub fn insert(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_text_in_range(None, text, window, cx);
+    }
+
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             let prev = self.previous_boundary(self.cursor_offset());
@@ -2402,8 +2412,11 @@ impl ComposerInput {
             cx.emit(ComposerInputEvent::MentionNavigate(1));
             return;
         }
-        if let Some(ix) = self.vertical_target(1.0) {
-            self.move_to(ix, cx);
+        match self.vertical_target(1.0) {
+            Some(ix) if ix != self.cursor_offset() => self.move_to(ix, cx),
+            // Nowhere left to go inside the text: the composer hands ↓ to
+            // whatever sits below it (the agent rail).
+            _ => cx.emit(ComposerInputEvent::ExitDown),
         }
     }
 
@@ -3866,6 +3879,8 @@ pub enum ComposerEvent {
     /// yet: the transcript remembers the stable id and promotes it to an
     /// own-turn anchor only when the host materializes the matching bubble.
     Queued { chat_id: String, message_id: String },
+    /// The agent rail picked a transcript for the conversation column.
+    FocusAgent(AgentTarget),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4005,6 +4020,18 @@ pub struct Composer {
     /// Composer actions row plus the new-session floating target tab
     /// ([`Pickers::render_new_thread_target_selectors`]).
     pickers: Entity<Pickers>,
+    /// The agent rail under the pill (`main` + this session's subagents). It
+    /// lives here rather than in the shell so it inherits the composer
+    /// column's width, insets and bottom padding — it IS the bottom of the
+    /// composer.
+    agents: Entity<SubagentNavigator>,
+    /// Focus moves are deferred to the next render, the first place with a
+    /// `Window` (the same trick the attachment lightbox uses).
+    focus_agents_pending: bool,
+    focus_input_pending: bool,
+    /// Characters typed while the rail held focus, waiting for the same
+    /// render to hand them to the input.
+    typed_from_rail: String,
     /// Draft text per chat key ("" = new-chat canvas), surviving navigation.
     drafts: HashMap<String, String>,
     /// Staged-but-unsent attachments per chat key (use-attachments.ts `stash`):
@@ -4144,6 +4171,7 @@ pub struct Composer {
     _pickers_observe: Subscription,
     _picker_focus: Subscription,
     _input_events: Subscription,
+    _agent_events: Subscription,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -4263,6 +4291,23 @@ impl Composer {
                 this.add_staged(staged, cx);
             }
             ComposerInputEvent::PastedPaths(paths) => this.add_paths(paths.clone(), cx),
+            ComposerInputEvent::ExitDown => {
+                this.focus_agents_pending = true;
+                cx.notify();
+            }
+        });
+        let agents = cx.new(|cx| SubagentNavigator::new(state.clone(), cx));
+        let agent_events = cx.subscribe(&agents, |this: &mut Self, _, event, cx| match event {
+            NavigatorEvent::Focus(target) => cx.emit(ComposerEvent::FocusAgent(target.clone())),
+            NavigatorEvent::ReturnToComposer => {
+                this.focus_input_pending = true;
+                cx.notify();
+            }
+            NavigatorEvent::TypeIntoComposer(text) => {
+                this.focus_input_pending = true;
+                this.typed_from_rail.push_str(text);
+                cx.notify();
+            }
         });
         let current_key = state.read(cx).selected_chat.clone().unwrap_or_default();
         let mut composer = Self {
@@ -4270,6 +4315,10 @@ impl Composer {
             input,
             queue_edit_draft: None,
             pickers,
+            agents,
+            focus_agents_pending: false,
+            focus_input_pending: false,
+            typed_from_rail: String::new(),
             drafts: HashMap::new(),
             attachments: HashMap::new(),
             appshots: HashMap::new(),
@@ -4342,6 +4391,7 @@ impl Composer {
             _pickers_observe: pickers_observe,
             _picker_focus: picker_focus,
             _input_events: input_events,
+            _agent_events: agent_events,
         };
         // Dev knob: pre-stage attachments (drop/paste can't be synthesized on
         // a rig) — `ZERON_ATTACH=/path/a.png[,/path/b.png]`, and
@@ -5955,6 +6005,12 @@ impl Composer {
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
     /// reasoning / options on the Run request itself (§1.7).
     fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
+        // The composer always talks to the SESSION — there is no channel into
+        // a running subagent. Sending while an agent's transcript is on
+        // screen puts the column back on the session, so the reply lands
+        // where the reader is looking instead of somewhere behind them.
+        self.agents
+            .update(cx, |agents, cx| agents.focus_target(AgentTarget::Main, cx));
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.failure = Some("Engine not connected".into());
             self.failure_key = None; // global — meaningful on every chat
@@ -7119,6 +7175,21 @@ impl Render for Composer {
             let focus = self.input.focus_handle(cx);
             window.focus(&focus, cx);
         }
+        // Deferred focus moves between the text and the rail below it (the
+        // event that asks for them has no `Window`).
+        if std::mem::take(&mut self.focus_input_pending) {
+            window.focus(&self.input.focus_handle(cx), cx);
+            if !self.typed_from_rail.is_empty() {
+                let typed = std::mem::take(&mut self.typed_from_rail);
+                self.input
+                    .update(cx, |input, cx| input.insert(&typed, window, cx));
+            }
+        }
+        if std::mem::take(&mut self.focus_agents_pending) {
+            // A rail with no agents declines, leaving ↓ its editor meaning.
+            self.agents
+                .update(cx, |agents, cx| agents.enter_from_composer(window, cx));
+        }
         let theme = Theme::of(cx).clone();
         let wizard_active = self.wizard.is_some();
         if self.mention.token.is_some()
@@ -7949,6 +8020,9 @@ impl Render for Composer {
         } else {
             container
         };
+        // The agent rail closes the stack: pill → footer → agents. It renders
+        // nothing until the session has spawned one.
+        let container = container.child(self.agents.clone());
         // Full-size preview of a staged thumbnail (AttachmentPreviewDialog).
         if let Some(preview) = self.preview.clone() {
             if std::mem::take(&mut self.preview_focus_pending) {

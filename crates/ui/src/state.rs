@@ -20,6 +20,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -39,6 +40,10 @@ use zeron_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_cl
 use crate::change_requests::{
     ChangeRequestClientState, ChangeRequestWatchKey, desired_watch_targets, watch_params,
 };
+
+/// A frozen subagent's transcript blob is one RPC; past this the fetch gives
+/// up and the live doc watch takes over.
+const SUBAGENT_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(20);
 
 // ---------------------------------------------------------------------------
 // Engine handle
@@ -704,9 +709,16 @@ pub struct AppState {
     sub_transcripts: HashMap<String, Vec<SessionMessageEntry>>,
     /// One watch task per live subagent doc (single-flight per key).
     /// Dropping a task cancels the engine-side watch and unpins the doc from
-    /// the engine LRU — closing a tab MUST go through
-    /// [`Self::unwatch_subagent_doc`].
+    /// the engine LRU — every reader MUST release through
+    /// [`Self::close_subagent_feed`].
     sub_watch_tasks: HashMap<String, Task<()>>,
+    /// Readers holding each subagent doc open — a right-pane tab, the agent
+    /// rail's scope path or its focus. The rows and the feed live while any
+    /// reader does, so one closing cannot blank what another still shows.
+    sub_feed_refs: HashMap<String, usize>,
+    /// A frozen subagent's blob fetch in flight; dropping it cancels the
+    /// fetch, and completion falls back to the live watch on any failure.
+    sub_fetch_tasks: HashMap<String, Task<()>>,
 }
 
 /// Text/reasoning growth changes the transcript without changing session
@@ -771,6 +783,8 @@ impl AppState {
             change_requests_visible: true,
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
+            sub_feed_refs: HashMap::new(),
+            sub_fetch_tasks: HashMap::new(),
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
@@ -1193,10 +1207,89 @@ impl AppState {
             .unwrap_or(&[])
     }
 
+    /// Open a subagent doc feed for one reader. A running subagent watches
+    /// its doc directly; a `frozen` one (done/failed) reads the uploaded
+    /// transcript blob (`{chat_id}/{doc_id}`) once and falls back to the
+    /// live watch on ANY failure, since the upload is best-effort
+    /// engine-side. Refcounted: a second reader of the same doc shares the
+    /// feed already running, and the rows survive until the last reader
+    /// closes.
+    pub fn open_subagent_feed(
+        &mut self,
+        chat_id: &str,
+        doc_id: String,
+        frozen: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let refs = self.sub_feed_refs.entry(doc_id.clone()).or_insert(0);
+        *refs += 1;
+        if *refs > 1 {
+            return;
+        }
+        if !frozen {
+            self.watch_subagent_doc(doc_id, cx);
+            return;
+        }
+        let Some(engine) = self.engine.clone() else {
+            self.watch_subagent_doc(doc_id, cx);
+            return;
+        };
+        let blob_ref = format!("{chat_id}/{doc_id}");
+        let task = cx.spawn({
+            let doc_id = doc_id.clone();
+            async move |this, cx| {
+                let reply = crate::attachments::call_with_timeout(
+                    &engine,
+                    cx.background_executor(),
+                    methods::FETCH_TOOL_BLOB,
+                    serde_json::json!({ "blobRef": blob_ref }),
+                    SUBAGENT_SNAPSHOT_TIMEOUT,
+                )
+                .await;
+                let entries: Option<Vec<SessionMessageEntry>> = reply.ok().and_then(|value| {
+                    let text = value.get("text")?.as_str()?.to_owned();
+                    serde_json::from_str(&text).ok()
+                });
+                this.update(cx, |state, cx| {
+                    // Every reader let go while the blob was in flight.
+                    if !state.sub_feed_refs.contains_key(&doc_id) {
+                        return;
+                    }
+                    state.sub_fetch_tasks.remove(&doc_id);
+                    match entries {
+                        Some(entries) => state.set_subagent_snapshot(doc_id, entries),
+                        None => state.watch_subagent_doc(doc_id, cx),
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        });
+        self.sub_fetch_tasks.insert(doc_id, task);
+    }
+
+    /// Release one reader. The last one out drops the watch task (cancelling
+    /// the engine-side watch and unpinning the doc from the engine LRU), any
+    /// blob fetch still in flight, and the rows.
+    pub fn close_subagent_feed(&mut self, doc_id: &str) {
+        let Some(refs) = self.sub_feed_refs.get_mut(doc_id) else {
+            return;
+        };
+        *refs -= 1;
+        if *refs > 0 {
+            return;
+        }
+        self.sub_feed_refs.remove(doc_id);
+        self.sub_fetch_tasks.remove(doc_id);
+        self.sub_watch_tasks.remove(doc_id);
+        self.sub_transcripts.remove(doc_id);
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+    }
+
     /// Watch a SUBAGENT doc (`WatchDocMessages` works for any doc id).
     /// Single-flight per key; a frozen snapshot already in place wins — the
     /// watch would race the (complete) blob with a possibly-purged live doc.
-    pub fn watch_subagent_doc(&mut self, doc_id: String, cx: &mut Context<Self>) {
+    fn watch_subagent_doc(&mut self, doc_id: String, cx: &mut Context<Self>) {
         if self.sub_watch_tasks.contains_key(&doc_id) {
             return;
         }
@@ -1208,17 +1301,9 @@ impl AppState {
         self.sub_watch_tasks.insert(doc_id, task);
     }
 
-    /// Tab closed: drop the watch task (cancels the engine-side watch and
-    /// unpins the doc from the engine LRU) and the rows.
-    pub fn unwatch_subagent_doc(&mut self, doc_id: &str) {
-        self.transcript_revision = self.transcript_revision.wrapping_add(1);
-        self.sub_watch_tasks.remove(doc_id);
-        self.sub_transcripts.remove(doc_id);
-    }
-
     /// Frozen-blob path: the finished subagent's uploaded transcript, no
     /// watch needed (and any in-flight watch is superseded).
-    pub fn set_subagent_snapshot(&mut self, doc_id: String, entries: Vec<SessionMessageEntry>) {
+    fn set_subagent_snapshot(&mut self, doc_id: String, entries: Vec<SessionMessageEntry>) {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.sub_watch_tasks.remove(&doc_id);
         self.sub_transcripts.insert(doc_id, entries);
@@ -3097,10 +3182,16 @@ mod tests {
         );
 
         let before_subagent = state.transcript_revision;
+        state.sub_feed_refs.insert("sub".into(), 2);
         state.set_subagent_snapshot("sub".into(), vec![user_entry("nested")]);
         assert_ne!(state.transcript_revision, before_subagent);
+        // Two readers (a tab and the rail): the first closing keeps the rows
+        // for the second, the last one out drops them.
         let before_close = state.transcript_revision;
-        state.unwatch_subagent_doc("sub");
+        state.close_subagent_feed("sub");
+        assert_eq!(state.sub_transcript("sub").len(), 1);
+        assert_eq!(state.transcript_revision, before_close);
+        state.close_subagent_feed("sub");
         assert!(state.sub_transcript("sub").is_empty());
         assert_ne!(state.transcript_revision, before_close);
     }
