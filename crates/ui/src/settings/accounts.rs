@@ -786,12 +786,6 @@ impl AccountsPage {
             .or_else(|| account.display_name.clone())
             .unwrap_or_else(|| "Unknown account".into())
             .into();
-        let initial: SharedString = email
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "?".into())
-            .into();
         let switch_account = account.clone();
         let forget_account = account.clone();
 
@@ -867,22 +861,9 @@ impl AccountsPage {
             .items_stretch()
             .gap(px(12.0))
             .child(
-                // Initial avatar: size-8 rounded-full border bg-white/[0.03].
-                div()
-                    .flex_none()
-                    .self_center()
-                    .size(px(32.0))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(crate::theme::ink(0.03))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text_muted)
-                    .child(initial),
+                // The same mark the sidebar draws for a person, seeded on the
+                // address so two logins to one provider stop looking alike.
+                crate::identity::avatar(&email, &email, 32.0, theme).self_center(),
             )
             .child(
                 div()

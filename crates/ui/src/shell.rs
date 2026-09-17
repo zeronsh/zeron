@@ -3518,6 +3518,7 @@ impl Shell {
         self.settings.terminal_font_size = current.terminal_font_size;
         self.settings.code_font_family = current.code_font_family;
         self.settings.code_font_size = current.code_font_size;
+        self.settings.images = current.images;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
@@ -6017,8 +6018,21 @@ impl Shell {
                 (line, Some("Alpha".into()), email)
             }
         };
-        let user_menu =
-            self.render_user_menu(user_line.clone(), trigger_subline, menu_identity, theme, cx);
+        // A signed-in person keeps one mark across sign-outs and reinstalls;
+        // a local or development profile is one identity per scope.
+        let identity_key = crate::identity::user_key(match (&user, workspace_scope) {
+            (Some(user), Some(WorkspaceScope::Synced) | None) => user.id.as_str(),
+            (_, Some(WorkspaceScope::Development)) => "development",
+            _ => "local",
+        });
+        let user_menu = self.render_user_menu(
+            user_line.clone(),
+            trigger_subline,
+            menu_identity,
+            identity_key,
+            theme,
+            cx,
+        );
 
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
@@ -6257,20 +6271,24 @@ impl Shell {
         user_line: SharedString,
         trigger_subline: Option<SharedString>,
         menu_identity: SharedString,
+        identity_key: String,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = &theme.for_popup();
         let open = self.user_menu.is_open();
         let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
-        // Bottom-of-sidebar identity: avatar circle + scope/account label and
-        // its secondary status line.
-        let initial: SharedString = user_line
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "?".into())
-            .into();
+        // Bottom-of-sidebar identity: the person's mark + scope/account label
+        // and its secondary status line.
+        let avatar = crate::identity::avatar_for(
+            &identity_key,
+            &identity_key,
+            user_line.as_ref(),
+            28.0,
+            theme,
+            cx,
+        );
+        let has_photo = crate::identity::picture(&identity_key, cx).is_some();
         let mut trigger = div()
             .id("user-menu")
             .flex_none()
@@ -6309,21 +6327,7 @@ impl Shell {
                 }
                 cx.notify();
             }))
-            .child(
-                // Avatar: white circle, initial in near-black (zeron user-menu.tsx).
-                div()
-                    .size(px(28.0))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(theme.text)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.bg)
-                    .child(initial),
-            )
+            .child(avatar)
             .child(
                 // Name with an optional status line underneath — no chip on the right.
                 div()
@@ -6428,6 +6432,45 @@ impl Shell {
                     };
                     menu.child(row).child(popover::menu_separator())
                 })
+                .child({
+                    let key = identity_key.clone();
+                    popover::menu_row(theme, false, "user-menu-photo")
+                        .id("user-menu-photo")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.close_user_menu(cx);
+                            crate::identity::pick_picture(key.clone(), cx, |this, result, _| {
+                                this.sidebar_notice = result.err().map(SharedString::from);
+                            });
+                        }))
+                        .child(
+                            icon(icons::FILE_IMAGE)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from(if has_photo {
+                            "Change photo…"
+                        } else {
+                            "Add photo…"
+                        }))
+                })
+                .when(has_photo, |menu| {
+                    let key = identity_key.clone();
+                    menu.child(
+                        popover::menu_row(theme, false, "user-menu-photo-clear")
+                            .id("user-menu-photo-clear")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_user_menu(cx);
+                                crate::identity::clear_picture(&key, cx);
+                            }))
+                            .child(
+                                icon(icons::CLOSE_CIRCLE)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from("Remove photo")),
+                    )
+                })
+                .child(popover::menu_separator())
                 .child(
                     popover::menu_row(theme, false, "user-menu-settings")
                         .id("user-menu-settings")

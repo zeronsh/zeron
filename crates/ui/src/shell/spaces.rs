@@ -811,12 +811,23 @@ impl Shell {
                     this.open_spaces_menu(window, cx);
                 }
             }))
-            .child(
-                icon(icons::FOLDER)
+            // "All projects" keeps the neutral folder; a selected project gets
+            // its own mark, so the trigger says WHICH project at a glance.
+            .child(match &filter {
+                Some(id) => crate::identity::tile_for(
+                    &crate::identity::space_key(id),
+                    id,
+                    label.as_ref(),
+                    16.0,
+                    theme,
+                    cx,
+                ),
+                None => icon(icons::FOLDER)
                     .size(px(16.0))
                     .flex_none()
-                    .text_color(theme.text_muted),
-            )
+                    .text_color(theme.text_muted)
+                    .into_any_element(),
+            })
             // flex_1 pushes the caret to the trigger's right edge and gives
             // long space names a bound to truncate against; the "@ device"
             // tag hugs the name inside it rather than sitting by the caret.
@@ -2841,6 +2852,52 @@ impl Shell {
                         }))
                         .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
                         .child(SharedString::from("Rename…")),
+                )
+                .child({
+                    let key = crate::identity::space_key(&space_id);
+                    let has_picture = crate::identity::picture(&key, cx).is_some();
+                    popover::menu_row(&theme, false, format!("space-menu-picture-{space_id}"))
+                        .id("space-menu-picture")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.close_space_menu(cx);
+                            crate::identity::pick_picture(key.clone(), cx, |this, result, _| {
+                                this.sidebar_notice = result.err().map(SharedString::from);
+                            });
+                        }))
+                        .child(
+                            icon(icons::FILE_IMAGE)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from(if has_picture {
+                            "Change picture…"
+                        } else {
+                            "Set picture…"
+                        }))
+                })
+                .when(
+                    crate::identity::picture(&crate::identity::space_key(&space_id), cx).is_some(),
+                    |menu| {
+                        let key = crate::identity::space_key(&space_id);
+                        menu.child(
+                            popover::menu_row(
+                                &theme,
+                                false,
+                                format!("space-menu-picture-clear-{space_id}"),
+                            )
+                            .id("space-menu-picture-clear")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_space_menu(cx);
+                                crate::identity::clear_picture(&key, cx);
+                            }))
+                            .child(
+                                icon(icons::CLOSE_CIRCLE)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from("Remove picture")),
+                        )
+                    },
                 )
                 .child(popover::menu_separator())
                 .child(
