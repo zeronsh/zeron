@@ -305,9 +305,11 @@ fn restored_main_window_bounds(cx: &App) -> (Bounds<gpui::Pixels>, Option<gpui::
 }
 
 fn save_main_window_geometry(window: &gpui::Window, cx: &mut App) {
-    if window.is_fullscreen() || window.is_maximized() {
+    if window.is_fullscreen() {
         return;
     }
+    // macos infers maximization from screen-sized bounds, including ordinary
+    // windows; other desktop backends report a distinct maximized variant.
     let WindowBounds::Windowed(bounds) = window.window_bounds() else {
         return;
     };
