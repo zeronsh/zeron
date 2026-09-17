@@ -33,6 +33,7 @@
 
 pub mod catalog;
 mod normalize;
+pub mod transcript;
 mod wire;
 
 use std::path::PathBuf;

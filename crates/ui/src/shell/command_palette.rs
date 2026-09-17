@@ -20,6 +20,7 @@ pub(super) struct CommandPalette {
 enum Entry {
     NewChat,
     NewProject,
+    ImportClaude,
     Settings,
     Chat(String),
 }
@@ -29,6 +30,7 @@ impl Entry {
         match self {
             Self::NewChat => Some(("New chat", icons::PEN_NEW_SQUARE)),
             Self::NewProject => Some(("New project", icons::FOLDER)),
+            Self::ImportClaude => Some(("Import Claude Code session", icons::PEN_NEW_SQUARE)),
             Self::Settings => Some(("Open settings", icons::SETTINGS_MINIMALISTIC)),
             Self::Chat(_) => None,
         }
@@ -41,10 +43,15 @@ fn matches_query(query: &str, text: &str) -> bool {
 }
 
 fn actions_for(query: &str) -> Vec<Entry> {
-    [Entry::NewChat, Entry::NewProject, Entry::Settings]
-        .into_iter()
-        .filter(|entry| matches_query(query, entry.action().unwrap().0))
-        .collect()
+    [
+        Entry::NewChat,
+        Entry::NewProject,
+        Entry::ImportClaude,
+        Entry::Settings,
+    ]
+    .into_iter()
+    .filter(|entry| matches_query(query, entry.action().unwrap().0))
+    .collect()
 }
 
 impl Shell {
@@ -142,6 +149,7 @@ impl Shell {
         match entry {
             Entry::NewChat => self.open_new_session(cx),
             Entry::NewProject => self.open_add_space(cx),
+            Entry::ImportClaude => self.open_claude_import(window, cx),
             Entry::Settings => self.open_settings(SettingsSection::Devices, cx),
             Entry::Chat(id) => self.open_chat(id, cx),
         }
@@ -436,7 +444,12 @@ mod tests {
     fn action_search_hides_empty_section_and_preserves_order() {
         assert_eq!(
             actions_for(""),
-            vec![Entry::NewChat, Entry::NewProject, Entry::Settings]
+            vec![
+                Entry::NewChat,
+                Entry::NewProject,
+                Entry::ImportClaude,
+                Entry::Settings
+            ]
         );
         assert_eq!(actions_for("new"), vec![Entry::NewChat, Entry::NewProject]);
         assert_eq!(actions_for("settings"), vec![Entry::Settings]);

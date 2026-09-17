@@ -19,6 +19,7 @@ pub mod agent_accounts;
 pub mod auth;
 pub mod change_requests;
 pub mod chat2_host;
+pub mod claude_import;
 pub mod diff_sync;
 pub mod doc_host;
 pub mod instance_lock;
@@ -133,6 +134,8 @@ pub struct EngineCore {
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
+    /// Imports Claude Code's own transcripts into chats.
+    pub claude_import: claude_import::ClaudeImporter,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -286,6 +289,12 @@ impl EngineCore {
                 uploads.clone(),
             )
         });
+        let claude_import = claude_import::ClaudeImporter::new(
+            agent_accounts_config.claude_config_dir.clone(),
+            &device_id,
+            workspace.clone(),
+            doc_host.clone(),
+        );
         let agent_accounts = AgentAccounts::new(agent_accounts_config);
         sessions.set_titles(TitleGenerator::new(
             workspace.clone(),
@@ -315,6 +324,7 @@ impl EngineCore {
             agent_accounts,
             device_id,
             local_import,
+            claude_import,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
@@ -456,6 +466,7 @@ impl EngineCore {
         if let Some(importer) = self.local_import.clone() {
             rpc = rpc.with_local_import(importer);
         }
+        rpc = rpc.with_claude_import(self.claude_import.clone());
         Arc::new(rpc)
     }
 

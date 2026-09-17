@@ -19,6 +19,15 @@ The installer starts the daemon immediately and keeps it running across reboots.
 
 The desktop sidebar browser also needs the [Linux browser runtime](docs/reference/linux-browser.md).
 
+On NixOS the prebuilt binary cannot run, so install from the flake instead:
+
+```bash
+nix profile install github:zeronsh/zeron   # or try it first: nix run github:zeronsh/zeron -- status
+zeron daemon install
+```
+
+The Nix package bundles the browser runtime. `zeron daemon install` writes a systemd user unit pointing at the current store path, so re-run it after upgrading the package. `nix develop` provides the toolchain and native libraries for source builds.
+
 Day-to-day:
 
 ```bash

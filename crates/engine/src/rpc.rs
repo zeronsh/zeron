@@ -366,6 +366,13 @@ struct FetchToolBlobParams {
     blob_ref: String,
 }
 
+/// Which Claude Code transcripts to import; empty imports every new one.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct ImportClaudeParams {
+    session_ids: Vec<String>,
+}
+
 /// The Mutate surface (feature-inventory §2 DataRpc), tagged by `op`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
@@ -479,6 +486,7 @@ pub struct EngineRpc {
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<zeron_update::Updater>,
     local_import: Option<crate::local_import::LocalImporter>,
+    claude_import: Option<crate::claude_import::ClaudeImporter>,
     engine_info: EngineInfo,
 }
 
@@ -520,6 +528,7 @@ impl EngineRpc {
             links: None,
             updater: None,
             local_import: None,
+            claude_import: None,
             engine_info,
         }
     }
@@ -553,6 +562,12 @@ impl EngineRpc {
         self
     }
 
+    /// Attach the Claude Code transcript importer.
+    pub fn with_claude_import(mut self, importer: crate::claude_import::ClaudeImporter) -> Self {
+        self.claude_import = Some(importer);
+        self
+    }
+
     fn auth(&self) -> Result<&Auth, RpcError> {
         self.auth
             .as_ref()
@@ -569,6 +584,12 @@ impl EngineRpc {
         self.local_import
             .as_ref()
             .ok_or_else(|| RpcError::Failed("local import requires a synced workspace".into()))
+    }
+
+    fn claude_importer(&self) -> Result<&crate::claude_import::ClaudeImporter, RpcError> {
+        self.claude_import
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("claude import unavailable".into()))
     }
 
     /// Resolve a mention-search root from synced workspace rows. A client may
@@ -1574,6 +1595,39 @@ impl RpcService for EngineRpc {
                             "importedChats": 0, "importedSpaces": 0,
                             "skippedChats": 0, "skippedSpaces": 0,
                             "journalsCopied": 0, "ledgerRowsMerged": 0,
+                            "errors": [format!("{err}")],
+                        }));
+                    }
+                    // tx drops here — the stream ends after the summary item.
+                });
+                Ok(RpcReply::Stream(Box::pin(futures::stream::poll_fn(
+                    move |cx| rx.poll_recv(cx),
+                ))))
+            }
+            methods::LIST_CLAUDE_SESSIONS => {
+                let importer = self.claude_importer()?.clone();
+                let sessions = tokio::task::spawn_blocking(move || importer.list())
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "sessions": sessions }))
+            }
+            methods::IMPORT_CLAUDE_SESSIONS => {
+                let params: ImportClaudeParams = parse_params(params)?;
+                let importer = self.claude_importer()?.clone();
+                // Unbounded like the profile import: reading transcripts is
+                // blocking fs work that must never wedge on a slow viewer.
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+                tokio::task::spawn_blocking(move || {
+                    let emit = |event: crate::claude_import::ClaudeImportEvent| {
+                        if let Ok(item) = serde_json::to_value(&event) {
+                            let _ = tx.send(item);
+                        }
+                    };
+                    if let Err(err) = importer.run(&params.session_ids, emit) {
+                        tracing::error!(error = %err, "claude transcript import failed");
+                        let _ = tx.send(serde_json::json!({
+                            "kind": "summary",
+                            "imported": 0, "skipped": 0, "messages": 0,
                             "errors": [format!("{err}")],
                         }));
                     }

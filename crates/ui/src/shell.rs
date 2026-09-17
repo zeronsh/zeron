@@ -59,10 +59,12 @@ use crate::theme::Theme;
 use crate::transcript::{self, Transcript, TranscriptEvent};
 use crate::workspace_links::resolve_workspace_file_link;
 
+mod claude_import;
 mod command_palette;
 mod spaces;
 mod tabs;
 
+use claude_import::ClaudeImportFlow;
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 
 actions!(
@@ -77,7 +79,8 @@ actions!(
         OpenSettings,
         NextSession,
         PrevSession,
-        ArchiveSession
+        ArchiveSession,
+        ImportClaudeSessions
     ]
 );
 
@@ -1405,6 +1408,7 @@ pub struct Shell {
     /// while open.
     add_space: Option<AddSpaceFlow>,
     command_palette: Option<command_palette::CommandPalette>,
+    claude_import: Option<ClaudeImportFlow>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
     /// Hover/drag + scroll-linger state of the dropdown's floating rail.
@@ -1766,6 +1770,7 @@ impl Shell {
             delete_space_confirm: None,
             add_space: None,
             command_palette: None,
+            claude_import: None,
             spaces_menu: popover::Popup::default(),
             spaces_menu_bar: popover::MenuScrollbarState::default(),
             sidebar_view_menu: popover::Popup::default(),
@@ -6864,6 +6869,11 @@ impl Shell {
             cx.notify();
             return true;
         }
+        if self.claude_import.is_some() {
+            self.claude_import = None;
+            cx.notify();
+            return true;
+        }
         if self.add_space.is_some() {
             self.add_space = None;
             cx.notify();
@@ -7183,6 +7193,9 @@ impl Shell {
             overlays.push(overlay);
         }
         if let Some(overlay) = self.render_add_space_overlay(viewport, window, cx) {
+            overlays.push(overlay);
+        }
+        if let Some(overlay) = self.render_claude_import_overlay(viewport, window, cx) {
             overlays.push(overlay);
         }
 
@@ -9774,6 +9787,9 @@ impl Render for Shell {
             )
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ImportClaudeSessions, window, cx| {
+                this.open_claude_import(window, cx);
             }))
             .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
                 if this.add_space.is_some() {

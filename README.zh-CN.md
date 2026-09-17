@@ -17,6 +17,15 @@ zeron status
 
 安装脚本会马上把守护进程拉起来，重启之后也会自己回来。不需要登录，也不需要配置同步。
 
+NixOS 上无法直接运行预编译的二进制文件，请改用 flake 安装：
+
+```bash
+nix profile install github:zeronsh/zeron   # 或先试用：nix run github:zeronsh/zeron -- status
+zeron daemon install
+```
+
+Nix 包已内置浏览器运行时。`zeron daemon install` 写入的 systemd 用户单元指向当前的 store 路径，升级后请重新运行一次。源码构建可以用 `nix develop` 获得工具链和原生依赖库。
+
 日常命令：
 
 ```bash

@@ -128,6 +128,10 @@ pub mod methods {
     pub const LOCAL_IMPORT_STATUS: &str = "LocalImportStatus";
     /// One-time local→synced profile import: run it (stream of progress items).
     pub const IMPORT_LOCAL_WORKSPACE: &str = "ImportLocalWorkspace";
+    /// Claude Code transcripts on this device that can be imported (unary).
+    pub const LIST_CLAUDE_SESSIONS: &str = "ListClaudeSessions";
+    /// Import Claude Code transcripts into chats (stream of progress items).
+    pub const IMPORT_CLAUDE_SESSIONS: &str = "ImportClaudeSessions";
     // Repos / worktrees / folders (ControlRpc, relay-forwardable).
     pub const LIST_REPOS: &str = "ListRepos";
     pub const ADD_REPO: &str = "AddRepo";
