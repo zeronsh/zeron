@@ -1235,3 +1235,51 @@ async fn devin_missing_variant_is_bounded_and_never_prompts() {
     );
     assert!(!dir.path().join("prompted").exists());
 }
+
+#[test]
+fn antigravity_sign_in_preserves_relative_home_auth_in_a_separate_process() {
+    let parent_cwd = tempfile::tempdir().unwrap();
+    let child_home = tempfile::tempdir().unwrap();
+    let gemini_home = child_home.path().join("relative-gemini-home");
+    let settings = gemini_home.join("antigravity-acp");
+    std::fs::create_dir_all(&settings).unwrap();
+    std::fs::write(
+        settings.join("settings.json"),
+        r#"{"auth":{"type":"oauth-business"}}"#,
+    )
+    .unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "antigravity_auth_path_subprocess", "--nocapture"])
+        .current_dir(parent_cwd.path())
+        .env("HOME", child_home.path())
+        .env("GEMINI_HOME", "relative-gemini-home")
+        .env("ZERON_TEST_EXPECTED_GEMINI_HOME", &gemini_home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[tokio::test]
+async fn antigravity_auth_path_subprocess() {
+    if std::env::var_os("ZERON_TEST_EXPECTED_GEMINI_HOME").is_none() {
+        return;
+    }
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake-antigravity-auth-path.sh");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        AcpHarness::antigravity()
+            .with_executable(fixture)
+            .sign_in(None, |_| {}),
+    )
+    .await
+    .expect("sign-in timed out")
+    .expect("configured business sign-in");
+}

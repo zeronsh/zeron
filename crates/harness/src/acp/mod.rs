@@ -28,6 +28,7 @@
 //! - Interrupt: `session/cancel`, escalating SIGTERM → SIGKILL; the stream
 //!   always ends with `Done { status: Interrupted }`.
 
+mod antigravity_paths;
 mod devin_models;
 mod normalize;
 mod subagent;
@@ -518,7 +519,7 @@ fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
 /// cwd the command listing doesn't have, so those still reach the agent when
 /// typed but aren't listed.
 fn antigravity_skill_dirs() -> Vec<PathBuf> {
-    antigravity_home()
+    antigravity_paths::home()
         .map(|home| {
             vec![
                 home.join("config").join("skills"),
@@ -526,45 +527,6 @@ fn antigravity_skill_dirs() -> Vec<PathBuf> {
             ]
         })
         .unwrap_or_default()
-}
-
-fn user_home() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-}
-
-/// python's `os.path.expanduser`, which is how the pinned server resolves
-/// `GEMINI_HOME`: without this, a home-relative value stays literal here and we
-/// read a different settings file than the server writes. `~user` needs the
-/// passwd database python consults, so it is left as-is exactly like python
-/// does when that lookup fails.
-fn expand_user(path: &Path, home: Option<&Path>) -> PathBuf {
-    let Some(rest) = path.to_str().and_then(|path| path.strip_prefix('~')) else {
-        return path.to_path_buf();
-    };
-    let rest = match rest {
-        "" => "",
-        rest if rest.starts_with(['/', '\\']) => rest.trim_start_matches(['/', '\\']),
-        _ => return path.to_path_buf(),
-    };
-    let Some(home) = home else {
-        return path.to_path_buf();
-    };
-    if rest.is_empty() {
-        home.to_path_buf()
-    } else {
-        home.join(rest)
-    }
-}
-
-fn antigravity_home() -> Option<PathBuf> {
-    let home = user_home();
-    match std::env::var_os("GEMINI_HOME").filter(|home| !home.is_empty()) {
-        Some(gemini_home) => Some(expand_user(Path::new(&gemini_home), home.as_deref())),
-        None => home.map(|home| home.join(".gemini")),
-    }
 }
 
 /// the pinned server keeps accepting `vertex-ai` for the method its
@@ -603,15 +565,6 @@ struct AntigravitySettings {
 struct AntigravityAuthSettings {
     #[serde(default, rename = "type")]
     method: Option<String>,
-}
-
-fn configured_antigravity_auth_method() -> Result<Option<ConfiguredAuthMethod>, HarnessError> {
-    let Some(path) =
-        antigravity_home().map(|home| home.join("antigravity-acp").join("settings.json"))
-    else {
-        return Ok(None);
-    };
-    configured_auth_method_in(&path)
 }
 
 fn configured_auth_method_in(path: &Path) -> Result<Option<ConfiguredAuthMethod>, HarnessError> {
@@ -1001,11 +954,16 @@ impl AcpHarness {
                 "{display_name} has no sign-in flow"
             )));
         };
-        let configured_method = if self.spec.id == HarnessId::Antigravity {
-            configured_antigravity_auth_method()?
-        } else {
-            None
-        };
+        let gemini_home = (self.spec.id == HarnessId::Antigravity)
+            .then(antigravity_paths::home)
+            .transpose()?;
+        let configured_method = gemini_home
+            .as_ref()
+            .map(|home| {
+                configured_auth_method_in(&home.join("antigravity-acp").join("settings.json"))
+            })
+            .transpose()?
+            .flatten();
         if let Launch::Archive { pin, .. } = self.resolve_launch()?
             && crate::archive_install::installed_entry(&pin).is_none()
         {
@@ -1017,6 +975,9 @@ impl AcpHarness {
         crate::compose_child_path(&mut cmd, &exe);
         if let Some(home) = std::env::var_os("HOME") {
             cmd.current_dir(home);
+        }
+        if let Some(home) = gemini_home {
+            cmd.env("GEMINI_HOME", home);
         }
         if let Some(browser) = browser {
             cmd.env("BROWSER", browser);
@@ -1263,6 +1224,9 @@ impl AcpHarness {
         crate::compose_child_path(&mut cmd, &exe);
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
+        }
+        if self.spec.id == HarnessId::Antigravity {
+            cmd.env("GEMINI_HOME", antigravity_paths::home()?);
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -3992,29 +3956,27 @@ mod tests {
     #[test]
     fn antigravity_home_expands_a_home_relative_gemini_home() {
         let home = tempfile::tempdir().unwrap();
-        let expanded = expand_user(Path::new("~/gemini-home"), Some(home.path()));
+        let expanded =
+            antigravity_paths::expand_user(Path::new("~/gemini-home"), Some(home.path())).unwrap();
         assert_eq!(expanded, home.path().join("gemini-home"));
 
-        assert_eq!(expand_user(Path::new("~"), Some(home.path())), home.path());
         assert_eq!(
-            expand_user(Path::new("/absolute/gemini"), Some(home.path())),
+            antigravity_paths::expand_user(Path::new("~"), Some(home.path())).unwrap(),
+            home.path()
+        );
+        assert_eq!(
+            antigravity_paths::expand_user(Path::new("/absolute/gemini"), Some(home.path()))
+                .unwrap(),
             Path::new("/absolute/gemini")
         );
-        // `~user` needs the passwd lookup python falls back on, so it stays literal.
-        assert_eq!(
-            expand_user(Path::new("~someone/gemini"), Some(home.path())),
-            Path::new("~someone/gemini")
-        );
-        assert_eq!(
-            expand_user(Path::new("~/gemini"), None),
-            Path::new("~/gemini")
-        );
+        assert!(antigravity_paths::expand_user(Path::new("~/gemini"), None).is_err());
     }
 
     #[test]
     fn antigravity_home_relative_settings_still_resolve_the_configured_method() {
         let home = tempfile::tempdir().unwrap();
-        let gemini_home = expand_user(Path::new("~/.gemini"), Some(home.path()));
+        let gemini_home =
+            antigravity_paths::expand_user(Path::new("~/.gemini"), Some(home.path())).unwrap();
         let dir = gemini_home.join("antigravity-acp");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -4027,6 +3989,89 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(method.canonical, "oauth-business");
+    }
+
+    fn selected_auth_in_home(gemini_home: &Path) -> String {
+        let configured =
+            configured_auth_method_in(&gemini_home.join("antigravity-acp").join("settings.json"))
+                .unwrap();
+        sign_in_auth_method(
+            &all_antigravity_auth_methods(),
+            "oauth-personal",
+            configured.as_ref(),
+        )
+        .unwrap()
+    }
+
+    fn write_business_auth(gemini_home: &Path) {
+        let settings = gemini_home.join("antigravity-acp");
+        std::fs::create_dir_all(&settings).unwrap();
+        std::fs::write(
+            settings.join("settings.json"),
+            r#"{"auth":{"type":"oauth-business"}}"#,
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_named_home_settings_preserve_business_auth() {
+        let (username, real_home) = antigravity_paths::passwd_entry(None).unwrap();
+        let directory = tempfile::tempdir_in(&real_home).unwrap();
+        write_business_auth(directory.path());
+        let path =
+            PathBuf::from(format!("~{username}")).join(directory.path().file_name().unwrap());
+        let unrelated_home = tempfile::tempdir().unwrap();
+        let resolved = antigravity_paths::resolve_home(
+            Some(&path),
+            Some(unrelated_home.path()),
+            unrelated_home.path(),
+        )
+        .unwrap();
+        assert_eq!(resolved, directory.path());
+        assert_eq!(selected_auth_in_home(&resolved), "oauth-business");
+    }
+
+    #[test]
+    fn antigravity_relative_home_settings_use_the_child_working_directory() {
+        let parent_cwd = tempfile::tempdir().unwrap();
+        let child_cwd = tempfile::tempdir().unwrap();
+        let relative = Path::new("relative-gemini-home");
+        write_business_auth(&child_cwd.path().join(relative));
+        assert!(!parent_cwd.path().join(relative).exists());
+        let resolved = antigravity_paths::resolve_home(
+            Some(relative),
+            Some(child_cwd.path()),
+            child_cwd.path(),
+        )
+        .unwrap();
+        assert_eq!(resolved, child_cwd.path().join(relative));
+        assert_eq!(selected_auth_in_home(&resolved), "oauth-business");
+        let command_home = parent_cwd.path().join(&resolved);
+        assert_eq!(selected_auth_in_home(&command_home), "oauth-business");
+    }
+
+    #[test]
+    fn antigravity_empty_home_fails_before_auth_selection() {
+        let child_cwd = tempfile::tempdir().unwrap();
+        assert!(
+            antigravity_paths::resolve_home(
+                Some(Path::new("")),
+                Some(child_cwd.path()),
+                child_cwd.path(),
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_unknown_named_home_fails_before_auth_selection() {
+        let cwd = tempfile::tempdir().unwrap();
+        let path = PathBuf::from(format!("~zeron-missing-{}", uuid::Uuid::new_v4()));
+        assert!(
+            antigravity_paths::resolve_home(Some(&path), Some(cwd.path()), cwd.path()).is_err()
+        );
     }
 
     #[test]
