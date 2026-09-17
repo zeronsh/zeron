@@ -214,13 +214,13 @@ enum LoginFlow {
         /// `Some(code)` once the child exited (`None` code = killed by signal).
         exit: Arc<Mutex<Option<Option<i32>>>>,
     },
-    /// A sign-in the engine drives itself (Antigravity's ACP `authenticate`);
+    /// a sign-in the engine drives itself (antigravity's acp `authenticate`);
     /// the task reports the browser url and its outcome through `state`.
     Task {
         harness: HarnessId,
         started_at: Instant,
         state: Arc<Mutex<TaskLoginState>>,
-        /// Aborting drops the sign-in future, which kills its agent child.
+        /// aborting drops the sign-in future, which kills its agent child.
         handle: tokio::task::JoinHandle<()>,
     },
 }
@@ -681,8 +681,8 @@ impl AgentAccounts {
         })
     }
 
-    /// Antigravity: the ACP server's own Google sign-in, run when the agent is
-    /// turned on rather than mid-chat. The start replies at once because a
+    /// antigravity: the acp server's own google sign-in, run when the agent is
+    /// turned on rather than mid-chat. the start replies at once because a
     /// first sign-in downloads a large server; polls carry the browser url
     /// once the server prints it.
     fn start_antigravity_login(&self) -> AgentLoginStart {
@@ -1027,7 +1027,7 @@ impl AgentAccounts {
         })
     }
 
-    /// Poll an engine-driven sign-in; `None` when `login_id` isn't one.
+    /// poll an engine-driven sign-in; `None` when `login_id` isn't one.
     fn poll_task_login(&self, login_id: &str) -> Option<AgentLoginPoll> {
         let state = match lock(&self.inner.flows).get(login_id) {
             Some(LoginFlow::Task { state, .. }) => state.clone(),

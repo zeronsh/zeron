@@ -74,7 +74,7 @@ struct AcpAgentSpec {
     /// spawns `node <entry>` directly, keeping npm (and every way a user's
     /// npm state can break) out of chat turns. See [`crate::adapter_install`].
     npm_package: Option<&'static str>,
-    /// Pinned release archive for this platform, installed ONCE into the
+    /// pinned release archive for this platform, installed once into the
     /// managed adapters dir when the binary isn't already present. See
     /// [`crate::archive_install`].
     archive: Option<crate::archive_install::ArchivePin>,
@@ -121,17 +121,17 @@ struct AcpAgentSpec {
     /// Agent-specific advice appended to the stall error chip: what a wedge
     /// usually means for THIS agent and what the user can check.
     stall_hint: &'static str,
-    /// The agent advertises every effort as its own model id (`…-low`,
+    /// the agent advertises every effort as its own model id (`…-low`,
     /// `…-high`) instead of a `thought_level` option: discovered variants fold
     /// into one row with a ladder, and a run sends the variant for its level.
     effort_in_model_id: bool,
-    /// Auth method to sign in with when `session/new` answers auth_required —
+    /// auth method to sign in with when `session/new` answers auth_required —
     /// for agents that expect the client to pick one before the first session.
     auth_method: Option<&'static str>,
-    /// Folders of `<skill>/SKILL.md` the agent loads itself but never
+    /// folders of `<skill>/SKILL.md` the agent loads itself but never
     /// advertises, listed as slash commands alongside its own.
     skill_dirs: fn() -> Vec<PathBuf>,
-    /// Advertised commands the picker leaves out.
+    /// advertised commands the picker leaves out.
     hidden_commands: &'static [&'static str],
 }
 
@@ -468,33 +468,38 @@ fn pi_spec() -> AcpAgentSpec {
     }
 }
 
-/// Google's builds as the ACP registry lists them (`antigravity-acp`); `None`
+/// google's builds as the acp registry lists them (`antigravity-acp`); `None`
 /// on platforms without one, where only an explicit override can launch.
 fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
-    let (url, entry) = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+    let (url, entry, sha512) = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         (
             "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-agy_acp_server_1.1.1-darwin-arm64.zip",
             "agy_acp_server.par",
+            "82576ba00164331daeba798db43f9e7c9097b76f0cd536cc07956f976e0132e3500f51b28288f07bdb5a3f90f9702dabc20ca0627edb25aa7e8e50f9fac29b8a",
         )
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         (
             "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-x86_64.zip",
             "agy_acp_server.par",
+            "bccda188b2903d3ff7a56691064fc8698f76d7bc2bb0f24e99bb5f8cda02c77f77629edc5dba640d6e713edf8e6576dfa38e88fb532752a53e26710934b5e4f0",
         )
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         (
             "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-arm64.zip",
             "agy_acp_server.par",
+            "f895b4ade624e25f9765c90df66f3a864b19b2d1f2bde2fc485de6b6782ce30be458abed2da587d7cdd2272ea0812a8452639682c6318127e4fe0b4b8fc62dcf",
         )
     } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         (
             "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-agy_acp_server_1.1.1-windows-x86_64.zip",
             "agy_acp_server.exe",
+            "5f1c7ad17a3f3a877552bcb9c75da7c53d05417916728a3436962d81a136bb136e9d9e35a880c9c8ca4db0fcbab9c76e959b26965c5ce6e16ebdea51e4ea28b5",
         )
     } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
         (
             "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-agy_acp_server_1.1.1-windows-arm64.zip",
             "agy_acp_server.exe",
+            "5ac47faa3d74a447f8c2b0aa6d174360c2fd08d0009368c2eff97ed8f24d0fedc6b798e5709e91d18ab756af9b06657dd9d90103cd37c67392afb94229fcc536",
         )
     } else {
         return None;
@@ -504,28 +509,90 @@ fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
         version: "1.1.1",
         url,
         entry,
+        sha512,
     })
 }
 
-/// The user-global skill folders the server loads (`resolve_skills_paths`).
-/// Its project-level `.gemini/skills` and `.agents/skills` depend on a session
+/// the user-global skill folders the server loads (`resolve_skills_paths`).
+/// its project-level `.gemini/skills` and `.agents/skills` depend on a session
 /// cwd the command listing doesn't have, so those still reach the agent when
 /// typed but aren't listed.
 fn antigravity_skill_dirs() -> Vec<PathBuf> {
-    let home = std::env::var_os("GEMINI_HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".gemini")));
-    home.map(|home| {
-        vec![
-            home.join("config").join("skills"),
-            home.join("antigravity-cli").join("skills"),
-        ]
-    })
-    .unwrap_or_default()
+    antigravity_home()
+        .map(|home| {
+            vec![
+                home.join("config").join("skills"),
+                home.join("antigravity-cli").join("skills"),
+            ]
+        })
+        .unwrap_or_default()
 }
 
-/// One command per `<dir>/<skill>/SKILL.md`, in folder order and
+fn antigravity_home() -> Option<PathBuf> {
+    std::env::var_os("GEMINI_HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".gemini")))
+}
+
+fn configured_antigravity_auth_method() -> Result<Option<String>, HarnessError> {
+    let Some(path) =
+        antigravity_home().map(|home| home.join("antigravity-acp").join("settings.json"))
+    else {
+        return Ok(None);
+    };
+    let settings = match std::fs::read_to_string(&path) {
+        Ok(settings) => settings,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(HarnessError::Protocol(format!(
+                "could not read Antigravity auth settings at {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    let settings: Value = serde_json::from_str(&settings).map_err(|error| {
+        HarnessError::Protocol(format!(
+            "could not parse Antigravity auth settings at {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(settings
+        .pointer("/auth/type")
+        .and_then(Value::as_str)
+        .filter(|method| !method.is_empty())
+        .map(str::to_owned))
+}
+
+fn sign_in_auth_method(
+    initialized: &Value,
+    default_method: &str,
+    configured_method: Option<&str>,
+) -> Result<String, HarnessError> {
+    let available: Vec<&str> = initialized
+        .get("authMethods")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|method| method.get("id").and_then(Value::as_str))
+        .collect();
+    let selected = configured_method.unwrap_or(default_method);
+    if available.contains(&selected) {
+        return Ok(selected.to_owned());
+    }
+    let source = if configured_method.is_some() {
+        "configured"
+    } else {
+        "default"
+    };
+    Err(HarnessError::Protocol(format!(
+        "Antigravity's {source} auth method {selected} is not advertised by the server; available methods: {}",
+        available.join(", ")
+    )))
+}
+
+/// one command per `<dir>/<skill>/SKILL.md`, in folder order and
 /// alphabetically within each folder; the first folder wins a repeated name.
 fn skill_commands(dirs: &[PathBuf]) -> Vec<SlashCommand> {
     let mut commands: Vec<SlashCommand> = Vec::new();
@@ -587,7 +654,7 @@ fn skill_frontmatter(text: &str) -> Option<(String, String)> {
     Some((name, field("description").unwrap_or_default()))
 }
 
-/// Skill descriptions are model-facing paragraphs; a picker row only has room
+/// skill descriptions are model-facing paragraphs; a picker row only has room
 /// for the opening sentence.
 fn first_sentence(text: &str) -> String {
     let text = text.trim();
@@ -648,9 +715,8 @@ fn antigravity_spec() -> AcpAgentSpec {
         prompt_stall: None,
         stall_hint: "The agent process is likely wedged.",
         effort_in_model_id: true,
-        // zeron has no sign-in picker; turning the agent on signs in with a
-        // personal Google account unless ~/.gemini/antigravity-acp/settings.json
-        // already names another method, and the server remembers the choice.
+        // the personal oauth method is only the first-run default; sign-in
+        // preserves any method already selected in antigravity's settings.
         auth_method: Some("oauth-personal"),
         skill_dirs: antigravity_skill_dirs,
         // signing out belongs to the Settings toggle, which keeps enablement
@@ -659,25 +725,32 @@ fn antigravity_spec() -> AcpAgentSpec {
     }
 }
 
-/// How long a sign-in may wait on the browser: the Antigravity server gives
+/// how long a sign-in may wait on the browser: the antigravity server gives
 /// its loopback redirect 300s, plus room for the token exchange.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(330);
-/// Sign-out is local credential removal; this bound covers the server's cold
+/// sign-out is local credential removal; this bound covers the server's cold
 /// start.
 const SIGN_OUT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Milestones of [`AcpHarness::sign_in`] a caller can surface.
+/// milestones of [`AcpHarness::sign_in`] a caller can surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignInProgress {
-    /// The server is being downloaded before sign-in can start.
+    /// the server is being downloaded before sign-in can start.
     Installing,
-    /// The agent is waiting on the user at this sign-in url.
+    /// the agent is waiting on the user at this sign-in url.
     OpenBrowser(String),
 }
 
 fn sign_in_url(line: &str) -> Option<String> {
-    let start = line.find("https://accounts.google.com/")?;
-    line[start..].split_whitespace().next().map(str::to_owned)
+    let start = [line.find("https://"), line.find("http://")]
+        .into_iter()
+        .flatten()
+        .min()?;
+    let url = line[start..]
+        .split_whitespace()
+        .next()?
+        .trim_end_matches(['.', ',', ';', ')', ']', '}']);
+    reqwest::Url::parse(url).ok().map(|url| url.to_string())
 }
 
 /// Background-install managed npm adapters for agents whose CLI is present
@@ -805,19 +878,14 @@ impl AcpHarness {
         Self::with_spec(pi_spec())
     }
 
-    /// Google Antigravity over its ACP server (`agy_acp_server`).
+    /// google antigravity over its acp server (`agy_acp_server`).
     pub fn antigravity() -> Self {
         Self::with_spec(antigravity_spec())
     }
 
-    /// Sign the agent out with ACP `logout`, clearing the credentials its
-    /// sign-in stored. A server that was never installed has nothing to clear.
+    /// sign the agent out with acp `logout`, clearing the credentials its
+    /// sign-in stored.
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
-        if let Launch::Archive { pin, .. } = self.resolve_launch()?
-            && crate::archive_install::installed_entry(&pin).is_none()
-        {
-            return Ok(());
-        }
         let home = std::env::var("HOME").ok();
         let (mut child, _stderr) = self.spawn_agent(home.as_deref(), false, &[]).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
@@ -845,7 +913,7 @@ impl AcpHarness {
         }
     }
 
-    /// Run the agent's own sign-in outside any chat: install the server if
+    /// run the agent's own sign-in outside any chat: install the server if
     /// needed, then `authenticate` with the spec's method. The server opens
     /// the sign-in page through `browser` (`$BROWSER`), so a caller that opens
     /// the reported url itself can pass a no-op to avoid a second tab.
@@ -855,10 +923,15 @@ impl AcpHarness {
         on_progress: impl Fn(SignInProgress) + Send + Sync + 'static,
     ) -> Result<(), HarnessError> {
         let display_name = self.spec.display_name;
-        let Some(method) = self.spec.auth_method else {
+        let Some(default_method) = self.spec.auth_method else {
             return Err(HarnessError::Protocol(format!(
                 "{display_name} has no sign-in flow"
             )));
+        };
+        let configured_method = if self.spec.id == HarnessId::Antigravity {
+            configured_antigravity_auth_method()?
+        } else {
+            None
         };
         if let Launch::Archive { pin, .. } = self.resolve_launch()?
             && crate::archive_install::installed_entry(&pin).is_none()
@@ -909,9 +982,11 @@ impl AcpHarness {
             }
         };
         let flow = async {
-            client
+            let initialized = client
                 .request("initialize", initialize_params(self.spec.id))
                 .await?;
+            let method =
+                sign_in_auth_method(&initialized, default_method, configured_method.as_deref())?;
             request_draining(
                 &client,
                 &mut incoming,
@@ -1567,6 +1642,12 @@ impl Harness for AcpHarness {
                 .refresh(&exe, self.model_discovery_timeout)
                 .await;
         }
+        if self.spec.id == HarnessId::Antigravity {
+            return match self.discover_models().await {
+                Ok(models) if !models.is_empty() => Ok(models),
+                _ => Ok((self.spec.models)()),
+            };
+        }
         if let Some(models) = self.models_cache.get() {
             return Ok(models.clone());
         }
@@ -1584,7 +1665,7 @@ impl Harness for AcpHarness {
         }
     }
 
-    /// The agent's advertised commands minus the spec's hidden ones, then its
+    /// the agent's advertised commands minus the spec's hidden ones, then its
     /// skills. Skills are read fresh on every call so a newly added one shows
     /// up, and they still list when discovery fails (a signed-out agent).
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
@@ -1864,6 +1945,59 @@ fn first_class_model_change(
         return Ok(None);
     }
     Ok(Some(requested.to_owned()))
+}
+
+fn validate_config_model_selection(
+    session_response: &Value,
+    requested: Option<&str>,
+    model_options: &serde_json::Map<String, Value>,
+) -> Result<(), HarnessError> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    let Some(option) = session_response
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .and_then(|options| {
+            options.iter().find(|option| {
+                option.get("type").and_then(Value::as_str) == Some("select")
+                    && option.get("category").and_then(Value::as_str) == Some("model")
+            })
+        })
+    else {
+        return Ok(());
+    };
+    let available: Vec<&str> = option
+        .get("options")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|choice| choice.get("value").and_then(Value::as_str))
+        .collect();
+    let context_1m = model_options
+        .get("contextWindow")
+        .and_then(Value::as_str)
+        .is_some_and(|window| window.eq_ignore_ascii_case("1m"));
+    if pick_model_value(requested, &available, context_1m).is_some() {
+        return Ok(());
+    }
+    Err(HarnessError::Protocol(format!(
+        "agent does not advertise requested model {requested}; available models: {}",
+        available.join(", ")
+    )))
+}
+
+fn is_model_config_option(session_response: &Value, config_id: &str) -> bool {
+    session_response
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .is_some_and(|options| {
+            options.iter().any(|option| {
+                option.get("id").and_then(Value::as_str) == Some(config_id)
+                    && option.get("category").and_then(Value::as_str) == Some("model")
+            })
+        })
 }
 
 /// The `session/set_config_option` calls a session response's `configOptions`
@@ -2251,7 +2385,7 @@ async fn new_session(
     }
 }
 
-/// ACP reserves -32000 for auth_required.
+/// acp reserves -32000 for auth_required.
 fn is_auth_required(error: &HarnessError) -> bool {
     matches!(error, HarnessError::Protocol(message) if message.contains("(code -32000)"))
 }
@@ -2262,7 +2396,7 @@ const EFFORT_SUFFIXES: [(&str, &str, ReasoningLevel); 3] = [
     ("-high", " (High)", ReasoningLevel::High),
 ];
 
-/// One picker row: either a single advertised model, or the effort variants
+/// one picker row: either a single advertised model, or the effort variants
 /// of one model with the id the agent advertises for each level.
 struct EffortGroup<'a> {
     id: String,
@@ -2270,7 +2404,7 @@ struct EffortGroup<'a> {
     variants: Vec<(ReasoningLevel, &'a str)>,
 }
 
-/// Group advertised `(id, name)` choices by their display name. Antigravity
+/// group advertised `(id, name)` choices by their display name. antigravity
 /// names every effort variant "<model> (Low|Medium|High)", but its ids don't
 /// always follow (a signed-in account pairs `gemini-3.1-pro-low` with
 /// `gemini-pro-agent` for High), so the name is the only reliable key. A
@@ -2321,7 +2455,7 @@ fn effort_groups<'a>(
     groups
 }
 
-/// Fold effort variants into one row whose ladder lists the levels offered;
+/// fold effort variants into one row whose ladder lists the levels offered;
 /// models without a level in their name pass through.
 fn group_effort_variants(models: Vec<Model>) -> Vec<Model> {
     let groups = effort_groups(models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
@@ -2344,7 +2478,7 @@ fn group_effort_variants(models: Vec<Model>) -> Vec<Model> {
         .collect()
 }
 
-/// The advertised variant id for a grouped model: the picked level when the
+/// the advertised variant id for a grouped model: the picked level when the
 /// model offers it, else its strongest level. Ids the agent already
 /// advertises (chats saved with a full variant id) pass through untouched.
 fn effort_variant_id(
@@ -2621,6 +2755,13 @@ async fn run_session(session: Session) {
             )),
             model => model.map(str::to_owned),
         };
+        if harness == HarnessId::Antigravity {
+            validate_config_model_selection(
+                &session_response,
+                requested_model.as_deref(),
+                &request.model_options,
+            )?;
+        }
         if let Some(model) =
             first_class_model_change(&session_response, requested_model.as_deref())?
         {
@@ -2666,17 +2807,13 @@ async fn run_session(session: Session) {
             )
             .await
             {
-                if harness == HarnessId::Devin
-                    && options_snapshot["configOptions"]
-                        .as_array()
-                        .is_some_and(|options| {
-                            options
-                                .iter()
-                                .any(|o| o["id"] == config_id && o["category"] == "model")
-                        })
+                if matches!(harness, HarnessId::Antigravity | HarnessId::Devin)
+                    && requested_model.is_some()
+                    && is_model_config_option(&options_snapshot, &config_id)
                 {
                     return Err(HarnessError::Protocol(format!(
-                        "Devin rejected requested model {requested_model:?}: {e}"
+                        "agent rejected requested model {}: {e}",
+                        requested_model.as_deref().unwrap_or_default()
                     )));
                 }
                 tracing::debug!(
@@ -3651,6 +3788,52 @@ async fn run_session(session: Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn antigravity_sign_in_preserves_an_advertised_configured_method() {
+        let initialized = json!({
+            "authMethods": [
+                {"id": "oauth-personal"},
+                {"id": "oauth-business"},
+                {"id": "agent-platform"},
+                {"id": "gemini-api-key"}
+            ]
+        });
+        assert_eq!(
+            sign_in_auth_method(&initialized, "oauth-personal", Some("oauth-business")).unwrap(),
+            "oauth-business"
+        );
+        assert_eq!(
+            sign_in_auth_method(&initialized, "oauth-personal", None).unwrap(),
+            "oauth-personal"
+        );
+    }
+
+    #[test]
+    fn antigravity_sign_in_refuses_to_replace_an_unavailable_configured_method() {
+        let initialized = json!({
+            "authMethods": [{"id": "oauth-personal"}]
+        });
+        let error = sign_in_auth_method(&initialized, "oauth-personal", Some("oauth-business"))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("configured auth method oauth-business")
+        );
+    }
+
+    #[test]
+    fn antigravity_sign_in_accepts_the_configured_method_url() {
+        assert_eq!(
+            sign_in_url("Continue at https://business.example.test/login?id=7."),
+            Some("https://business.example.test/login?id=7".into())
+        );
+        assert_eq!(
+            sign_in_url("Open http://127.0.0.1:8080/callback"),
+            Some("http://127.0.0.1:8080/callback".into())
+        );
+    }
 
     #[test]
     fn devin_initialize_enables_only_the_supported_subagent_stream() {

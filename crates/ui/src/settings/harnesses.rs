@@ -93,19 +93,19 @@ pub struct HarnessesPage {
     error: Option<String>,
     load_task: Option<Task<()>>,
     toggle_task: Option<Task<()>>,
-    /// A sign-in that switches its harness on once it succeeds.
+    /// a sign-in that switches its harness on once it succeeds.
     sign_in: Option<SignIn>,
     sign_in_task: Option<Task<()>>,
 }
 
 struct SignIn {
     harness: HarnessId,
-    /// Known once the engine accepted the start.
+    /// known once the engine accepted the start.
     login_id: Option<String>,
     message: Option<String>,
 }
 
-/// Harnesses whose toggle runs the agent's own sign-in before switching on.
+/// harnesses whose toggle runs the agent's own sign-in before switching on.
 fn signs_in_on_enable(harness: HarnessId) -> bool {
     harness == HarnessId::Antigravity
 }
@@ -426,7 +426,7 @@ impl HarnessesPage {
         }
     }
 
-    /// Sign in first, then switch on: StartAgentLogin, then PollAgentLogin
+    /// sign in first, then switch on: StartAgentLogin, then PollAgentLogin
     /// until the engine reports the outcome, opening the sign-in page the
     /// first time a poll names it.
     fn start_sign_in(&mut self, harness: HarnessId, cx: &mut Context<Self>) {

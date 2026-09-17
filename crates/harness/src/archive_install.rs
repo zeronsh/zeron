@@ -1,53 +1,57 @@
-//! Managed installs for ACP agents distributed as prebuilt zip archives
+//! managed installs for acp agents distributed as prebuilt zip archives
 //! (the ACP registry's `binary` distribution), such as Google's Antigravity
 //! server.
 //!
-//! Same contract as the npm installs in [`crate::adapter_install`]: the pinned
+//! same contract as the npm installs in [`crate::adapter_install`]: the pinned
 //! archive lands ONCE in `~/.zeron/adapters/<name>/<version>`, extraction runs
 //! in a `.tmp-*` sibling that is renamed into place only after the entry
 //! resolves and the marker is written, so a killed download never passes for
 //! a working install.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 use futures::StreamExt;
+use sha2::{Digest, Sha512};
 use tokio::io::AsyncWriteExt;
 
 use crate::HarnessError;
 use crate::adapter_install::{OK_MARKER, adapters_root, install_lock};
 
-/// A pinned archive: where to fetch it and which file inside runs the agent.
+/// a pinned archive: where to fetch it and which file inside runs the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ArchivePin {
     pub name: &'static str,
     pub version: &'static str,
     pub url: &'static str,
-    /// Path of the executable relative to the archive root.
+    /// path of the executable relative to the archive root.
     pub entry: &'static str,
+    pub sha512: &'static str,
 }
 
 /// multi-hundred-megabyte archives outlast any whole-request deadline on a
 /// slow link, so only a stalled stream counts as a failure.
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
-const EXTRACT_TIMEOUT: Duration = Duration::from_secs(600);
+const MAX_ARCHIVE_BYTES: u64 = 768 * 1024 * 1024;
+const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 4_096;
 
 fn install_dir(pin: &ArchivePin) -> Option<PathBuf> {
     adapters_root().map(|root| root.join(pin.name).join(pin.version))
 }
 
-/// The entry of a COMPLETED install, `None` when absent.
+/// the entry of a completed install, `None` when absent.
 pub(crate) fn installed_entry(pin: &ArchivePin) -> Option<PathBuf> {
     let dir = install_dir(pin)?;
-    if !dir.join(OK_MARKER).exists() {
+    if std::fs::read_to_string(dir.join(OK_MARKER)).ok()?.trim() != pin.sha512 {
         return None;
     }
     let entry = dir.join(pin.entry);
-    entry.exists().then_some(entry)
+    entry.is_file().then_some(entry)
 }
 
-/// Where the entry lives once installed, whether or not it is yet.
+/// where the entry lives once installed, whether or not it is yet.
 pub(crate) fn entry_path(pin: &ArchivePin) -> Option<PathBuf> {
     install_dir(pin).map(|dir| dir.join(pin.entry))
 }
@@ -86,7 +90,7 @@ pub(crate) async fn ensure_installed(
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(e);
     }
-    std::fs::write(tmp_dir.join(OK_MARKER), pin.version)?;
+    std::fs::write(tmp_dir.join(OK_MARKER), format!("{}\n", pin.sha512))?;
     if let Some(parent) = final_dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -112,11 +116,11 @@ async fn download_and_extract(
     display_name: &str,
 ) -> Result<(), HarnessError> {
     let archive = dir.join("download.zip");
-    download(pin.url, &archive, display_name).await?;
+    download(pin, &archive, display_name).await?;
     extract_zip(&archive, dir).await?;
     let _ = std::fs::remove_file(&archive);
     let entry = dir.join(pin.entry);
-    if !entry.exists() {
+    if !entry.is_file() {
         return Err(HarnessError::Install(format!(
             "the {display_name} archive ({}) has no {}",
             pin.url, pin.entry
@@ -126,7 +130,8 @@ async fn download_and_extract(
     Ok(())
 }
 
-async fn download(url: &str, dest: &Path, display_name: &str) -> Result<(), HarnessError> {
+async fn download(pin: &ArchivePin, dest: &Path, display_name: &str) -> Result<(), HarnessError> {
+    let url = pin.url;
     let failed = |detail: String| {
         HarnessError::Install(format!(
             "download of the {display_name} ACP server ({url}) failed: {detail}"
@@ -142,8 +147,19 @@ async fn download(url: &str, dest: &Path, display_name: &str) -> Result<(), Harn
         .await
         .and_then(reqwest::Response::error_for_status)
         .map_err(|e| failed(e.to_string()))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ARCHIVE_BYTES)
+    {
+        return Err(failed(format!(
+            "server reported an archive larger than the {} MiB limit",
+            MAX_ARCHIVE_BYTES / (1024 * 1024)
+        )));
+    }
     let mut body = response.bytes_stream();
     let mut file = tokio::fs::File::create(dest).await?;
+    let mut received = 0_u64;
+    let mut digest = Sha512::new();
     loop {
         let chunk = tokio::time::timeout(STALL_TIMEOUT, body.next())
             .await
@@ -154,56 +170,111 @@ async fn download(url: &str, dest: &Path, display_name: &str) -> Result<(), Harn
                 ))
             })?;
         match chunk {
-            Some(Ok(bytes)) => file.write_all(&bytes).await?,
+            Some(Ok(bytes)) => {
+                received = received.saturating_add(bytes.len() as u64);
+                if received > MAX_ARCHIVE_BYTES {
+                    return Err(failed(format!(
+                        "archive exceeded the {} MiB limit",
+                        MAX_ARCHIVE_BYTES / (1024 * 1024)
+                    )));
+                }
+                digest.update(&bytes);
+                file.write_all(&bytes).await?;
+            }
             Some(Err(e)) => return Err(failed(e.to_string())),
             None => break,
         }
     }
     file.flush().await?;
+    let actual = format!("{:x}", digest.finalize());
+    if actual != pin.sha512 {
+        return Err(failed(format!(
+            "SHA-512 mismatch (expected {}, got {actual})",
+            pin.sha512
+        )));
+    }
     Ok(())
 }
 
-/// the system unpacker keeps the crate free of a zip dependency: `unzip`
-/// ships with macOS and mainstream linux distros, and windows 10+ bundles a
-/// bsdtar that reads zip archives.
 pub(crate) async fn extract_zip(archive: &Path, dest: &Path) -> Result<(), HarnessError> {
-    let mut cmd = if cfg!(windows) {
-        let mut cmd = tokio::process::Command::new("tar");
-        cmd.arg("-xf").arg(archive).arg("-C").arg(dest);
-        cmd
-    } else {
-        let mut cmd = tokio::process::Command::new("unzip");
-        cmd.args(["-q", "-o"]).arg(archive).arg("-d").arg(dest);
-        cmd
-    };
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let unpacker = if cfg!(windows) { "tar" } else { "unzip" };
-    let output = match tokio::time::timeout(EXTRACT_TIMEOUT, cmd.output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(HarnessError::NotInstalled(format!(
-                "{unpacker} (required to unpack a managed ACP server archive)"
-            )));
-        }
-        Ok(Err(e)) => return Err(e.into()),
-        Err(_) => {
+    let archive = archive.to_owned();
+    let dest = dest.to_owned();
+    tokio::task::spawn_blocking(move || extract_zip_blocking(&archive, &dest))
+        .await
+        .map_err(|error| {
+            HarnessError::Install(format!("archive extraction task failed: {error}"))
+        })?
+}
+
+fn archive_entry_path(
+    dest: &Path,
+    enclosed_name: Option<&Path>,
+    unix_mode: Option<u32>,
+) -> Result<PathBuf, HarnessError> {
+    let name = enclosed_name
+        .ok_or_else(|| HarnessError::Install("archive contains an unsafe entry path".into()))?;
+    if let Some(mode) = unix_mode {
+        let kind = mode & 0o170000;
+        if !matches!(kind, 0 | 0o040000 | 0o100000) {
             return Err(HarnessError::Install(format!(
-                "{unpacker} did not finish within {} minutes",
-                EXTRACT_TIMEOUT.as_secs() / 60
+                "archive entry {} is a link or special file",
+                name.display()
             )));
         }
-    };
-    if output.status.success() {
-        return Ok(());
     }
-    Err(HarnessError::Install(format!(
-        "{unpacker} failed ({}): {}",
-        crate::describe_exit(Some(output.status)),
-        String::from_utf8_lossy(&output.stderr).trim()
-    )))
+    Ok(dest.join(name))
+}
+
+fn extract_zip_blocking(archive_path: &Path, dest: &Path) -> Result<(), HarnessError> {
+    let file = std::fs::File::open(archive_path)?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|error| HarnessError::Install(format!("invalid zip archive: {error}")))?;
+    if archive.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(HarnessError::Install(format!(
+            "archive has {} entries, exceeding the {MAX_ARCHIVE_ENTRIES} entry limit",
+            archive.len()
+        )));
+    }
+    let mut extracted = 0_u64;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| {
+            HarnessError::Install(format!("could not read archive entry {index}: {error}"))
+        })?;
+        extracted = extracted.checked_add(entry.size()).ok_or_else(|| {
+            HarnessError::Install("archive's extracted size overflows its limit".into())
+        })?;
+        if extracted > MAX_EXTRACTED_BYTES {
+            return Err(HarnessError::Install(format!(
+                "archive expands beyond the {} MiB limit",
+                MAX_EXTRACTED_BYTES / (1024 * 1024)
+            )));
+        }
+        let enclosed_name = entry.enclosed_name();
+        let output = archive_entry_path(dest, enclosed_name.as_deref(), entry.unix_mode())?;
+        if output == archive_path {
+            return Err(HarnessError::Install(
+                "archive attempts to overwrite its download file".into(),
+            ));
+        }
+        if entry.is_dir() {
+            std::fs::create_dir_all(&output)?;
+            continue;
+        }
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut output_file = std::fs::File::create(&output)?;
+        let copied = std::io::copy(&mut entry, &mut output_file)?;
+        if copied != entry.size() {
+            return Err(HarnessError::Install(format!(
+                "archive entry {} extracted {copied} bytes but declared {}",
+                output.display(),
+                entry.size()
+            )));
+        }
+        output_file.flush()?;
+    }
+    Ok(())
 }
 
 /// archives built off-unix can lose the executable bit, and the entry spawns
@@ -262,14 +333,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn corrupt_archive_reports_the_unpacker_failure() {
+    async fn corrupt_archive_reports_the_parser_failure() {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("broken.zip");
         std::fs::write(&archive, "not a zip").unwrap();
         let error = extract_zip(&archive, dir.path()).await.unwrap_err();
         assert!(
-            matches!(error, HarnessError::Install(ref m) if m.contains("failed")),
+            matches!(error, HarnessError::Install(ref m) if m.contains("invalid zip archive")),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn archive_entries_reject_traversal_links_and_special_files() {
+        let dest = Path::new("/safe/root");
+        assert!(archive_entry_path(dest, None, Some(0o100644)).is_err());
+        assert!(archive_entry_path(dest, Some(Path::new("link")), Some(0o120777)).is_err());
+        assert!(archive_entry_path(dest, Some(Path::new("device")), Some(0o020666)).is_err());
+        assert_eq!(
+            archive_entry_path(dest, Some(Path::new("bin/server")), Some(0o100755)).unwrap(),
+            dest.join("bin/server")
         );
     }
 
@@ -280,6 +363,7 @@ mod tests {
             version: "0.0.0-test",
             url: "https://example.invalid/x.zip",
             entry: "server",
+            sha512: "test-digest",
         };
         assert!(installed_entry(&pin).is_none());
         if std::env::var_os("HOME").is_some() || std::env::var_os("ZERON_ADAPTERS_DIR").is_some() {

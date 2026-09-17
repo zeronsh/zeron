@@ -59,7 +59,7 @@ fn auto_enabled(id: HarnessId) -> bool {
     id != HarnessId::Mock
 }
 
-/// Harnesses that stay off until the user turns them on. Enabling Antigravity
+/// harnesses that stay off until the user turns them on. enabling antigravity
 /// downloads a large server and runs a browser sign-in, which detection alone
 /// must never set off.
 fn opt_in(id: HarnessId) -> bool {
@@ -95,7 +95,7 @@ struct HarnessPrefsFile {
     /// so the file only records "no" — an agent installed later turns itself
     /// on without a trip to Settings.
     disabled: Vec<HarnessId>,
-    /// The user's explicit opt-INS, for the harnesses [`opt_in`] keeps off.
+    /// the user's explicit opt-ins, for the harnesses [`opt_in`] keeps off.
     opted_in: Vec<HarnessId>,
     titles: TitleSettings,
     /// The allow-list written back when enablement was a fixed default set.
@@ -605,7 +605,7 @@ pub fn default_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::OpencodeHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::OpencodeHarness::new()) as Arc<dyn Harness>)),
     );
-    // Antigravity over ACP (Google's agy_acp_server), same lazy pattern: the
+    // antigravity over acp (google's agy_acp_server), same lazy pattern: the
     // static descriptor mirrors AcpHarness::antigravity() exactly. No steering
     // extension (turn boundaries), and effort is baked into the model ids, so
     // the ladder lives on each model rather than the harness.

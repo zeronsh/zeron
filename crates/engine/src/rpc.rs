@@ -97,6 +97,34 @@ struct SetHarnessEnabledParams {
     enabled: bool,
 }
 
+async fn update_harness_enabled<F>(
+    registry: &HarnessRegistry,
+    harness: HarnessId,
+    enabled: bool,
+    sign_out: F,
+) -> Result<(), RpcError>
+where
+    F: std::future::Future<Output = Result<(), zeron_harness::HarnessError>>,
+{
+    let enabled_harnesses = registry.enabled_set();
+    let was_enabled = enabled_harnesses.contains(&harness);
+    if was_enabled && !enabled && harness == HarnessId::Antigravity {
+        if enabled_harnesses.len() == 1 {
+            return Err(RpcError::Failed(
+                "cannot disable the last enabled harness".into(),
+            ));
+        }
+        sign_out.await.map_err(|error| {
+            RpcError::Failed(format!(
+                "Antigravity sign-out failed; it remains enabled so you can retry: {error}"
+            ))
+        })?;
+    }
+    registry
+        .set_enabled(harness, enabled)
+        .map_err(RpcError::Failed)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct QueueCommandParams {
@@ -1196,19 +1224,13 @@ impl RpcService for EngineRpc {
             }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
-                let was_enabled = self.registry.enabled_set().contains(&p.harness);
-                self.registry
-                    .set_enabled(p.harness, p.enabled)
-                    .map_err(RpcError::Failed)?;
-                // turning Antigravity on is how it gets signed in, so turning
-                // it off signs it out and the next enable asks again
-                if was_enabled
-                    && !p.enabled
-                    && p.harness == HarnessId::Antigravity
-                    && let Err(error) = zeron_harness::AcpHarness::antigravity().sign_out().await
-                {
-                    tracing::warn!(%error, "signing out of Antigravity after disabling it failed");
-                }
+                update_harness_enabled(
+                    &self.registry,
+                    p.harness,
+                    p.enabled,
+                    zeron_harness::AcpHarness::antigravity().sign_out(),
+                )
+                .await?;
                 // Fresh catalog in the reply: the page repaints from it in one
                 // round trip, and a refused/raced toggle self-corrects.
                 RpcReply::value(&self.registry.descriptors())
@@ -2308,6 +2330,39 @@ impl RpcService for EngineRpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn antigravity_sign_out_failure_stays_enabled_and_can_be_retried() {
+        let registry = HarnessRegistry::new();
+        let executable = std::env::current_exe().unwrap();
+        registry.register(std::sync::Arc::new(
+            zeron_harness::AcpHarness::grok().with_executable(executable.clone()),
+        ));
+        registry.register(std::sync::Arc::new(
+            zeron_harness::AcpHarness::antigravity().with_executable(executable),
+        ));
+        registry.set_enabled(HarnessId::Antigravity, true).unwrap();
+
+        let error = update_harness_enabled(&registry, HarnessId::Antigravity, false, async {
+            Err(zeron_harness::HarnessError::Protocol(
+                "logout rejected".into(),
+            ))
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, RpcError::Failed(ref message) if message.contains("remains enabled")),
+            "{error}"
+        );
+        assert!(registry.enabled_set().contains(&HarnessId::Antigravity));
+
+        update_harness_enabled(&registry, HarnessId::Antigravity, false, async {
+            Ok::<(), zeron_harness::HarnessError>(())
+        })
+        .await
+        .unwrap();
+        assert!(!registry.enabled_set().contains(&HarnessId::Antigravity));
+    }
 
     /// The UI's Switch/Forget calls send `{id, accountId, harness}` (+ optional
     /// `targetDeviceId`); the extra fields must be tolerated, `accountId` wins.

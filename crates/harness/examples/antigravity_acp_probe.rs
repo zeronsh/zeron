@@ -1,6 +1,6 @@
-//! Live probe: the installed Antigravity ACP server's raw model catalog and,
+//! live probe: the installed antigravity acp server's raw model catalog and,
 //! with `--prompt`, the session updates and usage one short turn produces.
-//! Run from a directory outside any zeron project so preview discovery never
+//! run from a directory outside any zeron project so preview discovery never
 //! probes the server's ports.
 use std::process::Stdio;
 
@@ -9,13 +9,19 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::main]
 async fn main() {
-    let home = std::env::var("HOME").expect("HOME");
-    let server = std::env::var("ANTIGRAVITY_ACP_EXECUTABLE").unwrap_or_else(|_| {
-        format!("{home}/.zeron/adapters/antigravity-acp/1.1.1/agy_acp_server.par")
-    });
+    let server = std::env::var_os("ANTIGRAVITY_ACP_EXECUTABLE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            zeron_harness::AcpHarness::antigravity()
+                .launch_program()
+                .expect("installed antigravity acp server")
+        });
     let workspace = std::env::temp_dir().join("antigravity-acp-probe");
     std::fs::create_dir_all(&workspace).unwrap();
-    let mut child = tokio::process::Command::new(&server)
+    let mut command = tokio::process::Command::new(&server);
+    #[cfg(target_os = "linux")]
+    command.arg("--uid=");
+    let mut child = command
         .current_dir(&workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

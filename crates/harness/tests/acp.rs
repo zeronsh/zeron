@@ -742,6 +742,37 @@ async fn antigravity_runs_the_picked_effort_variant_unattended() {
 }
 
 #[tokio::test]
+async fn antigravity_stops_before_prompt_when_the_model_is_rejected() {
+    let workspace = tempfile::Builder::new()
+        .prefix("reject-model")
+        .tempdir()
+        .unwrap();
+    let mut req = request("hi");
+    req.model = Some("gemini-3.7-flash".into());
+    req.reasoning = Some(ReasoningLevel::Medium);
+    req.cwd = workspace.path().display().to_string();
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&antigravity_harness(), req, controls).await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TextDelta { .. })),
+        "{events:?}"
+    );
+    let done = dones(&events);
+    assert_eq!(done.len(), 1, "{events:?}");
+    assert_eq!(done[0].0, DoneStatus::Errored);
+    assert!(
+        done[0]
+            .1
+            .as_deref()
+            .is_some_and(|error| error.contains("rejected requested model")),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
 async fn antigravity_clamps_to_an_offered_level_and_keeps_saved_variant_ids() {
     let clamped = antigravity_config_sets("gemini-3.1-pro", Some(ReasoningLevel::Medium)).await;
     assert!(
