@@ -327,6 +327,17 @@ impl StickSpring {
 // Row model (pure)
 // ---------------------------------------------------------------------------
 
+/// What a chip inside a [`RowKind::ToolGroup`] represents. `Call` items come
+/// from doc tool parts; `Thought` (reasoning) and `Note` (a text part folded
+/// by compact mode) are UI-synthesized in [`rows_for_entry`] — the doc never
+/// emits either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolItemKind {
+    Call,
+    Thought,
+    Note,
+}
+
 /// One tool invocation inside a group row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolItem {
@@ -360,13 +371,14 @@ pub struct ToolItem {
     /// per-delta header rewrites read as noise). Never rendered; still
     /// fingerprinted so an old doc's chips re-splice correctly.
     pub subagent_tail: Option<SharedString>,
-    /// A REASONING part riding the tool group as a chip (user request: the
-    /// thought process belongs inside the combined "Ran N commands"
-    /// accordion, opening/closing with the same tween). Synthesized in
-    /// [`rows_for_entry`] — never comes from a doc tool part. The thought
-    /// text is the `detail`; `resolved == false` means it is still
-    /// streaming (the chip then defaults open).
-    pub is_thought: bool,
+    /// `Call` is a real doc tool invocation; `Thought` (a reasoning part
+    /// riding the tool group — the thought process belongs inside the
+    /// combined "Ran N commands" accordion, opening/closing with the same
+    /// tween) and `Note` (compact mode's folded narration) are synthesized
+    /// in [`rows_for_entry`], never from a doc tool part. A `Thought`'s text
+    /// is the `detail`; `resolved == false` means it is still streaming (the
+    /// chip then defaults open).
+    pub kind: ToolItemKind,
 }
 
 /// Subagent spawn chips — [`ToolCall::is_subagent_spawn`], the shared genus
@@ -714,8 +726,23 @@ fn thought_item(tree: &BlockTree, live: bool) -> ToolItem {
         subagent_ref: None,
         subagent_status: None,
         subagent_tail: None,
-        is_thought: true,
+        kind: ToolItemKind::Thought,
     }
+}
+
+/// A folded assistant TEXT part as a tool-group chip (compact mode): the
+/// narration between work steps collapses into the turn's single accordion
+/// as a "Wrote" chip whose detail is the text's markdown flattened exactly
+/// like a thought's. `live` = the part is the streaming tail — unresolved,
+/// so the collapsed header keeps its working shimmer until the reply lands.
+fn note_item(tree: &BlockTree, live: bool) -> ToolItem {
+    let mut item = thought_item(tree, live);
+    item.call = ToolCall::Unknown {
+        name: "Note".into(),
+        input: None,
+    };
+    item.kind = ToolItemKind::Note;
+    item
 }
 
 /// A chip's expandable detail payload.
@@ -1088,6 +1115,9 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
         acc.extend_from_slice(label.as_bytes());
         acc.extend_from_slice(&(detail.len() as u32).to_le_bytes());
         acc.push(t.is_error as u8 | (t.resolved as u8) << 1);
+        // Thought/note chips share `ToolCall::Unknown` — the kind is the
+        // label/icon discriminator, so a flip must re-splice.
+        acc.push(t.kind as u8);
         // Detail payload arriving (or growing) must re-splice the row even
         // when the resolved bit didn't change.
         match t.detail.as_deref() {
@@ -1229,9 +1259,14 @@ pub fn user_resize_spec(height_delta: f32) -> motion::MotionSpec {
 /// `parse` maps `(part_key, text)` to a block tree — the entity supplies
 /// incremental parsers for live parts and a cache for complete ones; tests pass
 /// a plain `parse_full`.
+/// `compact` is the transcript's compact mode: every working step of the
+/// turn — tool calls, thoughts, and the narration text between them — folds
+/// into ONE collapsed [`RowKind::ToolGroup`], so only the reply text (the
+/// trailing run of text parts) stays a visible row.
 pub fn rows_for_entry(
     entry: &SessionMessageEntry,
     pending: bool,
+    compact: bool,
     parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
 ) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
@@ -1285,9 +1320,36 @@ pub fn rows_for_entry(
     // ordinary tools. Agent/spawn chips flush into their own group so they
     // never share a collapse with Reads/Runs.
     let last_part_ix = entry.parts.len().saturating_sub(1);
+    // Compact mode's reply boundary: the index where the turn's TRAILING run
+    // of non-empty text parts begins. Every text part before it is narration
+    // that folds into the single work group; the run itself stays visible
+    // rows. While the turn still STREAMS there is no reply yet — a "tail"
+    // text would only fold back in once work resumes, so it rides the group
+    // too and nothing visible expands by default. `None` means the turn ends
+    // on work (or is mid-flight) — only the accordion renders.
+    let reply_start = (compact && !streaming)
+        .then(|| {
+            let mut start = entry.parts.iter().rposition(
+                |part| matches!(part, MessagePart::Text { text, .. } if !text.trim().is_empty()),
+            )?;
+            while start > 0
+                && matches!(
+                    &entry.parts[start - 1],
+                    MessagePart::Text { text, .. } if !text.trim().is_empty()
+                )
+            {
+                start -= 1;
+            }
+            Some(start)
+        })
+        .flatten();
     let mut group_ix = 0usize;
     let mut pending_group: Vec<ToolItem> = Vec::new();
     let mut group_last_part_ix = 0usize;
+    // Compact mode: the row index the single work group lands at — the
+    // position of the FIRST foldable part, so Input/Error chips ahead of it
+    // keep their doc order.
+    let mut compact_group_pos: Option<usize> = None;
 
     let flush_group =
         |rows: &mut Vec<Row>, group: &mut Vec<ToolItem>, group_ix: &mut usize, last_ix: usize| {
@@ -1341,14 +1403,19 @@ pub fn rows_for_entry(
                     subagent_ref: subagent_ref.clone().map(SharedString::from),
                     subagent_status: *subagent_status,
                     subagent_tail: subagent_tail.clone().map(SharedString::from),
-                    is_thought: false,
+                    kind: ToolItemKind::Call,
                 };
-                // Agent chips don't share a fold with ordinary tools: flush
-                // whenever the genus flips so each group is uniform.
-                if pending_group
+                if compact {
+                    // Compact mode keeps ONE group for the whole turn —
+                    // agent chips fold in with everything else, so the genus
+                    // split below never runs.
+                    compact_group_pos.get_or_insert(rows.len());
+                } else if pending_group
                     .first()
                     .is_some_and(|head| is_agent_tool(head) != is_agent_tool(&item))
                 {
+                    // Agent chips don't share a fold with ordinary tools:
+                    // flush whenever the genus flips so each group is uniform.
                     flush_group(
                         &mut rows,
                         &mut pending_group,
@@ -1374,9 +1441,11 @@ pub fn rows_for_entry(
                 // settled cache once complete.
                 let tree = parse(&format!("{}#{}", entry.id, part_id), text);
                 let item = thought_item(&tree, live);
-                // Thoughts join ordinary tool groups; agent (spawn-link)
-                // groups stay pure, exactly like the tool genus rule.
-                if pending_group.first().is_some_and(is_agent_tool) {
+                if compact {
+                    compact_group_pos.get_or_insert(rows.len());
+                } else if pending_group.first().is_some_and(is_agent_tool) {
+                    // Thoughts join ordinary tool groups; agent (spawn-link)
+                    // groups stay pure, exactly like the tool genus rule.
                     flush_group(
                         &mut rows,
                         &mut pending_group,
@@ -1388,12 +1457,29 @@ pub fn rows_for_entry(
                 group_last_part_ix = part_ix;
             }
             other => {
-                flush_group(
-                    &mut rows,
-                    &mut pending_group,
-                    &mut group_ix,
-                    group_last_part_ix,
-                );
+                // Compact mode: narration text folds into the single group as
+                // a "Wrote" chip — only the reply (the trailing text run)
+                // stays a row.
+                if compact
+                    && let MessagePart::Text { id: part_id, text } = other
+                    && !text.trim().is_empty()
+                    && reply_start.is_none_or(|start| part_ix < start)
+                {
+                    compact_group_pos.get_or_insert(rows.len());
+                    let tree = parse(&format!("{}#{}", entry.id, part_id), text);
+                    let live = streaming && part_ix == last_part_ix;
+                    pending_group.push(note_item(&tree, live));
+                    group_last_part_ix = part_ix;
+                    continue;
+                }
+                if !compact {
+                    flush_group(
+                        &mut rows,
+                        &mut pending_group,
+                        &mut group_ix,
+                        group_last_part_ix,
+                    );
+                }
                 match other {
                     MessagePart::Text { id: part_id, text } => {
                         if text.trim().is_empty() {
@@ -1512,12 +1598,37 @@ pub fn rows_for_entry(
             }
         }
     }
-    flush_group(
-        &mut rows,
-        &mut pending_group,
-        &mut group_ix,
-        group_last_part_ix,
-    );
+    if compact {
+        // One group for the whole turn, sitting where its first foldable
+        // part appeared. Never auto-opens — collapsed-by-default is the
+        // point of the mode; `auto_open` stays false even mid-stream and the
+        // render path gates the arrival reveal on the mode as well.
+        if !pending_group.is_empty() {
+            let tools = std::mem::take(&mut pending_group);
+            rows.insert(
+                compact_group_pos.unwrap_or(rows.len()),
+                Row {
+                    id: format!("{}#work", entry.id).into(),
+                    version: tool_fingerprint(&tools, false),
+                    turn_start: false,
+                    kind: RowKind::ToolGroup {
+                        tools: Arc::new(tools),
+                        auto_open: false,
+                    },
+                    entry_id: entry.id.clone().into(),
+                    timestamp: None,
+                    copy_text: None,
+                },
+            );
+        }
+    } else {
+        flush_group(
+            &mut rows,
+            &mut pending_group,
+            &mut group_ix,
+            group_last_part_ix,
+        );
+    }
 
     if let Some(first) = rows.first_mut() {
         first.turn_start = true;
@@ -1733,10 +1844,17 @@ pub fn diff_rows(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
 pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     let pairs: Vec<(ToolCall, bool)> = tools
         .iter()
-        .filter(|t| !t.is_thought)
+        .filter(|t| t.kind == ToolItemKind::Call)
         .map(|t| (t.call.clone(), t.is_error))
         .collect();
-    let thoughts = tools.iter().filter(|t| t.is_thought).count();
+    let thoughts = tools
+        .iter()
+        .filter(|t| t.kind == ToolItemKind::Thought)
+        .count();
+    let notes = tools
+        .iter()
+        .filter(|t| t.kind == ToolItemKind::Note)
+        .count();
     // The shared summary answers "used 0 tools" for an empty set — a
     // thought-only group must not inherit that.
     let base = if pairs.is_empty() {
@@ -1744,15 +1862,29 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     } else {
         zeron_proto::view::tool_group_summary(&pairs)
     };
-    // Thought chips ride the group (they are UI-synthesized, so the shared
-    // view summary never sees them): name them on the collapsed line.
-    match (base.is_empty(), thoughts) {
-        (_, 0) => base,
-        (true, 1) => "Thought process".into(),
-        (true, n) => format!("Thought {n} times"),
-        (false, 1) => format!("Thought · {base}"),
-        (false, n) => format!("Thought {n} times · {base}"),
+    // Thought and note chips ride the group (they are UI-synthesized, so the
+    // shared view summary never sees them): name them on the collapsed line.
+    let mut segments: Vec<String> = Vec::new();
+    match thoughts {
+        0 => {}
+        1 => segments.push("thought process".into()),
+        n => segments.push(format!("thought {n} times")),
     }
+    match notes {
+        0 => {}
+        1 => segments.push("wrote a note".into()),
+        n => segments.push(format!("wrote {n} notes")),
+    }
+    if !base.is_empty() {
+        segments.push(base);
+    }
+    let mut summary = segments.join(" · ");
+    // Same capitalization rule as the shared summary — only the leading
+    // letter lifts.
+    if let Some(first) = summary.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    summary
 }
 
 fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Theme) -> AnyElement {
@@ -2694,6 +2826,9 @@ pub struct Transcript {
     /// Each instance owns separate scroll handles and list measurements, so
     /// every one must reset itself after a global Fit-mode transition.
     code_fences_generation: u64,
+    /// Compact mode as last applied to this instance's row split. Render
+    /// polls the setting each frame; a flip rebuilds every row.
+    compact_mode: bool,
     highlights: HighlightStore,
     show_jump_button: bool,
     /// Distance from the bottom at the last observation (wheel event or spring
@@ -2934,6 +3069,7 @@ impl Transcript {
             rendered_rows: HashSet::new(),
             typography_generation: crate::typography::generation(cx),
             code_fences_generation: crate::settings::code_fences_generation(cx),
+            compact_mode: crate::settings::transcript_compact_mode(cx),
             highlights: HighlightStore::default(),
             show_jump_button: false,
             last_scroll_distance: 0.0,
@@ -4140,8 +4276,9 @@ impl Transcript {
             let RowKind::ToolGroup { tools, .. } = &row.kind else {
                 continue;
             };
-            // Agent/spawn groups are standalone cards, not task trees.
-            if !tool_group_collapses(tools) {
+            // Agent/spawn groups are standalone cards, not task trees —
+            // except under compact mode, where they collapse like the rest.
+            if !self.compact_mode && !tool_group_collapses(tools) {
                 continue;
             }
             live_tool_groups.insert(row.id.clone());
@@ -4336,10 +4473,13 @@ impl Transcript {
         let streaming = entry.status == Some(MessageStatus::Streaming);
         // Live entries always rebuild; don't allocate a fingerprint that the
         // streaming path cannot use.
+        // The mode is part of the row split, so it keys the cache alongside
+        // the entry's own content (the high bit — `entry_fingerprint` never
+        // sets it: its accumulator is small relative to 2^63).
         let fingerprint = if streaming {
             0
         } else {
-            entry_fingerprint(entry, pending)
+            entry_fingerprint(entry, pending) ^ ((self.compact_mode as u64) << 63)
         };
         if !streaming
             && let Some(cached) = self.row_cache.get(&entry.id)
@@ -4355,7 +4495,7 @@ impl Transcript {
             // rows whose content hash changed are spliced — the reparsed tail).
             parse_for_row(streaming, key, text, live_parsers, tree_cache).0
         };
-        let rows = rows_for_entry(entry, pending, &mut parse);
+        let rows = rows_for_entry(entry, pending, self.compact_mode, &mut parse);
 
         if !streaming {
             self.row_cache.insert(
@@ -6020,7 +6160,9 @@ impl Transcript {
         let mut fold = self.folds.get(row_id).copied().unwrap_or_default();
         // Agent/spawn chips never fold: they are their own row, always open,
         // no "Called N tools" header — a running subagent stays visible.
-        let collapses = tool_group_collapses(tools);
+        // Compact mode is the exception: EVERYTHING sits under the one work
+        // accordion, spawn chips included.
+        let collapses = self.compact_mode || tool_group_collapses(tools);
         let arrival_pending = !cx.reduce_motion()
             && self.tool_group_reveals.get(row_id).is_some_and(|reveal| {
                 reveal.starts.iter().flatten().any(|start| {
@@ -6030,7 +6172,9 @@ impl Transcript {
                         < TOOL_CONNECTOR_REVEAL.total()
                 })
             });
-        let effective_auto_open = auto_open || arrival_pending;
+        // Compact mode never auto-opens — not for the streaming tail, and not
+        // to show chips arriving mid-reveal. Collapsed-by-default is the mode.
+        let effective_auto_open = auto_open || (arrival_pending && !self.compact_mode);
         let open = !collapses || fold.open.unwrap_or(effective_auto_open);
         if collapses {
             let reveal = self.tool_group_reveals.entry(row_id.clone()).or_default();
@@ -6045,7 +6189,11 @@ impl Transcript {
             }
             reveal.rendered_open = Some(open);
         }
-        let active = collapses && auto_open;
+        // The title shimmer reads "working" even under the collapsed compact
+        // fold — any unresolved chip (a running tool, a live thought) keeps it
+        // pulsing until the turn's work settles.
+        let active =
+            collapses && (auto_open || (self.compact_mode && tools.iter().any(|t| !t.resolved)));
         // Chips render their EFFECTIVE detail: the precomputed doc-resident
         // one, upgraded in place by a fetched sidecar blob (chat2-sync A3).
         // Resolved per paint (a HashMap probe per chip) so fetched content
@@ -6157,8 +6305,10 @@ impl Transcript {
             .map(|(((detail, invocation), fold), tool)| {
                 // A STREAMING thought chip defaults open (the live thinking
                 // is the point); settled chips default closed. A user toggle
-                // overrides either way.
-                let default_open = tool.is_thought && !tool.resolved;
+                // overrides either way — and compact mode overrides all of
+                // it: nothing inside the fold opens itself.
+                let default_open =
+                    tool.kind == ToolItemKind::Thought && !tool.resolved && !self.compact_mode;
                 (detail.is_some() || invocation.is_some()) && fold.open.unwrap_or(default_open)
             })
             .collect();
@@ -6981,6 +7131,23 @@ fn thought_line_text(line: &[InlineRun], theme: &Theme) -> Option<(SharedString,
     Some((text.into(), runs))
 }
 
+/// The folded-narration chip's header detail — the first non-blank line of
+/// the text, already flattened by [`thought_lines`] (inline markers became
+/// styling, so they don't leak `**` glyphs into the one-liner).
+fn note_chip_detail(tool: &ToolItem) -> String {
+    let Some(ToolDetail::Thought { lines, .. }) = tool.detail.as_deref() else {
+        return String::new();
+    };
+    for line in lines {
+        let text: String = line.iter().map(|run| run.text.as_str()).collect();
+        let text = single_line(text.trim());
+        if !text.is_empty() {
+            return text;
+        }
+    }
+    String::new()
+}
+
 /// The trailing tile on a chip header, when it has one.
 enum ChipTrail {
     /// Expand/collapse chevron — flipped while the detail body is open.
@@ -7006,10 +7173,10 @@ fn chip_header_row(
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::Div {
-    let (label, detail) = if tool.is_thought {
-        ("Thought process", String::new())
-    } else {
-        tool_chip_content(&tool.call)
+    let (label, detail) = match tool.kind {
+        ToolItemKind::Thought => ("Thought process", String::new()),
+        ToolItemKind::Note => ("Wrote", note_chip_detail(tool)),
+        ToolItemKind::Call => tool_chip_content(&tool.call),
     };
     let activity = !is_agent_tool(tool);
     let file_path = match &tool.call {
@@ -7061,10 +7228,10 @@ fn chip_header_row(
                     .items_center()
                     .justify_center()
                     .child(
-                        crate::icons::icon(if tool.is_thought {
-                            crate::icons::CHAT_ROUND_LINE
-                        } else {
-                            tool_icon_path(&tool.call)
+                        crate::icons::icon(match tool.kind {
+                            ToolItemKind::Thought => crate::icons::CHAT_ROUND_LINE,
+                            ToolItemKind::Note => crate::icons::PEN,
+                            ToolItemKind::Call => tool_icon_path(&tool.call),
                         })
                         .size(px(12.0))
                         .text_color(theme.text_muted),
@@ -7418,10 +7585,10 @@ fn activity_rail(
             .inset_0(),
         )
         .child(
-            crate::icons::icon(if tool.is_thought {
-                crate::icons::CHAT_ROUND_LINE
-            } else {
-                tool_icon_path(&tool.call)
+            crate::icons::icon(match tool.kind {
+                ToolItemKind::Thought => crate::icons::CHAT_ROUND_LINE,
+                ToolItemKind::Note => crate::icons::PEN,
+                ToolItemKind::Call => tool_icon_path(&tool.call),
             })
             .absolute()
             .left(px(ACTIVITY_ICON_LEFT))
@@ -7651,6 +7818,15 @@ impl Render for Transcript {
             .borrow_mut()
             .retain_rows(&self.rendered_rows);
         self.rendered_rows.clear();
+        let compact_mode = crate::settings::transcript_compact_mode(cx);
+        if self.compact_mode != compact_mode {
+            self.compact_mode = compact_mode;
+            // The row SPLIT differs by mode (one work fold vs per-segment
+            // groups + narration rows) — the fingerprint above already keys
+            // on it, so a fresh sync rebuilds everything.
+            self.last_source = None;
+            self.sync(cx);
+        }
         let code_fences_generation = crate::settings::code_fences_generation(cx);
         if self.code_fences_generation != code_fences_generation {
             self.code_fences_generation = code_fences_generation;
@@ -8967,14 +9143,16 @@ mod tests {
                 tool_part("t3", "pwd"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
         assert_eq!(rows.len(), 1, "one combined accordion row");
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
         assert_eq!(tools.len(), 4);
-        assert!(tools[0].is_thought && tools[2].is_thought);
-        assert!(!tools[1].is_thought && !tools[3].is_thought);
+        assert_eq!(tools[0].kind, ToolItemKind::Thought);
+        assert_eq!(tools[2].kind, ToolItemKind::Thought);
+        assert_eq!(tools[1].kind, ToolItemKind::Call);
+        assert_eq!(tools[3].kind, ToolItemKind::Call);
         // Thought chips carry their text as a styled-line detail with an
         // ANALYTIC height, so the group's fold tween covers them.
         assert!(matches!(
@@ -8992,7 +9170,7 @@ mod tests {
             MessageStatus::Complete,
             vec![reasoning_part("r0", "just thinking")],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
         assert_eq!(rows.len(), 1);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
@@ -9005,7 +9183,7 @@ mod tests {
             MessageStatus::Complete,
             vec![reasoning_part("r0", "   ")],
         );
-        assert!(rows_for_entry(&entry, false, &mut parse).is_empty());
+        assert!(rows_for_entry(&entry, false, false, &mut parse).is_empty());
     }
 
     #[test]
@@ -9015,7 +9193,7 @@ mod tests {
             MessageStatus::Streaming,
             vec![reasoning_part("r0", "thinking hard")],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
         let RowKind::ToolGroup { tools, auto_open } = &rows[0].kind else {
             panic!("expected a tool group");
         };
@@ -9032,11 +9210,143 @@ mod tests {
                 text_part("t1", "answer"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
         assert!(tools[0].resolved, "a followed thought is settled");
+    }
+
+    #[test]
+    fn compact_mode_folds_the_whole_turn_into_one_collapsed_group() {
+        // Reasoning + tools + narration + the reply: everything before the
+        // trailing text run rides one closed-by-default accordion.
+        let entry = assistant(
+            "a1",
+            MessageStatus::Complete,
+            vec![
+                reasoning_part("r0", "thinking about it"),
+                tool_part("t1", "ls"),
+                text_part("n1", "checking the layout now"),
+                tool_part("t2", "pwd"),
+                text_part("r1", "All done — here is the answer."),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, true, &mut parse);
+        assert_eq!(rows.len(), 2, "one work accordion + the reply");
+        let RowKind::ToolGroup { tools, auto_open } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert!(!auto_open, "the work group never opens itself");
+        assert_eq!(tools.len(), 4);
+        assert_eq!(tools[0].kind, ToolItemKind::Thought);
+        assert_eq!(tools[1].kind, ToolItemKind::Call);
+        assert_eq!(tools[2].kind, ToolItemKind::Note);
+        assert_eq!(tools[3].kind, ToolItemKind::Call);
+        // The narration text is the note chip's flattened detail.
+        assert!(matches!(
+            tools[2].detail.as_deref(),
+            Some(ToolDetail::Thought { lines, .. })
+                if lines
+                    .iter()
+                    .flatten()
+                    .any(|r| r.text.contains("checking the layout"))
+        ));
+        assert!(matches!(rows[1].kind, RowKind::Markdown { .. }));
+        let summary = tool_group_summary(tools);
+        assert!(summary.contains("wrote a note"), "{summary}");
+        assert!(summary.contains("Ran 2 commands"), "{summary}");
+        assert!(summary.contains("Thought process"), "{summary}");
+    }
+
+    #[test]
+    fn compact_mode_keeps_reply_rows_and_skips_empty_groups() {
+        // A reply-only turn renders exactly like the ordinary split — no
+        // empty accordion.
+        let entry = assistant(
+            "a1",
+            MessageStatus::Complete,
+            vec![text_part("t0", "just an answer")],
+        );
+        let rows = rows_for_entry(&entry, false, true, &mut parse);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0].kind, RowKind::Markdown { .. }));
+
+        // Consecutive trailing texts all stay visible — only earlier
+        // narration folds.
+        let entry = assistant(
+            "a2",
+            MessageStatus::Complete,
+            vec![
+                tool_part("t0", "ls"),
+                text_part("r0", "first half"),
+                text_part("r1", "second half"),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, true, &mut parse);
+        assert_eq!(rows.len(), 3, "work group + two reply parts");
+        assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));
+        assert!(matches!(rows[1].kind, RowKind::Markdown { .. }));
+        assert!(matches!(rows[2].kind, RowKind::Markdown { .. }));
+    }
+
+    #[test]
+    fn compact_mode_stays_collapsed_while_streaming() {
+        // Streaming surfaces nothing under compact mode — in-progress text is
+        // narration until the turn settles, so it folds with the rest and the
+        // whole turn is one closed accordion.
+        let entry = assistant(
+            "a1",
+            MessageStatus::Streaming,
+            vec![
+                reasoning_part("r0", "thinking"),
+                tool_part("t1", "ls"),
+                text_part("r1", "streaming the answer"),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, true, &mut parse);
+        assert_eq!(rows.len(), 1, "the streaming text tail folds too");
+        let RowKind::ToolGroup { tools, auto_open } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert!(!auto_open);
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[2].kind, ToolItemKind::Note);
+
+        // On settle the same parts surface the reply as its own row.
+        let done = assistant("a1", MessageStatus::Complete, entry.parts.clone());
+        let rows = rows_for_entry(&done, false, true, &mut parse);
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));
+        assert!(matches!(rows[1].kind, RowKind::Markdown { .. }));
+    }
+
+    #[test]
+    fn compact_mode_keeps_input_and_error_chips_visible() {
+        // Interactive/error rows are not work steps — they stay outside the
+        // fold so a blocking question or a failure still surfaces.
+        let entry = assistant(
+            "a1",
+            MessageStatus::Complete,
+            vec![
+                tool_part("t0", "ls"),
+                MessagePart::Error {
+                    id: "e1".into(),
+                    message: "boom".into(),
+                },
+                tool_part("t1", "pwd"),
+                text_part("r0", "the answer"),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, true, &mut parse);
+        assert_eq!(rows.len(), 3);
+        assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));
+        assert!(matches!(rows[1].kind, RowKind::ErrorChip { .. }));
+        assert!(matches!(rows[2].kind, RowKind::Markdown { .. }));
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            unreachable!();
+        };
+        assert_eq!(tools.len(), 2, "the error didn't split the work group");
     }
 
     fn thought_of(text: &str) -> Vec<Vec<InlineRun>> {
@@ -9178,7 +9488,7 @@ mod tests {
         // Live rows split per block exactly like completed ones (the list
         // virtualizes them — the fading tail is the only per-frame work).
         let live = assistant("m1", MessageStatus::Streaming, vec![text_part("t0", MD)]);
-        let live_rows = rows_for_entry(&live, false, &mut parse);
+        let live_rows = rows_for_entry(&live, false, false, &mut parse);
         assert_eq!(live_rows.len(), 3, "one live row per top-level block");
         assert!(
             live_rows
@@ -9189,7 +9499,7 @@ mod tests {
         assert_eq!(live_rows[2].id.as_ref(), "m1#t0.2");
 
         let done = assistant("m1", MessageStatus::Complete, vec![text_part("t0", MD)]);
-        let done_rows = rows_for_entry(&done, false, &mut parse);
+        let done_rows = rows_for_entry(&done, false, false, &mut parse);
         assert_eq!(done_rows.len(), 3, "three top-level blocks");
         // Every block row keeps its id across the flip — no flicker on handoff.
         for (live, done) in live_rows.iter().zip(&done_rows) {
@@ -9212,8 +9522,8 @@ mod tests {
         let t2 = "para one\n\npara two\n\npara three grows here";
         let live1 = assistant("m1", MessageStatus::Streaming, vec![text_part("t0", t1)]);
         let live2 = assistant("m1", MessageStatus::Streaming, vec![text_part("t0", t2)]);
-        let r1 = rows_for_entry(&live1, false, &mut parse);
-        let r2 = rows_for_entry(&live2, false, &mut parse);
+        let r1 = rows_for_entry(&live1, false, false, &mut parse);
+        let r2 = rows_for_entry(&live2, false, false, &mut parse);
         assert_eq!(r1.len(), 3);
         assert_eq!(r2.len(), 3);
         assert_eq!(r1[0].version, r2[0].version, "settled block untouched");
@@ -9236,7 +9546,7 @@ mod tests {
                 text_part("t1", "tail para"),
             ],
         );
-        let rows = rows_for_entry(&done, false, &mut parse);
+        let rows = rows_for_entry(&done, false, false, &mut parse);
         // Rows: t0.0, t0.1, t0.2 (three MD blocks), g0, t1.0.
         assert_eq!(rows.len(), 5);
         // Sibling markdown blocks from the same part: md block gap.
@@ -9262,7 +9572,7 @@ mod tests {
                 tool_part("c", "make"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_ref()).collect();
         assert_eq!(ids, ["m2#t0.0", "m2#g0", "m2#t1.0", "m2#g1"]);
         let RowKind::ToolGroup { tools, .. } = &rows[1].kind else {
@@ -9312,7 +9622,7 @@ mod tests {
                 text_part("t1", "after"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_ref()).collect();
         assert_eq!(
             ids,
@@ -9376,7 +9686,7 @@ mod tests {
             MessageStatus::Complete,
             vec![tool_part("a", "ls"), stray, tool_part("c", "make")],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
         assert_eq!(rows.len(), 1, "one folded group, no agent split");
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("tool group expected")
@@ -9394,7 +9704,7 @@ mod tests {
             MessageStatus::Complete,
             vec![agent_part("s1", "scan repo")],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
         assert_eq!(rows.len(), 1);
         let RowKind::ToolGroup { tools, auto_open } = &rows[0].kind else {
             panic!("agent group expected")
@@ -9427,7 +9737,7 @@ mod tests {
             MessageStatus::Complete,
             vec![tool_part("a", "ls"), part],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
         assert_eq!(rows.len(), 2);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!()
@@ -9444,14 +9754,14 @@ mod tests {
     fn trailing_group_auto_opens_only_while_streaming() {
         let parts = vec![text_part("t0", "hi"), tool_part("a", "ls")];
         let streaming = assistant("m3", MessageStatus::Streaming, parts.clone());
-        let rows = rows_for_entry(&streaming, false, &mut parse);
+        let rows = rows_for_entry(&streaming, false, false, &mut parse);
         let RowKind::ToolGroup { auto_open, .. } = rows[1].kind else {
             panic!()
         };
         assert!(auto_open, "trailing group opens while streaming");
 
         let complete = assistant("m3", MessageStatus::Complete, parts);
-        let rows = rows_for_entry(&complete, false, &mut parse);
+        let rows = rows_for_entry(&complete, false, false, &mut parse);
         let RowKind::ToolGroup { auto_open, .. } = rows[1].kind else {
             panic!()
         };
@@ -9463,7 +9773,7 @@ mod tests {
             MessageStatus::Streaming,
             vec![tool_part("a", "ls"), text_part("t0", "hi")],
         );
-        let rows = rows_for_entry(&mid, false, &mut parse);
+        let rows = rows_for_entry(&mid, false, false, &mut parse);
         let RowKind::ToolGroup { auto_open, .. } = rows[0].kind else {
             panic!()
         };
@@ -9476,8 +9786,8 @@ mod tests {
         entry.role = MessageRole::User;
         entry.status = None;
         entry.parts = vec![text_part("t0", "hello")];
-        let confirmed = rows_for_entry(&entry, false, &mut parse);
-        let echoed = rows_for_entry(&entry, true, &mut parse);
+        let confirmed = rows_for_entry(&entry, false, false, &mut parse);
+        let echoed = rows_for_entry(&entry, true, false, &mut parse);
         assert_eq!(confirmed.len(), 1);
         assert_eq!(confirmed[0].id, echoed[0].id);
         // Pending → confirmed changes the version so the row re-renders.
@@ -10868,8 +11178,8 @@ mod tests {
         entry.role = MessageRole::User;
         entry.status = None;
         entry.parts = vec![text_part("t0", &"a line\n".repeat(40))];
-        let before = rows_for_entry(&entry, false, &mut parse);
-        let after = rows_for_entry(&entry, false, &mut parse);
+        let before = rows_for_entry(&entry, false, false, &mut parse);
+        let after = rows_for_entry(&entry, false, false, &mut parse);
         assert_eq!(before.len(), 1);
         assert_eq!(before[0].id, after[0].id);
         assert_eq!(before[0].version, after[0].version);
@@ -10885,7 +11195,7 @@ mod tests {
         entry.role = MessageRole::User;
         entry.status = None;
         entry.parts = vec![text_part("t0", &content)];
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
         assert_eq!(rows.len(), 1);
         let RowKind::User {
             text, attachments, ..
@@ -10902,7 +11212,7 @@ mod tests {
         // Image-only send: no bubble text, refs parsed.
         let only = crate::attachments::with_attachments("", &["/a/p.png".to_string()]);
         entry.parts = vec![text_part("t0", &only)];
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
         let RowKind::User {
             text, attachments, ..
         } = &rows[0].kind
@@ -10925,7 +11235,7 @@ mod tests {
         entry.role = MessageRole::User;
         entry.status = None;
         entry.parts = vec![text_part("t0", raw)];
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
         let RowKind::User { text, mentions, .. } = &rows[0].kind else {
             panic!("expected a user row");
         };
@@ -10944,7 +11254,7 @@ mod tests {
         assert_eq!(rows[0].version, (raw.len() as u64) << 1);
 
         entry.parts = vec![text_part("t0", "no mentions here")];
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
         let RowKind::User { text, mentions, .. } = &rows[0].kind else {
             panic!("expected a user row");
         };
@@ -10956,9 +11266,9 @@ mod tests {
     fn diff_rows_appends_and_middle_edits() {
         let entry1 = assistant("m1", MessageStatus::Complete, vec![text_part("t0", "one")]);
         let entry2 = assistant("m2", MessageStatus::Complete, vec![text_part("t0", "two")]);
-        let r1 = rows_for_entry(&entry1, false, &mut parse);
+        let r1 = rows_for_entry(&entry1, false, false, &mut parse);
         let mut both = r1.clone();
-        both.extend(rows_for_entry(&entry2, false, &mut parse));
+        both.extend(rows_for_entry(&entry2, false, false, &mut parse));
 
         // Identical → None.
         assert!(diff_rows(&r1, &r1.clone()).is_none());
@@ -10973,12 +11283,12 @@ mod tests {
             MessageStatus::Complete,
             vec![text_part("t0", "one more")],
         );
-        let mut both_b = rows_for_entry(&entry1b, false, &mut parse);
-        both_b.extend(rows_for_entry(&entry2, false, &mut parse));
+        let mut both_b = rows_for_entry(&entry1b, false, false, &mut parse);
+        both_b.extend(rows_for_entry(&entry2, false, false, &mut parse));
         assert_eq!(diff_rows(&both, &both_b), Some((0..1, 1)));
 
         // Full reset when everything shifts.
-        let r2 = rows_for_entry(&entry2, false, &mut parse);
+        let r2 = rows_for_entry(&entry2, false, false, &mut parse);
         assert_eq!(diff_rows(&r1, &r2), Some((0..1, 1)));
     }
 
@@ -10986,8 +11296,8 @@ mod tests {
     fn diff_handles_live_to_split_growth() {
         let live = assistant("m1", MessageStatus::Streaming, vec![text_part("t0", MD)]);
         let done = assistant("m1", MessageStatus::Complete, vec![text_part("t0", MD)]);
-        let live_rows = rows_for_entry(&live, false, &mut parse);
-        let done_rows = rows_for_entry(&done, false, &mut parse);
+        let live_rows = rows_for_entry(&live, false, false, &mut parse);
+        let done_rows = rows_for_entry(&done, false, false, &mut parse);
         // Same ids; every version flips its streaming bit → one 3-row splice.
         assert_eq!(diff_rows(&live_rows, &done_rows), Some((0..3, 3)));
     }
@@ -11087,7 +11397,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
-            is_thought: false,
+            kind: ToolItemKind::Call,
         };
         let edit = |p: &str| ToolItem {
             call: ToolCall::EditFile {
@@ -11105,7 +11415,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
-            is_thought: false,
+            kind: ToolItemKind::Call,
         };
         let tools = vec![
             exec("ls"),
@@ -11139,7 +11449,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
-                is_thought: false,
+                kind: ToolItemKind::Call,
             },
             ToolItem {
                 call: ToolCall::Glob {
@@ -11155,7 +11465,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
-                is_thought: false,
+                kind: ToolItemKind::Call,
             },
             ToolItem {
                 call: ToolCall::WebSearch { query: "q".into() },
@@ -11169,7 +11479,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
-                is_thought: false,
+                kind: ToolItemKind::Call,
             },
         ];
         assert_eq!(tool_group_summary(&tools), "Read 1 file · searched 2 times");
@@ -11388,7 +11698,7 @@ mod tests {
             status: None,
             continuation_of: None,
         };
-        let rows = rows_for_entry(&user, true, &mut parse);
+        let rows = rows_for_entry(&user, true, false, &mut parse);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].timestamp, Some(ms));
 
@@ -11398,7 +11708,7 @@ mod tests {
             MessageStatus::Complete,
             vec![text_part("p1", "one\n\ntwo")],
         );
-        let rows = rows_for_entry(&done, false, &mut parse);
+        let rows = rows_for_entry(&done, false, false, &mut parse);
         assert!(rows.len() >= 2);
         assert_eq!(rows.last().unwrap().timestamp, Some(done.created_at));
         assert_eq!(
@@ -11414,7 +11724,7 @@ mod tests {
             MessageStatus::Streaming,
             vec![text_part("p1", "streaming…")],
         );
-        let rows = rows_for_entry(&live, false, &mut parse);
+        let rows = rows_for_entry(&live, false, false, &mut parse);
         assert!(rows.iter().all(|r| r.timestamp.is_none()));
         assert!(rows.iter().all(|r| r.copy_text.is_none()));
         // Every row knows its entry (the hover group).
@@ -11594,7 +11904,7 @@ mod tests {
             MessageStatus::Streaming,
             vec![text_part("t0", ""), text_part("t1", "   ")],
         );
-        assert!(rows_for_entry(&entry, false, &mut parse).is_empty());
+        assert!(rows_for_entry(&entry, false, false, &mut parse).is_empty());
     }
 }
 
