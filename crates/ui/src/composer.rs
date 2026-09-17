@@ -3753,6 +3753,10 @@ impl Render for ComposerInput {
             .id(("composer-input", cx.entity_id()))
             .role(self.accessibility_role)
             .aria_label(self.placeholder.clone())
+            // Assistive text-entry clients such as Spokenly need the current
+            // value in addition to the role and placeholder to recognize this
+            // custom GPUI editor as an editable text destination.
+            .aria_value(self.content.clone())
             .aria_placeholder(self.placeholder.clone())
             .key_context(self.key_context)
             .track_focus(&self.focus_handle)
