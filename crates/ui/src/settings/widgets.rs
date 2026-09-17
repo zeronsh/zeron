@@ -3,9 +3,147 @@
 //! and small buttons, so every page reads as the same product surface
 //! (zeron settings.devices.tsx / settings.agents.tsx / settings.archived.tsx).
 
-use gpui::{AnyElement, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, Context, Pixels, ScrollHandle, SharedString, div, prelude::*, px};
 
+use crate::popover::{self, MenuScrollbarMetrics, MenuScrollbarState, ScrollRailHost};
 use crate::theme::{Theme, ink};
+
+/// Owned scroll + floating-scrollbar state for one settings page.
+///
+/// This is the dedicated settings scroll container state. It wraps the same
+/// `MenuScrollbarState` treatment as the model-picker (`pickers.rs`) and the
+/// composer popups (`composer.rs`): the rail is hidden until hover/drag and
+/// floats above content without consuming layout width.
+///
+/// Every settings page follows the same shape: a `scroll: PageScroll` field,
+/// a [`ScrollRailHost`] impl on the page delegating here, and a root
+/// `.relative()` host carrying only the list-hover `on_hover` around the
+/// `.overflow_y_scroll().track_scroll(&self.scroll.scroll)` page, with
+/// [`popover::rail`] supplying the rail and all of its listeners.
+pub struct PageScroll {
+    /// Tracked by the page's scrolling list directly — including the appshots
+    /// half of the shortcuts page, which renders from its own file.
+    pub scroll: ScrollHandle,
+    bar: MenuScrollbarState,
+}
+
+impl Default for PageScroll {
+    fn default() -> Self {
+        Self {
+            scroll: ScrollHandle::new(),
+            bar: MenuScrollbarState::default(),
+        }
+    }
+}
+
+impl ScrollRailHost for PageScroll {
+    fn rail_bar(&mut self) -> &mut MenuScrollbarState {
+        &mut self.bar
+    }
+
+    fn rail_scroll(&self) -> Option<ScrollHandle> {
+        Some(self.scroll.clone())
+    }
+}
+
+impl PageScroll {
+    pub fn set_list_hovered(&mut self, hovered: bool) -> bool {
+        self.bar.set_list_hovered(hovered)
+    }
+
+    fn set_bar_hovered(&mut self, hovered: bool) -> bool {
+        self.bar.set_bar_hovered(hovered)
+    }
+
+    fn begin_press(&mut self, pointer_y: Pixels) -> bool {
+        self.bar.begin_press(&self.scroll, pointer_y)
+    }
+
+    fn drag_to(&self, pointer_y: Pixels) -> bool {
+        self.bar.drag_to(&self.scroll, pointer_y)
+    }
+
+    fn end_press(&mut self) -> bool {
+        self.bar.end_press()
+    }
+
+    /// Rewind to the top and drop the rail's activity baseline — what a page
+    /// flip must do when one [`PageScroll`] is rerouted at a different list
+    /// (shortcuts ↔ appshots), so the new page opens unscrolled and the
+    /// offset jump is not read back as scrolling.
+    pub fn reset(&mut self) {
+        popover::reset_menu_scroll(&self.scroll, &mut self.bar);
+    }
+
+    /// Records scroll activity, then computes the rail geometry. Call once
+    /// per render ([`rail`] pairs this with the hide-countdown scheduling).
+    fn metrics(&mut self) -> Option<MenuScrollbarMetrics> {
+        self.bar.note_scroll(&self.scroll);
+        self.bar.metrics(&self.scroll)
+    }
+}
+
+/// [`popover::rail`] for a [`PageScroll`] that is not its view's only rail:
+/// `popover::rail` binds to the view's single [`ScrollRailHost`] impl, and a
+/// page carrying a second, menu-local scroll host (the appearance page's
+/// interface-font dropdown) cannot route that impl at both. The wiring
+/// mirrors [`popover::rail`]; `reach` re-borrows the state from the view
+/// inside the strip's pointer listeners, which fire with a `&mut V`.
+pub fn rail<V: 'static>(
+    scroll: &mut PageScroll,
+    id: &'static str,
+    theme: &Theme,
+    cx: &mut Context<V>,
+    reach: impl Fn(&mut V) -> &mut PageScroll + Copy + 'static,
+) -> Option<AnyElement> {
+    let metrics = scroll.metrics()?;
+    popover::schedule_scrollbar_hide(&mut scroll.bar, cx);
+    let strip = scroll.bar.render_rail(theme, metrics)?;
+    Some(
+        strip
+            .id(id)
+            .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
+                if reach(view).set_bar_hovered(*hovered) {
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |view, event: &gpui::MouseDownEvent, _, cx| {
+                    if reach(view).begin_press(event.position.y) {
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_drag(popover::MenuScrollbarDrag, |_, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| popover::MenuScrollbarDragGhost)
+            })
+            .on_drag_move(cx.listener(
+                move |view, event: &gpui::DragMoveEvent<popover::MenuScrollbarDrag>, _, cx| {
+                    if reach(view).drag_to(event.event.position.y) {
+                        cx.notify();
+                    }
+                },
+            ))
+            .on_mouse_up_out(
+                gpui::MouseButton::Left,
+                cx.listener(move |view, _: &gpui::MouseUpEvent, _, cx| {
+                    reach(view).end_press();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(move |view, _: &gpui::MouseUpEvent, _, cx| {
+                    reach(view).end_press();
+                    cx.notify();
+                }),
+            )
+            .into_any_element(),
+    )
+}
 
 /// Shared typography for a settings component's title and description. The
 /// Shortcuts page established this compact rhythm; list-style settings reuse

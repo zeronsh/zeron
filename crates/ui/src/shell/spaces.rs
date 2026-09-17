@@ -1,5 +1,5 @@
 //! Spaces sidebar: the space-filter dropdown (searchable, with "All projects"),
-//! the filtered Sessions list, and the add-space palette (⌘K-style: device
+//! the filtered Sessions list, and the add-space palette (device
 //! tabs + filtered folder browser).
 //!
 //! A space = a synced (device, folder) pair. Spaces stopped being a
@@ -10,7 +10,7 @@
 
 use super::*;
 use crate::pickers::{breadcrumbs, browser_rows, completion_prefix_len, parent_path};
-use gpui::FocusHandle;
+use gpui::{FocusHandle, Window};
 use zeron_proto::{ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, Space};
 
 struct ActiveChatRow {
@@ -22,7 +22,7 @@ struct ActiveChatRow {
     group: Option<(String, String)>,
 }
 
-fn compare_sidebar_chats(
+pub(super) fn compare_sidebar_chats(
     sort: SidebarSort,
     left: &zeron_proto::Chat,
     right: &zeron_proto::Chat,
@@ -43,7 +43,8 @@ fn compare_sidebar_chats(
 /// rows, keyboard highlight.
 pub(super) struct SpacesMenu {
     search: Entity<ComposerInput>,
-    /// Keyboard highlight within [`Shell::spaces_menu_rows`].
+    /// Keyboard highlight — an index into [`Shell::spaces_menu_rows`], or
+    /// that list's length when the pinned "New project…" footer holds it.
     active: usize,
     /// Tracked on the card — puts it on the keyboard dispatch path while the
     /// search input holds focus (the structure every working picker uses).
@@ -111,11 +112,6 @@ const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 7] = [
     SidebarViewRow::ShowHarness,
 ];
 
-// With the search field and card insets, this lets the project picker grow to
-// roughly the same maximum footprint as the sidebar view-options menu while
-// retaining an internal scroll region for larger project lists.
-const SPACES_MENU_LIST_MAX_HEIGHT: f32 = 336.0;
-// Sidebar rhythm: every first-level surface shares Theme's 8px inline edge;
 // list items stay tightly related at 2px, while section boundaries use 12px
 // (well over 2x the intra-list gap). Disclosure content gets a small 4px
 // handoff from its header without leaving dead space while collapsed.
@@ -171,7 +167,9 @@ fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyEle
         .child(chevron)
 }
 
-/// One row of the open dropdown, in display order.
+/// One activatable row of the open dropdown, in nav order. `AddSpace` names
+/// the card's pinned "New project…" footer, not a list row — keyboard nav
+/// maps the list-length index to it.
 #[derive(Clone, PartialEq)]
 pub(super) enum SpacesMenuRow {
     All,
@@ -179,31 +177,37 @@ pub(super) enum SpacesMenuRow {
     AddSpace,
 }
 
-/// The add-space palette (a command-K surface, summoned by ⌘K): search bar
-/// across the top, folder browser on the left, a Devices + Locations rail on
-/// the right, kbd-hint footer. One surface — picking a device or a drive in
-/// the rail rebrowses in place, no step wizard.
+/// New project navigates devices, locations, then folders on a command-palette surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectStep {
+    Devices,
+    Locations,
+    Folders,
+}
+
 pub(super) struct AddSpaceFlow {
-    /// The device currently browsed (the highlighted rail row).
+    step: ProjectStep,
+    location: Option<(String, Option<String>)>,
+    /// The selected device.
     device: Option<Device>,
     /// Filter input; Enter descends into the highlighted folder. Carries the
     /// tab-completion ghost (the faint suffix ⇥ accepts), and a trailing `/`
     /// on a folder-naming query descends immediately.
     search: Entity<ComposerInput>,
     browser: Loadable<FolderListing>,
-    /// The device's mounted drives/volumes (the rail's Locations rows).
+    /// The selected device's mounted drives/volumes.
     /// Best-effort: an error just leaves the section at Home only.
     drives: Loadable<Vec<DriveEntry>>,
     /// Requested browser path (`None` = the device's default, i.e. home).
     browser_path: Option<String>,
     /// The device's home (the path a `None` browse resolved to) — breadcrumbs
-    /// fold everything up to here into the device-name crumb.
+    /// fold everything up to here into the Home crumb.
     home: Option<String>,
     /// Best-effort git seed for the CURRENT browser path (known when we
     /// descended through an entry whose `is_repo` we saw; the owning device's
     /// SpacesSync re-verifies either way).
     browser_repo: bool,
-    /// Keyboard highlight within the FILTERED folder rows.
+    /// Keyboard highlight within the current step’s filtered rows.
     active: usize,
     submit_busy: bool,
     error: Option<SharedString>,
@@ -219,14 +223,6 @@ pub(super) struct AddSpaceFlow {
     drives_task: Option<Task<()>>,
     submit_task: Option<Task<()>>,
     _search_events: Subscription,
-}
-
-/// One row of the rail's Locations section: home, or a mounted drive
-/// (by index into the flow's loaded drive list).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LocationRow {
-    Home,
-    Drive(usize),
 }
 
 /// Segment-aware "is `path` at or under `base`" (`/media/a` is not under
@@ -261,6 +257,19 @@ pub(super) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hs
             theme.success.opacity(0.9) // emerald-400
         }
         ChatIndicator::Idle => crate::theme::ink(0.14),
+    }
+}
+
+// Handle-based rail host for the spaces dropdown: its list is a plain
+// tracked scroller, so the trait's default metrics/press/drag (off the live
+// ScrollHandle) apply unchanged.
+impl popover::ScrollRailHost for Shell {
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        &mut self.spaces_menu_bar
+    }
+
+    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
+        self.spaces_menu.get().map(|menu| menu.list_scroll.clone())
     }
 }
 
@@ -385,6 +394,17 @@ impl Shell {
         }
     }
 
+    fn on_spaces_menu_list_hover(
+        &mut self,
+        hovered: &bool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.spaces_menu_bar.set_list_hovered(*hovered) {
+            cx.notify();
+        }
+    }
+
     /// Open the new-session canvas in a just-added space, preserving the
     /// sidebar's current project filter.
     pub(super) fn land_in_space(&mut self, space_id: String, cx: &mut Context<Self>) {
@@ -406,9 +426,10 @@ impl Shell {
 
     // ---- sidebar sections ----
 
-    /// The filter's display rows: "All projects", then spaces matching the
-    /// search (ranked — `popover::filter_indices`), then "New project…".
-    /// "All" only shows on an empty query (searching means hunting a space).
+    /// The filter's scrollable rows: "All projects", then spaces matching
+    /// the search (ranked — `popover::filter_indices`). "All" only shows on
+    /// an empty query (searching means hunting a space). The "New project…"
+    /// action is not a row here — the card renders it as a pinned footer.
     fn spaces_menu_rows(&self, cx: &App) -> Vec<SpacesMenuRow> {
         let query = self
             .spaces_menu
@@ -430,7 +451,6 @@ impl Shell {
                 .into_iter()
                 .map(|ix| SpacesMenuRow::Space(spaces[ix].id.clone())),
         );
-        rows.push(SpacesMenuRow::AddSpace);
         rows
     }
 
@@ -458,6 +478,9 @@ impl Shell {
             list_scroll: gpui::ScrollHandle::new(),
             _search_events: search_events,
         });
+        // Fresh handle at the top — don't let the stale rail baseline read
+        // the reopen as scrolling.
+        self.spaces_menu_bar.clear_scroll_baseline();
         let rows = self.spaces_menu_rows(cx);
         let start = match &current {
             None => 0,
@@ -504,22 +527,32 @@ impl Shell {
                 cx.stop_propagation();
             }
             popover::MenuKey::Up | popover::MenuKey::Down => {
-                let count = self.spaces_menu_rows(cx).len();
+                let rows = self.spaces_menu_rows(cx);
+                // +1: the pinned footer stays in the nav order, exactly as
+                // when it was the list's last row.
+                let count = rows.len() + 1;
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
                 if let Some(menu) = self.spaces_menu.open_mut() {
                     menu.active = popover::menu_step(Some(menu.active), count, delta).unwrap_or(0);
-                    menu.list_scroll.scroll_to_item(menu.active);
+                    // The footer renders below the scroller — only in-list
+                    // rows can be scrolled to (the footer index would leave
+                    // a request pending against a row that never exists).
+                    if menu.active < rows.len() {
+                        menu.list_scroll.scroll_to_item(menu.active);
+                    }
                     cx.notify();
                 }
             }
             popover::MenuKey::Enter | popover::MenuKey::ModEnter => {
-                let row = {
-                    let active = self.spaces_menu.get().map(|m| m.active).unwrap_or(0);
-                    self.spaces_menu_rows(cx).get(active).cloned()
+                let active = self.spaces_menu.get().map(|m| m.active).unwrap_or(0);
+                let rows = self.spaces_menu_rows(cx);
+                // One past the scrollable rows is the pinned footer.
+                let row = if active < rows.len() {
+                    rows[active].clone()
+                } else {
+                    SpacesMenuRow::AddSpace
                 };
-                if let Some(row) = row {
-                    self.activate_spaces_menu_row(row, cx);
-                }
+                self.activate_spaces_menu_row(row, cx);
             }
             popover::MenuKey::Backspace | popover::MenuKey::Other => {}
         }
@@ -606,6 +639,7 @@ impl Shell {
     }
 
     fn render_sidebar_view_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let theme = &theme.for_popup();
         let Some(menu_state) = self.sidebar_view_menu.get() else {
             return div().into_any_element();
         };
@@ -666,7 +700,7 @@ impl Shell {
                     icon(icons[ix])
                         .size(px(15.0))
                         .flex_none()
-                        .text_color(theme.text_muted.opacity(0.8)),
+                        .text_color(theme.text_muted),
                 )
                 .child(div().flex_1().child(SharedString::from(labels[ix])))
                 .child(div().w(px(14.0)).flex_none().when(selected[ix], |el| {
@@ -922,6 +956,7 @@ impl Shell {
     /// The dropdown card: search on top, "All projects" + space rows (check on
     /// the active filter; right-click for rename/remove) + "New project…".
     fn render_spaces_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let theme = &theme.for_popup();
         let (search, active, focus, list_scroll) = {
             let Some(menu) = self.spaces_menu.get() else {
                 return div().into_any_element();
@@ -934,95 +969,108 @@ impl Shell {
             )
         };
         let rows = self.spaces_menu_rows(cx);
+        let scrollbar = popover::rail(self, "spaces-menu-scrollbar", theme, cx);
         let filter = self.settings.space_filter.clone();
-        let now = Utc::now();
-        // (name, device tag) per space row — presence reuses the session
-        // rows' heartbeat signal.
-        let details: Vec<(SpacesMenuRow, SharedString, Option<SharedString>, bool)> = {
+        // Keep the host tag so projects with the same name on different
+        // devices remain distinguishable. Consume `rows` to avoid cloning
+        // the list children per frame.
+        let details: Vec<(
+            SpacesMenuRow,
+            SharedString,
+            Option<SharedString>,
+            bool,
+            bool,
+        )> = {
             let state = self.state.read(cx);
-            rows.iter()
+            rows.into_iter()
                 .map(|row| match row {
-                    SpacesMenuRow::All => {
-                        (row.clone(), SharedString::from("All projects"), None, false)
-                    }
-                    SpacesMenuRow::Space(id) => match state.space_row(id) {
-                        Some(space) => {
-                            let (tag, offline) = state.space_device_tag(space, now);
-                            (
-                                row.clone(),
-                                space.display_name().to_string().into(),
-                                Some(tag.into()),
-                                offline,
-                            )
+                    SpacesMenuRow::All => (
+                        SpacesMenuRow::All,
+                        SharedString::from("All projects"),
+                        None,
+                        false,
+                        filter.is_none(),
+                    ),
+                    SpacesMenuRow::Space(id) => {
+                        let selected = filter.as_deref() == Some(id.as_str());
+                        match state.space_row(&id) {
+                            Some(space) => {
+                                let (tag, offline) = state.space_device_tag(space, Utc::now());
+                                (
+                                    SpacesMenuRow::Space(id),
+                                    space.display_name().to_string().into(),
+                                    Some(tag.into()),
+                                    offline,
+                                    selected,
+                                )
+                            }
+                            None => (
+                                SpacesMenuRow::Space(id),
+                                SharedString::from("?"),
+                                None,
+                                false,
+                                selected,
+                            ),
                         }
-                        None => (row.clone(), SharedString::from("?"), None, false),
-                    },
-                    SpacesMenuRow::AddSpace => {
-                        (row.clone(), SharedString::from("New project…"), None, false)
                     }
+                    // spaces_menu_rows never yields this variant — the
+                    // footer is rendered by the card, not the list.
+                    SpacesMenuRow::AddSpace => unreachable!(),
                 })
                 .collect()
         };
+        // The pinned footer's keyboard-nav index: one past the last
+        // scrollable row, its permanent place at the end of the nav order.
+        let add_index = details.len();
 
-        let list =
-            div()
-                .id("spaces-menu-list")
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .max_h(px(SPACES_MENU_LIST_MAX_HEIGHT))
-                .overflow_y_scroll()
-                .track_scroll(&list_scroll)
-                .children(details.into_iter().enumerate().map(
-                    |(ix, (row, label, tag, offline))| {
-                        let is_selected = match &row {
-                            SpacesMenuRow::All => filter.is_none(),
-                            SpacesMenuRow::Space(id) => filter.as_deref() == Some(id.as_str()),
-                            SpacesMenuRow::AddSpace => false,
-                        };
-                        let leading = match &row {
-                            SpacesMenuRow::AddSpace => icons::PLUS,
-                            _ => icons::FOLDER,
-                        };
-                        let menu_space = match &row {
-                            SpacesMenuRow::Space(id) => Some(id.clone()),
-                            _ => None,
-                        };
-                        let activate = row.clone();
-                        popover::menu_row_nav(
-                            theme,
-                            is_selected,
-                            ix == active,
-                            format!("spaces-menu-row-{ix}"),
-                        )
-                        .id(("spaces-menu-row", ix))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.activate_spaces_menu_row(activate.clone(), cx);
-                        }))
-                        .when_some(menu_space, |el, space_id| {
-                            el.on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                    this.space_menu.open((space_id.clone(), event.position));
-                                    cx.notify();
-                                }),
+        let list = popover::menu_scroll_host("spaces-menu-list-host")
+            .on_hover(cx.listener(Self::on_spaces_menu_list_hover))
+            .child(
+                popover::menu_scroll_list("spaces-menu-list", &list_scroll)
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    // Same scroll budget as the composer project menu.
+                    .max_h(px(224.0))
+                    .children(details.into_iter().enumerate().map(
+                        |(ix, (row, label, tag, offline, selected))| {
+                            let menu_space = match &row {
+                                SpacesMenuRow::Space(id) => Some(id.clone()),
+                                _ => None,
+                            };
+                            let activate = row;
+                            popover::menu_row_nav(
+                                theme,
+                                selected,
+                                ix == active,
+                                format!("spaces-menu-row-{ix}"),
                             )
-                        })
-                        .child(
-                            icon(leading)
-                                .size(px(15.0))
-                                .flex_none()
-                                .text_color(theme.text_muted.opacity(0.8)),
-                        )
-                        .child(div().flex_1().min_w_0().truncate().child(label))
-                        .when_some(tag, |el, tag| {
-                            el.child(
-                                div()
-                                    .flex_none()
-                                    .text_size(crate::typography::ui_rems(10.0))
-                                    .text_color(theme.text_muted.opacity(0.45))
-                                    .child(tag),
-                            )
+                            .id(("spaces-menu-row", ix))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.activate_spaces_menu_row(activate.clone(), cx);
+                            }))
+                            .when_some(menu_space, |el, space_id| {
+                                el.on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                        this.space_menu.open((space_id.clone(), event.position));
+                                        cx.notify();
+                                    }),
+                                )
+                            })
+                            .child(div().flex_1().min_w_0().truncate().child(label))
+                            .when_some(tag, |el, tag| {
+                                el.child(
+                                    div()
+                                        .max_w(gpui::relative(0.5))
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(crate::typography::ui_rems(10.0))
+                                        .font_weight(gpui::FontWeight::NORMAL)
+                                        .text_color(theme.text_muted)
+                                        .child(tag),
+                                )
+                            })
                             // Disconnected glyph, not the word (user request).
                             .when(offline, |el| {
                                 el.child(
@@ -1032,11 +1080,12 @@ impl Shell {
                                         .text_color(theme.warning.opacity(0.8)),
                                 )
                             })
-                        })
-                        // No check glyph — the selected row's wash (menu_row's
-                        // active styling) is the selection signal.
-                    },
-                ));
+                            // No check glyph — the selected row's wash (menu_row's
+                            // active styling) is the selection signal.
+                        },
+                    )),
+            )
+            .children(scrollbar);
 
         popover::popover_card(theme)
             // Match the trigger row as the sidebar is resized. Both live
@@ -1051,11 +1100,53 @@ impl Shell {
             }))
             .flex()
             .flex_col()
+            // Same 2px rhythm as the composer project menu's root.
+            .gap(px(2.0))
             .child(popover::search_input_frame(
                 theme,
                 search.into_any_element(),
             ))
             .child(list)
+            // "New project…" is a pinned action row under the list (the
+            // chat composer's project menu treatment) — scrolling must
+            // never carry it away, and its nav index (`add_index`) keeps it
+            // LAST.
+            .child(
+                // Full-bleed through the card's 4px inset — a divider
+                // stopping short of the edges reads as a mistake (the
+                // composer project menu's treatment).
+                div()
+                    .my(px(2.0))
+                    .mx(px(-popover::CARD_INSET))
+                    .h(px(1.0))
+                    .flex_none()
+                    .bg(theme.border.opacity(0.6)),
+            )
+            .child(
+                popover::menu_row_nav(
+                    theme,
+                    false,
+                    active == add_index,
+                    "spaces-menu-add".to_string(),
+                )
+                .id("spaces-menu-add")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.activate_spaces_menu_row(SpacesMenuRow::AddSpace, cx);
+                }))
+                .child(
+                    icon(icons::PLUS)
+                        .size(px(12.0))
+                        .flex_none()
+                        .text_color(theme.text_muted),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from("New project…")),
+                ),
+            )
             .into_any_element()
     }
 
@@ -1233,6 +1324,7 @@ impl Shell {
                     is_selected,
                     false,
                     jump_label,
+                    None,
                     theme,
                     cx,
                 );
@@ -1557,22 +1649,15 @@ impl Shell {
         Some(section.into_any_element())
     }
 
-    // ---- add-space flow (the ⌘K palette) ----
+    // ---- add-space flow ----
 
     pub(super) fn open_add_space(&mut self, cx: &mut Context<Self>) {
-        let devices: Vec<Device> = self.state.read(cx).devices.clone();
-        let local = self.state.read(cx).local_device_id.clone();
-        // Land on this device's tab (else the first registered device).
-        let device = devices
-            .iter()
-            .find(|d| local.as_deref() == Some(d.id.as_str()))
-            .or_else(|| devices.first())
-            .cloned();
+        self.command_palette = None;
         // "PaletteSearch" context: navigation keys stay unbound so ↑↓/←/→/⏎
         // bubble to the palette frame (`add_space_key`) instead of moving the
         // text caret — Enter and ⌘Enter are both handled there.
         let search =
-            cx.new(|cx| ComposerInput::with_context("Search folders…", "PaletteSearch", cx));
+            cx.new(|cx| ComposerInput::with_context("Search devices…", "PaletteSearch", cx));
         let search_events = cx.subscribe(&search, |this: &mut Shell, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 // Typing `/` after a query that names a folder descends into
@@ -1584,13 +1669,15 @@ impl Shell {
                 }
                 if let Some(flow) = this.add_space.as_mut() {
                     flow.active = 0;
+                    flow.list_scroll.set_offset(gpui::Point::default());
                 }
                 cx.notify();
             }
         });
-        let has_device = device.is_some();
         self.add_space = Some(AddSpaceFlow {
-            device,
+            step: ProjectStep::Devices,
+            location: None,
+            device: None,
             search,
             browser: Loadable::Idle,
             drives: Loadable::Idle,
@@ -1608,21 +1695,20 @@ impl Shell {
             submit_task: None,
             _search_events: search_events,
         });
-        if has_device {
-            self.load_space_folders(None, cx);
-            self.load_space_drives(cx);
-        }
         cx.notify();
     }
 
-    /// Devices-rail click: rebrowse the same palette on another device.
+    /// Selecting a device advances to its locations.
     fn add_space_pick_device(&mut self, device: Device, cx: &mut Context<Self>) {
         let Some(flow) = self.add_space.as_mut() else {
             return;
         };
-        if flow.device.as_ref().is_some_and(|d| d.id == device.id) {
-            return;
-        }
+        flow.focus_pending = true;
+        flow.step = ProjectStep::Locations;
+        flow.location = None;
+        flow.load_task = None;
+        flow.drives_task = None;
+        flow.list_scroll.set_offset(gpui::Point::default());
         flow.device = Some(device);
         flow.browser = Loadable::Idle;
         flow.drives = Loadable::Idle;
@@ -1632,29 +1718,100 @@ impl Shell {
         flow.active = 0;
         flow.error = None;
         let search = flow.search.clone();
-        search.update(cx, |input, cx| input.set_text("", cx));
-        self.load_space_folders(None, cx);
+        search.update(cx, |input, cx| {
+            input.set_placeholder("Search locations…", cx);
+            input.set_text("", cx);
+        });
         self.load_space_drives(cx);
         cx.notify();
     }
 
-    /// Locations-rail click: rebrowse at a drive's mount point (or home).
-    /// Same reset as descending — the query clears, the repo seed resets.
-    fn add_space_goto_location(&mut self, path: Option<String>, cx: &mut Context<Self>) {
+    fn add_space_goto_location(
+        &mut self,
+        name: String,
+        path: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(flow) = self.add_space.as_mut() else {
             return;
         };
-        // Already standing on that root — a no-op beats a reload flash.
-        if flow.browser.ready().is_some_and(|l| match &path {
-            Some(p) => l.path == *p,
-            None => flow.home.as_deref() == Some(l.path.as_str()),
-        }) {
-            return;
-        }
+        flow.focus_pending = true;
+        flow.step = ProjectStep::Folders;
+        flow.location = Some((name, path.clone()));
         flow.browser_repo = false;
         let search = flow.search.clone();
-        search.update(cx, |input, cx| input.set_text("", cx));
+        search.update(cx, |input, cx| {
+            input.set_placeholder("Search folders…", cx);
+            input.set_text("", cx);
+        });
         self.load_space_folders(path, cx);
+    }
+
+    fn add_space_back_to(&mut self, step: ProjectStep, cx: &mut Context<Self>) {
+        let Some(flow) = self.add_space.as_mut() else {
+            return;
+        };
+        flow.focus_pending = true;
+        flow.step = step;
+        flow.load_task = None;
+        flow.browser = Loadable::Idle;
+        flow.browser_path = None;
+        flow.location = None;
+        flow.browser_repo = false;
+        flow.active = 0;
+        flow.error = None;
+        flow.list_scroll.set_offset(gpui::Point::default());
+        if step == ProjectStep::Devices {
+            flow.drives_task = None;
+            flow.device = None;
+            flow.drives = Loadable::Idle;
+            flow.home = None;
+        }
+        let search = flow.search.clone();
+        search.update(cx, |input, cx| {
+            input.set_placeholder(
+                if step == ProjectStep::Devices {
+                    "Search devices…"
+                } else {
+                    "Search locations…"
+                },
+                cx,
+            );
+            input.set_text("", cx);
+        });
+        cx.notify();
+    }
+
+    fn add_space_devices(&self, cx: &App) -> Vec<Device> {
+        let Some(flow) = &self.add_space else {
+            return Vec::new();
+        };
+        let devices = &self.state.read(cx).devices;
+        let names: Vec<_> = devices.iter().map(|d| d.name.as_str()).collect();
+        popover::filter_indices(flow.search.read(cx).text(), &names)
+            .into_iter()
+            .map(|ix| devices[ix].clone())
+            .collect()
+    }
+
+    fn add_space_locations(&self, cx: &App) -> Vec<(String, Option<String>)> {
+        let Some(flow) = &self.add_space else {
+            return Vec::new();
+        };
+        let locations: Vec<_> = std::iter::once(("Home".to_string(), None))
+            .chain(
+                flow.drives
+                    .ready()
+                    .into_iter()
+                    .flatten()
+                    .map(|d| (d.name.clone(), Some(d.path.clone()))),
+            )
+            .collect();
+        let names: Vec<_> = locations.iter().map(|(name, _)| name.as_str()).collect();
+        popover::filter_indices(flow.search.read(cx).text(), &names)
+            .into_iter()
+            .map(|ix| locations[ix].clone())
+            .collect()
     }
 
     /// ListDrives on the flow's device (relay-forwarded when remote).
@@ -1707,6 +1864,9 @@ impl Shell {
         let Some(flow) = self.add_space.as_ref() else {
             return Vec::new();
         };
+        if flow.step != ProjectStep::Folders {
+            return Vec::new();
+        }
         let Some(listing) = flow.browser.ready() else {
             return Vec::new();
         };
@@ -1724,6 +1884,24 @@ impl Shell {
     /// instead — `/disk2⏎` must work, not sit on "No folders match" (an
     /// absolute query can never match a folder name anyway).
     fn add_space_open_active(&mut self, cx: &mut Context<Self>) {
+        let Some(flow) = self.add_space.as_ref() else {
+            return;
+        };
+        match flow.step {
+            ProjectStep::Devices => {
+                if let Some(device) = self.add_space_devices(cx).get(flow.active).cloned() {
+                    self.add_space_pick_device(device, cx);
+                }
+                return;
+            }
+            ProjectStep::Locations => {
+                if let Some((name, path)) = self.add_space_locations(cx).get(flow.active).cloned() {
+                    self.add_space_goto_location(name, path, cx);
+                }
+                return;
+            }
+            ProjectStep::Folders => {}
+        }
         let rows = self.add_space_filtered(cx);
         let Some(flow) = self.add_space.as_ref() else {
             return;
@@ -1761,6 +1939,13 @@ impl Shell {
     /// descending clears the query, so the caller must not keep acting on the
     /// old text.
     fn add_space_slash_descend(&mut self, cx: &mut Context<Self>) -> bool {
+        if self
+            .add_space
+            .as_ref()
+            .is_none_or(|f| f.step != ProjectStep::Folders)
+        {
+            return false;
+        }
         // A typed PATH jump: an absolute (`/disk2/`) or home-relative (`~/x/`)
         // query browses that path directly — mounts at unconventional roots
         // (and anywhere else) are reachable without a Locations row. Same
@@ -1861,19 +2046,23 @@ impl Shell {
 
     /// ListFolders on the flow's device (relay-forwarded when remote).
     pub(super) fn load_space_folders(&mut self, path: Option<String>, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
+        let engine = self.state.read(cx).engine().cloned();
         let local = self.state.read(cx).local_device_id.clone();
         let Some(flow) = self.add_space.as_mut() else {
             return;
         };
+        flow.focus_pending = true;
         let device_id = flow.device.as_ref().map(|d| d.id.clone());
         let went_home = path.is_none();
         flow.browser_path = path.clone();
         flow.browser = Loadable::Loading;
         flow.active = 0;
         flow.list_scroll.set_offset(gpui::Point::default());
+        let Some(engine) = engine else {
+            flow.browser = Loadable::Error("Device is not connected".into());
+            cx.notify();
+            return;
+        };
         flow.load_task = Some(cx.spawn(async move |this, cx| {
             let mut params = serde_json::Map::new();
             if let Some(p) = &path {
@@ -1924,7 +2113,7 @@ impl Shell {
         let Some(flow) = self.add_space.as_ref() else {
             return;
         };
-        if flow.submit_busy {
+        if flow.submit_busy || flow.step != ProjectStep::Folders {
             return;
         }
         let Some(device) = flow.device.clone() else {
@@ -2012,18 +2201,30 @@ impl Shell {
         cx.notify();
     }
 
-    /// Go up to the parent folder (←, and ⌫ on an empty query).
+    /// Back traverses folders, then locations, then devices.
     fn add_space_go_up(&mut self, cx: &mut Context<Self>) {
-        let parent = self
-            .add_space
-            .as_ref()
-            .and_then(|f| f.browser.ready())
-            .and_then(|l| parent_path(&l.path));
-        if let Some(parent) = parent {
-            if let Some(flow) = self.add_space.as_mut() {
-                flow.browser_repo = false; // unknown at the parent
+        let Some(flow) = &self.add_space else {
+            return;
+        };
+        match flow.step {
+            ProjectStep::Devices => return,
+            ProjectStep::Locations => self.add_space_back_to(ProjectStep::Devices, cx),
+            ProjectStep::Folders => {
+                let listing = flow.browser.ready();
+                let root = flow
+                    .location
+                    .as_ref()
+                    .and_then(|(_, path)| path.as_deref())
+                    .or(flow.home.as_deref());
+                let parent = listing
+                    .filter(|l| Some(l.path.as_str()) != root)
+                    .and_then(|l| parent_path(&l.path));
+                if let Some(parent) = parent {
+                    self.add_space_descend(parent, false, cx);
+                } else {
+                    self.add_space_back_to(ProjectStep::Locations, cx);
+                }
             }
-            self.load_space_folders(Some(parent), cx);
         }
     }
 
@@ -2065,7 +2266,11 @@ impl Shell {
                 cx.stop_propagation();
             }
             popover::MenuKey::Up | popover::MenuKey::Down => {
-                let count = self.add_space_filtered(cx).len();
+                let count = match self.add_space.as_ref().map(|f| f.step) {
+                    Some(ProjectStep::Devices) => self.add_space_devices(cx).len(),
+                    Some(ProjectStep::Locations) => self.add_space_locations(cx).len(),
+                    _ => self.add_space_filtered(cx).len(),
+                };
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
                 if let Some(flow) = self.add_space.as_mut() {
                     flow.active = popover::menu_step(Some(flow.active), count, delta).unwrap_or(0);
@@ -2097,736 +2302,457 @@ impl Shell {
         }
     }
 
-    /// The palette card: ⌘K search bar (with the ⌘⏎ add / esc chips) ·
-    /// breadcrumbs + folder list beside the devices rail · kbd-hint footer.
+    /// The same glass, header, row rhythm, scroll gutters and footer as Cmd+K.
     pub(super) fn render_add_space_overlay(
         &mut self,
         viewport: gpui::Size<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let theme = Theme::of(cx).clone();
-        {
-            let flow = self.add_space.as_mut()?;
-            if std::mem::take(&mut flow.focus_pending) {
-                let handle = flow.search.focus_handle(cx);
-                window.focus(&handle, cx);
-            }
+        let theme = Theme::of(cx).for_popup();
+        let flow = self.add_space.as_mut()?;
+        if std::mem::take(&mut flow.focus_pending) {
+            window.focus(&flow.search.focus_handle(cx), cx);
         }
-        let (
-            device,
-            search,
-            error,
-            submit_busy,
-            active,
-            loading,
-            load_error,
-            listing,
-            focus,
-            list_scroll,
-            home,
-            drives,
-        ) = {
-            let flow = self.add_space.as_ref()?;
-            (
-                flow.device.clone(),
-                flow.search.clone(),
-                flow.error.clone(),
-                flow.submit_busy,
-                flow.active,
-                matches!(flow.browser, Loadable::Loading | Loadable::Idle),
-                flow.browser.error().map(str::to_string),
-                flow.browser.ready().cloned(),
-                flow.focus.clone(),
-                flow.list_scroll.clone(),
-                flow.home.clone(),
-                flow.drives.ready().cloned().unwrap_or_default(),
-            )
-        };
-        let devices = self.state.read(cx).devices.clone();
-        let rows = self.add_space_filtered(cx);
-        // Push the completion preview into the input — the faint suffix ahead
-        // of the caret that ⇥ accepts. Recomputed every render (query, active
-        // row, and listing all move it); `set_ghost` no-ops when unchanged.
+        let step = flow.step;
+        let search = flow.search.clone();
+        let focus = flow.focus.clone();
+        let scroll = flow.list_scroll.clone();
+        let device = flow.device.clone();
+        let listing = flow.browser.ready().cloned();
+        let location = flow.location.clone();
+        let home = flow.home.clone();
+        let load_error = flow.browser.error().map(str::to_string);
+        let error = flow.error.clone();
+        let busy = flow.submit_busy;
+        let active = flow.active;
+        let loading = matches!(flow.browser, Loadable::Idle | Loadable::Loading);
+        let drives_loading = matches!(flow.drives, Loadable::Loading);
         let ghost = self
             .add_space_completion(cx)
             .map(|(_, suffix)| SharedString::from(suffix));
-        search.update(cx, |input, cx| input.set_ghost(ghost, cx));
-        let query_empty = search.read(cx).is_empty();
-        let hairline = crate::theme::hairline(0.06);
-        let now = Utc::now();
-        // (browsed device name, online) per rail row — presence is the same
-        // signal the sidebar space rows use.
-        let device_presence: Vec<bool> = {
-            let state = self.state.read(cx);
-            devices
-                .iter()
-                .map(|d| state.device_online(&d.id, now))
-                .collect()
-        };
-        let device_name: SharedString = device
-            .as_ref()
-            .map(|d| d.name.clone())
-            .unwrap_or_else(|| "This device".to_string())
-            .into();
-        // The rail's active Locations row: the root that owns the browsed
-        // path. Longest mount prefix wins; home outranks a drive covering it
-        // (the System "/" row covers everything).
-        let active_location: Option<LocationRow> = listing.as_ref().and_then(|l| {
-            let mut best = home
-                .as_deref()
-                .filter(|h| path_under(&l.path, h))
-                .map(|h| (h.trim_end_matches('/').len() + 1, LocationRow::Home));
-            for (ix, drive) in drives.iter().enumerate() {
-                if !path_under(&l.path, &drive.path) {
-                    continue;
-                }
-                let len = drive.path.trim_end_matches('/').len();
-                if best.is_none_or(|(b, _)| len > b) {
-                    best = Some((len, LocationRow::Drive(ix)));
-                }
-            }
-            best.map(|(_, row)| row)
+        search.update(cx, |input, cx| {
+            input.set_ghost(ghost, cx);
         });
-        // The drive whose mount folds into a breadcrumb (like home folds into
-        // the device crumb). System "/" keeps the plain full-path crumbs.
-        let active_drive: Option<&DriveEntry> = match active_location {
-            Some(LocationRow::Drive(ix)) => drives
-                .get(ix)
-                .filter(|d| !d.path.trim_end_matches('/').is_empty()),
-            _ => None,
-        };
-
-        // A quiet mono key-cap chip ("⌘K" / "esc") for the search bar ends.
-        let key_chip = |theme: &Theme| {
-            div()
-                .h(px(22.0))
-                .px(px(6.0))
-                .rounded(px(5.0))
+        let query = search.read(cx).text().to_string();
+        let row = |ix: usize| {
+            popover::menu_row(&theme, ix == active, format!("project-result-{ix}"))
+                .id(("project-result", ix))
+                .rounded(px(popover::PALETTE_ITEM_RADIUS))
+                .h(px(32.0))
                 .flex_none()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(2.0))
-                .bg(crate::theme::ink(0.05))
-                .text_size(crate::typography::ui_rems(11.0))
-                .font_family(theme.font_mono.clone())
-                .text_color(theme.text_muted.opacity(0.7))
         };
-
-        // ── search bar (the ⌘K bar): summon chip · input · "⌘ Enter" add ·
-        //    esc. The primary chip leads with the ⌘ glyph, then says "Enter"
-        //    in words (user request — the bare return arrow read as noise).
-        let submit_chip = popover::btn_primary(&theme, "")
-            .id("add-space-submit")
-            .h(px(22.0))
-            .px(px(8.0))
-            .py(px(0.0))
-            // Match the key-cap chips beside it (rounded-5) — btn_primary's
-            // rounded-8 at this size read as a different component.
-            .rounded(px(5.0))
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .text_size(crate::typography::ui_rems(12.0))
-            .when(submit_busy || listing.is_none(), |el| el.opacity(0.6))
-            .on_click(cx.listener(|this, _, _, cx| this.submit_add_space(cx)))
-            .when(!submit_busy, |el| {
-                el.child(
-                    icon(icons::COMMAND)
-                        .size(px(11.0))
-                        .text_color(theme.on_solid.opacity(0.8)),
-                )
-                .child(SharedString::from("Enter"))
-            })
-            .when(submit_busy, |el| el.child(SharedString::from("Adding…")));
-        // Header and footer sit a shade DEEPER than the body (the shared
-        // recessed-band tone) — the bands frame the folder list, which stays
-        // on the brighter tint.
-        let card_radius = 14.0;
-        let band = popover::band();
-        let input_row = div()
-            .h(px(46.0))
-            .flex_none()
-            .rounded_t(px(card_radius))
-            .pl(px(12.0))
-            .pr(px(10.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(10.0))
-            .bg(band)
-            .border_b_1()
-            .border_color(hairline)
-            .child(
-                key_chip(&theme)
-                    .child(
-                        icon(icons::COMMAND)
-                            .size(px(11.0))
-                            .text_color(theme.text_muted.opacity(0.7)),
-                    )
-                    .child(SharedString::from("K")),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(crate::typography::ui_rems(14.0))
-                    .child(search.clone().into_any_element()),
-            )
-            .child(submit_chip)
-            .child(
-                key_chip(&theme)
-                    .id("add-space-esc")
-                    .cursor_pointer()
-                    .hover(|s| s.bg(crate::theme::ink(0.09)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.add_space = None;
-                        cx.notify();
-                    }))
-                    .child(SharedString::from("esc")),
-            );
-
-        // ── breadcrumbs ("MacBook Pro / Projects / zeron"): the quiet mono
-        //    path voice, `/` separators. The device crumb stands in for home —
-        //    everything up to the resolved home path folds into it; below
-        //    home the full path shows. Ancestors (device crumb included) are
-        //    clickable.
-        let crumbs: AnyElement = match &listing {
-            Some(listing) => {
-                let segments = breadcrumbs(&listing.path);
-                let last = segments.len().saturating_sub(1);
-                // Root "/" chip always folds; the home segments fold too when
-                // the browsed path sits at/under home. A drive's mount folds
-                // the same way — into a crumb named after the drive
-                // ("work-laptop / T7 Shield / projects").
-                let at_home = home.as_deref() == Some(listing.path.as_str());
-                let drive_crumb: Option<(SharedString, String, bool)> = active_drive.map(|d| {
-                    let mount = d.path.trim_end_matches('/').to_string();
-                    let at_mount = listing.path.trim_end_matches('/') == mount;
-                    (SharedString::from(d.name.clone()), mount, at_mount)
-                });
-                let folded = 1 + match (&drive_crumb, home.as_deref()) {
-                    (Some((_, mount, _)), _) => mount.split('/').filter(|s| !s.is_empty()).count(),
-                    (None, Some(h))
-                        if listing.path == h || listing.path.starts_with(&format!("{h}/")) =>
-                    {
-                        h.split('/').filter(|s| !s.is_empty()).count()
-                    }
-                    _ => 0,
-                };
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .px(px(13.0))
-                    .pt(px(10.0))
-                    .pb(px(2.0))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .font_family(theme.font_mono.clone())
-                    .child({
-                        let crumb = div()
-                            .id("add-space-crumb-device")
-                            .px(px(3.0))
-                            .rounded(px(4.0))
-                            .child(device_name.clone());
-                        if at_home {
-                            // Standing at home — the device crumb IS the
-                            // current folder.
-                            crumb
-                                .text_color(theme.text.opacity(0.85))
-                                .into_any_element()
-                        } else {
-                            crumb
-                                .text_color(theme.text_muted.opacity(0.55))
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(theme.text))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(flow) = this.add_space.as_mut() {
-                                        flow.browser_repo = false;
-                                    }
-                                    this.load_space_folders(None, cx);
-                                }))
-                                .into_any_element()
-                        }
-                    })
-                    .when_some(drive_crumb, |el, (name, mount, at_mount)| {
-                        el.child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .text_color(theme.text_faint.opacity(0.7))
-                                        .child(SharedString::from("/")),
-                                )
-                                .child({
-                                    let crumb = div()
-                                        .id("add-space-crumb-drive")
-                                        .px(px(3.0))
-                                        .rounded(px(4.0))
-                                        .child(name);
-                                    if at_mount {
-                                        // Standing at the mount — the drive
-                                        // crumb IS the current folder.
-                                        crumb
-                                            .text_color(theme.text.opacity(0.85))
-                                            .into_any_element()
-                                    } else {
-                                        crumb
-                                            .text_color(theme.text_muted.opacity(0.55))
-                                            .cursor_pointer()
-                                            .hover(|s| s.text_color(theme.text))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.add_space_goto_location(
-                                                    Some(mount.clone()),
-                                                    cx,
-                                                );
-                                            }))
-                                            .into_any_element()
-                                    }
-                                }),
-                        )
-                    })
-                    .children(segments.into_iter().enumerate().skip(folded).map(
-                        |(ix, (label, full))| {
-                            let is_last = ix == last;
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .text_color(theme.text_faint.opacity(0.7))
-                                        .child(SharedString::from("/")),
-                                )
-                                .child({
-                                    let crumb = div()
-                                        .id(("add-space-crumb", ix))
-                                        .px(px(3.0))
-                                        .rounded(px(4.0))
-                                        .text_color(if is_last {
-                                            theme.text.opacity(0.85)
-                                        } else {
-                                            theme.text_muted.opacity(0.55)
-                                        })
-                                        .child(SharedString::from(label));
-                                    if is_last {
-                                        crumb.into_any_element()
-                                    } else {
-                                        crumb
-                                            .cursor_pointer()
-                                            .hover(|s| s.text_color(theme.text))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                if let Some(flow) = this.add_space.as_mut() {
-                                                    flow.browser_repo = false;
-                                                }
-                                                this.load_space_folders(Some(full.clone()), cx);
-                                            }))
-                                            .into_any_element()
-                                    }
-                                })
-                        },
-                    ))
-                    .into_any_element()
+        let mut rows = Vec::new();
+        match step {
+            ProjectStep::Devices => {
+                for (ix, device) in self.add_space_devices(cx).into_iter().enumerate() {
+                    let glyph = match device.platform.as_str() {
+                        "macos" | "darwin" => icons::LAPTOP,
+                        "web" => icons::GLOBAL,
+                        "ios" | "android" => icons::SMARTPHONE,
+                        _ => icons::MONITOR,
+                    };
+                    let online = self.state.read(cx).device_online(&device.id, Utc::now());
+                    let name = device.name.clone();
+                    rows.push(
+                        row(ix)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.add_space_pick_device(device.clone(), cx)
+                            }))
+                            .child(icon(glyph).size(px(17.0)).text_color(theme.text_muted))
+                            .child(popover::search_highlight(name.into(), Some(&query), &theme))
+                            .child(div().flex_1())
+                            .child(div().size(px(5.0)).rounded_full().bg(if online {
+                                theme.success
+                            } else {
+                                theme.text_faint
+                            }))
+                            .into_any_element(),
+                    );
+                }
             }
-            None => div().pt(px(6.0)).into_any_element(),
-        };
-
-        // ── folder list ─────────────────────────────────────────────────────
-        let base_path = listing.as_ref().map(|l| l.path.clone()).unwrap_or_default();
-        let list: AnyElement = if loading {
-            div()
-                .px(px(8.0))
-                .py(px(6.0))
-                .child(popover::skeleton_rows(
-                    "add-space-skeleton",
-                    &theme,
-                    6,
-                    cx.entity_id(),
-                    cx,
-                ))
-                .into_any_element()
-        } else if let Some(message) = load_error {
-            // Folder-level failures (typed path that doesn't exist, permission
-            // walls) show as themselves; only transport-shaped failures read
-            // as the device being unreachable. The engine's folder errors all
-            // name the folder ("could not read that folder: …").
-            let device_line = if message.contains("folder") {
-                message
-            } else {
-                device
-                    .as_ref()
-                    .map(|d| format!("{} didn't respond — is it online?", d.name))
-                    .unwrap_or(message)
-            };
-            popover::error_row(&theme, &device_line)
-                .px(px(14.0))
-                .py(px(10.0))
-                .child(
-                    div()
-                        .id("add-space-retry")
-                        .px(px(Theme::SPACE_SM))
-                        .py(px(3.0))
-                        .rounded(px(Theme::CONTROL_RADIUS))
-                        .border_1()
-                        .border_color(theme.border)
-                        .text_color(theme.text)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.element_hover))
+            ProjectStep::Locations => {
+                for (ix, (name, path)) in self.add_space_locations(cx).into_iter().enumerate() {
+                    let glyph = if path.is_none() {
+                        icons::HOME
+                    } else {
+                        icons::HARD_DRIVE
+                    };
+                    let label = name.clone();
+                    rows.push(
+                        row(ix)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.add_space_goto_location(name.clone(), path.clone(), cx)
+                            }))
+                            .child(icon(glyph).size(px(17.0)).text_color(theme.text_muted))
+                            .child(popover::search_highlight(
+                                label.into(),
+                                Some(&query),
+                                &theme,
+                            ))
+                            .into_any_element(),
+                    );
+                }
+            }
+            ProjectStep::Folders => {
+                if !loading && load_error.is_none() {
+                    for (ix, entry) in self.add_space_filtered(cx).into_iter().enumerate() {
+                        let base = listing.as_ref().map(|l| l.path.as_str()).unwrap_or("");
+                        let full = crate::pickers::child_path(base, &entry.name);
+                        let is_repo = entry.is_repo;
+                        rows.push(
+                            row(ix)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.add_space_descend(full.clone(), is_repo, cx)
+                                }))
+                                .child(
+                                    icon(icons::FOLDER)
+                                        .size(px(17.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(popover::search_highlight(
+                                    entry.name.into(),
+                                    Some(&query),
+                                    &theme,
+                                ))
+                                .child(div().flex_1())
+                                .when(is_repo, |el| {
+                                    el.child(
+                                        icon(icons::GIT_BRANCH)
+                                            .size(px(14.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                })
+                                .into_any_element(),
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(flow) = self.add_space.as_mut() {
+            flow.active = flow.active.min(rows.len().saturating_sub(1));
+        }
+        let empty = rows.is_empty();
+        let mut results = div()
+            .id("project-results")
+            .max_h(px((f32::from(viewport.height) - 220.0).clamp(100.0, 424.0)))
+            .overflow_y_scroll()
+            .track_scroll(&scroll)
+            .px(px(popover::CARD_INSET))
+            .flex()
+            .flex_col()
+            .gap(px(SIDEBAR_LIST_GAP))
+            .children(rows);
+        if step == ProjectStep::Folders && loading {
+            results = results.child(popover::skeleton_rows(
+                "project-loading",
+                &theme,
+                5,
+                cx.entity_id(),
+                cx,
+            ));
+        } else if let Some(message) = load_error.filter(|_| step == ProjectStep::Folders) {
+            results = results.child(
+                popover::error_row(&theme, &message).p(px(14.0)).child(
+                    popover::btn_ghost(&theme, "Retry", "project-retry")
+                        .id("project-retry")
                         .on_click(cx.listener(|this, _, _, cx| {
                             let path = this.add_space.as_ref().and_then(|f| f.browser_path.clone());
                             this.load_space_folders(path, cx);
-                        }))
-                        .child(SharedString::from("Retry")),
-                )
-                .into_any_element()
-        } else if rows.is_empty() {
-            div()
-                .px(px(14.0))
-                .py(px(16.0))
-                .text_size(crate::typography::ui_rems(12.5))
-                .text_color(theme.text_faint)
-                .child(SharedString::from(if query_empty {
-                    "No folders here"
-                } else {
-                    "No folders match"
-                }))
-                .into_any_element()
-        } else {
-            // The 6px gutters live on a WRAPPER, outside the scroll viewport:
-            // in-content padding/spacers can't do it — the wheel's max offset
-            // eats bottom padding, and `scroll_to_item` (keyboard) pins the
-            // row's bottom to the viewport edge regardless.
-            div()
-                .flex_1()
-                .min_h_0()
-                .py(px(6.0))
-                .child(
-                    div()
-                        .id("add-space-folders")
-                        .size_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&list_scroll)
-                        .px(px(8.0))
-                        .flex()
-                        .flex_col()
-                        // The app-wide list rhythm (sidebar rows, menu rows): 2px.
-                        .gap(px(2.0))
-                        .children(rows.into_iter().enumerate().map(|(ix, entry)| {
-                            let name: SharedString = entry.name.clone().into();
-                            let full = crate::pickers::child_path(&base_path, &entry.name);
-                            let is_repo = entry.is_repo;
-                            popover::menu_row_nav(
-                                &theme,
-                                false,
-                                ix == active,
-                                format!("add-space-folder-{ix}"),
-                            )
-                            // The floating-card selection language: the wash
-                            // plus the ring-only inset outline.
-                            .when(ix == active, |el| {
-                                el.shadow(crate::theme::card_selected_shadows())
-                            })
-                            .id(("add-space-folder", ix))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.add_space_descend(full.clone(), is_repo, cx);
-                            }))
-                            .child(
-                                icon(icons::FOLDER)
-                                    .size(px(15.0))
-                                    .flex_none()
-                                    .text_color(theme.text_muted.opacity(0.8)),
-                            )
-                            .child(div().flex_1().min_w_0().truncate().child(name))
-                            // Repos get a quiet trailing branch glyph — the row
-                            // you're usually hunting for announces itself.
-                            .when(is_repo, |el| {
-                                el.child(
-                                    icon(icons::GIT_BRANCH)
-                                        .size(px(13.0))
-                                        .flex_none()
-                                        .text_color(theme.text_muted.opacity(0.5)),
-                                )
-                            })
                         })),
+                ),
+            );
+        } else if empty {
+            results = results.child(div().p(px(24.0)).text_color(theme.text_muted).child(
+                match step {
+                    ProjectStep::Devices => "No devices found",
+                    ProjectStep::Locations => "No locations found",
+                    ProjectStep::Folders if query.is_empty() => "No folders here",
+                    ProjectStep::Folders => "No folders match",
+                },
+            ));
+        }
+        if step == ProjectStep::Locations && drives_loading {
+            results = results.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .text_color(theme.text_muted)
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .child("Loading locations…"),
+            );
+        }
+        let crumb =
+            |id: SharedString, name: SharedString, glyph: Option<&'static str>, current: bool| {
+                div()
+                    .id(id)
+                    .h(px(26.0))
+                    .px(px(7.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .cursor_pointer()
+                    .text_color(if current {
+                        theme.text
+                    } else {
+                        theme.text_muted
+                    })
+                    .when(current, |el| el.bg(theme.element_hover))
+                    .hover(|s| s.bg(theme.element_hover).text_color(theme.text))
+                    .when_some(glyph, |el, glyph| {
+                        el.child(
+                            icon(glyph)
+                                .size(px(14.0))
+                                .flex_none()
+                                .text_color(if current {
+                                    theme.text
+                                } else {
+                                    theme.text_muted
+                                }),
+                        )
+                    })
+                    .child(div().max_w(px(140.0)).truncate().child(name))
+            };
+        // Keep each chevron with its destination when a long path wraps.
+        let segment = |item: gpui::Stateful<gpui::Div>| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .child(
+                    icon(icons::ALT_ARROW_RIGHT)
+                        .size(px(12.0))
+                        .text_color(theme.text_faint),
                 )
-                .into_any_element()
+                .child(item)
         };
-
-        // ── rail: Devices (platform glyph + name + presence dot per row) over
-        //    Locations (home + the picked device's mounted drives), an info
-        //    line naming the browsed device. Rows are the tab recipe (h-28
-        //    rounded-8 washes), vertical.
-        let location_rows: Vec<(LocationRow, SharedString, &'static str, Option<String>)> = device
-            .is_some()
-            .then(|| {
-                std::iter::once((
-                    LocationRow::Home,
-                    SharedString::from("Home"),
-                    icons::HOME,
+        let mut trail = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(2.0))
+            .child(
+                crumb(
+                    "project-crumb-root".into(),
+                    "New project".into(),
                     None,
-                ))
-                .chain(drives.iter().enumerate().map(|(ix, drive)| {
-                    (
-                        LocationRow::Drive(ix),
-                        SharedString::from(drive.name.clone()),
-                        icons::HARD_DRIVE,
-                        Some(drive.path.clone()),
+                    step == ProjectStep::Devices,
+                )
+                .on_click(
+                    cx.listener(|this, _, _, cx| this.add_space_back_to(ProjectStep::Devices, cx)),
+                ),
+            );
+        if let Some(device) = device {
+            let glyph = match device.platform.as_str() {
+                "macos" | "darwin" => icons::LAPTOP,
+                "ios" | "android" => icons::SMARTPHONE,
+                _ => icons::MONITOR,
+            };
+            trail =
+                trail.child(segment(
+                    crumb(
+                        "project-crumb-device".into(),
+                        device.name.into(),
+                        Some(glyph),
+                        step == ProjectStep::Locations,
                     )
-                }))
-                .collect()
-            })
-            .unwrap_or_default();
-        let rail = div()
-            .id("add-space-rail")
-            .w(px(196.0))
-            .flex_none()
-            .border_l_1()
-            .border_color(hairline)
-            .px(px(8.0))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.add_space_back_to(ProjectStep::Locations, cx)
+                    })),
+                ));
+        }
+        if let Some((name, path)) = location {
+            let glyph = if path.is_none() {
+                icons::HOME
+            } else {
+                icons::HARD_DRIVE
+            };
+            let root = path.clone().or(home);
+            let at_root = listing
+                .as_ref()
+                .is_none_or(|l| root.as_deref() == Some(l.path.as_str()));
+            trail = trail.child(segment(
+                crumb(
+                    "project-crumb-location".into(),
+                    name.clone().into(),
+                    Some(glyph),
+                    at_root,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.add_space_goto_location(name.clone(), path.clone(), cx)
+                })),
+            ));
+            if let Some(listing) = listing.as_ref() {
+                for (ix, (name, full)) in breadcrumbs(&listing.path).into_iter().enumerate() {
+                    if root.as_deref().is_some_and(|root| path_under(root, &full)) {
+                        continue;
+                    }
+                    trail = trail.child(segment(
+                        crumb(
+                            format!("project-crumb-folder-{ix}").into(),
+                            name.into(),
+                            Some(icons::FOLDER),
+                            full == listing.path,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.add_space_descend(full.clone(), false, cx)
+                        })),
+                    ));
+                }
+            }
+        }
+        let crumbs = div()
+            .px(px(14.0))
             .py(px(8.0))
             .flex()
-            .flex_col()
-            .gap(px(2.0))
-            // Locations can outgrow the fixed body on mount-happy machines.
-            .overflow_y_scroll()
+            .items_start()
+            .gap(px(8.0))
+            .text_size(crate::typography::ui_rems(12.0))
             .child(
                 div()
-                    .px(px(8.0))
-                    .pt(px(2.0))
-                    .pb(px(4.0))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text_muted.opacity(0.6))
-                    .child(SharedString::from("Devices")),
-            )
-            .children(devices.into_iter().enumerate().map(|(ix, dev)| {
-                let is_active = device.as_ref().is_some_and(|d| d.id == dev.id);
-                let online = device_presence.get(ix).copied().unwrap_or(false);
-                // The Devices-page platform mapping (settings::devices).
-                let platform_icon = match dev.platform.as_str() {
-                    "macos" | "darwin" => icons::LAPTOP,
-                    "web" => icons::GLOBAL,
-                    "ios" | "android" => icons::SMARTPHONE,
-                    _ => icons::MONITOR,
-                };
-                let name: SharedString = dev.name.clone().into();
-                let pick = dev.clone();
-                div()
-                    .id(("add-space-device", ix))
-                    .h(px(28.0))
-                    .px(px(8.0))
-                    .rounded(px(8.0))
+                    .id("project-crumb-back")
+                    .size(px(26.0))
+                    .flex_none()
                     .flex()
-                    .flex_row()
                     .items_center()
-                    .gap(px(8.0))
-                    .text_size(crate::typography::ui_rems(12.5))
+                    .justify_center()
+                    .rounded(px(6.0))
                     .cursor_pointer()
-                    .when(is_active, |el| {
-                        // The floating-card selection language: wash +
-                        // ring-only inset outline.
-                        el.bg(crate::theme::card_selected_bg())
-                            .shadow(crate::theme::card_selected_shadows())
-                            .text_color(theme.text)
-                    })
-                    .when(!is_active, |el| {
-                        el.text_color(theme.text_muted.opacity(0.7))
-                            .hover(|s| s.bg(theme.element_hover))
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.add_space_pick_device(pick.clone(), cx);
+                    .text_color(theme.text_muted)
+                    .hover(|s| s.bg(theme.element_hover).text_color(theme.text))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.add_space = None;
+                        this.toggle_command_palette(window, cx);
                     }))
                     .child(
-                        icon(platform_icon)
-                            .size(px(14.0))
-                            .flex_none()
-                            .text_color(theme.text_muted.opacity(0.8)),
-                    )
-                    .child(div().flex_1().min_w_0().truncate().child(name))
-                    .child(
-                        div()
-                            .size(px(5.0))
-                            .rounded_full()
-                            .flex_none()
-                            .when(online, |el| {
-                                // The Devices-page presence emerald, soft glow
-                                // included.
-                                let emerald = theme.success;
-                                el.bg(emerald.opacity(0.9)).shadow(vec![gpui::BoxShadow {
-                                    color: emerald.opacity(0.55),
-                                    offset: gpui::point(px(0.0), px(0.0)),
-                                    blur_radius: px(6.0),
-                                    spread_radius: px(0.0),
-                                    inset: false,
-                                }])
-                            })
-                            .when(!online, |el| el.bg(crate::theme::ink(0.22))),
-                    )
-            }))
-            // ── Locations: home + the device's mounted drives. Clicking
-            //    rebrowses the palette at that root; the row owning the
-            //    browsed path carries the selection wash. Drives arrive
-            //    best-effort (ListDrives) — until then the section is just
-            //    Home, and on error it stays that way.
-            .when(!location_rows.is_empty(), |el| {
-                el.child(div().h(px(1.0)).mx(px(2.0)).my(px(6.0)).bg(hairline))
-                    .child(
-                        div()
-                            .px(px(8.0))
-                            .pb(px(4.0))
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_muted.opacity(0.6))
-                            .child(SharedString::from("Locations")),
-                    )
-                    .children(location_rows.into_iter().enumerate().map(
-                        |(ix, (row, name, glyph, path))| {
-                            let is_active = active_location == Some(row);
-                            div()
-                                .id(("add-space-location", ix))
-                                .h(px(28.0))
-                                .px(px(8.0))
-                                .rounded(px(8.0))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .text_size(crate::typography::ui_rems(12.5))
-                                .cursor_pointer()
-                                .when(is_active, |el| {
-                                    // The floating-card selection language:
-                                    // wash + ring-only inset outline.
-                                    el.bg(crate::theme::card_selected_bg())
-                                        .shadow(crate::theme::card_selected_shadows())
-                                        .text_color(theme.text)
-                                })
-                                .when(!is_active, |el| {
-                                    el.text_color(theme.text_muted.opacity(0.7))
-                                        .hover(|s| s.bg(theme.element_hover))
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.add_space_goto_location(path.clone(), cx);
-                                }))
-                                .child(
-                                    icon(glyph)
-                                        .size(px(14.0))
-                                        .flex_none()
-                                        .text_color(theme.text_muted.opacity(0.8)),
-                                )
-                                .child(div().flex_1().min_w_0().truncate().child(name))
-                        },
-                    ))
-            })
-            .child(div().h(px(1.0)).mx(px(2.0)).my(px(6.0)).bg(hairline))
+                        icon(icons::ARROW_LEFT)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    ),
+            )
             .child(
                 div()
-                    .px(px(8.0))
-                    .flex()
-                    .flex_row()
-                    .items_start()
-                    .gap(px(6.0))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .line_height(px(15.0))
-                    .text_color(theme.text_muted.opacity(0.5))
-                    .child(
-                        icon(icons::INFO_CIRCLE)
-                            .size(px(12.0))
-                            .flex_none()
-                            .mt(px(1.0))
-                            .text_color(theme.text_muted.opacity(0.5)),
-                    )
-                    .child(div().min_w_0().child(SharedString::from(format!(
-                        "Showing folders from {device_name} only"
-                    )))),
-            );
-
-        // ── body: folder column (crumbs + list) beside the devices rail.
-        //    FIXED height — sparse folders, loading skeletons, and device
-        //    switches must not resize the card (the list fills and scrolls).
-        let body = div()
-            .h(px(330.0))
+                    .w(px(1.0))
+                    .h(px(16.0))
+                    .mt(px(5.0))
+                    .flex_none()
+                    .bg(theme.border),
+            )
+            .child(trail);
+        let header = div()
+            .h(px(58.0))
+            .flex_none()
+            .px(px(18.0))
             .flex()
-            .flex_row()
-            .items_stretch()
+            .items_center()
+            .gap(px(12.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(popover::palette_search_icon(&theme))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(crumbs)
-                    .child(list),
+                    .text_size(crate::typography::ui_rems(15.0))
+                    .child(search),
             )
-            .child(rail);
-
-        // ── footer: the shared key-cap legend voice (popover::key_hint).
+            .child(popover::key_hint_text(&theme, "esc", ""));
         let footer = div()
             .flex_none()
-            .rounded_b(px(card_radius))
-            .bg(band)
+            .px(px(18.0))
+            .py(px(12.0))
             .border_t_1()
-            .border_color(hairline)
-            .px(px(12.0))
-            .py(px(8.0))
+            .border_color(theme.border)
             .flex()
-            .flex_row()
             .items_center()
-            .gap(px(12.0))
+            .gap(px(18.0))
             .child(popover::key_hint_pair(
                 &theme,
                 icons::ARROW_UP,
                 icons::ARROW_DOWN,
                 "Navigate",
             ))
-            .child(popover::key_hint(&theme, icons::ARROW_LEFT, "Up"))
-            .child(popover::key_hint(&theme, icons::ARROW_RIGHT, "Open"))
-            .child(popover::key_hint_text(&theme, "tab", "Complete"))
-            .when_some(error, |el, message| {
+            .child(popover::key_hint_text(&theme, "↵", "Open"))
+            .child(popover::key_hint_text(&theme, "esc", "Close"))
+            .child(div().flex_1())
+            .when(step == ProjectStep::Folders, |el| {
                 el.child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.danger)
-                        .child(message),
+                    popover::btn_ghost(
+                        &theme,
+                        if busy { "Adding…" } else { "Add project" },
+                        "project-add",
+                    )
+                    .id("project-add")
+                    .h(px(22.0))
+                    .py(px(0.0))
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .when(busy || listing.is_none(), |el| el.opacity(0.5))
+                    .on_click(cx.listener(|this, _, _, cx| this.submit_add_space(cx)))
+                    .child(
+                        popover::key_cap(&theme)
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .child(crate::settings::badge_combo("mod-enter")),
+                    ),
                 )
             });
-
         let card =
-            popover::palette_card(&theme, px(680.0), card_radius)
+            div()
                 .id("add-space-palette")
-                // On the keyboard dispatch path (see `AddSpaceFlow::focus`) — the
-                // pickers' proven structure for frame-level keys with a focused
-                // child input.
                 .track_focus(&focus)
+                .w(px(600.0_f32.min(f32::from(viewport.width) - 32.0)))
+                .flex()
+                .flex_col()
+                .rounded(px(14.0))
+                .border_1()
+                .border_color(theme.border)
+                .when(!theme.is_frost(), |el| el.shadow_lg())
+                .bg(popover::surface_bg(&theme))
+                .text_color(theme.text)
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                     this.add_space_key(event, cx)
                 }))
-                // Clicking the scrim dismisses (user requirement) — same close
-                // path as Escape.
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.add_space = None;
                     cx.notify();
                 }))
-                .child(input_row)
-                .child(body)
-                .child(footer)
-                .into_any_element();
-        // The glass-modal variant: lighter scrim + a frost radius matching
-        // this card's 14px rounding, so the palette reads like the popovers
-        // instead of a flat slab over a 60% dim (user request).
-        Some(popover::modal_glass(
-            "add-space-dialog",
-            viewport,
-            card,
-            card_radius,
-        ))
+                .child(header)
+                .child(crumbs)
+                .child(div().min_h_0().py(px(popover::CARD_INSET)).child(results))
+                .when_some(error, |el, error| {
+                    el.child(
+                        div()
+                            .px(px(18.0))
+                            .pb(px(8.0))
+                            .text_color(theme.danger)
+                            .child(error),
+                    )
+                })
+                .child(footer);
+        Some(
+            gpui::deferred(
+                gpui::anchored()
+                    .position(gpui::point(px(0.0), px(0.0)))
+                    .child(
+                        div()
+                            .occlude()
+                            .w(viewport.width)
+                            .h(viewport.height)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(crate::frost::frosted(14.0, crate::frost::MENU_BLUR, card)),
+                    ),
+            )
+            .priority(2)
+            .into_any_element(),
+        )
     }
 
     // ---- space context menu / rename / delete overlays ----
@@ -2893,7 +2819,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let theme = Theme::of(cx).clone();
+        let theme = Theme::of(cx).for_popup();
         let mut overlays: Vec<AnyElement> = Vec::new();
 
         if let Some((space_id, position)) = self.space_menu.get().cloned() {
@@ -3112,5 +3038,137 @@ mod tests {
         promote_local_device_group(&mut groups, Some("not-present"));
 
         assert_eq!(groups, before);
+    }
+}
+
+/// Synthetic responses for the isolated native screenshot fixture only.
+#[cfg(feature = "project-palette-fixture")]
+impl Shell {
+    pub fn fixture_project_responses(&mut self, cx: &mut Context<Self>) {
+        if std::env::var_os("ZERON_FIXTURE_BACKGROUND").is_some() {
+            self.composer
+                .read(cx)
+                .pickers()
+                .clone()
+                .update(cx, |pickers, cx| pickers.fixture_model_catalog(cx));
+        }
+        let Some(flow) = self.add_space.as_mut() else {
+            return;
+        };
+        if flow.device.is_some() && !matches!(flow.drives, Loadable::Ready(_)) {
+            flow.drives = Loadable::Ready(
+                serde_json::from_value(serde_json::json!([
+                    {"name":"Projects", "path":"/projects"},
+                    {"name":"System", "path":"/"}
+                ]))
+                .unwrap(),
+            );
+            cx.notify();
+        }
+        if flow.step == ProjectStep::Folders && !matches!(flow.browser, Loadable::Ready(_)) {
+            let path = flow
+                .browser_path
+                .clone()
+                .unwrap_or_else(|| "/home/alex".into());
+            if flow.browser_path.is_none() {
+                flow.home = Some(path.clone());
+            }
+            let names = match path.as_str() {
+                "/home/alex" => vec!["Desktop", "Documents", "Downloads", "Projects"],
+                "/projects" | "/home/alex/Projects" => vec!["fieldnotes", "mobile-app", "website"],
+                _ => vec!["assets", "docs", "src", "tests"],
+            };
+            flow.browser = Loadable::Ready(
+                serde_json::from_value(serde_json::json!({
+                    "path":path,
+                    "entries":names.into_iter().map(|name| serde_json::json!({
+                        "name":name,"isDir":true,"isRepo":name=="fieldnotes"
+                    })).collect::<Vec<_>>()
+                }))
+                .unwrap(),
+            );
+            cx.notify();
+        }
+    }
+}
+
+#[cfg(test)]
+mod project_flow_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn devices_locations_folders_and_back_clear_stale_state(cx: &mut gpui::TestAppContext) {
+        let data = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let shell = cx.new(|cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.devices = serde_json::from_value(serde_json::json!([
+                    {"id":"local","name":"Studio","platform":"macos","lastSeenAt":null},
+                    {"id":"remote","name":"Server","platform":"linux","lastSeenAt":null}
+                ]))
+                .unwrap();
+                state
+            });
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: data.path().into(),
+                    ipc_port: 0,
+                    edge_url: String::new(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        shell.update(cx, |shell, cx| {
+            shell.open_add_space(cx);
+            assert_eq!(shell.add_space.as_ref().unwrap().step, ProjectStep::Devices);
+            assert!(shell.add_space.as_ref().unwrap().device.is_none());
+            let search = shell.add_space.as_ref().unwrap().search.clone();
+            search.update(cx, |input, cx| input.set_text("server", cx));
+            assert_eq!(shell.add_space_devices(cx).len(), 1);
+            shell.add_space_open_active(cx);
+            let flow = shell.add_space.as_mut().unwrap();
+            assert_eq!(flow.step, ProjectStep::Locations);
+            assert_eq!(flow.device.as_ref().unwrap().id, "remote");
+            assert!(flow.search.read(cx).is_empty());
+            flow.drives = Loadable::Ready(vec![DriveEntry {
+                name: "Projects".into(),
+                path: "/projects".into(),
+            }]);
+            search.update(cx, |input, cx| input.set_text("projects", cx));
+            shell.add_space_open_active(cx);
+            let flow = shell.add_space.as_mut().unwrap();
+            assert_eq!(flow.step, ProjectStep::Folders);
+            assert_eq!(flow.browser_path.as_deref(), Some("/projects"));
+            flow.browser = Loadable::Ready(FolderListing {
+                path: "/projects".into(),
+                entries: Vec::new(),
+                truncated: false,
+            });
+            shell.add_space_go_up(cx);
+            assert_eq!(
+                shell.add_space.as_ref().unwrap().step,
+                ProjectStep::Locations
+            );
+            assert!(shell.add_space.as_ref().unwrap().browser.ready().is_none());
+            shell.add_space_go_up(cx);
+            let flow = shell.add_space.as_ref().unwrap();
+            assert_eq!(flow.step, ProjectStep::Devices);
+            assert!(flow.device.is_none());
+            assert!(flow.drives.ready().is_none());
+            assert!(flow.search.read(cx).is_empty());
+            // Slash navigation only applies to folders, never device search.
+            search.update(cx, |input, cx| input.set_text("/projects/", cx));
+            assert!(!shell.add_space_slash_descend(cx));
+        });
     }
 }

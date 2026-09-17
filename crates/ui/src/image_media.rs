@@ -171,6 +171,42 @@ pub(crate) fn decode_image(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, Str
         };
         return Ok(media.preview_for_view((900.0, 480.0), 2.0));
     }
+    decode_raster_image(bytes, zeron_proto::MAX_WORKSPACE_IMAGE_BYTES)
+}
+
+/// Validate generated raster metadata and retain a bounded static preview.
+pub(crate) fn decode_generated_image(
+    bytes: Vec<u8>,
+    mime: &str,
+    max_bytes: usize,
+) -> Result<MediaImage, String> {
+    if bytes.len() > max_bytes
+        || !matches!(
+            mime,
+            "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+        )
+    {
+        return Err("Unsupported generated image".into());
+    }
+    let actual = image::guess_format(&bytes).map_err(|e| e.to_string())?;
+    if Some(actual) != image::ImageFormat::from_mime_type(mime) {
+        return Err("Generated image format does not match its metadata".into());
+    }
+    decode_raster_image_bounded(bytes, max_bytes, Some(2048))
+}
+
+pub(crate) fn decode_raster_image(bytes: Vec<u8>, max_bytes: usize) -> Result<MediaImage, String> {
+    decode_raster_image_bounded(bytes, max_bytes, None)
+}
+
+fn decode_raster_image_bounded(
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    max_side: Option<u32>,
+) -> Result<MediaImage, String> {
+    if bytes.len() > max_bytes {
+        return Err("Image exceeds preview size limit".into());
+    }
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
@@ -181,6 +217,13 @@ pub(crate) fn decode_image(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, Str
     reader.limits(limits);
     // Decode one frame and encode a static PNG so GPUI cannot expand unbounded animation frames.
     let decoded = reader.decode().map_err(|e| e.to_string())?;
+    // Generated previews retain one bounded 8-bit frame. This keeps each
+    // cache entry below the cache budget, including CPU and GPU copies.
+    let decoded = if let Some(side) = max_side {
+        image::DynamicImage::ImageRgba8(decoded.thumbnail(side, side).to_rgba8())
+    } else {
+        decoded
+    };
     let (width, height) = (decoded.width() as f32, decoded.height() as f32);
     let mut png = Cursor::new(Vec::new());
     decoded

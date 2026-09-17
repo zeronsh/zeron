@@ -43,7 +43,8 @@ export type RenderToolCall =
   | { readonly _tag: "Unknown"; readonly name: string };
 
 /** A message part as stored in the session doc: identical to the app-layer
- * {@link MessagePart} except tool calls are render-only. */
+ * {@link MessagePart} except tool calls are render-only. Image references pass
+ * through unchanged as atomic metadata; media bytes never enter the document. */
 export type SessionMessagePart =
   | Exclude<MessagePart, { kind: "tool" }>
   | {

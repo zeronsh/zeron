@@ -5,9 +5,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, Context, Entity, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent,
-    ObjectFit, Render, SharedString, StyledImage as _, Subscription, Window, div, img, prelude::*,
-    px,
+    AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
+    KeyDownEvent, ObjectFit, Render, SharedString, StyledImage as _, Subscription, Window, div,
+    img, prelude::*, px,
 };
 use zeron_theme::vscode::{ImportReport, SourceCompilation};
 use zeron_theme::{
@@ -36,15 +36,181 @@ struct ImportDialog {
     error: Option<SharedString>,
 }
 
+/// The three independently configurable font slots. Interface and code/diff
+/// draw from the whole catalog — proportional faces are legal there. The
+/// terminal draws from the fixed-width subset only.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FontKind {
+    Ui,
+    Terminal,
+    Code,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AppearanceSettingsEvent {
+    CodeFontSizeChanged(f32),
+}
+
+impl FontKind {
+    const ALL: [Self; 3] = [Self::Ui, Self::Terminal, Self::Code];
+
+    fn slug(self) -> &'static str {
+        match self {
+            Self::Ui => "interface",
+            Self::Terminal => "terminal",
+            Self::Code => "code",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ui => "Interface font",
+            Self::Terminal => "Terminal font",
+            Self::Code => "Code & diff font",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Ui => "Menus, sidebars, and conversation text.",
+            Self::Terminal => "Terminal panes and shell output. Fixed-width families only.",
+            Self::Code => "Code blocks, diffs, and workspace file editors.",
+        }
+    }
+
+    /// The catalog this slot may pick from. Only the terminal narrows: its
+    /// renderer positions cursor, selection, and hit-testing on an `m`-wide
+    /// cell grid, which a proportional family silently breaks.
+    fn choices_for(self, availability: &FontAvailability) -> &[UiFontFamily] {
+        match self {
+            Self::Terminal => availability.fixed_width_choices(),
+            _ => availability.choices(),
+        }
+    }
+
+    fn is_available_for(self, availability: &FontAvailability, family: &UiFontFamily) -> bool {
+        match self {
+            Self::Terminal => availability.is_fixed_width_available(family),
+            _ => availability.is_available(family),
+        }
+    }
+
+    fn requested(self, cx: &gpui::App) -> UiFontFamily {
+        match self {
+            Self::Ui => typography::requested(cx),
+            Self::Terminal => typography::terminal_requested(cx),
+            Self::Code => typography::code_requested(cx),
+        }
+    }
+
+    fn effective(self, cx: &gpui::App) -> UiFontFamily {
+        match self {
+            Self::Ui => typography::effective(cx),
+            Self::Terminal => typography::terminal_effective(cx),
+            Self::Code => typography::code_effective(cx),
+        }
+    }
+
+    fn apply_family(self, family: UiFontFamily, cx: &mut gpui::App) {
+        match self {
+            Self::Ui => typography::set_family(family, cx),
+            Self::Terminal => typography::set_terminal_family(family, cx),
+            Self::Code => typography::set_code_family(family, cx),
+        };
+    }
+
+    fn pixel_size(self, cx: &gpui::App) -> f32 {
+        match self {
+            Self::Ui => typography::font_size(cx).pixels(),
+            Self::Terminal => typography::terminal_font_size(cx),
+            Self::Code => typography::code_font_size(cx),
+        }
+    }
+
+    /// Labels for this kind's size ladder, in ladder order. Both ladders read
+    /// as plain pixel values, so all three dropdowns look the same.
+    fn size_labels(self) -> Vec<SharedString> {
+        match self {
+            Self::Ui => UiFontSize::ALL.iter().map(|size| size.label()).collect(),
+            _ => MONO_FONT_SIZES
+                .iter()
+                .map(|size| SharedString::from(format_px(*size)))
+                .collect(),
+        }
+    }
+
+    fn size_count(self) -> usize {
+        match self {
+            Self::Ui => UiFontSize::ALL.len(),
+            _ => MONO_FONT_SIZES.len(),
+        }
+    }
+
+    /// Ladder position of the committed size. Terminal and code sizes are
+    /// stored as free pixels (older settings, hand-edited files), so they snap
+    /// to the nearest rung rather than falling off the list.
+    fn size_ix(self, cx: &gpui::App) -> usize {
+        match self {
+            Self::Ui => UiFontSize::ALL
+                .iter()
+                .position(|size| *size == typography::font_size(cx))
+                .unwrap_or_default(),
+            _ => nearest_mono_ix(self.pixel_size(cx)),
+        }
+    }
+}
+
+/// Pixel ladder behind the terminal and code size dropdowns. Both defaults
+/// (terminal 13, code 12.5) are rungs, so today's rendering is reachable.
+const MONO_FONT_SIZES: [f32; 10] = [10.0, 11.0, 12.0, 12.5, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0];
+
+fn nearest_mono_ix(size: f32) -> usize {
+    MONO_FONT_SIZES
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| (**a - size).abs().total_cmp(&(**b - size).abs()))
+        .map(|(ix, _)| ix)
+        .unwrap_or_default()
+}
+
 pub struct AppearancePage {
+    scroll: crate::settings::widgets::PageScroll,
     selected_font: UiFontFamily,
+    selected_terminal_font: UiFontFamily,
+    selected_code_font: UiFontFamily,
     selected_size: UiFontSize,
+    selected_terminal_size: f32,
+    selected_code_size: f32,
     font_focus: FocusHandle,
+    terminal_font_focus: FocusHandle,
+    code_font_focus: FocusHandle,
     size_focus: FocusHandle,
+    terminal_size_focus: FocusHandle,
+    code_size_focus: FocusHandle,
     font_menu: Popup<()>,
+    terminal_font_menu: Popup<()>,
+    code_font_menu: Popup<()>,
+    /// Floating rail for each family dropdown (the menu-scrollbar treatment,
+    /// on the menu's own scroll host). One per kind: the menus scroll
+    /// independently, so sharing a state would carry one menu's offset and
+    /// rail timers into the next one opened.
+    font_list: widgets::PageScroll,
+    terminal_font_list: widgets::PageScroll,
+    code_font_list: widgets::PageScroll,
     size_menu: Popup<()>,
+    terminal_size_menu: Popup<()>,
+    code_size_menu: Popup<()>,
     font_menu_dismissed_at: Option<std::time::Instant>,
+    terminal_font_menu_dismissed_at: Option<std::time::Instant>,
+    code_font_menu_dismissed_at: Option<std::time::Instant>,
+    /// Filter for whichever family menu is open — a device can carry hundreds
+    /// of families, so the list narrows as you type instead of asking you to
+    /// scroll. One input serves all three kinds: only one menu is ever open.
+    font_search: Entity<ComposerInput>,
+    _font_search_events: Subscription,
     size_menu_dismissed_at: Option<std::time::Instant>,
+    terminal_size_menu_dismissed_at: Option<std::time::Instant>,
+    code_size_menu_dismissed_at: Option<std::time::Instant>,
     light_theme_menu: Popup<()>,
     dark_theme_menu: Popup<()>,
     import_dialog: Option<ImportDialog>,
@@ -55,15 +221,47 @@ pub struct AppearancePage {
 
 impl AppearancePage {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        // `PaletteSearch` binds text-editing keys only — arrows/Enter/Escape
+        // stay unbound and bubble from the input to the menu card's own key
+        // handler. `Submitted` never fires here, so Enter has exactly one path.
+        let font_search =
+            cx.new(|cx| ComposerInput::with_context("Search fonts", "PaletteSearch", cx));
+        let font_search_events = cx.subscribe(&font_search, |this: &mut Self, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Edited) {
+                this.on_font_search_edited(cx);
+            }
+        });
         Self {
+            scroll: crate::settings::widgets::PageScroll::default(),
             selected_font: typography::effective(cx),
+            selected_terminal_font: typography::terminal_effective(cx),
+            selected_code_font: typography::code_effective(cx),
             selected_size: typography::font_size(cx),
+            selected_terminal_size: typography::terminal_font_size(cx),
+            selected_code_size: typography::code_font_size(cx),
             font_focus: cx.focus_handle(),
+            terminal_font_focus: cx.focus_handle(),
+            code_font_focus: cx.focus_handle(),
             size_focus: cx.focus_handle(),
+            terminal_size_focus: cx.focus_handle(),
+            code_size_focus: cx.focus_handle(),
             font_menu: Popup::default(),
+            terminal_font_menu: Popup::default(),
+            code_font_menu: Popup::default(),
+            font_list: widgets::PageScroll::default(),
+            terminal_font_list: widgets::PageScroll::default(),
+            code_font_list: widgets::PageScroll::default(),
             size_menu: Popup::default(),
+            terminal_size_menu: Popup::default(),
+            code_size_menu: Popup::default(),
             font_menu_dismissed_at: None,
+            terminal_font_menu_dismissed_at: None,
+            code_font_menu_dismissed_at: None,
+            font_search,
+            _font_search_events: font_search_events,
             size_menu_dismissed_at: None,
+            terminal_size_menu_dismissed_at: None,
+            code_size_menu_dismissed_at: None,
             light_theme_menu: Popup::default(),
             dark_theme_menu: Popup::default(),
             import_dialog: None,
@@ -73,180 +271,393 @@ impl AppearancePage {
         }
     }
 
-    fn commit_font(&mut self, cx: &mut Context<Self>) {
-        if typography::is_available(&self.selected_font, cx) {
-            typography::set_family(self.selected_font.clone(), cx);
-            self.selected_font = typography::effective(cx);
-            self.close_font_menu(cx);
+    fn font_menu(&self, kind: FontKind) -> &Popup<()> {
+        match kind {
+            FontKind::Ui => &self.font_menu,
+            FontKind::Terminal => &self.terminal_font_menu,
+            FontKind::Code => &self.code_font_menu,
+        }
+    }
+
+    fn font_menu_mut(&mut self, kind: FontKind) -> &mut Popup<()> {
+        match kind {
+            FontKind::Ui => &mut self.font_menu,
+            FontKind::Terminal => &mut self.terminal_font_menu,
+            FontKind::Code => &mut self.code_font_menu,
+        }
+    }
+
+    fn font_list_mut(&mut self, kind: FontKind) -> &mut widgets::PageScroll {
+        match kind {
+            FontKind::Ui => &mut self.font_list,
+            FontKind::Terminal => &mut self.terminal_font_list,
+            FontKind::Code => &mut self.code_font_list,
+        }
+    }
+
+    fn selected_font(&self, kind: FontKind) -> &UiFontFamily {
+        match kind {
+            FontKind::Ui => &self.selected_font,
+            FontKind::Terminal => &self.selected_terminal_font,
+            FontKind::Code => &self.selected_code_font,
+        }
+    }
+
+    fn set_selected_font(&mut self, kind: FontKind, family: UiFontFamily) {
+        match kind {
+            FontKind::Ui => self.selected_font = family,
+            FontKind::Terminal => self.selected_terminal_font = family,
+            FontKind::Code => self.selected_code_font = family,
+        }
+    }
+
+    fn font_focus(&self, kind: FontKind) -> &FocusHandle {
+        match kind {
+            FontKind::Ui => &self.font_focus,
+            FontKind::Terminal => &self.terminal_font_focus,
+            FontKind::Code => &self.code_font_focus,
+        }
+    }
+
+    fn font_dismissed_at(&mut self, kind: FontKind) -> &mut Option<std::time::Instant> {
+        match kind {
+            FontKind::Ui => &mut self.font_menu_dismissed_at,
+            FontKind::Terminal => &mut self.terminal_font_menu_dismissed_at,
+            FontKind::Code => &mut self.code_font_menu_dismissed_at,
+        }
+    }
+
+    fn commit_font(&mut self, kind: FontKind, cx: &mut Context<Self>) {
+        let family = self.selected_font(kind).clone();
+        if kind.is_available_for(&typography::availability(cx), &family) {
+            kind.apply_family(family, cx);
+            let effective = kind.effective(cx);
+            self.set_selected_font(kind, effective);
+            self.close_font_menu(kind, cx);
             cx.notify();
         }
     }
 
-    fn commit_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        typography::set_font_size(self.selected_size, window, cx);
-        self.selected_size = typography::font_size(cx);
-        self.close_size_menu(cx);
+    fn size_menu(&self, kind: FontKind) -> &Popup<()> {
+        match kind {
+            FontKind::Ui => &self.size_menu,
+            FontKind::Terminal => &self.terminal_size_menu,
+            FontKind::Code => &self.code_size_menu,
+        }
+    }
+
+    fn size_menu_mut(&mut self, kind: FontKind) -> &mut Popup<()> {
+        match kind {
+            FontKind::Ui => &mut self.size_menu,
+            FontKind::Terminal => &mut self.terminal_size_menu,
+            FontKind::Code => &mut self.code_size_menu,
+        }
+    }
+
+    fn size_focus(&self, kind: FontKind) -> &FocusHandle {
+        match kind {
+            FontKind::Ui => &self.size_focus,
+            FontKind::Terminal => &self.terminal_size_focus,
+            FontKind::Code => &self.code_size_focus,
+        }
+    }
+
+    fn size_dismissed_at(&mut self, kind: FontKind) -> &mut Option<std::time::Instant> {
+        match kind {
+            FontKind::Ui => &mut self.size_menu_dismissed_at,
+            FontKind::Terminal => &mut self.terminal_size_menu_dismissed_at,
+            FontKind::Code => &mut self.code_size_menu_dismissed_at,
+        }
+    }
+
+    /// Highlighted rung of this kind's size ladder.
+    fn selected_size_ix(&self, kind: FontKind) -> usize {
+        match kind {
+            FontKind::Ui => UiFontSize::ALL
+                .iter()
+                .position(|size| *size == self.selected_size)
+                .unwrap_or_default(),
+            FontKind::Terminal => nearest_mono_ix(self.selected_terminal_size),
+            FontKind::Code => nearest_mono_ix(self.selected_code_size),
+        }
+    }
+
+    fn set_selected_size_ix(&mut self, kind: FontKind, ix: usize) {
+        let ix = ix.min(kind.size_count() - 1);
+        match kind {
+            FontKind::Ui => self.selected_size = UiFontSize::ALL[ix],
+            FontKind::Terminal => self.selected_terminal_size = MONO_FONT_SIZES[ix],
+            FontKind::Code => self.selected_code_size = MONO_FONT_SIZES[ix],
+        }
+    }
+
+    fn commit_size(&mut self, kind: FontKind, window: &mut Window, cx: &mut Context<Self>) {
+        let ix = self.selected_size_ix(kind);
+        match kind {
+            FontKind::Ui => {
+                typography::set_font_size(UiFontSize::ALL[ix], window, cx);
+                self.selected_size = typography::font_size(cx);
+            }
+            FontKind::Terminal => {
+                let next = MONO_FONT_SIZES[ix];
+                typography::set_terminal_font_size(next, cx);
+                self.selected_terminal_size = next;
+            }
+            FontKind::Code => {
+                let next = MONO_FONT_SIZES[ix];
+                typography::set_code_font_size(next, cx);
+                self.selected_code_size = next;
+                // Open file editors only learn the new size through this event.
+                cx.emit(AppearanceSettingsEvent::CodeFontSizeChanged(next));
+            }
+        }
+        self.close_size_menu(kind, cx);
         cx.notify();
     }
 
-    fn close_font_menu(&mut self, cx: &mut Context<Self>) {
-        if self.font_menu.begin_close() {
-            popover::reap_popup(cx, |page| &mut page.font_menu);
+    /// This kind's catalog, narrowed and ranked by the typed query.
+    fn visible_choices(
+        &self,
+        kind: FontKind,
+        availability: &FontAvailability,
+        cx: &gpui::App,
+    ) -> Vec<UiFontFamily> {
+        filter_families(
+            self.font_search.read(cx).text(),
+            kind.choices_for(availability),
+        )
+    }
+
+    /// The kind whose menu is open, if any. Opening one closes the others.
+    fn open_font_kind(&self) -> Option<FontKind> {
+        FontKind::ALL
+            .into_iter()
+            .find(|kind| self.font_menu(*kind).is_open())
+    }
+
+    fn on_font_search_edited(&mut self, cx: &mut Context<Self>) {
+        if let Some(kind) = self.open_font_kind() {
+            self.clamp_highlight(kind, cx);
         }
     }
 
-    fn close_size_menu(&mut self, cx: &mut Context<Self>) {
-        if self.size_menu.begin_close() {
-            popover::reap_popup(cx, |page| &mut page.size_menu);
-        }
-    }
-
-    fn dismiss_font_menu(&mut self, cx: &mut Context<Self>) {
-        self.font_menu_dismissed_at = Some(std::time::Instant::now());
-        self.close_font_menu(cx);
-    }
-
-    fn dismiss_size_menu(&mut self, cx: &mut Context<Self>) {
-        self.size_menu_dismissed_at = Some(std::time::Instant::now());
-        self.close_size_menu(cx);
-    }
-
-    fn toggle_font_menu(&mut self, cx: &mut Context<Self>) {
-        self.close_size_menu(cx);
-        let just_dismissed = self
-            .font_menu_dismissed_at
-            .take()
-            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(400));
-        if self.font_menu.is_open() {
-            self.close_font_menu(cx);
-        } else if !just_dismissed {
-            self.selected_font = typography::effective(cx);
-            self.font_menu.open(());
-        }
-        cx.notify();
-    }
-
-    fn toggle_size_menu(&mut self, cx: &mut Context<Self>) {
-        self.close_font_menu(cx);
-        let just_dismissed = self
-            .size_menu_dismissed_at
-            .take()
-            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(400));
-        if self.size_menu.is_open() {
-            self.close_size_menu(cx);
-        } else if !just_dismissed {
-            self.selected_size = typography::font_size(cx);
-            self.size_menu.open(());
-        }
-        cx.notify();
-    }
-
-    fn on_font_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    /// Keep the highlighted row inside the filtered list, so the next Enter
+    /// cannot commit a family the query has already filtered out of existence.
+    fn clamp_highlight(&mut self, kind: FontKind, cx: &mut Context<Self>) {
         let availability = typography::availability(cx);
-        match event.keystroke.key.as_str() {
-            "up" | "left" => {
-                if !self.font_menu.is_open() {
-                    self.font_menu_dismissed_at = None;
-                    self.toggle_font_menu(cx);
-                }
-                self.selected_font = step_font(&self.selected_font, -1, &availability);
-                cx.notify();
-            }
-            "down" | "right" => {
-                if !self.font_menu.is_open() {
-                    self.font_menu_dismissed_at = None;
-                    self.toggle_font_menu(cx);
-                }
-                self.selected_font = step_font(&self.selected_font, 1, &availability);
-                cx.notify();
-            }
-            "home" => {
-                if !self.font_menu.is_open() {
-                    self.font_menu_dismissed_at = None;
-                    self.toggle_font_menu(cx);
-                }
-                self.selected_font = first_available(&availability);
-                cx.notify();
-            }
-            "end" => {
-                if !self.font_menu.is_open() {
-                    self.font_menu_dismissed_at = None;
-                    self.toggle_font_menu(cx);
-                }
-                self.selected_font = last_available(&availability);
-                cx.notify();
-            }
-            "enter" | "space" => {
-                if self.font_menu.is_open() {
-                    self.commit_font(cx);
-                } else {
-                    self.font_menu_dismissed_at = None;
-                    self.toggle_font_menu(cx);
-                }
-            }
-            "escape" => {
-                self.selected_font = typography::effective(cx);
-                self.close_font_menu(cx);
-                cx.notify();
-            }
-            _ => {}
+        let visible = self.visible_choices(kind, &availability, cx);
+        if !visible.contains(self.selected_font(kind)) {
+            let next = if visible.is_empty() {
+                kind.effective(cx)
+            } else {
+                first_available(&visible, kind, &availability)
+            };
+            self.set_selected_font(kind, next);
         }
+        cx.notify();
+    }
+
+    fn close_font_menu(&mut self, kind: FontKind, cx: &mut Context<Self>) {
+        if !self.font_menu_mut(kind).begin_close() {
+            return;
+        }
+        match kind {
+            FontKind::Ui => popover::reap_popup(cx, |page| &mut page.font_menu),
+            FontKind::Terminal => popover::reap_popup(cx, |page| &mut page.terminal_font_menu),
+            FontKind::Code => popover::reap_popup(cx, |page| &mut page.code_font_menu),
+        }
+    }
+
+    /// Only one of this page's six font dropdowns may be open at a time;
+    /// opening any one closes the other five.
+    fn close_other_menus(
+        &mut self,
+        keep_family: Option<FontKind>,
+        keep_size: Option<FontKind>,
+        cx: &mut Context<Self>,
+    ) {
+        for kind in FontKind::ALL {
+            if Some(kind) != keep_family {
+                self.close_font_menu(kind, cx);
+            }
+            if Some(kind) != keep_size {
+                self.close_size_menu(kind, cx);
+            }
+        }
+    }
+
+    fn close_size_menu(&mut self, kind: FontKind, cx: &mut Context<Self>) {
+        if !self.size_menu_mut(kind).begin_close() {
+            return;
+        }
+        match kind {
+            FontKind::Ui => popover::reap_popup(cx, |page| &mut page.size_menu),
+            FontKind::Terminal => popover::reap_popup(cx, |page| &mut page.terminal_size_menu),
+            FontKind::Code => popover::reap_popup(cx, |page| &mut page.code_size_menu),
+        }
+    }
+
+    fn dismiss_font_menu(&mut self, kind: FontKind, cx: &mut Context<Self>) {
+        *self.font_dismissed_at(kind) = Some(std::time::Instant::now());
+        self.close_font_menu(kind, cx);
+    }
+
+    fn dismiss_size_menu(&mut self, kind: FontKind, cx: &mut Context<Self>) {
+        *self.size_dismissed_at(kind) = Some(std::time::Instant::now());
+        self.close_size_menu(kind, cx);
+    }
+
+    fn toggle_font_menu(&mut self, kind: FontKind, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_other_menus(Some(kind), None, cx);
+        let just_dismissed = self
+            .font_dismissed_at(kind)
+            .take()
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(400));
+        if self.font_menu(kind).is_open() {
+            self.close_font_menu(kind, cx);
+        } else if !just_dismissed {
+            // Clear before opening: the resulting `Edited` finds no open menu,
+            // so it cannot clobber the highlight we anchor on the next line.
+            self.font_search
+                .update(cx, |input, cx| input.set_text("", cx));
+            let effective = kind.effective(cx);
+            self.set_selected_font(kind, effective);
+            // Every open starts at the top, and the rail's baseline with it —
+            // no reopen flash from the previous session's offset.
+            self.font_list_mut(kind).reset();
+            self.font_menu_mut(kind).open(());
+            window.focus(&self.font_search.read(cx).focus_handle(cx), cx);
+        }
+        cx.notify();
+    }
+
+    fn toggle_size_menu(&mut self, kind: FontKind, cx: &mut Context<Self>) {
+        self.close_other_menus(None, Some(kind), cx);
+        let just_dismissed = self
+            .size_dismissed_at(kind)
+            .take()
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(400));
+        if self.size_menu(kind).is_open() {
+            self.close_size_menu(kind, cx);
+        } else if !just_dismissed {
+            self.set_selected_size_ix(kind, kind.size_ix(cx));
+            self.size_menu_mut(kind).open(());
+        }
+        cx.notify();
+    }
+
+    /// Open on the first navigation key, so ↑↓/Home/End work from the closed
+    /// trigger exactly as they do inside the list.
+    fn open_size_menu(&mut self, kind: FontKind, cx: &mut Context<Self>) {
+        if !self.size_menu(kind).is_open() {
+            *self.size_dismissed_at(kind) = None;
+            self.toggle_size_menu(kind, cx);
+        }
+    }
+
+    /// Returns whether the key was consumed. The card and its trigger both
+    /// listen, and the trigger's guard re-reads `is_open` — which Enter has
+    /// already flipped — so a consumed key must not bubble on.
+    fn on_font_key_down(
+        &mut self,
+        kind: FontKind,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let key = event.keystroke.key.as_str();
+
+        if !self.font_menu(kind).is_open() {
+            // Closed: any list key opens the menu, and the filter takes over
+            // from there — no stepping through hundreds of rows by hand.
+            if matches!(
+                key,
+                "up" | "down" | "left" | "right" | "home" | "end" | "enter" | "space"
+            ) {
+                *self.font_dismissed_at(kind) = None;
+                self.toggle_font_menu(kind, window, cx);
+                return true;
+            }
+            return false;
+        }
+
+        // Open: the filter input owns text and caret keys. Only navigation,
+        // commit, and dismiss bubble out to us.
+        let availability = typography::availability(cx);
+        let choices = self.visible_choices(kind, &availability, cx);
+        let modifiers = event.keystroke.modifiers;
+        let next = match (
+            key,
+            popover::classify_key(key, modifiers.platform, modifiers.control),
+        ) {
+            (_, popover::MenuKey::Up) => {
+                step_font(self.selected_font(kind), -1, &choices, kind, &availability)
+            }
+            (_, popover::MenuKey::Down) => {
+                step_font(self.selected_font(kind), 1, &choices, kind, &availability)
+            }
+            ("home", _) => first_available(&choices, kind, &availability),
+            ("end", _) => last_available(&choices, kind, &availability),
+            (_, popover::MenuKey::Enter) => {
+                self.commit_font(kind, cx);
+                return true;
+            }
+            (_, popover::MenuKey::Escape) => {
+                let effective = kind.effective(cx);
+                self.set_selected_font(kind, effective);
+                self.close_font_menu(kind, cx);
+                window.focus(&self.font_focus(kind).clone(), cx);
+                cx.notify();
+                return true;
+            }
+            _ => return false,
+        };
+        self.set_selected_font(kind, next);
+        cx.notify();
+        true
     }
 
     fn on_size_key_down(
         &mut self,
+        kind: FontKind,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let current = UiFontSize::ALL
-            .iter()
-            .position(|size| *size == self.selected_size)
-            .unwrap_or(4);
+        let last = kind.size_count() - 1;
+        let current = self.selected_size_ix(kind);
         match event.keystroke.key.as_str() {
             "up" | "left" => {
-                if !self.size_menu.is_open() {
-                    self.size_menu_dismissed_at = None;
-                    self.toggle_size_menu(cx);
-                }
-                self.selected_size = UiFontSize::ALL[current.saturating_sub(1)];
+                self.open_size_menu(kind, cx);
+                self.set_selected_size_ix(kind, current.saturating_sub(1));
                 cx.notify();
             }
             "down" | "right" => {
-                if !self.size_menu.is_open() {
-                    self.size_menu_dismissed_at = None;
-                    self.toggle_size_menu(cx);
-                }
-                self.selected_size = UiFontSize::ALL[(current + 1).min(UiFontSize::ALL.len() - 1)];
+                self.open_size_menu(kind, cx);
+                self.set_selected_size_ix(kind, current + 1);
                 cx.notify();
             }
             "home" => {
-                if !self.size_menu.is_open() {
-                    self.size_menu_dismissed_at = None;
-                    self.toggle_size_menu(cx);
-                }
-                self.selected_size = UiFontSize::ALL[0];
+                self.open_size_menu(kind, cx);
+                self.set_selected_size_ix(kind, 0);
                 cx.notify();
             }
             "end" => {
-                if !self.size_menu.is_open() {
-                    self.size_menu_dismissed_at = None;
-                    self.toggle_size_menu(cx);
-                }
-                self.selected_size = UiFontSize::ALL[UiFontSize::ALL.len() - 1];
+                self.open_size_menu(kind, cx);
+                self.set_selected_size_ix(kind, last);
                 cx.notify();
             }
             "enter" | "space" => {
-                if self.size_menu.is_open() {
-                    self.commit_size(window, cx);
+                if self.size_menu(kind).is_open() {
+                    self.commit_size(kind, window, cx);
                 } else {
-                    self.size_menu_dismissed_at = None;
-                    self.toggle_size_menu(cx);
+                    *self.size_dismissed_at(kind) = None;
+                    self.toggle_size_menu(kind, cx);
                 }
             }
             "escape" => {
-                self.selected_size = typography::font_size(cx);
-                self.close_size_menu(cx);
+                self.set_selected_size_ix(kind, kind.size_ix(cx));
+                self.close_size_menu(kind, cx);
                 cx.notify();
             }
             _ => {}
@@ -423,6 +834,24 @@ impl AppearancePage {
         }
         cx.notify();
     }
+
+    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        if self.scroll.set_list_hovered(*hovered) {
+            cx.notify();
+        }
+    }
+}
+
+impl popover::ScrollRailHost for AppearancePage {
+    // The page's rail; each font dropdown's rail goes through
+    // [`widgets::rail`], which can serve further scroll hosts on the same view.
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        self.scroll.rail_bar()
+    }
+
+    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
+        self.scroll.rail_scroll()
+    }
 }
 
 fn source_name(path: &Path) -> String {
@@ -462,9 +891,13 @@ fn slug(value: &str) -> String {
 fn step_font(
     current: &UiFontFamily,
     delta: isize,
+    choices: &[UiFontFamily],
+    kind: FontKind,
     availability: &FontAvailability,
 ) -> UiFontFamily {
-    let choices = availability.choices();
+    if choices.is_empty() {
+        return current.clone();
+    }
     let current = choices
         .iter()
         .position(|family| family == current)
@@ -472,7 +905,7 @@ fn step_font(
     let mut ix = current + delta.signum();
     while (0..choices.len() as isize).contains(&ix) {
         let candidate = &choices[ix as usize];
-        if availability.is_available(candidate) {
+        if kind.is_available_for(availability, candidate) {
             return candidate.clone();
         }
         ix += delta.signum();
@@ -480,23 +913,60 @@ fn step_font(
     choices[current as usize].clone()
 }
 
-fn first_available(availability: &FontAvailability) -> UiFontFamily {
-    availability
-        .choices()
-        .iter()
-        .find(|family| availability.is_available(family))
-        .cloned()
-        .unwrap_or(UiFontFamily::System)
+/// Narrow and rank families by a typed query: prefix matches first, then
+/// substring matches, catalog order preserved within each rank. An empty query
+/// keeps the catalog untouched, so bundled entries still sort first.
+fn filter_families(query: &str, choices: &[UiFontFamily]) -> Vec<UiFontFamily> {
+    if query.trim().is_empty() {
+        return choices.to_vec();
+    }
+    let labels: Vec<&str> = choices.iter().map(UiFontFamily::label).collect();
+    popover::filter_indices(query, &labels)
+        .into_iter()
+        .map(|ix| choices[ix].clone())
+        .collect()
 }
 
-fn last_available(availability: &FontAvailability) -> UiFontFamily {
-    availability
-        .choices()
+fn first_available(
+    choices: &[UiFontFamily],
+    kind: FontKind,
+    availability: &FontAvailability,
+) -> UiFontFamily {
+    choices
+        .iter()
+        .find(|family| kind.is_available_for(availability, family))
+        .cloned()
+        .unwrap_or_else(|| fallback_selection(kind))
+}
+
+fn last_available(
+    choices: &[UiFontFamily],
+    kind: FontKind,
+    availability: &FontAvailability,
+) -> UiFontFamily {
+    choices
         .iter()
         .rev()
-        .find(|family| availability.is_available(family))
+        .find(|family| kind.is_available_for(availability, family))
         .cloned()
-        .unwrap_or(UiFontFamily::System)
+        .unwrap_or_else(|| fallback_selection(kind))
+}
+
+/// Highlight target when a kind's catalog offers nothing: System UI is
+/// proportional, so the terminal cannot land there.
+fn fallback_selection(kind: FontKind) -> UiFontFamily {
+    match kind {
+        FontKind::Terminal => UiFontFamily::GeistMono,
+        _ => UiFontFamily::System,
+    }
+}
+
+fn format_px(size: f32) -> String {
+    if size.fract().abs() < f32::EPSILON {
+        format!("{size:.0} px")
+    } else {
+        format!("{size:.1} px")
+    }
 }
 
 fn bar(fraction: f32, tone: Hsla) -> gpui::Div {
@@ -1025,6 +1495,276 @@ impl AppearancePage {
         }
     }
 
+    fn render_font_picker(
+        &mut self,
+        kind: FontKind,
+        theme: &Theme,
+        availability: &FontAvailability,
+        fixed: SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let slug = kind.slug();
+        // The scroll helpers key off `&'static str`, so the ids are spelled
+        // out rather than formatted from the slug.
+        let (host_id, list_id, rail_id) = match kind {
+            FontKind::Ui => (
+                "interface-font-host",
+                "interface-font-scroll",
+                "interface-font-scrollbar",
+            ),
+            FontKind::Terminal => (
+                "terminal-font-host",
+                "terminal-font-scroll",
+                "terminal-font-scrollbar",
+            ),
+            FontKind::Code => ("code-font-host", "code-font-scroll", "code-font-scrollbar"),
+        };
+        let effective = kind.effective(cx);
+        let selected = self.selected_font(kind).clone();
+        let visible = self.visible_choices(kind, availability, cx);
+        let filtered = !self.font_search.read(cx).text().trim().is_empty();
+        let rows: Vec<AnyElement> = visible
+            .into_iter()
+            .enumerate()
+            .map(|(ix, family)| {
+                let available = kind.is_available_for(availability, &family);
+                let active = family == effective;
+                let focused = family == selected;
+                let label = SharedString::from(family.label().to_owned());
+                popover::menu_row_nav(theme, active, focused, format!("{slug}-font-option-{ix}"))
+                    .id(SharedString::from(format!("{slug}-font-option-{ix}")))
+                    .when(available, |row| {
+                        row.on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.set_selected_font(kind, family.clone());
+                            this.commit_font(kind, cx);
+                        }))
+                    })
+                    .when(!available, |row| row.opacity(0.45))
+                    .child(div().flex_1().min_w_0().truncate().child(label))
+                    .child(div().w(px(18.0)).flex_none().when(active, |slot| {
+                        slot.child(
+                            icons::icon(icons::CHECK)
+                                .size(px(14.0))
+                                .text_color(theme.accent),
+                        )
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+
+        let list: AnyElement = if rows.is_empty() {
+            div()
+                .px(px(8.0))
+                .py(px(6.0))
+                .text_size(px(12.0))
+                .text_color(theme.for_popup().text_faint)
+                .child(SharedString::from(if filtered {
+                    "No matching fonts"
+                } else {
+                    "No fonts"
+                }))
+                .into_any_element()
+        } else {
+            // Card-bleed scroll host (see [`popover::menu_scroll_host`]): the
+            // rail mounts as a sibling of the scroller, above its clip. The
+            // bleed stays horizontal — the search input sits above the list.
+            let rail = widgets::rail(self.font_list_mut(kind), rail_id, theme, cx, move |page| {
+                page.font_list_mut(kind)
+            });
+            let scroll = self.font_list_mut(kind).scroll.clone();
+            popover::menu_scroll_host(host_id)
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if this.font_list_mut(kind).set_list_hovered(*hovered) {
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    popover::menu_scroll_list(list_id, &scroll)
+                        .max_h(px(280.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .children(rows),
+                )
+                .children(rail)
+                .into_any_element()
+        };
+
+        // The key handler sits on the card, not just the trigger: focus moves
+        // into the filter input, and `PaletteSearch` lets arrows/Enter/Escape
+        // bubble to exactly this ancestor.
+        let menu = popover::popover_card(theme)
+            .w(px(220.0))
+            .font_family(fixed)
+            .on_mouse_down_out(cx.listener(move |this, _, _, cx| this.dismiss_font_menu(kind, cx)))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if this.on_font_key_down(kind, event, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .flex()
+            .flex_col()
+            .child(popover::search_input_frame(
+                theme,
+                self.font_search.clone().into_any_element(),
+            ))
+            .child(list)
+            .into_any_element();
+
+        let open = self.font_menu(kind).is_open();
+        let closing = self.font_menu(kind).closing_since();
+        div()
+            .id(SharedString::from(format!("{slug}-font-dropdown")))
+            .relative()
+            .w(px(220.0))
+            .h(px(36.0))
+            .px(px(11.0))
+            .rounded(px(9.0))
+            .border_1()
+            .border_color(if open {
+                theme.border_strong
+            } else {
+                theme.border
+            })
+            .bg(crate::theme::ink(0.025))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .cursor_pointer()
+            .track_focus(self.font_focus(kind))
+            // Only the closed state: once open, the card above owns these keys
+            // and stops their propagation before they reach us.
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if !this.font_menu(kind).is_open() {
+                    this.on_font_key_down(kind, event, window, cx);
+                }
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                window.focus(&this.font_focus(kind).clone(), cx);
+                this.toggle_font_menu(kind, window, cx);
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(effective.label().to_owned())),
+            )
+            .child(
+                icons::icon(icons::ALT_ARROW_DOWN)
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .when_some(self.font_menu(kind).get(), |trigger, _| {
+                trigger.child(popover::anchored_menu_below(
+                    SharedString::from(format!("{slug}-font-menu")),
+                    menu,
+                    closing,
+                ))
+            })
+            .into_any_element()
+    }
+
+    /// The size dropdown, identical in shape to the family picker beside it.
+    /// Every kind picks from a discrete ladder, so all three rows read alike.
+    fn render_size_picker(
+        &mut self,
+        kind: FontKind,
+        theme: &Theme,
+        fixed: SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let slug = kind.slug();
+        let labels = kind.size_labels();
+        let current = kind.size_ix(cx);
+        let selected = self.selected_size_ix(kind);
+        let rows: Vec<AnyElement> = labels
+            .iter()
+            .enumerate()
+            .map(|(ix, label)| {
+                popover::menu_row_nav(
+                    theme,
+                    ix == current,
+                    ix == selected,
+                    format!("{slug}-font-size-option-{ix}"),
+                )
+                .id(SharedString::from(format!("{slug}-font-size-option-{ix}")))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.set_selected_size_ix(kind, ix);
+                    this.commit_size(kind, window, cx);
+                }))
+                .child(div().flex_1().child(label.clone()))
+                .child(div().w(px(18.0)).flex_none().when(ix == current, |slot| {
+                    slot.child(
+                        icons::icon(icons::CHECK)
+                            .size(px(14.0))
+                            .text_color(theme.accent),
+                    )
+                }))
+                .into_any_element()
+            })
+            .collect();
+
+        let menu = popover::popover_card(theme)
+            .w(px(128.0))
+            .font_family(fixed)
+            .on_mouse_down_out(cx.listener(move |this, _, _, cx| this.dismiss_size_menu(kind, cx)))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .children(rows)
+            .into_any_element();
+
+        let open = self.size_menu(kind).is_open();
+        let closing = self.size_menu(kind).closing_since();
+        div()
+            .id(SharedString::from(format!("{slug}-font-size-dropdown")))
+            .relative()
+            .w(px(128.0))
+            .h(px(36.0))
+            .px(px(11.0))
+            .rounded(px(9.0))
+            .border_1()
+            .border_color(if open {
+                theme.border_strong
+            } else {
+                theme.border
+            })
+            .bg(crate::theme::ink(0.025))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .cursor_pointer()
+            .track_focus(self.size_focus(kind))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                this.on_size_key_down(kind, event, window, cx)
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                window.focus(&this.size_focus(kind).clone(), cx);
+                this.toggle_size_menu(kind, cx);
+            }))
+            .child(div().flex_1().child(labels[current].clone()))
+            .child(
+                icons::icon(icons::ALT_ARROW_DOWN)
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .when_some(self.size_menu(kind).get(), |trigger, _| {
+                trigger.child(popover::anchored_menu_below(
+                    SharedString::from(format!("{slug}-font-size-menu")),
+                    menu,
+                    closing,
+                ))
+            })
+            .into_any_element()
+    }
+
     fn render_theme_selector(
         &mut self,
         appearance_kind: Appearance,
@@ -1281,7 +2021,7 @@ impl AppearancePage {
                         .mt(px(4.0))
                         .ml(px(23.0))
                         .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.text_muted.opacity(0.68))
+                        .text_color(theme.text_muted)
                         .child(description),
                 )
         };
@@ -1361,7 +2101,7 @@ impl AppearancePage {
                     .child(
                         div()
                             .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_muted.opacity(0.65))
+                            .text_color(theme.text_muted)
                             .child(SharedString::from(format!(
                                 "{} variant{}",
                                 compilation.family.variants.len(),
@@ -1464,7 +2204,7 @@ impl AppearancePage {
                                         .child(
                                             div()
                                                 .text_size(crate::typography::ui_rems(11.0))
-                                                .text_color(theme.text_muted.opacity(0.65))
+                                                .text_color(theme.text_muted)
                                                 .child(appearance),
                                         ),
                                 )
@@ -1533,7 +2273,7 @@ impl AppearancePage {
                     .gap(px(7.0))
                     .text_size(crate::typography::ui_rems(11.0))
                     .line_height(px(16.0))
-                    .text_color(theme.text_muted.opacity(0.72))
+                    .text_color(theme.text_muted)
                     .child(
                         icons::icon(icons::INFO_CIRCLE)
                             .size(px(13.0))
@@ -1979,11 +2719,11 @@ impl AppearancePage {
     }
 }
 
+impl EventEmitter<AppearanceSettingsEvent> for AppearancePage {}
+
 impl Render for AppearancePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        let effective_font = typography::effective(cx);
-        let requested_font = typography::requested(cx);
         let availability = typography::availability(cx);
         let fixed = theme.font_sans_fixed.clone();
         let current_mode = appearance::mode(cx);
@@ -2292,276 +3032,127 @@ impl Render for AppearancePage {
             .render_import_dialog(window.viewport_size(), &theme, window, cx)
             .or_else(|| self.render_review_dialog(window.viewport_size(), &theme, cx));
 
-        let font_rows: Vec<AnyElement> = availability
-            .choices()
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(ix, family)| {
-                let available = availability.is_available(&family);
-                let selected = family == effective_font;
-                let focused = family == self.selected_font;
-                let label = SharedString::from(family.label().to_owned());
-                popover::menu_row_nav(
-                    &theme,
-                    selected,
-                    focused,
-                    format!("interface-font-option-{ix}"),
-                )
-                .id(("interface-font-option", ix))
-                .when(available, |row| {
-                    row.on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.selected_font = family.clone();
-                        this.commit_font(cx);
-                    }))
-                })
-                .when(!available, |row| row.opacity(0.45))
-                .child(div().flex_1().min_w_0().truncate().child(label))
-                .child(div().w(px(18.0)).flex_none().when(selected, |slot| {
-                    slot.child(
-                        icons::icon(icons::CHECK)
-                            .size(px(14.0))
-                            .text_color(theme.accent),
-                    )
-                }))
-                .into_any_element()
-            })
-            .collect();
+        let ui_picker =
+            self.render_font_picker(FontKind::Ui, &theme, &availability, fixed.clone(), cx);
+        let terminal_picker =
+            self.render_font_picker(FontKind::Terminal, &theme, &availability, fixed.clone(), cx);
+        let code_picker =
+            self.render_font_picker(FontKind::Code, &theme, &availability, fixed.clone(), cx);
+        let ui_size = self.render_size_picker(FontKind::Ui, &theme, fixed.clone(), cx);
+        let terminal_size = self.render_size_picker(FontKind::Terminal, &theme, fixed.clone(), cx);
+        let code_size = self.render_size_picker(FontKind::Code, &theme, fixed.clone(), cx);
 
-        let font_menu = popover::popover_card(&theme)
-            .id("interface-font-scroll")
-            .w(px(220.0))
-            .font_family(fixed.clone())
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_font_menu(cx)))
-            .max_h(px(320.0))
-            .overflow_y_scroll()
+        let mut font_section = div()
+            .mt(px(36.0))
             .flex()
             .flex_col()
-            .gap(px(2.0))
-            .children(font_rows)
-            .into_any_element();
-
-        let font_trigger = div()
-            .id("interface-font-dropdown")
-            .relative()
-            .w(px(220.0))
-            .h(px(36.0))
-            .px(px(11.0))
-            .rounded(px(9.0))
-            .border_1()
-            .border_color(if self.font_menu.is_open() {
-                theme.border_strong
-            } else {
-                theme.border
-            })
-            .bg(crate::theme::ink(0.025))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .cursor_pointer()
-            .track_focus(&self.font_focus)
-            .on_key_down(
-                cx.listener(|this, event: &KeyDownEvent, _, cx| this.on_font_key_down(event, cx)),
-            )
-            .on_click(cx.listener(|this, _, window, cx| {
-                window.focus(&this.font_focus, cx);
-                this.toggle_font_menu(cx);
-            }))
-            .child(
+            .gap(px(18.0))
+            .font_family(fixed.clone());
+        for (kind, picker, size_control) in [
+            (FontKind::Ui, ui_picker, ui_size),
+            (FontKind::Terminal, terminal_picker, terminal_size),
+            (FontKind::Code, code_picker, code_size),
+        ] {
+            font_section = font_section.child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(SharedString::from(effective_font.label().to_owned())),
-            )
-            .child(
-                icons::icon(icons::ALT_ARROW_DOWN)
-                    .size(px(14.0))
-                    .flex_none()
-                    .text_color(theme.text_muted),
-            )
-            .when_some(self.font_menu.get(), |trigger, _| {
-                trigger.child(popover::anchored_menu_below(
-                    "interface-font-menu",
-                    font_menu,
-                    self.font_menu.closing_since(),
-                ))
-            });
-
-        let size_rows: Vec<AnyElement> = UiFontSize::ALL
-            .into_iter()
-            .enumerate()
-            .map(|(ix, size)| {
-                popover::menu_row_nav(
-                    &theme,
-                    size == typography::font_size(cx),
-                    size == self.selected_size,
-                    format!("interface-font-size-option-{ix}"),
-                )
-                .id(("interface-font-size-option", ix))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.selected_size = size;
-                    this.commit_size(window, cx);
-                }))
-                .child(div().flex_1().child(size.label()))
-                .child(div().w(px(18.0)).flex_none().when(
-                    size == typography::font_size(cx),
-                    |slot| {
-                        slot.child(
-                            icons::icon(icons::CHECK)
-                                .size(px(14.0))
-                                .text_color(theme.accent),
-                        )
-                    },
-                ))
-                .into_any_element()
-            })
-            .collect();
-
-        let size_menu = popover::popover_card(&theme)
-            .w(px(128.0))
-            .font_family(fixed.clone())
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_size_menu(cx)))
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .children(size_rows)
-            .into_any_element();
-
-        let size_trigger = div()
-            .id("interface-font-size-dropdown")
-            .relative()
-            .w(px(128.0))
-            .h(px(36.0))
-            .px(px(11.0))
-            .rounded(px(9.0))
-            .border_1()
-            .border_color(if self.size_menu.is_open() {
-                theme.border_strong
-            } else {
-                theme.border
-            })
-            .bg(crate::theme::ink(0.025))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .cursor_pointer()
-            .track_focus(&self.size_focus)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.on_size_key_down(event, window, cx)
-            }))
-            .on_click(cx.listener(|this, _, window, cx| {
-                window.focus(&this.size_focus, cx);
-                this.toggle_size_menu(cx);
-            }))
-            .child(div().flex_1().child(typography::font_size(cx).label()))
-            .child(
-                icons::icon(icons::ALT_ARROW_DOWN)
-                    .size(px(14.0))
-                    .flex_none()
-                    .text_color(theme.text_muted),
-            )
-            .when_some(self.size_menu.get(), |trigger, _| {
-                trigger.child(popover::anchored_menu_below(
-                    "interface-font-size-menu",
-                    size_menu,
-                    self.size_menu.closing_since(),
-                ))
-            });
-
-        div()
-            .id("appearance-page")
-            .size_full()
-            .overflow_y_scroll()
-            .child(
-                widgets::page_column()
-                    .child(widgets::page_header(&theme, "Appearance", None))
-                    .child(
-                        widgets::page_subtitle(
-                            &theme,
-                            "Choose how Zeron looks. These settings stay on this device.",
-                        )
-                        .max_w(px(512.0))
-                        .line_height(px(20.0)),
-                    )
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(24.0))
                     .child(
                         div()
-                            .mt(px(32.0))
+                            .min_w_0()
+                            .flex_1()
                             .flex()
                             .flex_col()
-                            .gap(px(12.0))
-                            .child(widgets::field_label(&theme, "Appearance"))
-                            .child(widgets::option_card_row().children(cards)),
-                    )
-                    .child(widgets::section_card(&theme).children(settings_rows))
-                    .child(
-                        div()
-                            .mt(px(36.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(10.0))
-                            .font_family(fixed.clone())
+                            .gap(px(4.0))
+                            .child(widgets::field_label(&theme, kind.label()))
                             .child(
                                 div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap(px(24.0))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .flex_1()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(4.0))
-                                            .child(widgets::field_label(&theme, "Interface font"))
-                                            .child(
-                                                div()
-                                                    .max_w(px(520.0))
-                                                    .text_size(typography::ui_rems(12.0))
-                                                    .line_height(px(18.0))
-                                                    .text_color(theme.text_muted)
-                                                    .child(SharedString::from(
-                                                        "Used across the interface and conversations. Code, diffs, and terminal keep their current fonts and sizes.",
-                                                    )),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .flex()
-                                            .flex_row()
-                                            .items_center()
-                                            .gap(px(8.0))
-                                            .child(font_trigger)
-                                            .child(size_trigger),
-                                    ),
+                                    .max_w(px(520.0))
+                                    .text_size(typography::ui_rems(12.0))
+                                    .line_height(px(18.0))
+                                    .text_color(theme.text_muted)
+                                    .child(kind.description()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(picker)
+                            .child(size_control),
+                    ),
+            );
+        }
+        for kind in FontKind::ALL {
+            let (requested, effective) = (kind.requested(cx), kind.effective(cx));
+            if requested != effective {
+                font_section = font_section.child(
+                    widgets::error_strip(
+                        &theme,
+                        format!(
+                            "{} \"{}\" isn't available on this device. Using {}.",
+                            kind.label(),
+                            requested.label(),
+                            effective.label()
+                        ),
+                    )
+                    .font_family(fixed.clone()),
+                );
+            }
+        }
+
+        let scrollbar = popover::rail(self, "appearance-page-scrollbar", &theme, cx);
+        div()
+            .id("appearance-page-host")
+            .relative()
+            .size_full()
+            .on_hover(cx.listener(Self::on_scroll_hovered))
+            .child(
+                div()
+                    .id("appearance-page")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll.scroll)
+                    .child(
+                        widgets::page_column()
+                            .child(widgets::page_header(&theme, "Appearance", None))
+                            .child(
+                                widgets::page_subtitle(
+                                    &theme,
+                                    "Choose how Zeron looks. These settings stay on this device.",
+                                )
+                                .max_w(px(512.0))
+                                .line_height(px(20.0)),
                             )
-                            .when(requested_font != effective_font, |section| {
-                                section.child(
-                                    widgets::error_strip(
-                                        &theme,
-                                        "This font could not be loaded. Comet is using Geist.",
-                                    )
-                                    .font_family(fixed.clone()),
+                            .child(
+                                div()
+                                    .mt(px(32.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(12.0))
+                                    .child(widgets::field_label(&theme, "Appearance"))
+                                    .child(widgets::option_card_row().children(cards)),
+                            )
+                            .child(widgets::section_card(&theme).children(settings_rows))
+                            .child(font_section)
+                            .when_some(library_warning, |page, warning| {
+                                page.child(
+                                    div()
+                                        .mt(px(8.0))
+                                        .text_size(crate::typography::ui_rems(11.5))
+                                        .text_color(theme.warning)
+                                        .child(warning),
                                 )
                             }),
-                    )
-                    .when_some(library_warning, |page, warning| {
-                        page.child(
-                            div()
-                                .mt(px(8.0))
-                                .text_size(crate::typography::ui_rems(11.5))
-                                .text_color(theme.warning)
-                                .child(warning),
-                        )
-                    }),
+                    ),
             )
+            .children(scrollbar)
             .children(modal)
     }
 }
@@ -2629,20 +3220,134 @@ mod tests {
     }
 
     #[test]
+    fn only_the_terminal_catalog_is_narrowed_to_fixed_width() {
+        let all = FontAvailability::all();
+        let terminal: Vec<_> = FontKind::Terminal
+            .choices_for(&all)
+            .iter()
+            .map(UiFontFamily::label)
+            .collect();
+        assert_eq!(terminal, ["Geist Mono", "Menlo"]);
+
+        for kind in [FontKind::Ui, FontKind::Code] {
+            assert_eq!(kind.choices_for(&all), all.choices());
+            assert!(kind.is_available_for(&all, &UiFontFamily::System));
+            assert!(kind.is_available_for(&all, &UiFontFamily::Installed("Arial".into())));
+        }
+        for proportional in [
+            UiFontFamily::System,
+            UiFontFamily::Geist,
+            UiFontFamily::Installed("Arial".into()),
+        ] {
+            assert!(!FontKind::Terminal.is_available_for(&all, &proportional));
+        }
+        assert!(FontKind::Terminal.is_available_for(&all, &UiFontFamily::GeistMono));
+        // A query that only matches proportional families leaves the terminal
+        // highlight on the bundled mono face rather than on System UI.
+        assert_eq!(
+            first_available(&[], FontKind::Terminal, &all),
+            UiFontFamily::GeistMono
+        );
+    }
+
+    #[test]
     fn font_keyboard_navigation_stops_at_edges_and_skips_unavailable() {
         let all = FontAvailability::all();
+        let choices = all.choices().to_vec();
         assert_eq!(
-            step_font(&UiFontFamily::Geist, -1, &all),
+            step_font(&UiFontFamily::Geist, -1, &choices, FontKind::Ui, &all),
             UiFontFamily::Geist
         );
         assert_eq!(
-            step_font(&UiFontFamily::Installed("Menlo".into()), 1, &all),
+            step_font(
+                &UiFontFamily::Installed("Menlo".into()),
+                1,
+                &choices,
+                FontKind::Ui,
+                &all
+            ),
             UiFontFamily::Installed("Menlo".into())
         );
         let without_arial = all.without(&UiFontFamily::Installed("Arial".into()));
         assert_eq!(
-            step_font(&UiFontFamily::System, 1, &without_arial),
+            step_font(
+                &UiFontFamily::System,
+                1,
+                &choices,
+                FontKind::Ui,
+                &without_arial
+            ),
             UiFontFamily::Installed("Menlo".into())
+        );
+    }
+
+    #[test]
+    fn filtering_narrows_to_matches_and_navigation_stays_inside_them() {
+        let all = FontAvailability::all();
+        let catalog = all.choices().to_vec();
+
+        assert_eq!(filter_families("", &catalog), catalog);
+        assert_eq!(filter_families("   ", &catalog), catalog);
+        assert!(filter_families("helvetica", &catalog).is_empty());
+        // Case-insensitive, and the bundled entries still lead when they match.
+        assert_eq!(
+            filter_families("GEIST", &catalog),
+            vec![UiFontFamily::Geist, UiFontFamily::GeistMono]
+        );
+
+        // "Menlo" prefix-matches, so it outranks the "System UI" substring hit.
+        let matches = filter_families("m", &catalog);
+        assert_eq!(
+            matches,
+            vec![
+                UiFontFamily::Installed("Menlo".into()),
+                UiFontFamily::GeistMono,
+                UiFontFamily::System,
+            ]
+        );
+        // Stepping never escapes the filtered list.
+        assert_eq!(
+            step_font(&UiFontFamily::System, 1, &matches, FontKind::Ui, &all),
+            UiFontFamily::System
+        );
+        assert_eq!(
+            first_available(&matches, FontKind::Ui, &all),
+            UiFontFamily::Installed("Menlo".into())
+        );
+        assert_eq!(
+            last_available(&matches, FontKind::Ui, &all),
+            UiFontFamily::System
+        );
+    }
+
+    #[test]
+    fn each_font_kind_gets_distinct_labels_and_element_ids() {
+        let slugs: Vec<_> = FontKind::ALL.iter().map(|kind| kind.slug()).collect();
+        let labels: Vec<_> = FontKind::ALL.iter().map(|kind| kind.label()).collect();
+        assert_eq!(
+            slugs.iter().collect::<std::collections::HashSet<_>>().len(),
+            3
+        );
+        assert_eq!(
+            labels
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn pixel_sizes_render_whole_and_fractional_values() {
+        assert_eq!(format_px(13.0), "13 px");
+        assert_eq!(format_px(typography::CODE_FONT_SIZE_DEFAULT), "12.5 px");
+        assert_eq!(
+            typography::clamp_font_size(typography::FONT_SIZE_MAX + 1.0),
+            typography::FONT_SIZE_MAX
+        );
+        assert_eq!(
+            typography::clamp_font_size(typography::FONT_SIZE_MIN - 1.0),
+            typography::FONT_SIZE_MIN
         );
     }
 
@@ -2651,5 +3356,119 @@ mod tests {
         let values = UiFontSize::ALL.map(UiFontSize::pixels);
         assert!(values.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(UiFontSize::ALL.contains(&UiFontSize::default()));
+    }
+
+    #[test]
+    fn mono_size_ladder_keeps_both_defaults_exactly_reachable() {
+        assert!(MONO_FONT_SIZES.windows(2).all(|pair| pair[0] < pair[1]));
+        for default in [
+            typography::TERMINAL_FONT_SIZE_DEFAULT,
+            typography::CODE_FONT_SIZE_DEFAULT,
+        ] {
+            assert_eq!(MONO_FONT_SIZES[nearest_mono_ix(default)], default);
+        }
+        // Off-ladder values (older settings, hand-edited files) snap, never drop.
+        assert_eq!(MONO_FONT_SIZES[nearest_mono_ix(0.0)], MONO_FONT_SIZES[0]);
+        assert_eq!(MONO_FONT_SIZES[nearest_mono_ix(99.0)], 20.0);
+        assert_eq!(MONO_FONT_SIZES[nearest_mono_ix(12.4)], 12.5);
+    }
+
+    #[test]
+    fn every_size_dropdown_labels_its_whole_ladder_in_pixels() {
+        for kind in FontKind::ALL {
+            let labels = kind.size_labels();
+            assert_eq!(labels.len(), kind.size_count());
+            assert!(labels.iter().all(|label| label.ends_with(" px")));
+        }
+        assert!(FontKind::Terminal.size_labels().contains(&"13 px".into()));
+        assert!(FontKind::Code.size_labels().contains(&"12.5 px".into()));
+    }
+
+    #[gpui::test]
+    fn size_dropdowns_commit_from_the_ladder_and_enter_leaves_menus_closed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            typography::init(
+                UiFontFamily::Geist,
+                UiFontSize::default(),
+                UiFontFamily::GeistMono,
+                typography::TERMINAL_FONT_SIZE_DEFAULT,
+                UiFontFamily::GeistMono,
+                typography::CODE_FONT_SIZE_DEFAULT,
+                FontAvailability::all(),
+                cx,
+            );
+        });
+        let window = cx.add_window(|_, cx| AppearancePage::new(cx));
+        window
+            .update(cx, |page, window, cx| {
+                for kind in [FontKind::Terminal, FontKind::Code] {
+                    page.toggle_size_menu(kind, cx);
+                    assert!(page.size_menu(kind).is_open());
+                    assert_eq!(page.selected_size_ix(kind), kind.size_ix(cx));
+                    let target = kind.size_ix(cx) + 1;
+                    page.set_selected_size_ix(kind, target);
+                    page.commit_size(kind, window, cx);
+                    assert_eq!(kind.pixel_size(cx), MONO_FONT_SIZES[target]);
+                    assert!(!page.size_menu(kind).is_open());
+                }
+
+                // Opening a family menu closes a size menu left open elsewhere.
+                page.toggle_size_menu(FontKind::Ui, cx);
+                assert!(page.size_menu(FontKind::Ui).is_open());
+                page.toggle_font_menu(FontKind::Code, window, cx);
+                assert!(!page.size_menu(FontKind::Ui).is_open());
+                assert!(page.font_menu(FontKind::Code).is_open());
+
+                // Enter commits and reports the key consumed — without that the
+                // trigger's `is_open` guard reads the just-closed menu and
+                // reopens it on the very same event.
+                let enter = KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse("enter").expect("valid keystroke"),
+                    is_held: false,
+                    prefer_character_input: false,
+                };
+                assert!(page.on_font_key_down(FontKind::Code, &enter, window, cx));
+                assert!(!page.font_menu(FontKind::Code).is_open());
+            })
+            .expect("window is open");
+    }
+
+    /// A settings file written before the terminal picker was constrained can
+    /// still name a proportional family; startup must not hand it to the grid.
+    #[gpui::test]
+    fn persisted_proportional_terminal_family_resolves_to_geist_mono(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            typography::init(
+                UiFontFamily::Geist,
+                UiFontSize::default(),
+                UiFontFamily::Installed("Arial".into()),
+                typography::TERMINAL_FONT_SIZE_DEFAULT,
+                UiFontFamily::Installed("Arial".into()),
+                typography::CODE_FONT_SIZE_DEFAULT,
+                FontAvailability::all(),
+                cx,
+            );
+            assert_eq!(
+                typography::terminal_effective(cx),
+                UiFontFamily::GeistMono,
+                "proportional terminal family must fall back"
+            );
+            assert_eq!(
+                typography::code_effective(cx),
+                UiFontFamily::Installed("Arial".into()),
+                "code and diffs keep proportional picks"
+            );
+            // The setter path rejects the same family too.
+            assert!(!typography::set_terminal_family(UiFontFamily::System, cx));
+            assert_eq!(typography::terminal_effective(cx), UiFontFamily::GeistMono);
+        });
     }
 }

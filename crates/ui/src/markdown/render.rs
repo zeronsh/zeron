@@ -31,9 +31,12 @@ pub const MD_BLOCK_GAP: f32 = 12.0;
 /// Body text size / line height (zeron: 14px / 22px).
 pub const MD_TEXT_SIZE: f32 = 14.0;
 pub const MD_LINE_HEIGHT: f32 = 22.0;
-/// Code block metrics — height is `lines × CODE_LINE_HEIGHT + padding + header`.
+/// Default code block metrics; the rendered size comes from the theme.
 pub const CODE_TEXT_SIZE: f32 = 12.5;
 pub const CODE_LINE_HEIGHT: f32 = 18.0;
+/// Line height as a multiple of the code size, so a user-chosen size keeps the
+/// default's row rhythm.
+const CODE_LINE_HEIGHT_RATIO: f32 = CODE_LINE_HEIGHT / CODE_TEXT_SIZE;
 pub const CODE_PADDING_X: f32 = 12.0;
 pub const CODE_PADDING_Y: f32 = 10.0;
 const CODE_HEADER_HEIGHT: f32 = 28.0;
@@ -1233,12 +1236,22 @@ pub(crate) fn paint_text_selection(
     layout: &gpui::TextLayout,
     theme: &Theme,
 ) {
+    paint_text_selection_with_wash(window, key, text, layout, selection_wash(theme));
+}
+
+fn paint_text_selection_with_wash(
+    window: &mut Window,
+    key: &std::sync::Arc<str>,
+    text: &SharedString,
+    layout: &gpui::TextLayout,
+    wash: Hsla,
+) {
     if let Some(range) = super::selection::wash_range(key) {
         for rect in range_rects(layout, &range, 0.0, 0.0) {
             window.paint_quad(quad(
                 rect,
                 px(0.0),
-                selection_wash(theme),
+                wash,
                 px(0.0),
                 gpui::transparent_black(),
                 BorderStyle::default(),
@@ -1254,6 +1267,33 @@ pub(crate) fn paint_text_selection(
         })
     });
     register_selection_listeners(window, key, text, layout, None);
+}
+
+fn selectable_text_element(
+    key: std::sync::Arc<str>,
+    text: SharedString,
+    runs: Vec<TextRun>,
+    wash: Hsla,
+) -> AnyElement {
+    let styled = StyledText::new(text.clone()).with_runs(runs);
+    let layout = styled.layout().clone();
+    let underlay = canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            paint_text_selection_with_wash(window, &key, &text, &layout, wash);
+        },
+    )
+    .absolute()
+    .size_full();
+    div()
+        .relative()
+        .child(underlay)
+        .child(styled)
+        .into_any_element()
+}
+
+fn code_line_selection_key(row_key: &str, code_ix: usize, line_ix: usize) -> std::sync::Arc<str> {
+    format!("{row_key}-code{code_ix}-line{line_ix}").into()
 }
 
 /// One painted text element, registered per frame in document order — the
@@ -2069,6 +2109,7 @@ fn render_code_block_source_with_actions(
         None => Vec::new(),
     };
     let scroll_id: SharedString = format!("{}-code{ix}", opts.row_key).into();
+    let sel_wash = selection_wash(theme);
     let code_ui = opts.code.as_ref().and_then(|code| code.get(&ix)).cloned();
     let fit_content = code_ui.as_ref().is_some_and(|ui| ui.fit_content);
 
@@ -2127,8 +2168,8 @@ fn render_code_block_source_with_actions(
         .px(px(CODE_PADDING_X))
         .py(px(CODE_PADDING_Y))
         .font_family(theme.font_mono.clone())
-        .text_size(px(CODE_TEXT_SIZE))
-        .line_height(px(CODE_LINE_HEIGHT))
+        .text_size(px(theme.code_font_size))
+        .line_height(px(theme.code_font_size * CODE_LINE_HEIGHT_RATIO))
         .map(|el| {
             if fit_content {
                 el.whitespace_normal()
@@ -2144,16 +2185,20 @@ fn render_code_block_source_with_actions(
             *off = start + line.len() + 1; // +1 for the '\n'
             let local = slice_spans(&veil_spans, start, start + line.len());
             let runs = apply_veil(runs.clone(), &local);
+            let key = code_line_selection_key(&opts.row_key, ix, li);
             Some(
                 div()
                     .map(|el| {
                         if fit_content {
-                            el.w_full().min_w_0().min_h(px(CODE_LINE_HEIGHT))
+                            el.w_full()
+                                .min_w_0()
+                                .min_h(px(theme.code_font_size * CODE_LINE_HEIGHT_RATIO))
                         } else {
-                            el.h(px(CODE_LINE_HEIGHT)).flex_none()
+                            el.h(px(theme.code_font_size * CODE_LINE_HEIGHT_RATIO))
+                                .flex_none()
                         }
                     })
-                    .child(StyledText::new(line.clone()).with_runs(runs)),
+                    .child(selectable_text_element(key, line.clone(), runs, sel_wash)),
             )
         }));
 
@@ -2333,6 +2378,141 @@ pub fn runs_for_syntax_line_with_plain(
 mod tests {
     use super::*;
     use crate::markdown::parser::{InlineStyle, parse_full};
+    use gpui::TestAppContext;
+
+    struct CodeSelectionHarness;
+
+    impl Render for CodeSelectionHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let opts = RenderOptions::settled("code-selection-test".into());
+            let plain = |text: &str| {
+                vec![InlineRun {
+                    text: text.into(),
+                    style: InlineStyle::default(),
+                }]
+            };
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(selection_frame_reset())
+                .child(text_element(
+                    &plain("before"),
+                    MD_TEXT_SIZE,
+                    MD_LINE_HEIGHT,
+                    false,
+                    0,
+                    0,
+                    &opts,
+                    &theme,
+                ))
+                .child(render_code_block_source(
+                    None,
+                    "selectable\n\nsecond",
+                    1,
+                    1,
+                    &opts,
+                    &theme,
+                    None,
+                ))
+                .child(text_element(
+                    &plain("after"),
+                    MD_TEXT_SIZE,
+                    MD_LINE_HEIGHT,
+                    false,
+                    2,
+                    2,
+                    &opts,
+                    &theme,
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn code_block_lines_participate_in_text_selection(cx: &mut TestAppContext) {
+        let _selection = super::super::selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (_, cx) = cx.add_window_view(|_, _| CodeSelectionHarness);
+        cx.simulate_resize(size(px(640.0), px(240.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+
+        let before_key = "code-selection-test:0";
+        let first_key = "code-selection-test-code1-line0";
+        let blank_key = "code-selection-test-code1-line1";
+        let second_key = "code-selection-test-code1-line2";
+        let after_key = "code-selection-test:2";
+        let before_bounds = selection_test_bounds(before_key);
+        let first_bounds = selection_test_bounds(first_key);
+        selection_test_bounds(blank_key);
+        let second_bounds = selection_test_bounds(second_key);
+        let after_bounds = selection_test_bounds(after_key);
+
+        cx.simulate_event(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position: first_bounds.origin + point(px(5.0), px(9.0)),
+            click_count: 2,
+            ..Default::default()
+        });
+        assert_eq!(
+            super::super::selection::selected_text().as_deref(),
+            Some("selectable")
+        );
+        super::super::selection::end_active_drag();
+        super::super::selection::clear_if_owner(first_key);
+
+        cx.simulate_event(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position: first_bounds.origin + point(px(1.0), px(9.0)),
+            click_count: 1,
+            ..Default::default()
+        });
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: point(second_bounds.right(), second_bounds.top() + px(9.0)),
+            pressed_button: Some(gpui::MouseButton::Left),
+            ..Default::default()
+        });
+        assert_eq!(
+            super::super::selection::selected_text().as_deref(),
+            Some("selectable\n\nsecond")
+        );
+        cx.simulate_event(gpui::MouseUpEvent {
+            button: gpui::MouseButton::Left,
+            position: point(second_bounds.right(), second_bounds.top() + px(9.0)),
+            ..Default::default()
+        });
+        super::super::selection::clear_if_owner(first_key);
+
+        super::super::selection::begin(before_key, 0);
+        assert!(update_drag_at(point(
+            after_bounds.right(),
+            after_bounds.top() + px(9.0)
+        )));
+        assert_eq!(
+            super::super::selection::selected_text().as_deref(),
+            Some("before\nselectable\n\nsecond\nafter")
+        );
+        super::super::selection::end_active_drag();
+        super::super::selection::clear_if_owner(before_key);
+        assert!(before_bounds.top() < first_bounds.top());
+        assert!(second_bounds.bottom() < after_bounds.bottom());
+    }
+
+    /// Markdown code blocks are the surface the shared setting's default was
+    /// taken from, so they scale 1:1 and need no ratio of their own.
+    #[test]
+    fn the_default_code_font_size_reproduces_the_historical_code_block_size() {
+        assert_eq!(CODE_TEXT_SIZE, crate::typography::CODE_FONT_SIZE_DEFAULT);
+        let theme = crate::theme::Theme::dark();
+        assert_eq!(theme.code_font_size, CODE_TEXT_SIZE);
+        assert_eq!(
+            theme.code_font_size * CODE_LINE_HEIGHT_RATIO,
+            CODE_LINE_HEIGHT
+        );
+    }
 
     #[test]
     fn code_block_indices_include_nested_quotes_and_lists() {

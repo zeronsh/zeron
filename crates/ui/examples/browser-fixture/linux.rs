@@ -476,7 +476,17 @@ pub async fn exercise(
     let outside =
         page.read_with(cx, |b, _| b.fixture_linux_bounds().origin) + point(px(350.), px(300.));
     click(window, outside, cx)?;
-    pause(cx, 150).await;
+    // Dismissal includes an exit animation and a deferred repaint. Wait for
+    // the real popup lifecycle instead of racing its 120ms removal timer.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while window.update(cx, |s, _, _| s.fixture_browser_menu_mounted())? {
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "outside click did not dismiss browser menu"
+        );
+        pause(cx, 20).await;
+    }
+    pause(cx, 100).await;
     anyhow::ensure!(
         eval(&page, "window.pagePresses||0", cx).await? == presses,
         "outside menu click leaked into browser"

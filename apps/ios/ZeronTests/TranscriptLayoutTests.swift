@@ -106,6 +106,30 @@ final class TranscriptLayoutTests: XCTestCase {
         super.tearDown()
     }
 
+    func testGeneratedImageArrivalResizesTheRowAndKeepsTheTailVisible() async {
+        await mount(turns: 6)
+        let path = "/fixture/generated-\(UUID().uuidString).png"
+        let reference = GeneratedImageReference(path: path, name: "generated.png", mimeType: "image/png")
+        var entries = harness.store.entries
+        entries.append(MessageEntry(id: "generated-reply", role: .assistant,
+                                    parts: [.image(id: "image", reference: reference)],
+                                    createdAt: nowMs(), deviceId: "image-owner",
+                                    status: .complete, continuationOf: nil))
+        harness.store.setEntries(entries)
+        await settle()
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let data = UIGraphicsImageRenderer(size: CGSize(width: 320, height: 420), format: format)
+            .pngData { context in
+                UIColor.red.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 320, height: 420))
+            }
+        AttachmentImageCache.shared.seed(deviceId: "image-owner", path: path,
+                                        name: "generated.png", data: data, expectedMimeType: "image/png")
+        await settle()
+        assertTailVisible()
+    }
+
     func testAccessibilityPagesThroughVirtualizedHistory() async {
         await mount(turns: 600)
         let table = harness.scroll.nativeScrollView as! TranscriptTableView

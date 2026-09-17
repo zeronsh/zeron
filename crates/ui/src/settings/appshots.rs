@@ -33,7 +33,7 @@ fn row(
 }
 
 impl ShortcutsPage {
-    pub(super) fn render_appshots(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn render_appshots(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let accent = theme.accent;
         let capabilities = self.appshot_capabilities;
@@ -271,23 +271,75 @@ impl ShortcutsPage {
                 this.appshot_capabilities = crate::appshots::capabilities();
                 cx.notify();
             }));
-        div().id("appshots-settings-page").size_full().overflow_y_scroll().track_focus(&self.focus)
-            .tab_group()
-            .tab_index(0)
-            .tab_stop(false)
-            .on_key_down(|event, window, cx| {
-                let key = &event.keystroke;
-                if key.key == "tab" && !key.modifiers.control && !key.modifiers.alt && !key.modifiers.platform {
-                    if key.modifiers.shift { window.focus_prev(cx); } else { window.focus_next(cx); }
-                    cx.stop_propagation();
-                }
-            })
-            .child(widgets::page_column().child(widgets::page_header(&theme, "Appshots", None))
-                .child(widgets::page_subtitle(&theme, capabilities.setup_description()).line_height(px(20.0)))
-                .child(card).child(div().min_h(px(20.0)).mt(px(8.0)).text_size(px(12.0)).text_color(theme.text_muted).child(helper))
-                .child(div().mt(px(12.0)).flex().flex_wrap().items_center().gap(px(12.0))
-                    .child(div().flex_1().text_size(px(12.0)).text_color(theme.text_muted).child("Changed a permission? Check again after returning to Zeron."))
-                    .child(refresh)))
+        let scrollbar = self.render_scrollbar(&theme, cx);
+        div()
+            .id("appshots-settings-page-host")
+            .relative()
+            .size_full()
+            .on_hover(cx.listener(Self::on_scroll_hovered))
+            .on_drag_move(cx.listener(Self::on_bar_drag_move))
+            .child(
+                div()
+                    .id("appshots-settings-page")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll.scroll)
+                    .track_focus(&self.focus)
+                    .tab_group()
+                    .tab_index(0)
+                    .tab_stop(false)
+                    .on_key_down(|event, window, cx| {
+                        let key = &event.keystroke;
+                        if key.key == "tab"
+                            && !key.modifiers.control
+                            && !key.modifiers.alt
+                            && !key.modifiers.platform
+                        {
+                            if key.modifiers.shift {
+                                window.focus_prev(cx);
+                            } else {
+                                window.focus_next(cx);
+                            }
+                            cx.stop_propagation();
+                        }
+                    })
+                    .child(
+                        widgets::page_column()
+                            .child(widgets::page_header(&theme, "Appshots", None))
+                            .child(
+                                widgets::page_subtitle(&theme, capabilities.setup_description())
+                                    .line_height(px(20.0)),
+                            )
+                            .child(card)
+                            .child(
+                                div()
+                                    .min_h(px(20.0))
+                                    .mt(px(8.0))
+                                    .text_size(px(12.0))
+                                    .text_color(theme.text_muted)
+                                    .child(helper),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(12.0))
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap(px(12.0))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(px(12.0))
+                                            .text_color(theme.text_muted)
+                                            .child(
+                                                "Changed a permission? Check again after returning to Zeron.",
+                                            ),
+                                    )
+                                    .child(refresh),
+                            ),
+                    ),
+            )
+            .children(scrollbar)
             .into_any_element()
     }
 }

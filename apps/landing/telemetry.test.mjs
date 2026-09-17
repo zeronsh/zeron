@@ -14,7 +14,7 @@ function load({ url = "https://zeron.sh/", referrer = "", navigator = {}, transp
     const href = html.match(new RegExp(`id="${id}" href="([^"]+)"`))[1];
     const listeners = {};
     return [id, {
-      href,
+      href: href === "#downloads" ? "https://zeron.sh/releases/zeron-0.2.10-macos-arm64.dmg" : href,
       addEventListener: (type, listener) => { listeners[type] = listener; },
       activate(type = "click", button = 0) {
         listeners[type]?.({ button, defaultPrevented: false });

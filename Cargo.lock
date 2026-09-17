@@ -1466,7 +1466,7 @@ dependencies = [
 [[package]]
 name = "collections"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "gpui_util",
  "indexmap",
@@ -2113,7 +2113,7 @@ dependencies = [
 [[package]]
 name = "derive_refineable"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3266,7 +3266,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3352,7 +3352,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.5.2"
-source = "git+https://github.com/zeronsh/gpui-component?rev=94c1bbaf6311b9f36f5e7438aaf5aeadd38740da#94c1bbaf6311b9f36f5e7438aaf5aeadd38740da"
+source = "git+https://github.com/zeronsh/gpui-component?rev=03cd9947a6aa07921cb284ad66c87fd6735e55b0#03cd9947a6aa07921cb284ad66c87fd6735e55b0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3382,7 +3382,7 @@ dependencies = [
 [[package]]
 name = "gpui_linux"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -3434,7 +3434,7 @@ dependencies = [
 [[package]]
 name = "gpui_macos"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -3483,7 +3483,7 @@ dependencies = [
 [[package]]
 name = "gpui_macros"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -3494,7 +3494,7 @@ dependencies = [
 [[package]]
 name = "gpui_platform"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "console_error_panic_hook",
  "gpui",
@@ -3507,7 +3507,7 @@ dependencies = [
 [[package]]
 name = "gpui_shared_string"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "schemars",
  "serde",
@@ -3517,7 +3517,7 @@ dependencies = [
 [[package]]
 name = "gpui_tokio"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3528,7 +3528,7 @@ dependencies = [
 [[package]]
 name = "gpui_util"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "anyhow",
  "log",
@@ -3538,7 +3538,7 @@ dependencies = [
 [[package]]
 name = "gpui_web"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3562,7 +3562,7 @@ dependencies = [
 [[package]]
 name = "gpui_wgpu"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3591,7 +3591,7 @@ dependencies = [
 [[package]]
 name = "gpui_windows"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -3923,7 +3923,7 @@ dependencies = [
 [[package]]
 name = "http_client"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -5049,7 +5049,7 @@ checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 [[package]]
 name = "media"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -6192,7 +6192,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "perf"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "collections",
  "serde",
@@ -7263,7 +7263,7 @@ dependencies = [
 [[package]]
 name = "refineable"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "derive_refineable",
 ]
@@ -7856,9 +7856,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.43"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "once_cell",
  "ring",
@@ -7949,7 +7949,7 @@ checksum = "c62751faa8bc286982334a082fe125184a29fc89d17775766e4f891b7d726980"
 [[package]]
 name = "scheduler"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "async-task",
  "backtrace",
@@ -8695,7 +8695,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sum_tree"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "heapless 0.9.3",
  "log",
@@ -9947,7 +9947,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 [[package]]
 name = "util_macros"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=aa009411c2dbfb39556bff1b1febed0512fdf609#aa009411c2dbfb39556bff1b1febed0512fdf609"
+source = "git+https://github.com/zeronsh/zui?rev=c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add#c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add"
 dependencies = [
  "perf",
  "quote",
@@ -11708,10 +11708,11 @@ dependencies = [
 
 [[package]]
 name = "zeron"
-version = "0.2.65"
+version = "0.2.72"
 dependencies = [
  "anyhow",
  "clap",
+ "embed-resource",
  "libc",
  "mimalloc",
  "serde_json",
@@ -11719,6 +11720,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
  "zeron-engine",
  "zeron-rpc",
  "zeron-ui",
@@ -11727,7 +11729,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-doc"
-version = "0.2.65"
+version = "0.2.72"
 dependencies = [
  "chrono",
  "loro",
@@ -11741,7 +11743,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-engine"
-version = "0.2.65"
+version = "0.2.72"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11767,6 +11769,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
  "zeron-doc",
  "zeron-harness",
  "zeron-preview",
@@ -11778,7 +11781,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-harness"
-version = "0.2.65"
+version = "0.2.72"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11794,12 +11797,13 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
  "zeron-proto",
 ]
 
 [[package]]
 name = "zeron-preview"
-version = "0.2.65"
+version = "0.2.72"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11827,7 +11831,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-proto"
-version = "0.2.65"
+version = "0.2.72"
 dependencies = [
  "chrono",
  "serde",
@@ -11837,7 +11841,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-rpc"
-version = "0.2.65"
+version = "0.2.72"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11856,7 +11860,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-sync"
-version = "0.2.65"
+version = "0.2.72"
 dependencies = [
  "block2 0.6.2",
  "chrono",
@@ -11879,7 +11883,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-syntax"
-version = "0.2.65"
+version = "0.2.72"
 dependencies = [
  "thiserror 2.0.20",
  "tree-sitter",
@@ -11913,7 +11917,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-theme"
-version = "0.2.65"
+version = "0.2.72"
 dependencies = [
  "anyhow",
  "clap",
@@ -11928,7 +11932,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-ui"
-version = "0.2.65"
+version = "0.2.72"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -11979,6 +11983,7 @@ dependencies = [
  "url",
  "usvg",
  "uuid",
+ "windows-sys 0.61.2",
  "wry",
  "x11rb 0.14.0",
  "zeron-doc",
@@ -11993,7 +11998,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-update"
-version = "0.2.65"
+version = "0.2.72"
 dependencies = [
  "anyhow",
  "futures",
@@ -12004,6 +12009,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

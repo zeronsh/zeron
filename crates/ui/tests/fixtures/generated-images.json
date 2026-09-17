@@ -1,0 +1,5 @@
+[
+  {"id":"loaded","role":"assistant","deviceId":"fixture-owner","createdAt":1,"status":"complete","parts":[{"kind":"image","id":"loaded:image","path":"/fixture/generated-loaded.png","name":"generated.png","mimeType":"image/png"}]},
+  {"id":"loading","role":"assistant","deviceId":"fixture-owner","createdAt":2,"status":"streaming","parts":[{"kind":"image","id":"loading:image","path":"/fixture/generated-loading.png","name":"generated.png","mimeType":"image/png"}]},
+  {"id":"unavailable","role":"assistant","deviceId":"fixture-owner","createdAt":3,"status":"complete","parts":[{"kind":"image","id":"unavailable:image","path":"/fixture/generated-unavailable.png","name":"generated.png","mimeType":"image/png"}]}
+]

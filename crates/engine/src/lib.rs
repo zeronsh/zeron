@@ -269,6 +269,11 @@ impl EngineCore {
         // Queued-attachment support: the doc host resolves `pending://` refs
         // against this store and pushes staged bytes to remote hosts.
         doc_host.set_uploads(uploads.clone());
+        let agent_accounts_config = AgentAccountsConfig::detect(data_dir);
+        sessions.set_generated_images(
+            uploads.clone(),
+            agent_accounts_config.codex_home.join("generated_images"),
+        );
         let local_import = (profile.scope() == WorkspaceScope::Synced).then(|| {
             local_import::LocalImporter::new(
                 data_dir,
@@ -281,7 +286,7 @@ impl EngineCore {
                 uploads.clone(),
             )
         });
-        let agent_accounts = AgentAccounts::new(AgentAccountsConfig::detect(data_dir));
+        let agent_accounts = AgentAccounts::new(agent_accounts_config);
         sessions.set_titles(TitleGenerator::new(
             workspace.clone(),
             registry.clone(),
@@ -783,7 +788,16 @@ impl Engine {
             tokens: Arc::new(auth.clone()),
         });
         core.previews.start(projects, preview_signaling).await;
-        if edge_enabled {
+        // Portable Windows packages explicitly configure an update feed; users
+        // should not need to enable workspace sync to receive application updates.
+        let check_updates = edge_enabled;
+        #[cfg(windows)]
+        let check_updates = check_updates
+            || matches!(
+                zeron_update::detect_install(),
+                zeron_update::InstallKind::WindowsPortable { .. }
+            );
+        if check_updates {
             // Release checker: polls {edge}/releases on a 6h cadence; headless
             // installs with ZERON_AUTO_UPDATE=1 apply + restart themselves — gated
             // on quiescence so a restart never lands under a live run or open PTY.

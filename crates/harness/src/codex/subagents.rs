@@ -98,7 +98,7 @@ impl Subagents {
         if child == Some(self.root.as_str()) {
             return Vec::new();
         }
-        let mut item = item.clone();
+        let mut item = std::borrow::Cow::Borrowed(item);
         let mut buffered = Vec::new();
         if let Some(child) = child {
             let call = item
@@ -108,7 +108,7 @@ impl Subagents {
                 .to_owned();
             buffered = self.bind(child, &call);
             if let Some(owner) = self.spawns.get(child) {
-                item["id"] = owner.clone().into();
+                item.to_mut()["id"] = owner.clone().into();
             }
         }
         let mut events: Vec<_> = map_item(phase, &item)

@@ -1,6 +1,8 @@
 //! CodexHarness integration tests against the fake app server in
 //! `tests/fixtures/fake-codex.sh` (no real `codex` binary involved).
 
+#![cfg(unix)]
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1204,4 +1206,88 @@ async fn title_run_preserves_read_only_and_replaces_coding_instructions() {
         )),
         "{events:?}"
     );
+}
+
+#[tokio::test]
+async fn image_generation_fake_lifecycle_reaches_done_without_inline_payload() {
+    for scenario in ["success", "failure", "missing-path"] {
+        let (controls, _steer, _token) = controls("Yes");
+        let events = run_to_end(
+            &harness(),
+            request(&format!("scenario:image-{scenario}")),
+            controls,
+        )
+        .await;
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::Done { .. })));
+        let results: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    AgentEvent::ToolCall { .. }
+                        | AgentEvent::ToolResult { .. }
+                        | AgentEvent::GeneratedImage { .. }
+                        | AgentEvent::Error { .. }
+                )
+            })
+            .collect();
+        assert_eq!(results.len(), 4);
+        assert!(matches!(results[0], AgentEvent::ToolCall { .. }));
+        assert!(matches!(results[1], AgentEvent::ToolCall { .. }));
+        assert!(
+            matches!(results[2], AgentEvent::ToolResult { is_error, .. } if *is_error == (scenario != "success"))
+        );
+        assert_eq!(
+            matches!(results[3], AgentEvent::GeneratedImage { .. }),
+            scenario == "success"
+        );
+        assert!(
+            !serde_json::to_string(&events)
+                .unwrap()
+                .contains("INLINE_IMAGE_SENTINEL")
+        );
+    }
+}
+
+/// Opt-in provider smoke; the engine integration test verifies the subsequent
+/// import lands under profile uploads. See docs/generated-images-validation.md.
+#[tokio::test]
+#[ignore = "consumes image quota; requires real Codex auth and image generation access"]
+async fn real_image_generation_smoke() {
+    let (controls, _steer, token) = controls("Yes");
+    let mut req = request(
+        "Use image generation to create a small green goblin portrait. Generate an image, not text or code.",
+    );
+    req.model = None;
+    req.reasoning = None;
+    req.cwd = std::env::temp_dir().display().to_string();
+    let mut stream = CodexHarness::new().run(req, controls).await.unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(300), async {
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            let done = matches!(event, AgentEvent::Done { .. });
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+        events
+    })
+    .await
+    .expect("generation completes in five minutes");
+    token.cancel();
+    let path = events
+        .iter()
+        .find_map(|e| {
+            if let AgentEvent::GeneratedImage { path, .. } = e {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .expect("Codex returns savedPath");
+    assert!(std::path::Path::new(path).is_absolute());
+    assert!(std::path::Path::new(path).is_file());
+    assert!(serde_json::to_vec(&events).unwrap().len() < 64 * 1024);
 }

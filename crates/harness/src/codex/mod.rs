@@ -4,7 +4,8 @@
 //!
 //! VERSION PIN: the app-server API is EXPERIMENTAL (`capabilities.
 //! experimentalApi`); this driver is validated against codex-cli 0.153.4 —
-//! revalidate the method/notification surface when bumping past it.
+//! imageGeneration additionally follows the 0.154.0 schema (savedPath only).
+//! Revalidate the method/notification surface when bumping past it.
 //!
 //! - `initialize` handshake (clientInfo + `capabilities.experimentalApi`) then
 //!   the `initialized` notification; unknown notification methods tolerated.
@@ -41,7 +42,6 @@ mod subagents;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,7 +50,6 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde_json::{Value, json};
 use tokio::io::AsyncBufReadExt;
-use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
 use zeron_proto::{
@@ -59,6 +58,7 @@ use zeron_proto::{
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
+use crate::process::{Child, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls};
 use catalog::{REASONING_LEVELS, sandbox_mode, sandbox_policy_value, static_models, to_effort};
 use normalize::{
@@ -71,41 +71,34 @@ use normalize::{
 /// PATH in ways a GUI/service launch never sees — see [`crate::shell_env`]),
 /// then known install locations as a last resort. Resolved per call — cheap
 /// after the snapshot is cached.
-fn resolve_codex_executable() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("CODEX_EXECUTABLE")
-        && !p.is_empty()
-    {
-        return Some(PathBuf::from(p));
+pub fn resolve_codex_executable() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("CODEX_EXECUTABLE").filter(|p| !p.is_empty()) {
+        return crate::executable::validate_native_override(&PathBuf::from(p)).ok();
     }
-    let exe = if cfg!(windows) { "codex.exe" } else { "codex" };
-    let mut candidates: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|path| {
-            std::env::split_paths(&path)
-                .filter(|d| !d.as_os_str().is_empty())
-                .map(|d| d.join(exe))
-                .collect()
-        })
-        .unwrap_or_default();
-    if let Some(shell_path) = crate::shell_env::login_shell_path() {
-        candidates.extend(
-            std::env::split_paths(shell_path)
-                .filter(|d| !d.as_os_str().is_empty())
-                .map(|d| d.join(exe)),
-        );
+    let mut extra = Vec::new();
+    if let Some(home) = crate::executable::home_dir() {
+        extra.push(home.join(".local").join("bin").join("codex"));
+        extra.push(home.join(".codex").join("bin").join("codex"));
+        extra.push(home.join(".npm-global").join("bin").join("codex"));
     }
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        candidates.push(home.join(".local").join("bin").join("codex"));
-        candidates.push(home.join(".codex").join("bin").join("codex"));
-        candidates.push(home.join(".npm-global").join("bin").join("codex"));
-    }
-    candidates.push(PathBuf::from("/opt/homebrew/bin/codex"));
-    candidates.push(PathBuf::from("/usr/local/bin/codex"));
-    candidates.extend(
-        crate::node_version_manager_bins()
-            .into_iter()
-            .map(|d| d.join(exe)),
-    );
-    candidates.into_iter().find(|p| p.exists())
+    extra.push(PathBuf::from("/opt/homebrew/bin/codex"));
+    extra.push(PathBuf::from("/usr/local/bin/codex"));
+    crate::executable::find_on_paths("codex", extra)
+}
+
+/// A ready-to-spawn `codex login` command for the engine's account flow.
+///
+/// Shares the harness's full resolution (`CODEX_EXECUTABLE`, PATH, login-shell
+/// snapshot, install locations — including the Windows npm payload layout) and
+/// its child-PATH composition, so "Add account" launches exactly the binary
+/// the harness itself would run. `CODEX_HOME` isolates the login from the live
+/// `~/.codex` session; the caller owns stdio wiring and cancellation.
+pub fn login_command(codex_home: &std::path::Path) -> Result<Command, HarnessError> {
+    let exe = CodexHarness::new().resolve_executable()?;
+    let mut cmd = Command::new(&exe);
+    crate::compose_child_path(&mut cmd, &exe);
+    cmd.arg("login").env("CODEX_HOME", codex_home);
+    Ok(cmd)
 }
 
 /// The Codex harness. Construct with [`CodexHarness::new`]; tests point it at a
@@ -152,14 +145,20 @@ impl CodexHarness {
 
     fn resolve_executable(&self) -> Result<PathBuf, HarnessError> {
         if let Some(p) = &self.executable {
-            return Ok(p.clone());
+            return crate::executable::validate_native_override(p);
+        }
+        if let Some(p) = std::env::var_os("CODEX_EXECUTABLE")
+            && !p.is_empty()
+        {
+            return crate::executable::validate_native_override(&PathBuf::from(p));
         }
         resolve_codex_executable().ok_or_else(|| {
             HarnessError::NotInstalled(
                 "codex (searched PATH, the login shell's PATH, ~/.local/bin, \
                  ~/.codex/bin, ~/.npm-global/bin, /opt/homebrew/bin, /usr/local/bin, \
-                 and fnm/nvm/volta/pnpm/bun install dirs; set CODEX_EXECUTABLE to \
-                 override)"
+                 and fnm/nvm/volta/pnpm/bun install dirs; Windows also checks USERPROFILE \
+                 and explicit NVM_SYMLINK/VOLTA_HOME/PNPM_HOME; set CODEX_EXECUTABLE \
+                 to override)"
                     .into(),
             )
         })
@@ -540,7 +539,7 @@ impl Harness for CodexHarness {
         REASONING_LEVELS
     }
     fn installed(&self) -> bool {
-        self.executable.is_some() || resolve_codex_executable().is_some()
+        self.resolve_executable().is_ok()
     }
     /// Done is the CLI's own terminal frame, for wake turns too.
     fn deterministic_turn_end(&self) -> bool {
@@ -1076,8 +1075,8 @@ async fn run_session(session: Session) {
                         } else {
                             Phase::Completed
                         };
-                        let item = params.get("item").cloned().unwrap_or(Value::Null);
-                        if matches!(item_type(&item), "agentMessage" | "agent_message") {
+                        let item = params.get("item").unwrap_or(&Value::Null);
+                        if matches!(item_type(item), "agentMessage" | "agent_message") {
                             if phase == Phase::Completed {
                                 // Fallback for non-streamed messages only.
                                 let id = item.get("id").and_then(Value::as_str).unwrap_or("");
@@ -1121,7 +1120,7 @@ async fn run_session(session: Session) {
                                 }
                             }
                         } else {
-                            for ev in children.parent_item(phase, &item) {
+                            for ev in children.parent_item(phase, item) {
                                 if !send(&event_tx, ev).await {
                                     break 'main;
                                 }
@@ -1382,12 +1381,12 @@ async fn run_session(session: Session) {
                     });
                     // Escalate if the app server doesn't wind down (turn/aborted)
                     // within the grace periods: SIGTERM, then SIGKILL.
-                    if let Some(pid) = child.id() {
+                    if let Some(pid) = crate::process::signal_target(&child) {
                         escalation = Some(tokio::spawn(async move {
                             tokio::time::sleep(interrupt_grace).await;
-                            send_signal(pid, Signal::Term);
+                            send_signal(&pid, Signal::Term);
                             tokio::time::sleep(kill_grace).await;
-                            send_signal(pid, Signal::Kill);
+                            send_signal(&pid, Signal::Kill);
                         }));
                     }
                 } else {

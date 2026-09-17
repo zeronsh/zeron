@@ -9,23 +9,24 @@
 //! subagent traffic and thinking never reaches the ACP wire usefully. The
 //! desktop app doesn't use ACP; neither do we.
 //!
-//! Protocol (verified against the 1.18 "v1" server, the one `opencode serve`
-//! and the desktop's embedded sidecar expose):
+//! Two server generations are spoken, detected at boot from the health
+//! endpoints ([`Protocol`]): the 1.18 "v1" wire (verified against 1.18.31)
+//! and the 2.x `/api/*` wire (verified against 2.0.3):
 //! - spawn `opencode serve --port <free> --hostname 127.0.0.1` with
 //!   `OPENCODE_SERVER_PASSWORD=<uuid>` (HTTP Basic, username `opencode`);
-//!   readiness = `GET /global/health`.
-//! - one global SSE bus `GET /global/event` carries every session's
-//!   `message.updated` / `message.part.updated` / `message.part.delta` /
-//!   `session.status` / `session.idle` / `session.error` / `permission.asked`
-//!   / `question.asked` — child (subagent) sessions included, token-level.
-//! - a turn is `POST /session/{id}/prompt_async` (204, fire-and-forget); the
-//!   END of the turn is `session.status{type:"idle"}` for THAT session —
-//!   exactly what the desktop's `session_working()` predicate keys on. Busy
-//!   is re-asserted at the top of every agent-loop iteration, so idle after
-//!   busy is authoritative, not a lull.
-//! - reasoning streams as `reasoning` parts (`message.part.delta`
-//!   field="text" between the opening and closing `message.part.updated`
-//!   snapshots) → [`AgentEvent::ReasoningDelta`], the thinking feed.
+//!   readiness + protocol = `GET /api/health` vs `GET /global/health`.
+//! - one global SSE bus (`GET /api/event` on 2.x, `GET /global/event` on
+//!   1.x) carries every session's traffic, child (subagent) sessions
+//!   included, token-level. 2.x frames are rewritten into the 1.x payload
+//!   shapes ([`normalize_v2_frame`]) so the turn engine is wire-agnostic.
+//! - a turn is `POST /api/session/{id}/prompt` (2.x; model set once on the
+//!   session) or `POST /session/{id}/prompt_async` (1.x, fire-and-forget
+//!   204); the END of the turn is the terminal execution/status frame for
+//!   THAT session — exactly what the desktop's working-predicate keys on.
+//!   Busy is re-asserted at the top of every agent-loop iteration, so idle
+//!   after busy is authoritative, not a lull.
+//! - reasoning streams as reasoning parts on both wires →
+//!   [`AgentEvent::ReasoningDelta`], the thinking feed.
 //!
 //! Failure surfacing (the #169 class): a dying provider is VISIBLE here —
 //! `session.status{type:"retry", attempt, message}` streams per attempt.
@@ -37,7 +38,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,7 +46,6 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde_json::{Value, json};
 use tokio::io::AsyncBufReadExt;
-use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
 use zeron_proto::{
@@ -54,6 +53,7 @@ use zeron_proto::{
     SteeringMode, TodoItem, ToolCall, UserInputAnswer, UserInputQuestion,
 };
 
+use crate::process::{Child, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls, shutdown_child};
 
 /// opencode loads plugins and MCP config before the server answers; cold
@@ -113,9 +113,13 @@ fn stall_bound() -> Option<Duration> {
 
 fn opencode_install_paths() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    // `crate::executable::home_dir` checks USERPROFILE too, so the Unix-style
+    // install locations resolve on Windows (`~/.local/bin/opencode.exe`, the
+    // bun layout) instead of silently vanishing with an unset HOME.
+    if let Some(home) = crate::executable::home_dir() {
         dirs.push(home.join(".opencode").join("bin").join("opencode"));
         dirs.push(home.join(".local").join("bin").join("opencode"));
+        dirs.push(home.join(".bun").join("bin").join("opencode"));
         dirs.push(home.join(".npm-global").join("bin").join("opencode"));
     }
     dirs.push(PathBuf::from("/opt/homebrew/bin/opencode"));
@@ -124,16 +128,23 @@ fn opencode_install_paths() -> Vec<PathBuf> {
 }
 
 const INSTALL_HINT: &str = "opencode (searched PATH, the login shell's PATH, ~/.opencode/bin, \
-     ~/.local/bin, ~/.npm-global/bin, /opt/homebrew/bin, /usr/local/bin, and \
-     fnm/nvm/volta/pnpm/bun install dirs; install with \
+     ~/.local/bin, ~/.bun/bin, ~/.npm-global/bin, /opt/homebrew/bin, /usr/local/bin, and \
+     fnm/nvm/volta/pnpm/bun install dirs; Windows also checks USERPROFILE, \
+     %APPDATA%\\npm, and explicit NVM_SYMLINK/VOLTA_HOME/PNPM_HOME; install with \
      `curl -fsSL https://opencode.ai/install | bash` or \
      `npm install -g opencode-ai`, then `opencode auth login`; set \
      OPENCODE_EXECUTABLE to override)";
 
+/// The user's opencode: `OPENCODE_EXECUTABLE` when it exists, else PATH (plus
+/// install locations). The override is validated at launch through
+/// [`crate::executable::validate_native_override`] — including the `.cmd`
+/// shims npm installs on Windows.
 fn resolve_opencode_executable() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("OPENCODE_EXECUTABLE") {
+    if let Some(path) = std::env::var_os("OPENCODE_EXECUTABLE")
+        && !path.is_empty()
+    {
         let path = PathBuf::from(path);
-        if path.exists() {
+        if path.is_file() {
             return Some(path);
         }
     }
@@ -273,7 +284,7 @@ impl OpencodeHarness {
         }
         let mut server = self.server(None).await?;
         let result = async {
-            let providers: ProviderCatalog = server.get("/provider", None).await?;
+            let providers = server.provider_catalog(None).await?;
             let models = models_from_providers(&providers);
             if models.is_empty() {
                 return Err(HarnessError::Protocol(
@@ -281,7 +292,7 @@ impl OpencodeHarness {
                         .into(),
                 ));
             }
-            if let Ok(commands) = server.get_json("/command", None).await {
+            if let Ok(commands) = server.commands_wire(None).await {
                 let _ = self.commands_cache.set(commands_from_wire(&commands));
             }
             Ok(models)
@@ -298,7 +309,7 @@ impl OpencodeHarness {
         }
         let mut server = self.server(None).await?;
         let result = server
-            .get_json("/command", None)
+            .commands_wire(None)
             .await
             .map(|v| commands_from_wire(&v));
         server.shutdown(self.kill_grace).await;
@@ -391,6 +402,41 @@ struct Server {
     auth: Option<String>,
     client: reqwest::Client,
     stderr_tail: crate::StderrTail,
+    /// Wire generation, resolved once via the health endpoints.
+    protocol: tokio::sync::OnceCell<Protocol>,
+}
+
+/// The attached server's wire generation: the 1.x "v1" global namespace
+/// (`/global/*`, `/session/*`, prompt_async) and the 2.x `/api/*` surface
+/// (session-scoped model, prompt with delivery, interrupt).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Protocol {
+    V1,
+    V2,
+}
+
+impl Protocol {
+    /// One readiness poll across both generations. 2.x answers
+    /// `GET /api/health` with `{healthy, version}` and serves its web UI on
+    /// `/global/health`; 1.x answers `GET /global/health` with
+    /// `{healthy, version}` AND also serves `/api/health` — with
+    /// `{"healthy":true}`, no version (both observed live). The version
+    /// field is the only unambiguous discriminator. `None` = still booting.
+    async fn detect(server: &Server) -> Option<Self> {
+        for (path, protocol) in [
+            ("/api/health", Protocol::V2),
+            ("/global/health", Protocol::V1),
+        ] {
+            if let Ok(resp) = server.get_raw(path).await
+                && resp.status().is_success()
+                && let Ok(v) = resp.json::<Value>().await
+                && v.get("version").and_then(Value::as_str).is_some()
+            {
+                return Some(protocol);
+            }
+        }
+        None
+    }
 }
 
 impl Server {
@@ -401,11 +447,22 @@ impl Server {
             auth: None,
             client: http_client(),
             stderr_tail: crate::StderrTail::default(),
+            protocol: tokio::sync::OnceCell::new(),
         }
     }
 
+    /// The resolved wire generation: detected against the live server on
+    /// first use (spawn seeds the cell during the readiness loop).
+    async fn protocol(&self) -> Protocol {
+        *self
+            .protocol
+            .get_or_init(|| async { Protocol::detect(self).await.unwrap_or(Protocol::V1) })
+            .await
+    }
+
     /// Spawn `opencode serve` on a free loopback port with a per-run Basic
-    /// password, and wait for `GET /global/health`.
+    /// password, and wait for a generation-bearing health answer (which
+    /// also resolves [`Protocol`]).
     async fn spawn(
         exe: &std::path::Path,
         cwd: Option<&str>,
@@ -461,6 +518,7 @@ impl Server {
             auth: Some(auth),
             client: http_client(),
             stderr_tail,
+            protocol: tokio::sync::OnceCell::new(),
         };
 
         // Readiness: the server binds a few seconds into the process's life
@@ -477,9 +535,9 @@ impl Server {
                     &server.stderr_tail,
                 )));
             }
-            match server.get_raw("/global/health").await {
-                Ok(resp) if resp.status().is_success() => break,
-                _ => {}
+            if let Some(protocol) = Protocol::detect(&server).await {
+                let _ = server.protocol.set(protocol);
+                break;
             }
             if tokio::time::Instant::now() >= deadline {
                 server.shutdown(Duration::from_secs(1)).await;
@@ -540,15 +598,12 @@ impl Server {
         path: &str,
         directory: Option<&str>,
     ) -> Result<reqwest::Response, HarnessError> {
-        let mut req = self
+        let req = self
             .request(reqwest::Method::GET, path)
             .timeout(CALL_TIMEOUT);
-        if let Some(dir) = directory {
-            req = req
-                .query(&[("directory", dir)])
-                .header("x-opencode-directory", encode_directory(dir));
-        }
-        let resp = req
+        let resp = self
+            .scoped(req, directory)
+            .await
             .send()
             .await
             .map_err(|e| HarnessError::Protocol(format!("opencode GET {path}: {e}")))?;
@@ -569,34 +624,161 @@ impl Server {
         directory: Option<&str>,
         body: &Value,
     ) -> Result<Value, HarnessError> {
-        let mut req = self
+        let (status, text) = self.post_json_raw(path, directory, body).await?;
+        if !status.is_success() {
+            return Err(HarnessError::Protocol(post_error_message(
+                path, status, &text,
+            )));
+        }
+        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
+    /// POST returning `(status, raw body)`; only transport failures error.
+    /// HTTP status handling is the caller's (the lazy-migration retry in
+    /// [`create_session`] needs to see 5xx, not a preformatted message).
+    async fn post_json_raw(
+        &self,
+        path: &str,
+        directory: Option<&str>,
+        body: &Value,
+    ) -> Result<(reqwest::StatusCode, String), HarnessError> {
+        let req = self
             .request(reqwest::Method::POST, path)
             .timeout(CALL_TIMEOUT)
             .json(body);
-        if let Some(dir) = directory {
-            req = req
-                .query(&[("directory", dir)])
-                .header("x-opencode-directory", encode_directory(dir));
-        }
-        let resp = req
+        let resp = self
+            .scoped(req, directory)
+            .await
             .send()
             .await
             .map_err(|e| HarnessError::Protocol(format!("opencode POST {path}: {e}")))?;
         let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(HarnessError::Protocol(format!(
-                "opencode POST {path}: {status} {}",
-                truncate_body(&body)
-            )));
+        let text = resp.text().await.unwrap_or_default();
+        Ok((status, text))
+    }
+
+    /// Directory scope: the server's per-request instance selector. V1 takes
+    /// it as a query param (plus header, matching the official SDK); V2's
+    /// strict query validation rejects unknown params — there the header
+    /// alone scopes the request (verified live, 2.0.3).
+    async fn scoped(
+        &self,
+        mut req: reqwest::RequestBuilder,
+        directory: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        if let Some(dir) = directory {
+            req = req.header("x-opencode-directory", encode_directory(dir));
+            if self.protocol().await == Protocol::V1 {
+                req = req.query(&[("directory", dir)]);
+            }
         }
-        Ok(resp.json::<Value>().await.unwrap_or(Value::Null))
+        req
     }
 
     async fn shutdown(&mut self, kill_grace: Duration) {
         if let Some(child) = self.child.as_mut() {
             shutdown_child(child, kill_grace).await;
         }
+    }
+
+    /// Session lookup for resume; both wires answer with the info object
+    /// (2.x wrapped in `{data}`).
+    async fn session_info(
+        &self,
+        session_id: &str,
+        directory: Option<&str>,
+    ) -> Result<Value, HarnessError> {
+        let path = match self.protocol().await {
+            Protocol::V1 => format!("/session/{session_id}"),
+            Protocol::V2 => format!("/api/session/{session_id}"),
+        };
+        let info = self.get_json(&path, directory).await?;
+        Ok(unwrap_data(info))
+    }
+
+    /// Provider catalog for the picker, variant picking, and context
+    /// windows. V1 advertises it on `/provider`; 2.x splits it into a flat
+    /// enabled-model list on `/api/model` that folds into the same shape.
+    async fn provider_catalog(
+        &self,
+        directory: Option<&str>,
+    ) -> Result<ProviderCatalog, HarnessError> {
+        match self.protocol().await {
+            Protocol::V1 => self.get("/provider", directory).await,
+            Protocol::V2 => {
+                // The 2.x catalog syncs from models.dev shortly after the
+                // health endpoint opens: an empty list right then is a race,
+                // not a fact — poll briefly before believing it.
+                for attempt in 0..5 {
+                    let list: V2ModelList = self.get("/api/model", directory).await?;
+                    if !list.data.is_empty() || attempt == 4 {
+                        return Ok(catalog_from_v2_models(list.data));
+                    }
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                unreachable!("loop returns on the last attempt")
+            }
+        }
+    }
+
+    /// Slash commands; both wires carry `{name, description}` entries (2.x
+    /// wrapped in `{data}`).
+    async fn commands_wire(&self, directory: Option<&str>) -> Result<Value, HarnessError> {
+        let path = match self.protocol().await {
+            Protocol::V1 => "/command",
+            Protocol::V2 => "/api/command",
+        };
+        let raw = self.get_json(path, directory).await?;
+        Ok(unwrap_data(raw))
+    }
+
+    /// Is the session mid-turn? V1 keeps a status map on `/session/status`;
+    /// V2 lists running sessions on `/api/session/active`. `Err` = can't
+    /// tell — the caller treats that as still running.
+    async fn session_running(
+        &self,
+        session_id: &str,
+        directory: Option<&str>,
+    ) -> Result<bool, HarnessError> {
+        let path = match self.protocol().await {
+            Protocol::V1 => "/session/status",
+            Protocol::V2 => "/api/session/active",
+        };
+        let map = unwrap_data(self.get_json(path, directory).await?);
+        Ok(map.get(session_id).is_some())
+    }
+
+    /// End the live turn.
+    async fn abort_session(
+        &self,
+        session_id: &str,
+        directory: Option<&str>,
+    ) -> Result<Value, HarnessError> {
+        let path = match self.protocol().await {
+            Protocol::V1 => format!("/session/{session_id}/abort"),
+            Protocol::V2 => format!("/api/session/{session_id}/interrupt"),
+        };
+        self.post_json(&path, directory, &Value::Null).await
+    }
+
+    /// 2.x: model and reasoning variant ride the SESSION (set once per run),
+    /// not the prompt.
+    async fn set_model(
+        &self,
+        session_id: &str,
+        provider: &str,
+        model: &str,
+        variant: Option<&str>,
+        directory: Option<&str>,
+    ) -> Result<(), HarnessError> {
+        let mut model_ref = json!({ "providerID": provider, "id": model });
+        if let Some(variant) = variant {
+            model_ref["variant"] = json!(variant);
+        }
+        let path = format!("/api/session/{session_id}/model");
+        self.post_json(&path, directory, &json!({ "model": model_ref }))
+            .await
+            .map(|_| ())
     }
 }
 
@@ -633,6 +815,21 @@ fn truncate_body(body: &str) -> String {
             end -= 1;
         }
         format!("{}…", &trimmed[..end])
+    }
+}
+
+/// POST failure text; 5xx adds where the body's `ref` resolves — opencode's
+/// own error bodies say only "Check server logs for details.", which sends
+/// users to us instead of the log that holds the actual cause.
+fn post_error_message(path: &str, status: reqwest::StatusCode, body: &str) -> String {
+    let base = format!("opencode POST {path}: {status} {}", truncate_body(body));
+    if status.is_server_error() {
+        format!(
+            "{base} (server-side fault; the body's ref keys the cause in \
+             ~/.local/share/opencode/log/opencode.log)"
+        )
+    } else {
+        base
     }
 }
 
@@ -772,6 +969,90 @@ fn commands_from_wire(commands: &Value) -> Vec<SlashCommand> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// `GET /api/model` (2.x): `{"location": .., "data": [Model.Info]}`.
+#[derive(Debug, serde::Deserialize)]
+struct V2ModelList {
+    #[serde(default)]
+    data: Vec<V2Model>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct V2Model {
+    #[serde(rename = "providerID")]
+    provider_id: String,
+    id: String,
+    name: Option<String>,
+    #[serde(default)]
+    limit: ProviderLimit,
+    #[serde(default)]
+    variants: Vec<V2Variant>,
+    enabled: Option<bool>,
+}
+
+/// 2.x carries each variant as `{id, settings}` (settings ignored).
+#[derive(Debug, serde::Deserialize)]
+struct V2Variant {
+    id: String,
+}
+
+/// 2.x's flat model list folds into the 1.x provider-catalog shape, so
+/// variant picking and context windows stay wire-agnostic downstream.
+/// Providers keep their id as display name (`/api/model` names no
+/// providers).
+fn catalog_from_v2_models(models: Vec<V2Model>) -> ProviderCatalog {
+    let mut order: Vec<String> = Vec::new();
+    let mut grouped: HashMap<String, Vec<(String, ProviderModel)>> = HashMap::new();
+    for model in models {
+        if model.enabled == Some(false) {
+            continue;
+        }
+        let provider_id = model.provider_id.clone();
+        let entry = grouped.entry(provider_id.clone()).or_insert_with(|| {
+            order.push(provider_id);
+            Vec::new()
+        });
+        entry.push((
+            model.id.clone(),
+            ProviderModel {
+                limit: model.limit,
+                name: model.name,
+                variants: Some(
+                    model
+                        .variants
+                        .into_iter()
+                        .map(|v| (v.id, serde::de::IgnoredAny))
+                        .collect(),
+                ),
+            },
+        ));
+    }
+    let all = order
+        .into_iter()
+        .map(|id| {
+            let mut models = grouped.remove(&id).unwrap_or_default();
+            models.sort_by(|a, b| a.0.cmp(&b.0));
+            Provider {
+                id: Some(id.clone()),
+                name: Some(id),
+                models: Some(models.into_iter().collect()),
+            }
+        })
+        .collect();
+    ProviderCatalog {
+        all: Some(all),
+        connected: None,
+    }
+}
+
+/// Both wires wrap responses in `{data}` on 2.x only; unwrap when present.
+fn unwrap_data(value: Value) -> Value {
+    value
+        .get("data")
+        .cloned()
+        .filter(|d| d.is_object() || d.is_array())
+        .unwrap_or(value)
 }
 
 // ---------------------------------------------------------------------------
@@ -919,7 +1200,7 @@ async fn run_session(session: Session) {
         let session_id = match &request.resume {
             Some(resume) => {
                 // Sessions are durable server-side: resume = reuse the id.
-                match server.get_json(&format!("/session/{resume}"), dir).await {
+                match server.session_info(resume, dir).await {
                     Ok(info) => info
                         .get("id")
                         .and_then(Value::as_str)
@@ -939,10 +1220,22 @@ async fn run_session(session: Session) {
 
         // Provider catalog: resolves the model's advertised reasoning
         // variants so the requested effort only rides models that have it.
-        let providers = server
-            .get::<ProviderCatalog>("/provider", dir)
-            .await
-            .unwrap_or_default();
+        let providers = server.provider_catalog(dir).await.unwrap_or_default();
+
+        // 2.x: the requested model (+ variant) is set on the session once;
+        // prompts carry only text and files.
+        if server.protocol().await == Protocol::V2
+            && let Some((provider, model_id)) = request
+                .model
+                .as_deref()
+                .and_then(|m| m.split_once('/'))
+                .map(|(p, m)| (p.to_owned(), m.to_owned()))
+        {
+            let variant = pick_variant(&providers, &provider, &model_id, request.reasoning);
+            server
+                .set_model(&session_id, &provider, &model_id, variant.as_deref(), dir)
+                .await?;
+        }
         Ok::<(String, ProviderCatalog), HarnessError>((session_id, providers))
     };
     let (session_id, providers) = tokio::select! {
@@ -1020,7 +1313,7 @@ async fn run_session(session: Session) {
     let commands = match known_commands {
         Some(commands) => commands,
         None => server
-            .get_json("/command", dir)
+            .commands_wire(dir)
             .await
             .map(|v| commands_from_wire(&v))
             .unwrap_or_default(),
@@ -1040,7 +1333,12 @@ async fn run_session(session: Session) {
 
     // ---- SSE bus ----------------------------------------------------------
     let (bus_tx, mut bus_rx) = mpsc::channel::<BusMsg>(256);
-    let bus_handle = tokio::spawn(bus_task(server.base.clone(), server.auth.clone(), bus_tx));
+    let bus_handle = tokio::spawn(bus_task(
+        server.base.clone(),
+        server.auth.clone(),
+        server.protocol().await,
+        bus_tx,
+    ));
 
     // ---- first prompt -----------------------------------------------------
     // The bus has no replay: wait for the subscription to be LIVE before
@@ -1064,19 +1362,17 @@ async fn run_session(session: Session) {
         );
     }
     let stall = stall_bound();
-    let first_body = prompt_body(
-        &request.prompt,
-        &model,
-        variant.as_deref(),
-        &request.attachments,
-    );
     if let Err(e) = post_prompt(
         &server,
         &session_id,
         dir,
         &commands,
         &request.prompt,
-        first_body,
+        TurnSpec {
+            model: model.as_ref(),
+            variant: variant.as_deref(),
+            attachments: &request.attachments,
+        },
     )
     .await
     {
@@ -1154,8 +1450,20 @@ async fn run_session(session: Session) {
                 }).await {
                     break $label;
                 }
-                let body = prompt_body(&steer, &model, variant.as_deref(), &[]);
-                match post_prompt(&server, &session_id, dir, &commands, &steer, body).await {
+                match post_prompt(
+                    &server,
+                    &session_id,
+                    dir,
+                    &commands,
+                    &steer,
+                    TurnSpec {
+                        model: model.as_ref(),
+                        variant: variant.as_deref(),
+                        attachments: &[],
+                    },
+                )
+                .await
+                {
                     Ok(()) => {
                         turn = TurnState::begin(stall);
                         continue $label;
@@ -1215,10 +1523,9 @@ async fn run_session(session: Session) {
                 interrupt_requested = true;
                 if turn.active {
                     turn.idle_ready = true;
-                    let path = format!("/session/{session_id}/abort");
                     let abort = tokio::time::timeout(
                         Duration::from_secs(5),
-                        server.post_json(&path, dir, &Value::Null),
+                        server.abort_session(&session_id, dir),
                     )
                     .await;
                     if !matches!(abort, Ok(Ok(_))) {
@@ -1258,13 +1565,26 @@ async fn run_session(session: Session) {
                         } else {
                             // Between turns (shouldn't happen — the engine
                             // steers live runs — but deliver, don't drop).
-                            let body = prompt_body(&steer.prompt, &model, variant.as_deref(), &[]);
                             let (prev, next) = rotate(&mut assistant_message_id);
                             let _ = send(&event_tx, AgentEvent::Steered {
                                 assistant_message_id: Some(prev),
                                 next_assistant_message_id: Some(next),
                             }).await;
-                            if post_prompt(&server, &session_id, dir, &commands, &steer.prompt, body).await.is_ok() {
+                            if post_prompt(
+                                &server,
+                                &session_id,
+                                dir,
+                                &commands,
+                                &steer.prompt,
+                                TurnSpec {
+                                    model: model.as_ref(),
+                                    variant: variant.as_deref(),
+                                    attachments: &[],
+                                },
+                            )
+                            .await
+                            .is_ok()
+                            {
                                 turn = TurnState::begin(stall);
                             }
                         }
@@ -1291,8 +1611,7 @@ async fn run_session(session: Session) {
                     stall.unwrap_or(DEFAULT_STALL_BOUND).as_secs()
                 );
                 let _ = send(&event_tx, AgentEvent::Error { message: message.clone() }).await;
-                let path = format!("/session/{session_id}/abort");
-                let _ = server.post_json(&path, dir, &Value::Null).await;
+                let _ = server.abort_session(&session_id, dir).await;
                 settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
                 let _ = send(&event_tx, AgentEvent::Done {
                     status: DoneStatus::Errored,
@@ -1310,18 +1629,16 @@ async fn run_session(session: Session) {
                     BusMsg::Connected => {
                         // A RECONNECT mid-turn may have swallowed our idle
                         // (no replay): re-sync from the server's own status
-                        // map — absent means idle.
-                        if turn.active {
-                            let status = server.get_json("/session/status", dir).await;
-                            let busy = match &status {
-                                Ok(map) => map.get(&session_id).is_some(),
-                                // Can't tell: leave the turn running; the
-                                // next disconnect or event decides.
-                                Err(_) => true,
-                            };
-                            if !busy {
-                                settle_idle!('main);
-                            }
+                        // surface — not running means idle. Can't tell:
+                        // leave the turn running; the next disconnect or
+                        // event decides.
+                        if turn.active
+                            && !server
+                                .session_running(&session_id, dir)
+                                .await
+                                .unwrap_or(true)
+                        {
+                            settle_idle!('main);
                         }
                     }
                     BusMsg::Disconnected => {
@@ -1359,6 +1676,7 @@ async fn run_session(session: Session) {
                             dir,
                             event_tx: &event_tx,
                             request_input: &request_input,
+                            auto_approve: request.auto_approve,
                             main_feed: &mut main_feed,
                             children: &mut children,
                             pending_spawns: &mut pending_spawns,
@@ -1371,6 +1689,10 @@ async fn run_session(session: Session) {
                             BusOutcome::Continue => {}
                             BusOutcome::ConsumerGone => break 'main,
                             BusOutcome::TurnIdle => settle_idle!('main),
+                            BusOutcome::TurnInterrupted => {
+                                interrupt_requested = true;
+                                settle_idle!('main);
+                            }
                         }
                     }
                 }
@@ -1387,12 +1709,58 @@ async fn run_session(session: Session) {
 }
 
 async fn create_session(server: &Server, dir: Option<&str>) -> Result<String, HarnessError> {
-    let created = server.post_json("/session", dir, &json!({})).await?;
-    created
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| HarnessError::Protocol("opencode session create returned no id".into()))
+    if server.protocol().await == Protocol::V2 {
+        // 2.x takes the run directory in the BODY (`location.directory`) —
+        // the header is ignored on this route (observed live, 2.0.3) — and
+        // wraps the answer in `{data}`. Its schema is stable; the 1.x-only
+        // lazy-migration crash below doesn't exist there.
+        let body = match dir {
+            Some(dir) => json!({ "location": { "directory": dir } }),
+            None => json!({}),
+        };
+        let created = server.post_json("/api/session", dir, &body).await?;
+        return created
+            .pointer("/data/id")
+            .or_else(|| created.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                HarnessError::Protocol("opencode session create returned no id".into())
+            });
+    }
+    // opencode 1.18.x lazily migrates a directory's legacy rows on its
+    // FIRST directory-scoped request (`Project.migrateProjectId`). On a db
+    // whose schema a newer 2.x install has rewritten, that migration throws
+    // mid-request — observed live: `SQLiteError: no such column:
+    // project_id` → `500 UnknownError` on `POST /session` — but the project
+    // row it inserted commits BEFORE the throw, so the identical request
+    // retried immediately succeeds. Retry once on any 5xx: this failure
+    // class then costs one round-trip instead of a dead turn.
+    for attempt in 0..2 {
+        let (status, text) = server.post_json_raw("/session", dir, &json!({})).await?;
+        if status.is_success() {
+            let created = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
+            return created
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    HarnessError::Protocol("opencode session create returned no id".into())
+                });
+        }
+        if attempt == 0 && status.is_server_error() {
+            tracing::debug!(
+                target: "zeron_harness::opencode",
+                "POST /session answered {status}; retrying once (the lazy-migration crash self-heals)"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            continue;
+        }
+        return Err(HarnessError::Protocol(post_error_message(
+            "/session", status, &text,
+        )));
+    }
+    unreachable!("create_session retry loop returns from every path")
 }
 
 fn context_usage_event(info: &Value, context_windows: &HashMap<String, u64>) -> Option<AgentEvent> {
@@ -1456,7 +1824,7 @@ fn pick_variant(
 /// Build a `prompt_async` body: text part + attachment file parts.
 fn prompt_body(
     prompt: &str,
-    model: &Option<(String, String)>,
+    model: Option<(&str, &str)>,
     variant: Option<&str>,
     attachments: &[String],
 ) -> Value {
@@ -1486,6 +1854,25 @@ fn prompt_body(
     Value::Object(body)
 }
 
+/// 2.x prompt body: plain text plus `{uri, name}` file attachments. Model
+/// and variant do NOT ride here — they were set on the session at run
+/// start (`POST /api/session/{id}/model`).
+fn prompt_body_v2(prompt: &str, attachments: &[String]) -> Value {
+    let files: Vec<Value> = attachments
+        .iter()
+        .map(|path| {
+            json!({
+                "uri": format!("file://{path}"),
+                "name": std::path::Path::new(path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            })
+        })
+        .collect();
+    json!({ "text": prompt, "files": files })
+}
+
 fn mime_for(path: &str) -> &'static str {
     match std::path::Path::new(path)
         .extension()
@@ -1502,9 +1889,17 @@ fn mime_for(path: &str) -> &'static str {
     }
 }
 
+/// What a posted turn carries besides its text (1.x folds model/variant
+/// into the prompt body; 2.x ignores them there — set on the session).
+struct TurnSpec<'a> {
+    model: Option<&'a (String, String)>,
+    variant: Option<&'a str>,
+    attachments: &'a [String],
+}
+
 /// Send a turn: a leading `/command` known to the agent routes through the
 /// command endpoint (the desktop parity — the server does NOT parse slash
-/// text out of an ordinary prompt); everything else is `prompt_async`.
+/// text out of an ordinary prompt); everything else is a prompt.
 /// Both are fire-and-forget for the loop: the command endpoint is
 /// synchronous on the wire, so it rides a detached task and the bus
 /// delivers the actual turn.
@@ -1514,19 +1909,35 @@ async fn post_prompt(
     dir: Option<&str>,
     commands: &[SlashCommand],
     prompt: &str,
-    body: Value,
+    spec: TurnSpec<'_>,
 ) -> Result<(), HarnessError> {
+    let TurnSpec {
+        model,
+        variant,
+        attachments,
+    } = spec;
+    let protocol = server.protocol().await;
     if let Some(rest) = prompt.strip_prefix('/') {
         let mut split = rest.splitn(2, char::is_whitespace);
         let name = split.next().unwrap_or_default();
         let arguments = split.next().unwrap_or_default().trim().to_owned();
         if !name.is_empty() && commands.iter().any(|c| c.name == name) {
-            let path = format!("/session/{session_id}/command");
-            let cmd_body = json!({ "command": name, "arguments": arguments });
+            // 1.x names the args `arguments`; 2.x `text`.
+            let (path, cmd_body) = match protocol {
+                Protocol::V1 => (
+                    format!("/session/{session_id}/command"),
+                    json!({ "command": name, "arguments": arguments }),
+                ),
+                Protocol::V2 => (
+                    format!("/api/session/{session_id}/command"),
+                    json!({ "command": name, "text": arguments }),
+                ),
+            };
             let server_base = server.base.clone();
             let auth = server.auth.clone();
             let dir_owned = dir.map(str::to_owned);
             let path_owned = path.clone();
+            let protocol = server.protocol.clone();
             tokio::spawn(async move {
                 let server = Server {
                     child: None,
@@ -1534,6 +1945,7 @@ async fn post_prompt(
                     auth,
                     client: http_client(),
                     stderr_tail: crate::StderrTail::default(),
+                    protocol,
                 };
                 // The command endpoint blocks for the whole turn; the bus
                 // carries the real events, so this response is ignored —
@@ -1541,11 +1953,7 @@ async fn post_prompt(
                 let mut req = server
                     .request(reqwest::Method::POST, &path_owned)
                     .json(&cmd_body);
-                if let Some(dir) = dir_owned.as_deref() {
-                    req = req
-                        .query(&[("directory", dir)])
-                        .header("x-opencode-directory", encode_directory(dir));
-                }
+                req = server.scoped(req, dir_owned.as_deref()).await;
                 if let Err(e) = req.send().await {
                     tracing::debug!(
                         target: "zeron_harness::opencode",
@@ -1556,8 +1964,25 @@ async fn post_prompt(
             return Ok(());
         }
     }
-    let path = format!("/session/{session_id}/prompt_async");
-    server.post_json(&path, dir, &body).await.map(|_| ())
+    match protocol {
+        Protocol::V1 => {
+            let body = prompt_body(
+                prompt,
+                model.map(|(provider, model)| (provider.as_str(), model.as_str())),
+                variant,
+                attachments,
+            );
+            let path = format!("/session/{session_id}/prompt_async");
+            server.post_json(&path, dir, &body).await.map(|_| ())
+        }
+        Protocol::V2 => {
+            // 2.x prompts carry text + `{uri, name}` files; model/variant
+            // were set on the session at run start.
+            let body = prompt_body_v2(prompt, attachments);
+            let path = format!("/api/session/{session_id}/prompt");
+            server.post_json(&path, dir, &body).await.map(|_| ())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1568,6 +1993,7 @@ enum BusOutcome {
     Continue,
     /// Our session's turn reached idle.
     TurnIdle,
+    TurnInterrupted,
     ConsumerGone,
 }
 
@@ -1584,6 +2010,7 @@ struct BusCtx<'a> {
     dir: Option<&'a str>,
     event_tx: &'a mpsc::Sender<Result<AgentEvent, HarnessError>>,
     request_input: &'a Arc<RequestInput>,
+    auto_approve: bool,
     main_feed: &'a mut SessionFeed,
     children: &'a mut HashMap<String, ChildRun>,
     pending_spawns: &'a mut VecDeque<PendingSpawn>,
@@ -1635,6 +2062,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
         dir,
         event_tx,
         request_input,
+        auto_approve,
         main_feed,
         children,
         pending_spawns,
@@ -1668,6 +2096,9 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
         });
 
     let is_ours = event_session == Some(session_id);
+    if is_ours && kind == "session.interrupted" {
+        return BusOutcome::TurnInterrupted;
+    }
     let status = props
         .get("status")
         .and_then(|s| s.get("type"))
@@ -1710,8 +2141,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                         if !send(event_tx, AgentEvent::Error { message: msg }).await {
                             return BusOutcome::ConsumerGone;
                         }
-                        let path = format!("/session/{session_id}/abort");
-                        let _ = server.post_json(&path, dir, &Value::Null).await;
+                        let _ = server.abort_session(session_id, dir).await;
                     } else if attempt >= RETRY_REPORT_ATTEMPT && !turn.retry_reported {
                         turn.retry_reported = true;
                         let msg = format!(
@@ -1727,7 +2157,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             }
             BusOutcome::Continue
         }
-        "session.error" => {
+        "session.error" | "session.warning" => {
             // Errors are session-scoped but a missing id still concerns us
             // (global provider failures).
             if event_session.is_some() && !is_ours {
@@ -1760,7 +2190,9 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 let prev = first(prev);
                 !line.is_empty() && (prev.contains(&line) || line.contains(&prev))
             });
-            turn.error = Some(message.clone());
+            if kind == "session.error" {
+                turn.error = Some(message.clone());
+            }
             if !duplicate && !send(event_tx, AgentEvent::Error { message }).await {
                 return BusOutcome::ConsumerGone;
             }
@@ -1935,19 +2367,45 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             BusOutcome::Continue
         }
         "permission.asked" => {
-            // Parity with every other driver: sessions run unattended, so
-            // permissions auto-approve ("always" also whitelists the
-            // pattern, cutting future asks). Child sessions included — the
-            // ACP layer silently dropped those and subagents hung.
+            // A global bus includes unrelated sessions. Never answer their
+            // requests, or a malformed request without an explicit owner.
+            let Some(session) = event_session.filter(|session| {
+                *session == session_id
+                    || children.get(*session).is_some_and(|child| !child.done)
+                    || unbound_children.contains_key(*session)
+            }) else {
+                return BusOutcome::Continue;
+            };
             let Some(id) = props.get("id").and_then(Value::as_str) else {
                 return BusOutcome::Continue;
             };
-            let session = event_session.unwrap_or(session_id).to_owned();
-            let reply_path = format!("/permission/{id}/reply");
-            let fallback_path = format!("/session/{session}/permissions/{id}");
+            let session = session.to_owned();
+            let protocol = server.protocol().await;
+            // 1.x: global permission endpoint + a session-scoped fallback;
+            // 2.x: the reply rides the session's permission route
+            // (`{"reply": "once" | "always" | "reject"}`).
+            let (reply_path, fallback_path) = match protocol {
+                Protocol::V1 => (
+                    format!("/permission/{id}/reply"),
+                    Some(format!("/session/{session}/permissions/{id}")),
+                ),
+                Protocol::V2 => (
+                    format!("/api/session/{session}/permission/{id}/reply"),
+                    None,
+                ),
+            };
             let base = server.base.clone();
             let auth = server.auth.clone();
             let dir_owned = dir.map(str::to_owned);
+            let protocol_cell = server.protocol.clone();
+            let permission_input = Arc::clone(request_input);
+            let question = UserInputQuestion {
+                id: format!("permission:{id}"),
+                header: "Permission".into(),
+                question: format!("Allow this OpenCode request once? {}", props),
+                options: vec!["No".into(), "Yes".into()],
+                multi_select: false,
+            };
             tokio::spawn(async move {
                 let server = Server {
                     child: None,
@@ -1955,21 +2413,38 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     auth,
                     client: http_client(),
                     stderr_tail: crate::StderrTail::default(),
+                    protocol: protocol_cell,
                 };
+                let allowed = auto_approve
+                    || (permission_input)(vec![question.clone()])
+                        .await
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|answer| {
+                            answer.question_id == question.id
+                                && answer
+                                    .labels
+                                    .iter()
+                                    .any(|label| label.eq_ignore_ascii_case("yes"))
+                        });
+                // V2 "always" writes durable project-wide permission rules.
+                // Approval of this request must not grant future runs access.
+                let reply = if allowed { "once" } else { "reject" };
                 if server
                     .post_json(
                         &reply_path,
                         dir_owned.as_deref(),
-                        &json!({ "reply": "always" }),
+                        &json!({ "reply": reply }),
                     )
                     .await
                     .is_err()
+                    && let Some(fallback_path) = fallback_path
                 {
                     let _ = server
                         .post_json(
                             &fallback_path,
                             dir_owned.as_deref(),
-                            &json!({ "response": "always" }),
+                            &json!({ "response": reply }),
                         )
                         .await;
                 }
@@ -1977,6 +2452,13 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             BusOutcome::Continue
         }
         "question.asked" => {
+            if !event_session.is_some_and(|session| {
+                session == session_id
+                    || children.get(session).is_some_and(|child| !child.done)
+                    || unbound_children.contains_key(session)
+            }) {
+                return BusOutcome::Continue;
+            }
             let Some(id) = props.get("id").and_then(Value::as_str) else {
                 return BusOutcome::Continue;
             };
@@ -2001,6 +2483,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             let dir_owned = dir.map(str::to_owned);
             let request_id = id.to_owned();
             let tx = event_tx.clone();
+            let protocol_cell = server.protocol.clone();
             tokio::spawn(async move {
                 let server = Server {
                     child: None,
@@ -2008,6 +2491,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     auth,
                     client: http_client(),
                     stderr_tail: crate::StderrTail::default(),
+                    protocol: protocol_cell,
                 };
                 let reply = match rx.await {
                     Ok(answers) => {
@@ -2564,26 +3048,357 @@ fn oc_tool_call(name: &str, input: &Value) -> ToolCall {
 // SSE bus reader
 // ---------------------------------------------------------------------------
 
-/// Tail `/global/event` into the session loop. Reconnects on transient
-/// drops (the server is our own child on loopback); past the budget the
-/// loop learns via [`BusMsg::Disconnected`] and errors the run — missed
-/// frames mean the transcript can no longer be trusted.
-async fn bus_task(base: String, auth: Option<String>, tx: mpsc::Sender<BusMsg>) {
+/// Rewrite one 2.x `/api/event` frame into the 1.x-shaped bus payloads
+/// (`{type, properties}`) the session loop consumes, so the whole turn
+/// engine — feeds, settle, retries, subagents — stays wire-agnostic. The
+/// 2.x frame is `{id, type, data: {sessionID, assistantMessageID, ..}}`
+/// (all shapes captured live from a 2.0.3 server); the names and shapes
+/// of the 2.x event vocabulary:
+/// - turn lifecycle: `session.execution.started` (busy) and
+///   `.succeeded`/`.interrupted`/`.failed` (idle; failed carries the error).
+/// - per step: `session.step.started` fixes the assistant message id its
+///   items stream under.
+/// - streaming items: `session.text.delta` (+ started/ended snapshots) and
+///   `session.reasoning.started/.ended`; `ordinal` numbers the item within
+///   the step — the synthetic part id.
+/// - tools: `session.tool.input.started` (carries the NAME),
+///   `.input.ended` (args as text), `.called` (args as object),
+///   `.success` (content array) / `.error`.
+/// - usage: `session.usage.updated` with the cumulative token totals.
+///
+/// `tool_names` tracks pending calls by session, message, and provider call id.
+type V2ToolKey = (String, String, String);
+const MAX_PENDING_V2_TOOLS: usize = 4096;
+
+fn normalize_v2_frame(event: Value, tool_names: &mut HashMap<V2ToolKey, String>) -> Vec<Value> {
+    let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+    let data = event.get("data").cloned().unwrap_or(Value::Null);
+    if data
+        .get("sessionID")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        return Vec::new();
+    }
+    let session = || data.get("sessionID").cloned().unwrap_or(Value::Null);
+    let message = || {
+        data.get("assistantMessageID")
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let tool_key = || {
+        (
+            data.get("sessionID")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            data.get("assistantMessageID")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            data.get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        )
+    };
+    if matches!(
+        kind,
+        "session.execution.succeeded"
+            | "session.execution.interrupted"
+            | "session.execution.failed"
+    ) {
+        tool_names.retain(|(owner, _, _), _| {
+            Some(owner.as_str()) != data.get("sessionID").and_then(Value::as_str)
+        });
+    }
+    match kind {
+        "session.execution.started" => vec![json!({
+            "type": "session.status",
+            "properties": { "sessionID": session(), "status": { "type": "busy" } }
+        })],
+        "session.execution.interrupted" => vec![json!({
+            "type": "session.interrupted",
+            "properties": { "sessionID": session() }
+        })],
+        "session.execution.succeeded" => vec![json!({
+            "type": "session.idle",
+            "properties": { "sessionID": session() }
+        })],
+        "session.execution.failed" => {
+            vec![
+                v2_error_payload(&data),
+                json!({
+                    "type": "session.idle",
+                    "properties": { "sessionID": session() }
+                }),
+            ]
+        }
+        "session.step.failed" => {
+            // An interrupt surfaces as step.failed{aborted}; the terminal
+            // execution.interrupted frame settles the turn. Any other
+            // failure is a step-level provider error: surface it as a chip,
+            // the turn itself keeps going (execution.* decides its end).
+            if data.pointer("/error/type").and_then(Value::as_str) == Some("aborted") {
+                return Vec::new();
+            }
+            let mut warning = v2_error_payload(&data);
+            warning["type"] = json!("session.warning");
+            vec![warning]
+        }
+        "session.step.started" => vec![json!({
+            "type": "message.updated",
+            "properties": {
+                "info": { "sessionID": session(), "id": message(), "role": "assistant" }
+            }
+        })],
+        "session.text.started" | "session.text.ended" => {
+            vec![v2_stream_part(
+                &data,
+                "text",
+                data.get("text").cloned().unwrap_or(json!("")),
+            )]
+        }
+        "session.text.delta" | "session.reasoning.delta" => vec![json!({
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": session(),
+                "messageID": message(),
+                "partID": v2_part_id(&data, if kind == "session.reasoning.delta" { 'r' } else { 't' }),
+                "field": "text",
+                "delta": data.get("delta").cloned().unwrap_or(json!("")),
+            }
+        })],
+        "session.reasoning.started" | "session.reasoning.ended" => vec![v2_stream_part(
+            &data,
+            "reasoning",
+            data.get("text").cloned().unwrap_or(json!("")),
+        )],
+        "session.tool.input.started" => {
+            let id = data.get("id").and_then(Value::as_str).unwrap_or_default();
+            let name = data.get("name").and_then(Value::as_str).unwrap_or_default();
+            tool_names.insert(tool_key(), name.to_owned());
+            vec![v2_tool_part(
+                &data,
+                id,
+                name,
+                &json!({ "status": "pending" }),
+            )]
+        }
+        "session.tool.called" => {
+            let id = data.get("id").and_then(Value::as_str).unwrap_or_default();
+            let name = tool_names
+                .get(&tool_key())
+                .map(String::as_str)
+                .unwrap_or_default();
+            let state = json!({
+                "status": "running",
+                "input": data.get("input").cloned().unwrap_or(json!({})),
+            });
+            vec![v2_tool_part(&data, id, name, &state)]
+        }
+        "session.tool.success" => {
+            let id = data.get("id").and_then(Value::as_str).unwrap_or_default();
+            let name = tool_names.remove(&tool_key()).unwrap_or_default();
+            let output = data
+                .get("content")
+                .and_then(Value::as_array)
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .filter_map(|p| p.get("text").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
+            vec![v2_tool_part(
+                &data,
+                id,
+                &name,
+                &json!({ "status": "completed", "output": output }),
+            )]
+        }
+        "session.tool.failed" | "session.tool.error" => {
+            let id = data.get("id").and_then(Value::as_str).unwrap_or_default();
+            let name = tool_names.remove(&tool_key()).unwrap_or_default();
+            let error = data.get("error").cloned().unwrap_or(Value::Null);
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| error.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            vec![v2_tool_part(
+                &data,
+                id,
+                &name,
+                &json!({ "status": "error", "error": message }),
+            )]
+        }
+        "session.usage.updated" => {
+            let tokens = data.get("tokens").cloned().unwrap_or(Value::Null);
+            if tokens.is_null() {
+                return Vec::new();
+            }
+            // Cumulative totals keyed to a synthetic message: registers
+            // Usage + ContextUsage exactly like the 1.x assistant
+            // message.updated did. (No providerID/modelID on this frame —
+            // the context window is dropped.)
+            vec![json!({
+                "type": "message.updated",
+                "properties": {
+                    "info": {
+                        "sessionID": session(),
+                        "id": "usage",
+                        "role": "assistant",
+                        "tokens": tokens,
+                    }
+                }
+            })]
+        }
+        "session.created" => {
+            let Some(id) = data.get("sessionID").and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            vec![json!({
+                "type": "session.created",
+                "properties": {
+                    "info": {
+                        "id": id,
+                        "parentID": data.get("parentID").cloned().unwrap_or(Value::Null),
+                        "title": data
+                            .get("title")
+                            .or_else(|| data.get("slug"))
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    }
+                }
+            })]
+        }
+        // Same event name as 1.x; preserve permission details for the reply
+        // and any interactive approval. The route differs by generation. Observed live
+        // on 2.0.3 when a tool reaches outside the workspace.
+        "permission.asked" => {
+            if data.get("id").and_then(Value::as_str).is_none() {
+                return Vec::new();
+            }
+            vec![json!({
+                "type": "permission.asked",
+                "properties": data
+            })]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The 2.x error shape (`{type, message}`) folded into the 1.x
+/// `session.error` properties (`{name, data: {message}}`). 2.x provider
+/// failures can carry an EMPTY message (observed live: `provider.auth`
+/// with `message: ""`) — fall back to the type so the chip isn't blank.
+fn v2_error_payload(data: &Value) -> Value {
+    let error = data.get("error").cloned().unwrap_or(Value::Null);
+    let name = error.get("type").and_then(Value::as_str).unwrap_or("");
+    let message = match error.get("message").and_then(Value::as_str) {
+        Some(message) if !message.is_empty() => message,
+        _ => name,
+    };
+    json!({
+        "type": "session.error",
+        "properties": {
+            "sessionID": data.get("sessionID").cloned().unwrap_or(Value::Null),
+            "error": {
+                "name": name,
+                "data": { "message": message },
+            },
+        }
+    })
+}
+
+/// Synthetic part id for a streamed 2.x text/reasoning item: message id +
+/// kind + ordinal (text and reasoning number separately).
+fn v2_part_id(data: &Value, kind: char) -> String {
+    let message = data
+        .get("assistantMessageID")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let ordinal = data.get("ordinal").and_then(Value::as_u64).unwrap_or(0);
+    format!("{message}:{kind}{ordinal}")
+}
+
+/// A text/reasoning item snapshot in the 1.x part shape.
+fn v2_stream_part(data: &Value, part_type: &str, text: Value) -> Value {
+    let kind_char = if part_type == "text" { 't' } else { 'r' };
+    json!({
+        "type": "message.part.updated",
+        "properties": { "part": {
+            "sessionID": data.get("sessionID").cloned().unwrap_or(Value::Null),
+            "id": v2_part_id(data, kind_char),
+            "messageID": data.get("assistantMessageID").cloned().unwrap_or(Value::Null),
+            "type": part_type,
+            "text": text,
+        }}
+    })
+}
+
+/// A tool frame in the 1.x tool-part shape (`callID` keys the chip).
+fn v2_tool_part(data: &Value, id: &str, name: &str, state: &Value) -> Value {
+    // Provider call ids can repeat across assistant messages. Both the feed's
+    // state key and the emitted chip id must keep those calls distinct.
+    let id = format!(
+        "{}:{}:{id}",
+        data.get("sessionID")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        data.get("assistantMessageID")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    );
+    json!({
+        "type": "message.part.updated",
+        "properties": { "part": {
+            "sessionID": data.get("sessionID").cloned().unwrap_or(Value::Null),
+            "messageID": data.get("assistantMessageID").cloned().unwrap_or(Value::Null),
+            "id": id,
+            "callID": id,
+            "type": "tool",
+            "tool": name,
+            "state": state,
+        }}
+    })
+}
+
+/// Tail the event bus into the session loop: `/global/event` on 1.x,
+/// `/api/event` on 2.x (which serves nothing unless `Accept:
+/// text/event-stream` is sent — observed live, 2.0.3). Reconnects on
+/// transient drops (the server is our own child on loopback); past the
+/// budget the loop learns via [`BusMsg::Disconnected`] and errors the run —
+/// missed frames mean the transcript can no longer be trusted.
+async fn bus_task(
+    base: String,
+    auth: Option<String>,
+    protocol: Protocol,
+    tx: mpsc::Sender<BusMsg>,
+) {
     let client = http_client();
-    let url = format!("{base}/global/event");
+    let url = match protocol {
+        Protocol::V1 => format!("{base}/global/event"),
+        Protocol::V2 => format!("{base}/api/event"),
+    };
     let mut failures: u32 = 0;
     loop {
         if tx.is_closed() {
             return;
         }
-        let mut req = client.get(&url);
+        let mut req = client
+            .get(&url)
+            .header(reqwest::header::ACCEPT, "text/event-stream");
         if let Some(auth) = &auth {
             req = req.header(reqwest::header::AUTHORIZATION, auth.clone());
         }
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
                 failures = 0;
-                stream_bus(&tx, resp).await;
+                stream_bus(&tx, resp, protocol).await;
                 if tx.is_closed() {
                     return;
                 }
@@ -2601,10 +3416,13 @@ async fn bus_task(base: String, auth: Option<String>, tx: mpsc::Sender<BusMsg>) 
     }
 }
 
-async fn stream_bus(tx: &mpsc::Sender<BusMsg>, resp: reqwest::Response) {
+async fn stream_bus(tx: &mpsc::Sender<BusMsg>, resp: reqwest::Response, protocol: Protocol) {
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     let mut announced = false;
+    // 2.x names a tool only when its input starts streaming; the later
+    // called/success frames carry the call id alone.
+    let mut v2_tool_names: HashMap<V2ToolKey, String> = HashMap::new();
     while let Some(chunk) = stream.next().await {
         let Ok(bytes) = chunk else {
             return;
@@ -2632,7 +3450,18 @@ async fn stream_bus(tx: &mpsc::Sender<BusMsg>, resp: reqwest::Response) {
                 let Ok(event) = serde_json::from_str::<Value>(data) else {
                     continue;
                 };
-                if tx.send(BusMsg::Event(event)).await.is_err() {
+                if protocol == Protocol::V2 {
+                    let payloads = normalize_v2_frame(event, &mut v2_tool_names);
+                    if v2_tool_names.len() > MAX_PENDING_V2_TOOLS {
+                        let _ = tx.send(BusMsg::Disconnected).await;
+                        return;
+                    }
+                    for payload in payloads {
+                        if tx.send(BusMsg::Event(payload)).await.is_err() {
+                            return;
+                        }
+                    }
+                } else if tx.send(BusMsg::Event(event)).await.is_err() {
                     return;
                 }
             }

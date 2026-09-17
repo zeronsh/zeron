@@ -246,7 +246,22 @@ struct RenderToolCall: Hashable {
     var string: (String) -> String? { { key in self.fields[key] as? String } }
 }
 
+/// Durable metadata only; bytes remain on the message owner's device.
+struct GeneratedImageReference: Hashable {
+    var path: String
+    var name: String
+    var mimeType: String
+
+    static let supportedMimeTypes: Set<String> = ["image/png", "image/jpeg", "image/webp", "image/gif"]
+
+    var isValid: Bool {
+        path.hasPrefix("/") && !path.contains("\0") && !name.isEmpty
+            && Self.supportedMimeTypes.contains(mimeType)
+    }
+}
+
 enum MessagePart: Hashable, Identifiable {
+    case image(id: String, reference: GeneratedImageReference)
     case text(id: String, text: String)
     case tool(id: String, call: RenderToolCall, isError: Bool, resolved: Bool)
     case input(id: String, requestId: String, questions: [UserInputQuestion], resolved: Bool)
@@ -254,7 +269,7 @@ enum MessagePart: Hashable, Identifiable {
 
     var id: String {
         switch self {
-        case .text(let id, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _):
+        case .text(let id, _), .image(let id, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _):
             return id
         }
     }

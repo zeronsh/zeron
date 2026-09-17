@@ -2511,3 +2511,186 @@ async fn pending_steer_handoff_does_not_publish_a_completion() {
         core.shutdown().await;
     }
 }
+
+/// Real drive_run + journal + Loro, with an isolated Codex source root.
+#[tokio::test]
+async fn generated_image_is_materialized_before_publication_and_survives_reopen() {
+    use zeron_engine::{DocHost, DocHostConfig, SessionsEngine, Uploads};
+    let dir = tempfile::tempdir().unwrap();
+    let source_root = dir.path().join("codex/generated_images");
+    std::fs::create_dir_all(&source_root).unwrap();
+    let source = source_root.join("source.png");
+    let bytes = b"\x89PNG\r\n\x1a\nBASE64_SENTINEL_ONLY_IN_FILE";
+    std::fs::write(&source, bytes).unwrap();
+    let image = AgentEvent::GeneratedImage {
+        id: "image-1:image".into(),
+        path: source.to_string_lossy().into_owned(),
+        name: "untrusted".into(),
+        mime_type: "untrusted".into(),
+    };
+    let script = vec![
+        AgentEvent::ToolCall {
+            id: "image-1".into(),
+            call: ToolCall::Unknown {
+                name: "Generate image".into(),
+                input: None,
+            },
+        },
+        AgentEvent::ToolResult {
+            id: "image-1".into(),
+            is_error: false,
+            output: None,
+            diff: None,
+        },
+        image.clone(),
+        image.clone(),
+        done(DoneStatus::Completed),
+    ];
+    let registry = registry_with(Arc::new(MockHarness { script }));
+    let journal = Arc::new(RunJournal::open(dir.path().join("journals")).unwrap());
+    let sessions = SessionsEngine::new("host".into(), journal.clone(), registry);
+    let uploads = Uploads::from_root(&dir.path().join("profile/uploads"));
+    sessions.set_generated_images(uploads.clone(), source_root);
+    let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+    let host = DocHost::new(
+        store,
+        DocHostConfig {
+            device_id: "host".into(),
+            default_harness: HarnessId::Mock,
+            edge: None,
+        },
+    );
+    sessions.set_doc_host(host.clone());
+    sessions
+        .dispatch(CHAT, HarnessId::Mock, run_request("image"), None)
+        .await
+        .unwrap();
+    wait_for(
+        || {
+            sessions
+                .session_status(CHAT)
+                .is_some_and(|s| s.status == SessionStatus::Idle)
+        },
+        "image completion",
+    )
+    .await;
+    let handle = host.open(CHAT).unwrap();
+    let entries = handle.doc().read_entries().unwrap();
+    let images: Vec<_> = entries
+        .iter()
+        .flat_map(|e| &e.parts)
+        .filter_map(|p| {
+            if let MessagePart::Image { path, .. } = p {
+                Some(path.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(images.len(), 1);
+    assert!(std::path::Path::new(&images[0]).starts_with(uploads.dir()));
+    let serialized = serde_json::to_string(&journal.replay(CHAT, 0).unwrap()).unwrap();
+    assert!(!serialized.contains(source.to_str().unwrap()));
+    assert!(!serialized.contains("BASE64_SENTINEL"));
+    let doc_json = serde_json::to_string(&entries).unwrap();
+    assert!(!doc_json.contains(source.to_str().unwrap()));
+    assert!(!doc_json.contains("BASE64_SENTINEL"));
+    std::fs::remove_file(&source).unwrap();
+    assert_eq!(std::fs::read(&images[0]).unwrap(), bytes);
+    let imported = loro::LoroDoc::new();
+    imported
+        .import(&handle.doc().export_snapshot().unwrap())
+        .unwrap();
+    assert_eq!(
+        SessionDoc::from_doc(imported).read_entries().unwrap(),
+        entries
+    );
+    // Resume echoes the successful completed item after Codex removed its source.
+    sessions
+        .dispatch(CHAT, HarnessId::Mock, run_request("resume"), None)
+        .await
+        .unwrap();
+    wait_for(
+        || {
+            sessions
+                .session_status(CHAT)
+                .is_some_and(|s| s.status == SessionStatus::Idle)
+        },
+        "resume completion",
+    )
+    .await;
+    assert_eq!(
+        handle
+            .doc()
+            .read_entries()
+            .unwrap()
+            .iter()
+            .flat_map(|e| &e.parts)
+            .filter(|p| matches!(p, MessagePart::Image { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        !handle
+            .doc()
+            .read_entries()
+            .unwrap()
+            .iter()
+            .flat_map(|e| &e.parts)
+            .any(|p| matches!(p, MessagePart::Error { .. }))
+    );
+    sessions.shutdown().await;
+}
+
+/// Real provider + engine smoke, opt-in because it consumes image quota.
+#[tokio::test]
+#[ignore = "requires authenticated Codex with image generation; consumes quota"]
+async fn real_image_generation_profile_smoke() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        registry_with(Arc::new(zeron_harness::CodexHarness::new())),
+        HarnessId::Codex,
+        None,
+    )
+    .unwrap();
+    core.sessions
+        .dispatch(
+            CHAT,
+            HarnessId::Codex,
+            run_request("Generate an image of a small green goblin using image generation."),
+            None,
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(300), async {
+        while !entries_now(&core)
+            .iter()
+            .any(|e| e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete))
+        {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let all = entries(&core);
+    let image = all
+        .iter()
+        .flat_map(|e| &e.parts)
+        .find_map(|p| {
+            if let MessagePart::Image { path, .. } = p {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .expect("generated image reaches document");
+    assert!(std::path::Path::new(image).starts_with(core.uploads.dir()));
+    assert!(std::path::Path::new(image).is_file());
+    assert!(
+        !serde_json::to_string(&all)
+            .unwrap()
+            .contains("generated_images/")
+    );
+    core.sessions.shutdown().await;
+}

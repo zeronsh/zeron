@@ -9,7 +9,7 @@
 //! - `queue`:    LoroMovableList of LoroMap {
 //!   id, text, attachments?, issuedBy, issuedAt, editedAt? }        (any device writes)
 //!
-//! Part maps: { id, kind: "text"|"reasoning"|"tool"|"input"|"error", text?: LoroText,
+//! Part maps: { id, kind: "text"|"reasoning"|"tool"|"input"|"error"|"image", text?: LoroText,
 //! reasoning?: LoroText, call?: json, isError?, questions?: json, resolved?, message? }.
 //! Text bodies are **LoroText** so streaming appends RLE-merge (1.03x oplog overhead vs
 //! 125x for whole-value rewrites).
@@ -63,6 +63,12 @@ struct DocPartJson {
     id: String,
     kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     text: Option<String>,
     /// Thinking body for `kind: "reasoning"` (additive). Deliberately NOT the
     /// `text` field: old readers' unknown-kind fallback renders `text` as
@@ -113,6 +119,19 @@ struct DocPartJson {
 /// App parts → doc part json (mirror of `toDocParts`).
 fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
     Ok(match part {
+        MessagePart::Image {
+            id,
+            path,
+            name,
+            mime_type,
+        } => DocPartJson {
+            id: id.clone(),
+            kind: "image".into(),
+            path: Some(path.clone()),
+            name: Some(name.clone()),
+            mime_type: Some(mime_type.clone()),
+            ..Default::default()
+        },
         MessagePart::Text { id, text } => DocPartJson {
             id: id.clone(),
             kind: "text".into(),
@@ -188,6 +207,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
 /// Doc part json → app part (mirror of `fromDocParts`; malformed degrades to empty text).
 fn from_doc_part(p: DocPartJson) -> MessagePart {
     match p.kind.as_str() {
+        "image" => image_part(p.id, p.path, p.name, p.mime_type),
         "tool" => match p.call.and_then(|c| serde_json::from_value(c).ok()) {
             Some(call) => MessagePart::Tool {
                 id: p.id,
@@ -234,6 +254,35 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
         _ => MessagePart::Text {
             id: p.id,
             text: p.text.unwrap_or_default(),
+        },
+    }
+}
+
+fn image_part(
+    id: String,
+    path: Option<String>,
+    name: Option<String>,
+    mime_type: Option<String>,
+) -> MessagePart {
+    match (path, name, mime_type) {
+        (Some(path), Some(name), Some(mime_type))
+            if !path.is_empty()
+                && !name.is_empty()
+                && matches!(
+                    mime_type.as_str(),
+                    "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+                ) =>
+        {
+            MessagePart::Image {
+                id,
+                path,
+                name,
+                mime_type,
+            }
+        }
+        _ => MessagePart::Error {
+            id,
+            message: "Generated image unavailable".into(),
         },
     }
 }
@@ -694,6 +743,15 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
         let t = map.insert_container("reasoning", LoroText::new())?;
         t.insert(0, reasoning)?;
     }
+    for (key, value) in [
+        ("path", &doc_part.path),
+        ("name", &doc_part.name),
+        ("mimeType", &doc_part.mime_type),
+    ] {
+        if let Some(value) = value {
+            map.insert(key, value.as_str())?;
+        }
+    }
     if let Some(call) = &doc_part.call {
         map.insert("call", loro_value_from_json(call))?;
     }
@@ -840,6 +898,15 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
         .and_then(|x| x.as_str())
         .map(str::to_owned)
         .unwrap_or_else(|| format!("{entry_id}#recovered-{ix}"));
+    if obj.get("kind").and_then(|v| v.as_str()) == Some("image") {
+        let field = |key| obj.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+        return Some(image_part(
+            id,
+            field("path"),
+            field("name"),
+            field("mimeType"),
+        ));
+    }
     if let Some(reasoning) = obj.get("reasoning").and_then(|x| x.as_str()) {
         return Some(MessagePart::Reasoning {
             id,
@@ -1090,6 +1157,15 @@ fn part_map_at(parts: &LoroList, index: usize) -> Result<LoroMap, DocError> {
 /// In-place field refresh for tool/input parts (and defensive text rewrite).
 fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError> {
     let doc_part = to_doc_part(part)?;
+    for (key, value) in [
+        ("path", &doc_part.path),
+        ("name", &doc_part.name),
+        ("mimeType", &doc_part.mime_type),
+    ] {
+        if let Some(value) = value {
+            map.insert(key, value.as_str())?;
+        }
+    }
     if let Some(call) = &doc_part.call {
         map.insert("call", loro_value_from_json(call))?;
     }
@@ -1193,6 +1269,48 @@ mod tests {
     use super::*;
     use crate::parts::fold_event_into_parts;
     use zeron_proto::{AgentEvent, ToolCall};
+
+    #[test]
+    fn generated_image_persists_updates_and_salvages() {
+        let doc = SessionDoc::init("images").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a", "owner", 1).unwrap();
+        let mut parts = vec![];
+        let event = AgentEvent::GeneratedImage {
+            id: "i:image".into(),
+            path: "/uploads/a.png".into(),
+            name: "generated.png".into(),
+            mime_type: "image/png".into(),
+        };
+        fold_event_into_parts(&mut parts, &event);
+        writer.sync(&parts).unwrap();
+        if let MessagePart::Image { path, .. } = &mut parts[0] {
+            *path = "/uploads/b.png".into();
+        }
+        writer.sync(&parts).unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0].parts, parts);
+        let imported = LoroDoc::new();
+        imported.import(&doc.export_snapshot().unwrap()).unwrap();
+        let loaded = SessionDoc::from_doc(imported);
+        assert_eq!(loaded.read_entries().unwrap()[0].parts, parts);
+        let valid = serde_json::json!({"kind":"image", "id":"i", "path":"/uploads/i.png", "name":"i.png", "mimeType":"image/png", "isError":42});
+        assert!(matches!(
+            salvage_part(&valid, "a", 0),
+            Some(MessagePart::Image { .. })
+        ));
+        for bad in [
+            serde_json::json!({"kind":"image", "id":"i"}),
+            serde_json::json!({"kind":"image", "id":"i", "path":"/x", "name":"x", "mimeType":"image/svg+xml"}),
+        ] {
+            assert!(matches!(
+                from_doc_part(serde_json::from_value(bad.clone()).unwrap()),
+                MessagePart::Error { .. }
+            ));
+            assert!(matches!(
+                salvage_part(&bad, "a", 0),
+                Some(MessagePart::Error { .. })
+            ));
+        }
+    }
 
     fn user_entry(id: &str, text: &str) -> SessionMessageEntry {
         SessionMessageEntry {
@@ -1504,7 +1622,12 @@ mod tests {
             },
         );
         writer.sync(&folded).unwrap();
-        fold_event_into_parts(&mut folded, &AgentEvent::TextDelta { text: "Done".into() });
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::TextDelta {
+                text: "Done".into(),
+            },
+        );
         writer.sync(&folded).unwrap();
         writer.finish(&folded, MessageStatus::Complete).unwrap();
 

@@ -32,6 +32,16 @@ use crate::{
 };
 
 const PREVIEW_LINE_HEIGHT: f32 = 20.0;
+/// One shared `code_font_size` setting drives two surfaces in this file that
+/// never agreed on a size: the editable editor and the plain preview. Each
+/// scales off its own baseline so the default setting reproduces the size that
+/// surface always had, and a user-chosen size moves both while keeping their
+/// proportions.
+const EDITOR_TEXT_SIZE: f32 = 13.0;
+const PREVIEW_TEXT_SIZE: f32 = 11.5;
+const EDITOR_TEXT_SIZE_RATIO: f32 = EDITOR_TEXT_SIZE / crate::typography::CODE_FONT_SIZE_DEFAULT;
+const PREVIEW_TEXT_SIZE_RATIO: f32 = PREVIEW_TEXT_SIZE / crate::typography::CODE_FONT_SIZE_DEFAULT;
+const PREVIEW_LINE_HEIGHT_RATIO: f32 = PREVIEW_LINE_HEIGHT / PREVIEW_TEXT_SIZE;
 const WIDE_BREAKPOINT: f32 = 680.0;
 const TREE_SPLIT_DEFAULT: f32 = 286.0;
 const TREE_SPLIT_MIN: f32 = 220.0;
@@ -159,6 +169,7 @@ pub(super) struct FilePreviewState {
     comment_anchors: HashMap<String, HashMap<String, EditorCommentAnchor>>,
     comment_draft: Option<EditorCommentDraft>,
     active_comment: Option<String>,
+    typography_generation: u32,
 }
 
 impl FilePreviewState {
@@ -195,6 +206,7 @@ impl FilePreviewState {
             comment_anchors: HashMap::new(),
             comment_draft: None,
             active_comment: None,
+            typography_generation: 0,
         }
     }
 
@@ -358,6 +370,24 @@ impl FilePreviewState {
 
     fn word_wrap(&self) -> bool {
         self.word_wrap
+    }
+
+    /// Row height for plain (non-editable) preview lines. The list's
+    /// uniform-height hint and the painted rows must both read it from here: a
+    /// fixed 20 px row clips glyphs at larger code sizes, and a hint that
+    /// disagrees with the painted row desyncs the virtualized measurements.
+    fn line_height(&self) -> gpui::Pixels {
+        px((self.preview_text_size() * PREVIEW_LINE_HEIGHT_RATIO).max(PREVIEW_LINE_HEIGHT))
+    }
+
+    /// Text size of the editable editor.
+    fn editor_text_size(&self) -> f32 {
+        crate::typography::clamp_font_size(self.editor_font_size * EDITOR_TEXT_SIZE_RATIO)
+    }
+
+    /// Text size of the plain (non-editable) preview rows.
+    fn preview_text_size(&self) -> f32 {
+        crate::typography::clamp_font_size(self.editor_font_size * PREVIEW_TEXT_SIZE_RATIO)
     }
 
     pub(super) fn set_editor_font_size(&mut self, editor_font_size: f32) {
@@ -635,18 +665,19 @@ pub(super) struct FileEditorTooltip {
 impl Render for FileEditorTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
-        div()
+        let card = div()
             .max_w(px(360.0))
             .px(px(9.0))
             .py(px(6.0))
             .rounded(px(6.0))
             .border_1()
             .border_color(theme.border)
-            .bg(theme.surface_overlay)
+            .bg(crate::popover::surface_bg(theme))
             .font_family(theme.font_sans.clone())
             .text_size(px(10.5))
             .text_color(theme.text_muted)
-            .child(self.text.clone())
+            .child(self.text.clone());
+        crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
     }
 }
 
@@ -2002,7 +2033,7 @@ impl FilesSurface {
             .unwrap_or(0);
         self.preview
             .list
-            .reset_with_uniform_height(count, px(PREVIEW_LINE_HEIGHT));
+            .reset_with_uniform_height(count, self.preview.line_height());
     }
 
     fn request_reload_active_document(&mut self, cx: &mut Context<Self>) {
@@ -2067,6 +2098,14 @@ impl FilesSurface {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
+        let typography_generation = crate::typography::generation(cx);
+        if self.preview.typography_generation != typography_generation {
+            self.preview.typography_generation = typography_generation;
+            // Row heights are cached per item, including virtualized rows off
+            // screen, so a code-size change leaves stale geometry behind.
+            // `remeasure` re-derives them while holding the scroll position.
+            self.preview.list.remeasure();
+        }
         let Some(active) = self.preview.active.clone() else {
             return gpui::Empty.into_any_element();
         };
@@ -2699,9 +2738,9 @@ impl FilesSurface {
                 .relative()
                 .overflow_hidden()
                 .font_family(theme.font_mono.clone())
-                .text_size(px(self.preview.editor_font_size))
+                .text_size(px(self.preview.editor_text_size()))
                 .line_height(px(
-                    (self.preview.editor_font_size + 8.5).max(PREVIEW_LINE_HEIGHT)
+                    (self.preview.editor_text_size() + 8.5).max(PREVIEW_LINE_HEIGHT)
                 ))
                 .child(super::editor::editor_element(&editor))
                 .children(overlays)
@@ -2902,6 +2941,7 @@ impl FilesSurface {
         theme: &Theme,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let theme = &theme.for_popup();
         let group: SharedString = format!("file-comment-card-{}", comment.id).into();
         let id = comment.id.clone();
         let card = crate::popover::popover_card_flush(theme)
@@ -2993,6 +3033,7 @@ impl FilesSurface {
         theme: &Theme,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let theme = &theme.for_popup();
         let card = crate::popover::popover_card_flush(theme)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
@@ -3143,16 +3184,14 @@ impl FilesSurface {
             theme.text.opacity(0.93),
             &theme,
         );
+        let row_height = self.preview.line_height();
         div()
-            .min_h(px(PREVIEW_LINE_HEIGHT))
+            .min_h(row_height)
             .flex_none()
             .flex()
             .when(word_wrap, |element| element.w_full().items_stretch())
             .when(!word_wrap, |element| {
-                element
-                    .h(px(PREVIEW_LINE_HEIGHT))
-                    .min_w_full()
-                    .items_center()
+                element.h(row_height).min_w_full().items_center()
             })
             .child(
                 div()
@@ -3179,7 +3218,10 @@ impl FilesSurface {
                     .pr(px(18.0))
                     .when(!word_wrap, |element| element.whitespace_nowrap())
                     .font_family(theme.font_mono.clone())
-                    .text_size(px(11.5))
+                    // Same source `row_height` derives from; a second reading of
+                    // the code size could drift from the geometry the glyphs
+                    // are measured against.
+                    .text_size(px(self.preview.preview_text_size()))
                     .child(gpui::StyledText::new(line.clone()).with_runs(runs)),
             )
             .into_any_element()
@@ -3390,6 +3432,49 @@ fn read_only_message(reason: Option<WorkspaceReadOnlyReason>) -> SharedString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Rendering a preview needs a window, so this asserts on `line_height`,
+    // the single source both the uniform-height hint passed to
+    // `reset_with_uniform_height` and the painted row in
+    // `render_preview_line` read.
+    #[test]
+    fn preview_rows_track_the_code_font_size_from_the_default_to_the_maximum() {
+        let default = FilePreviewState::new(false, 900, false, 12.5);
+        assert_eq!(default.line_height(), px(PREVIEW_LINE_HEIGHT));
+
+        let maximum = FilePreviewState::new(false, 900, false, 32.0);
+        assert!(maximum.line_height() > px(PREVIEW_LINE_HEIGHT));
+
+        let minimum = FilePreviewState::new(false, 900, false, 8.0);
+        assert_eq!(minimum.line_height(), px(PREVIEW_LINE_HEIGHT));
+    }
+
+    /// The regression this guards: collapsing both surfaces onto the raw
+    /// setting silently resized them on a fresh install.
+    #[test]
+    fn the_default_code_font_size_reproduces_the_historical_per_surface_sizes() {
+        let default =
+            FilePreviewState::new(false, 900, false, crate::typography::CODE_FONT_SIZE_DEFAULT);
+        assert_eq!(default.editor_text_size(), 13.0);
+        assert_eq!(default.preview_text_size(), 11.5);
+    }
+
+    #[test]
+    fn scaled_preview_sizes_keep_their_proportions_and_stay_clamped() {
+        let doubled = FilePreviewState::new(
+            false,
+            900,
+            false,
+            2.0 * crate::typography::CODE_FONT_SIZE_DEFAULT,
+        );
+        assert_eq!(doubled.editor_text_size(), 26.0);
+        assert_eq!(doubled.preview_text_size(), 23.0);
+
+        // The editor ratio is >1, so the maximum setting would overshoot.
+        let maximum = FilePreviewState::new(false, 900, false, crate::typography::FONT_SIZE_MAX);
+        assert_eq!(maximum.editor_text_size(), crate::typography::FONT_SIZE_MAX);
+        assert!(maximum.preview_text_size() < crate::typography::FONT_SIZE_MAX);
+    }
 
     #[test]
     fn tree_split_uses_the_standard_resize_geometry_and_limits() {

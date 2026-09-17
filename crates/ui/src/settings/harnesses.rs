@@ -78,6 +78,7 @@ pub struct HarnessesPage {
     title_task: Option<Task<()>>,
     title_saving: bool,
     state: Entity<AppState>,
+    scroll: widgets::PageScroll,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
     /// Which device's harnesses are shown/edited; `None` = this device (no
     /// passthrough). Retargeted by the page-header device switcher.
@@ -118,6 +119,7 @@ impl HarnessesPage {
             title_task: None,
             title_saving: false,
             state,
+            scroll: widgets::PageScroll::default(),
             harnesses: Loadable::Idle,
             target_device: None,
             device_menu_open: false,
@@ -684,6 +686,7 @@ impl HarnessesPage {
                 );
 
         if open {
+            let theme = &theme.for_popup();
             let menu = popover::popover_card(theme)
                 .w(px(220.0))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -720,7 +723,7 @@ impl HarnessesPage {
                                 div()
                                     .flex_none()
                                     .text_size(crate::typography::ui_rems(10.5))
-                                    .text_color(theme.text_muted.opacity(0.35))
+                                    .text_color(theme.text_muted)
                                     .child(SharedString::from("You")),
                             )
                         })
@@ -858,6 +861,21 @@ impl HarnessesPage {
             })
             .collect()
     }
+    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        if self.scroll.set_list_hovered(*hovered) {
+            cx.notify();
+        }
+    }
+}
+
+impl popover::ScrollRailHost for HarnessesPage {
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        self.scroll.rail_bar()
+    }
+
+    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
+        self.scroll.rail_scroll()
+    }
 }
 
 impl Render for HarnessesPage {
@@ -904,35 +922,45 @@ impl Render for HarnessesPage {
             .map(|message| widgets::error_strip(&theme, message).into_any_element());
         let switcher = self.render_device_switcher(&theme, cx);
         let titles = self.render_titles(&theme, cx);
+        let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
 
         div()
-            .id("harnesses-page")
+            .id("harnesses-page-host")
+            .relative()
             .size_full()
-            .overflow_y_scroll()
+            .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                widgets::page_column()
+                div()
+                    .id("harnesses-page")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll.scroll)
                     .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .child(widgets::page_header(&theme, "Agents", None))
-                            .child(switcher),
-                    )
-                    .child(
-                        widgets::page_subtitle(
-                            &theme,
-                            "Choose which coding agents the composer offers. The setting is per \
-                             device — switch devices in the header. Agents whose CLI isn't \
-                             installed on a device can't be enabled there.",
-                        )
-                        .max_w(px(512.0))
-                        .line_height(px(20.0)),
-                    )
-                    .children(error)
-                    .child(body)
-                    .child(titles),
+                        widgets::page_column()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(widgets::page_header(&theme, "Agents", None))
+                                    .child(switcher),
+                            )
+                            .child(
+                                widgets::page_subtitle(
+                                    &theme,
+                                    "Choose which coding agents the composer offers. The setting is per \
+                                     device — switch devices in the header. Agents whose CLI isn't \
+                                     installed on a device can't be enabled there.",
+                                )
+                                .max_w(px(512.0))
+                                .line_height(px(20.0)),
+                            )
+                            .children(error)
+                            .child(body)
+                            .child(titles),
+                    ),
             )
+            .children(scrollbar)
     }
 }

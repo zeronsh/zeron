@@ -8,6 +8,8 @@ use gpui::{
 use zeron_proto::Chat;
 use zeron_rpc::methods;
 
+use crate::popover;
+use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
@@ -18,6 +20,7 @@ pub fn archived_chats(chats: &[Chat]) -> Vec<&Chat> {
 
 pub struct ArchivedPage {
     state: Entity<AppState>,
+    scroll: widgets::PageScroll,
     error: Option<SharedString>,
     /// Chat with an in-flight unarchive (button shows working state).
     busy: Option<String>,
@@ -33,6 +36,7 @@ impl ArchivedPage {
         let observe = cx.observe(&state, |_, _, cx| cx.notify());
         Self {
             state,
+            scroll: widgets::PageScroll::default(),
             error: None,
             busy: None,
             hovered: None,
@@ -65,11 +69,26 @@ impl ArchivedPage {
         }));
         cx.notify();
     }
+
+    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        if self.scroll.set_list_hovered(*hovered) {
+            cx.notify();
+        }
+    }
+}
+
+impl popover::ScrollRailHost for ArchivedPage {
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        self.scroll.rail_bar()
+    }
+
+    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
+        self.scroll.rail_scroll()
+    }
 }
 
 impl Render for ArchivedPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        use crate::settings::widgets;
         let theme = Theme::of(cx).clone();
         let now = chrono::Utc::now();
         let (rows, device_names): (Vec<Chat>, std::collections::HashMap<String, String>) = {
@@ -280,34 +299,44 @@ impl Render for ArchivedPage {
                 .into_any_element()
         };
 
+        let scrollbar = popover::rail(self, "archived-page-scrollbar", &theme, cx);
         div()
-            .id("archived-page")
+            .id("archived-page-host")
+            .relative()
             .size_full()
-            .overflow_y_scroll()
+            .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                widgets::page_column()
-                    .child(widgets::page_header(
-                        &theme,
-                        "Archived sessions",
-                        (count > 0).then_some(count),
-                    ))
-                    .child(widgets::page_subtitle(
-                        &theme,
-                        "Hidden from the sidebar, never deleted. Unarchiving puts a session back on its device.",
-                    ))
-                    .when_some(self.error.clone(), |el, message| {
-                        el.child(
-                            widgets::error_strip(&theme, message)
-                                .id("archived-error")
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.error = None;
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    .child(body),
+                div()
+                    .id("archived-page")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll.scroll)
+                    .child(
+                        widgets::page_column()
+                            .child(widgets::page_header(
+                                &theme,
+                                "Archived sessions",
+                                (count > 0).then_some(count),
+                            ))
+                            .child(widgets::page_subtitle(
+                                &theme,
+                                "Hidden from the sidebar, never deleted. Unarchiving puts a session back on its device.",
+                            ))
+                            .when_some(self.error.clone(), |el, message| {
+                                el.child(
+                                    widgets::error_strip(&theme, message)
+                                        .id("archived-error")
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.error = None;
+                                            cx.notify();
+                                        })),
+                                )
+                            })
+                            .child(body),
+                    ),
             )
+            .children(scrollbar)
     }
 }
 

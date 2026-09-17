@@ -90,7 +90,7 @@ struct InProcessEngine {
     refresh_task: tokio::task::JoinHandle<()>,
     /// Serves this engine to other viewports over the IPC port. `None` when the
     /// port was already taken — the window still works over its own transport.
-    ipc_task: Option<tokio::task::JoinHandle<()>>,
+    ipc_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     client: RpcClient,
 }
 
@@ -106,8 +106,12 @@ impl EngineBackend for InProcessEngine {
         self.boot_task.abort();
         // Stop accepting first: a viewport must not connect midway through the
         // drain and queue work against stores that are closing.
-        if let Some(ipc) = &self.ipc_task {
+        let ipc_task = self.ipc_task.lock().await.take();
+        if let Some(ipc) = ipc_task {
             ipc.abort();
+            // `abort` only requests cancellation. Observe task completion so the
+            // listener is closed before bootstrap reports an assembly failure.
+            let _ = ipc.await;
         }
         if let Some(runtime) = self.runtime.lock().await.take() {
             runtime.shutdown().await;
@@ -362,7 +366,7 @@ impl EngineHandle {
                 runtime,
                 boot_task,
                 refresh_task,
-                ipc_task,
+                ipc_task: tokio::sync::Mutex::new(ipc_task),
                 client,
             }),
             engine_info,
@@ -443,6 +447,23 @@ impl EngineHandle {
                 tracing::warn!(%url, error = %err, "not an engine; embedding instead");
                 None
             }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_client(client: RpcClient) -> Self {
+        Self {
+            inner: Arc::new(RemoteEngine {
+                client: Arc::new(client),
+                url: "memory://test".into(),
+                lifecycle_task: tokio::sync::Mutex::new(None),
+            }),
+            engine_info: EngineInfo {
+                device_id: "local".into(),
+                workspace_scope: WorkspaceScope::Local,
+                capabilities: Vec::new(),
+            },
+            deferred_state: None,
         }
     }
 
@@ -1587,6 +1608,11 @@ impl AppState {
 
     pub fn engine(&self) -> Option<&EngineHandle> {
         self.engine.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_engine(&mut self, handle: EngineHandle) {
+        self.engine = Some(handle);
     }
 
     /// Drop every account-scoped view and subscription after its runtime has

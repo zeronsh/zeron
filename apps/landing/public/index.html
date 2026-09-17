@@ -68,6 +68,7 @@
   }
   ::selection { background: var(--purple-deep); color: #fff; }
   a { color: inherit; text-decoration: none; }
+  a:focus-visible { outline: 2px solid var(--purple); outline-offset: 4px; }
   .wrap { max-width: 1140px; margin: 0 auto; padding: 0 32px; }
 
   /* ── nav ─────────────────────────────────────────────── */
@@ -174,6 +175,8 @@
     font-size: 12.5px;
     color: var(--faint);
   }
+  .all-downloads { font-size: 13.5px; color: var(--dim); transition: color .15s; }
+  .all-downloads:hover { color: var(--ink); }
   .hero-ascii {
     justify-self: end;
     font-family: var(--mono);
@@ -600,6 +603,84 @@
     .tweet-row { overflow-x: auto; }
   }
 
+  /* ── downloads ───────────────────────────────────────── */
+  /* centered lede, then hairline rows: a lead column (audience + sub) and
+     a list of builds with a button each. z-index keeps the rows above
+     the closing section's ascii hand, which reaches up into this section */
+  .downloads { padding: 130px 0 0; position: relative; z-index: 1; }
+  .downloads .wrap { scroll-margin-top: 40px; }
+  .dl-lede { text-align: center; }
+  .dl-lede h2 {
+    font-size: clamp(24px, 3vw, 32px);
+    font-weight: 600;
+    letter-spacing: -0.025em;
+    text-wrap: balance;
+  }
+  .dl-lede .sub {
+    margin: 14px auto 0;
+    max-width: 460px;
+    font-size: 14.5px;
+    line-height: 1.65;
+    color: var(--dim);
+  }
+  .dl-rows { margin-top: 56px; border-bottom: 1px solid var(--line-soft); }
+  .dl-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+    gap: 32px;
+    padding: 44px 0;
+    border-top: 1px solid var(--line-soft);
+  }
+  .dl-lead h3 {
+    font-size: 19px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  .dl-lead p { margin-top: 8px; font-size: 14.5px; line-height: 1.6; color: var(--faint); }
+  .dl-list { list-style: none; }
+  .dl-list li {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 9px 0;
+  }
+  .dl-list li + li { border-top: 1px solid var(--line-soft); }
+  .dl-name { font-size: 14px; font-weight: 500; }
+  /* build details in the same mono caption voice as the gallery */
+  .dl-meta {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    color: var(--faint);
+    white-space: nowrap;
+  }
+  .dl-list .btn { margin-left: auto; padding: 8px 14px; font-size: 13px; }
+  .dl-list .btn.ghost[aria-disabled="true"] {
+    opacity: .4;
+    cursor: default;
+    pointer-events: none;
+  }
+  .dl-soon {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    color: var(--faint);
+  }
+  .download-foot {
+    margin-top: 24px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    flex-wrap: wrap;
+    font-size: 12.5px;
+    color: var(--faint);
+  }
+  .download-foot a { color: var(--dim); transition: color .15s; }
+  .download-foot a:hover { color: var(--ink); }
+  @media (max-width: 900px) {
+    .dl-row { grid-template-columns: 1fr; gap: 22px; padding: 34px 0; }
+  }
+
   /* ── closing ─────────────────────────────────────────── */
   .closing {
     margin: 140px 0 80px;
@@ -677,6 +758,9 @@
     .tweet-track { animation-duration: 56s; }
     .tweet-row.is-reverse .tweet-track { animation-duration: 62s; }
     .tweet { width: 300px; }
+    .downloads { padding: 84px 0 0; }
+    .dl-rows { margin-top: 36px; }
+    .dl-list li { flex-wrap: wrap; row-gap: 6px; }
     .closing { margin: 80px 0 56px; }
     .closing p { font-size: 14px; }
     .closing .cta-row { margin-top: 28px; }
@@ -703,7 +787,7 @@
         <a class="gh-icon" href="https://github.com/zeronsh/comet" aria-label="GitHub">
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
         </a>
-        <a class="btn small" id="nav-download" href="https://zeron.sh/releases/zeron-0.2.10-macos-arm64.dmg">Download</a>
+        <a class="btn small" id="nav-download" href="#downloads">Download</a>
       </div>
     </div>
   </nav>
@@ -717,8 +801,9 @@
           machines. You steer them from one window, on any device, live.
         </p>
         <div class="cta-row">
-          <a class="btn" id="hero-download" href="https://zeron.sh/releases/zeron-0.2.10-macos-arm64.dmg">Download</a>
-          <span class="cta-ver" id="ver">v0.2.10</span>
+          <a class="btn" id="hero-download" href="#downloads">Download</a>
+          <a class="all-downloads" href="#downloads">All downloads ↓</a>
+          <span class="cta-ver" id="ver">v0.2.66</span>
         </div>
         <div class="agents" aria-label="Supported agents">
           <span class="agent-icon" title="Claude Code" style="--icon: url('/assets/icons/claude-mark.svg')"></span>
@@ -727,6 +812,8 @@
           <span class="agent-icon" title="Grok" style="--icon: url('/assets/icons/grok-mark.svg')"></span>
           <span class="agent-icon" title="Hermes" style="--icon: url('/assets/icons/hermes-mark.svg')"></span>
           <span class="agent-icon" title="Pi" style="--icon: url('/assets/icons/pi-mark.svg')"></span>
+          <span class="agent-icon" title="Devin" style="--icon: url('/assets/icons/devin-mark.svg')"></span>
+          <span class="agent-icon" title="OpenCode" style="--icon: url('/assets/icons/opencode-mark.svg')"></span>
         </div>
       </div>
       <pre class="hero-ascii" aria-hidden="true">++=========+=====+++++++++++******+++++++++++++++++++++*****#############%%######***#######*#%#######****#####
@@ -1316,13 +1403,48 @@ love the ui</p>
   </section>
 
 
+  <section class="downloads" aria-labelledby="downloads-title">
+    <div class="wrap" id="downloads">
+      <div class="dl-lede">
+        <h2 id="downloads-title">Download Zeron.</h2>
+        <p class="sub">Available for macOS, Windows and Linux. iOS is on the way.</p>
+      </div>
+      <div class="dl-rows">
+        <div class="dl-row">
+          <div class="dl-lead">
+            <h3>Zeron for desktop.</h3>
+            <p>macOS, Windows and Linux.</p>
+          </div>
+          <ul class="dl-list">
+            <li><span class="dl-name">macOS</span><span class="dl-meta">apple silicon · dmg</span><a class="btn ghost" data-platform-download="macos" href="https://zeron.sh/releases/zeron-0.2.66-macos-arm64.dmg">Download</a></li>
+            <li><span class="dl-name">Windows</span><span class="dl-meta">x64 · portable zip</span><a class="btn ghost" data-platform-download="windows" href="https://zeron.sh/releases/zeron-0.2.66-windows-x86_64.zip">Download</a></li>
+            <li><span class="dl-name">Linux</span><span class="dl-meta">x64 · tar.gz</span><a class="btn ghost" data-platform-download="linux" href="https://zeron.sh/releases/zeron-0.2.66-linux-x86_64.tar.gz">Download</a></li>
+            <li><span class="dl-name">Linux</span><span class="dl-meta">arm64 · tar.gz</span><a class="btn ghost" data-platform-download="linux-arm" href="https://zeron.sh/releases/zeron-0.2.66-linux-aarch64.tar.gz">Download</a></li>
+          </ul>
+        </div>
+        <div class="dl-row">
+          <div class="dl-lead">
+            <h3>Zeron for mobile.</h3>
+            <p>iPhone and iPad.</p>
+          </div>
+          <ul class="dl-list">
+            <li><span class="dl-name">iOS</span><span class="dl-soon">coming soon</span><span class="btn ghost" role="link" aria-disabled="true">App Store ↗</span></li>
+          </ul>
+        </div>
+      </div>
+      <div class="download-foot">
+        <a href="https://github.com/zeronsh/zeron/releases/latest">Release notes and checksums ↗</a>
+      </div>
+    </div>
+  </section>
+
   <section class="closing">
     <canvas class="hand-ascii hand-down" aria-hidden="true"></canvas>
     <div class="wrap">
       <h2>Bring your agents together.</h2>
       <p>One window for every machine you own. Zeron is open source and MIT licensed.</p>
       <div class="cta-row">
-        <a class="btn" id="closing-download" href="https://zeron.sh/releases/zeron-0.2.10-macos-arm64.dmg">Download</a>
+        <a class="btn" id="closing-download" href="#downloads">Download</a>
         <a class="btn ghost" href="https://github.com/zeronsh/comet">Star on GitHub ↗</a>
       </div>
     </div>
@@ -1344,21 +1466,8 @@ love the ui</p>
     </div>
   </footer>
 
+<script defer src="/downloads.js"></script>
 <script>
-  // Keep the dmg links on the latest release (same-origin in prod; the
-  // pinned fallback href still works if this fetch fails, e.g. local dev).
-  fetch("https://zeron.sh/releases/latest.txt")
-    .then((r) => (r.ok ? r.text() : Promise.reject()))
-    .then((v) => {
-      const ver = v.trim();
-      if (!/^\d+\.\d+\.\d+$/.test(ver)) return;
-      const href = `https://zeron.sh/releases/zeron-${ver}-macos-arm64.dmg`;
-      for (const id of ["nav-download", "hero-download", "closing-download"])
-        document.getElementById(id).href = href;
-      document.getElementById("ver").textContent = `v${ver}`;
-    })
-    .catch(() => {});
-
   // Edge ascii: a slow-warping noise field mapped through a glyph density
   // ramp — organic clusters of characters hugging each page edge, dense at
   // the outside and thinning toward the content. Freezes on reduced motion.
