@@ -496,9 +496,88 @@ pub enum SidebarSort {
     Created,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowGeometry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_uuid: Option<uuid::Uuid>,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl WindowGeometry {
+    pub fn is_valid(self) -> bool {
+        [self.x, self.y, self.width, self.height]
+            .into_iter()
+            .all(f32::is_finite)
+            && self.width > 0.0
+            && self.height > 0.0
+    }
+
+    pub fn from_bounds(bounds: gpui::Bounds<gpui::Pixels>) -> Self {
+        Self {
+            display_uuid: None,
+            x: bounds.origin.x.into(),
+            y: bounds.origin.y.into(),
+            width: bounds.size.width.into(),
+            height: bounds.size.height.into(),
+        }
+    }
+
+    pub fn restore(self, displays: &[Self], primary: usize) -> Option<(usize, Self)> {
+        if !self.is_valid() {
+            return None;
+        }
+        let matched = self.display_uuid.and_then(|uuid| {
+            displays
+                .iter()
+                .position(|display| display.is_valid() && display.display_uuid == Some(uuid))
+        });
+        let index = matched
+            .or_else(|| {
+                displays
+                    .get(primary)
+                    .filter(|display| display.is_valid())
+                    .map(|_| primary)
+            })
+            .or_else(|| displays.iter().position(|display| display.is_valid()))?;
+        let display = displays[index];
+        let mut geometry = self.fit(display);
+        if self.display_uuid.is_some() && matched.is_none() {
+            geometry.x = display.x + (display.width - geometry.width) / 2.0;
+            geometry.y = display.y + (display.height - geometry.height) / 2.0;
+        }
+        geometry.display_uuid = display.display_uuid;
+        Some((index, geometry))
+    }
+
+    pub fn fit(self, display: Self) -> Self {
+        let width = self.width.max(900.0).min(display.width);
+        let height = self.height.max(600.0).min(display.height);
+        Self {
+            display_uuid: self.display_uuid,
+            x: self.x.clamp(display.x, display.x + display.width - width),
+            y: self.y.clamp(display.y, display.y + display.height - height),
+            width,
+            height,
+        }
+    }
+
+    pub fn bounds(self) -> gpui::Bounds<gpui::Pixels> {
+        gpui::Bounds::new(
+            gpui::point(gpui::px(self.x), gpui::px(self.y)),
+            gpui::size(gpui::px(self.width), gpui::px(self.height)),
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_geometry: Option<WindowGeometry>,
     /// Submit using Enter or the platform modifier plus Enter.
     pub composer_send_behavior: ComposerSendBehavior,
     pub sidebar_width: f32,
@@ -632,6 +711,7 @@ pub struct UiSettings {
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
+            window_geometry: None,
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
             sidebar_grouped: false,
@@ -1134,6 +1214,7 @@ impl UiSettings {
 
     /// Clamp widths into their legal ranges (also heals NaN to defaults).
     pub fn clamped(mut self) -> Self {
+        self.window_geometry = self.window_geometry.filter(|geometry| geometry.is_valid());
         if self.sidebar_organization == SidebarOrganization::ByProject {
             self.sidebar_organization = SidebarOrganization::InOneList;
         }
@@ -1333,6 +1414,204 @@ mod tests {
         ] {
             assert!(!loaded.session_sound_enabled(sound));
         }
+    }
+
+    #[test]
+    fn window_geometry_round_trips_and_legacy_settings_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let geometry = WindowGeometry {
+            display_uuid: None,
+            x: -1500.0,
+            y: 40.0,
+            width: 1200.0,
+            height: 800.0,
+        };
+        let settings = UiSettings {
+            window_geometry: Some(geometry),
+            ..Default::default()
+        };
+        settings.save(dir.path()).unwrap();
+        assert_eq!(UiSettings::load(dir.path()).window_geometry, Some(geometry));
+        assert_eq!(WindowGeometry::from_bounds(geometry.bounds()), geometry);
+        let legacy: UiSettings = serde_json::from_str(r#"{"sidebarWidth":300}"#).unwrap();
+        assert_eq!(legacy.window_geometry, None);
+        assert_eq!(legacy.sidebar_width, 300.0);
+    }
+
+    #[test]
+    fn window_geometry_restores_display_identity_with_overlapping_local_coordinates() {
+        let primary = WindowGeometry {
+            display_uuid: Some(uuid::Uuid::from_u128(1)),
+            x: 0.0,
+            y: 25.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+        let secondary = WindowGeometry {
+            display_uuid: Some(uuid::Uuid::from_u128(2)),
+            ..primary
+        };
+        let saved = WindowGeometry {
+            x: 100.0,
+            y: 80.0,
+            width: 1200.0,
+            height: 800.0,
+            ..secondary
+        };
+        let encoded = serde_json::to_string(&saved).unwrap();
+        let saved: WindowGeometry = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(saved.restore(&[primary, secondary], 0), Some((1, saved)));
+        assert_eq!(saved.restore(&[secondary, primary], 1), Some((0, saved)));
+    }
+
+    #[test]
+    fn window_geometry_recenters_when_saved_display_is_disconnected() {
+        let primary = WindowGeometry {
+            display_uuid: Some(uuid::Uuid::from_u128(1)),
+            x: 0.0,
+            y: 25.0,
+            width: 1440.0,
+            height: 900.0,
+        };
+        let saved = WindowGeometry {
+            display_uuid: Some(uuid::Uuid::from_u128(2)),
+            x: 500.0,
+            y: 300.0,
+            width: 1200.0,
+            height: 800.0,
+        };
+        assert_eq!(
+            saved.restore(&[primary], 0),
+            Some((
+                0,
+                WindowGeometry {
+                    display_uuid: primary.display_uuid,
+                    x: 120.0,
+                    y: 75.0,
+                    ..saved
+                }
+            ))
+        );
+        assert_eq!(saved.restore(&[], 0), None);
+        let oversized = WindowGeometry {
+            width: 2400.0,
+            height: 1600.0,
+            ..saved
+        };
+        assert_eq!(oversized.restore(&[primary], 0), Some((0, primary)));
+    }
+
+    #[test]
+    fn window_geometry_without_display_identity_uses_primary() {
+        let saved: WindowGeometry =
+            serde_json::from_str(r#"{"x":100,"y":80,"width":1200,"height":800}"#).unwrap();
+        assert_eq!(saved.display_uuid, None);
+        let display = WindowGeometry {
+            display_uuid: Some(uuid::Uuid::from_u128(1)),
+            x: 0.0,
+            y: 25.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+        assert_eq!(
+            saved.restore(&[display, display], 1),
+            Some((
+                1,
+                WindowGeometry {
+                    display_uuid: display.display_uuid,
+                    ..saved
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn window_geometry_rejects_invalid_values_without_resetting_settings() {
+        let valid = WindowGeometry {
+            display_uuid: None,
+            x: 40.0,
+            y: 50.0,
+            width: 1200.0,
+            height: 800.0,
+        };
+        for geometry in [
+            WindowGeometry {
+                x: f32::NAN,
+                ..valid
+            },
+            WindowGeometry {
+                y: f32::INFINITY,
+                ..valid
+            },
+            WindowGeometry {
+                width: 0.0,
+                ..valid
+            },
+            WindowGeometry {
+                height: -1.0,
+                ..valid
+            },
+        ] {
+            let settings = UiSettings {
+                window_geometry: Some(geometry),
+                sidebar_width: 300.0,
+                ..Default::default()
+            }
+            .clamped();
+            assert_eq!(settings.window_geometry, None);
+            assert_eq!(settings.sidebar_width, 300.0);
+        }
+    }
+
+    #[test]
+    fn window_geometry_preserves_position_on_negative_coordinate_display() {
+        let display = WindowGeometry {
+            display_uuid: None,
+            x: -1920.0,
+            y: -200.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+        let geometry = WindowGeometry {
+            display_uuid: None,
+            x: -1800.0,
+            y: -100.0,
+            width: 1200.0,
+            height: 800.0,
+        };
+        assert_eq!(geometry.fit(display), geometry);
+    }
+
+    #[test]
+    fn window_geometry_fits_smaller_display_and_keeps_titlebar_visible() {
+        let display = WindowGeometry {
+            display_uuid: None,
+            x: 0.0,
+            y: 25.0,
+            width: 1280.0,
+            height: 720.0,
+        };
+        let geometry = WindowGeometry {
+            display_uuid: None,
+            x: 2000.0,
+            y: -1000.0,
+            width: 2000.0,
+            height: 1500.0,
+        };
+        assert_eq!(geometry.fit(display), display);
+        let small = WindowGeometry {
+            width: 800.0,
+            height: 500.0,
+            ..display
+        };
+        assert_eq!(geometry.fit(small), small);
+        let tiny = WindowGeometry {
+            width: 100.0,
+            height: 100.0,
+            ..display
+        };
+        assert_eq!(tiny.fit(display).width, 900.0);
+        assert_eq!(tiny.fit(display).height, 600.0);
     }
 
     #[test]
@@ -1585,6 +1864,7 @@ mod tests {
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
+            window_geometry: None,
             sidebar_width: 300.0,
             sidebar_collapsed: true,
             sidebar_grouped: true,
@@ -2117,7 +2397,8 @@ mod tests {
 
     #[test]
     fn new_project_shortcut_migrates_and_persists() {
-        let mut keymap: KeymapConfig = serde_json::from_str(r#"{"newSession":"mod-alt-n"}"#).unwrap();
+        let mut keymap: KeymapConfig =
+            serde_json::from_str(r#"{"newSession":"mod-alt-n"}"#).unwrap();
         assert_eq!(keymap.get(ShortcutId::NewProject), "mod-shift-n");
         assert_eq!(keymap.get(ShortcutId::NewSession), "mod-alt-n");
         keymap.set(ShortcutId::NewProject, "mod-alt-p".into());

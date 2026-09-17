@@ -275,20 +275,69 @@ fn open_notified_chat(chat_id: String, state: &gpui::Entity<state::AppState>, cx
     }
 }
 
-/// Open the 1320×880 main window (min 900×600) with [`shell::Shell`] as the
-/// root view. Called at boot and again from `on_reopen` if the dock icon is
-/// clicked after ⌘W closed the window.
+fn restored_main_window_bounds(cx: &App) -> (Bounds<gpui::Pixels>, Option<gpui::DisplayId>) {
+    let fallback = (Bounds::centered(None, size(px(1320.), px(880.)), cx), None);
+    let Some(saved) = settings::current(cx).window_geometry else {
+        return fallback;
+    };
+    let displays = cx.displays();
+    let primary = cx
+        .primary_display()
+        .and_then(|primary| {
+            displays
+                .iter()
+                .position(|display| display.id() == primary.id())
+        })
+        .unwrap_or(0);
+    let geometries: Vec<_> = displays
+        .iter()
+        .map(|display| {
+            let mut geometry = settings::WindowGeometry::from_bounds(display.visible_bounds());
+            geometry.display_uuid = display.uuid().ok();
+            geometry
+        })
+        .collect();
+    saved
+        .restore(&geometries, primary)
+        .map_or(fallback, |(index, geometry)| {
+            (geometry.bounds(), Some(displays[index].id()))
+        })
+}
+
+fn save_main_window_geometry(window: &gpui::Window, cx: &mut App) {
+    if window.is_fullscreen() || window.is_maximized() {
+        return;
+    }
+    let WindowBounds::Windowed(bounds) = window.window_bounds() else {
+        return;
+    };
+    let mut geometry = settings::WindowGeometry::from_bounds(bounds);
+    geometry.display_uuid = window.display(cx).and_then(|display| display.uuid().ok());
+    if geometry.is_valid() {
+        settings::update(settings::SavePolicy::Debounced, cx, |settings| {
+            settings.window_geometry = Some(geometry);
+        });
+    }
+}
+
+fn observe_main_window_geometry<T: 'static>(window: &mut gpui::Window, cx: &gpui::Context<T>) {
+    cx.observe_window_bounds(window, |_, window, cx| {
+        save_main_window_geometry(window, cx);
+    })
+    .detach();
+}
+
 fn open_main_window(
     state: gpui::Entity<state::AppState>,
     boot: EngineBootConfig,
     cx: &mut App,
 ) -> gpui::WindowHandle<shell::Shell> {
-    // zeron window geometry: 1320×880, min 900×600 (feature-inventory §1.1).
-    let bounds = Bounds::centered(None, size(px(1320.), px(880.)), cx);
+    let (bounds, display_id) = restored_main_window_bounds(cx);
     let handle = cx
         .open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                display_id,
                 window_min_size: Some(size(px(900.), px(600.))),
                 // `kind` is deliberately left at its default `WindowKind::Normal`
                 // (gpui platform.rs WindowOptions::default), which on macOS maps
@@ -344,12 +393,21 @@ fn open_main_window(
                 // the subscription lives as long as the window does, and the window
                 // owns nothing that would drop it early.
                 appearance::observe_window(window, cx).detach();
-                let shell = cx.new(|cx| shell::Shell::new(state, boot, cx));
+                let shell = cx.new(|cx| {
+                    observe_main_window_geometry(window, cx);
+                    shell::Shell::new(state, boot, cx)
+                });
+                save_main_window_geometry(window, cx);
                 let weak_shell = shell.downgrade();
-                window.on_window_should_close(cx, move |_, cx| {
-                    weak_shell
+                window.on_window_should_close(cx, move |window, cx| {
+                    let should_close = weak_shell
                         .update(cx, |shell, cx| shell.prepare_window_close(cx))
-                        .unwrap_or(true)
+                        .unwrap_or(true);
+                    if should_close {
+                        save_main_window_geometry(window, cx);
+                        settings::flush(cx);
+                    }
+                    should_close
                 });
                 shell
             },
