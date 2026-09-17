@@ -4517,6 +4517,96 @@ mod tests {
         );
     }
 
+    /// the pinned 1.1.1 server fetches a signed-in account's flash list
+    /// dynamically, so a newer flagship than the static catalog knows about can
+    /// arrive on the wire; it has to reach the picker on its own merits rather
+    /// than be filtered down to the ids we happen to have curated.
+    #[test]
+    fn antigravity_surfaces_a_newer_flash_the_live_catalog_advertises() {
+        let live = json!({
+            "configOptions": [{
+                "id": "model",
+                "category": "model",
+                "type": "select",
+                "options": [
+                    {"value": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash (High)"},
+                    {"value": "gemini-3.8-flash-medium", "name": "Gemini 3.8 Flash (Medium)"},
+                    {"value": "gemini-3.8-flash-low", "name": "Gemini 3.8 Flash (Low)"},
+                    {"value": "gemini-3.7-flash-high", "name": "Gemini 3.7 Flash (High)"},
+                    {"value": "gemini-3.7-flash-medium", "name": "Gemini 3.7 Flash (Medium)"},
+                    {"value": "gemini-3.7-flash-low", "name": "Gemini 3.7 Flash (Low)"},
+                    {"value": "gemini-pro-agent", "name": "Gemini 3.1 Pro (High)"},
+                    {"value": "gemini-3.1-pro-low", "name": "Gemini 3.1 Pro (Low)"}
+                ]
+            }]
+        });
+        let models = models_from_session(&live, &(antigravity_spec().models)());
+        let rows: Vec<(String, String, Vec<ReasoningLevel>)> = group_effort_variants(models)
+            .into_iter()
+            .map(|m| (m.id, m.label, m.reasoning_levels))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "gemini-3.8-flash".into(),
+                    "Gemini 3.8 Flash".into(),
+                    vec![
+                        ReasoningLevel::Low,
+                        ReasoningLevel::Medium,
+                        ReasoningLevel::High
+                    ]
+                ),
+                (
+                    "gemini-3.7-flash".into(),
+                    "Gemini 3.7 Flash".into(),
+                    vec![
+                        ReasoningLevel::Low,
+                        ReasoningLevel::Medium,
+                        ReasoningLevel::High
+                    ]
+                ),
+                (
+                    "gemini-3.1-pro".into(),
+                    "Gemini 3.1 Pro".into(),
+                    vec![ReasoningLevel::Low, ReasoningLevel::High]
+                ),
+            ]
+        );
+        assert_eq!(
+            effort_variant_id(&live, "gemini-3.8-flash", Some(ReasoningLevel::Medium)),
+            "gemini-3.8-flash-medium"
+        );
+    }
+
+    /// the offline list is what an unreachable or signed-out server falls back
+    /// to, so it stays at what the pinned 1.1.1 archive itself bundles. a newer
+    /// flash belongs here only once that pin advertises it.
+    #[test]
+    fn antigravity_static_fallback_stays_on_the_pinned_servers_models() {
+        let fallback: Vec<(String, Vec<ReasoningLevel>)> = (antigravity_spec().models)()
+            .into_iter()
+            .map(|m| (m.id, m.reasoning_levels))
+            .collect();
+        assert_eq!(
+            fallback,
+            vec![
+                (
+                    "gemini-3.7-flash".into(),
+                    vec![
+                        ReasoningLevel::Low,
+                        ReasoningLevel::Medium,
+                        ReasoningLevel::High
+                    ]
+                ),
+                (
+                    "gemini-3.1-pro".into(),
+                    vec![ReasoningLevel::Low, ReasoningLevel::High]
+                ),
+            ]
+        );
+    }
+
     #[test]
     fn effort_variant_id_resolves_the_advertised_id_for_each_level() {
         let catalog = antigravity_signed_in_catalog();
