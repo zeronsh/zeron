@@ -34,7 +34,7 @@ mod subagent;
 mod subagent_devin;
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -528,20 +528,94 @@ fn antigravity_skill_dirs() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-fn antigravity_home() -> Option<PathBuf> {
-    std::env::var_os("GEMINI_HOME")
+fn user_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".gemini")))
 }
 
-fn configured_antigravity_auth_method() -> Result<Option<String>, HarnessError> {
+/// python's `os.path.expanduser`, which is how the pinned server resolves
+/// `GEMINI_HOME`: without this, a home-relative value stays literal here and we
+/// read a different settings file than the server writes. `~user` needs the
+/// passwd database python consults, so it is left as-is exactly like python
+/// does when that lookup fails.
+fn expand_user(path: &Path, home: Option<&Path>) -> PathBuf {
+    let Some(rest) = path.to_str().and_then(|path| path.strip_prefix('~')) else {
+        return path.to_path_buf();
+    };
+    let rest = match rest {
+        "" => "",
+        rest if rest.starts_with(['/', '\\']) => rest.trim_start_matches(['/', '\\']),
+        _ => return path.to_path_buf(),
+    };
+    let Some(home) = home else {
+        return path.to_path_buf();
+    };
+    if rest.is_empty() {
+        home.to_path_buf()
+    } else {
+        home.join(rest)
+    }
+}
+
+fn antigravity_home() -> Option<PathBuf> {
+    let home = user_home();
+    match std::env::var_os("GEMINI_HOME").filter(|home| !home.is_empty()) {
+        Some(gemini_home) => Some(expand_user(Path::new(&gemini_home), home.as_deref())),
+        None => home.map(|home| home.join(".gemini")),
+    }
+}
+
+/// the pinned server keeps accepting `vertex-ai` for the method its
+/// `initialize` advertises as `agent-platform`, so a settings file saved under
+/// the old name still has to resolve.
+const ANTIGRAVITY_AUTH_ALIASES: &[(&str, &str)] = &[("vertex-ai", "agent-platform")];
+
+struct ConfiguredAuthMethod {
+    /// what the settings file holds, so an error names what the user wrote.
+    configured: String,
+    /// the id `initialize` advertises for it.
+    canonical: String,
+}
+
+impl ConfiguredAuthMethod {
+    fn new(configured: String) -> Self {
+        let canonical = ANTIGRAVITY_AUTH_ALIASES
+            .iter()
+            .find(|(alias, _)| *alias == configured)
+            .map_or(configured.as_str(), |(_, canonical)| canonical)
+            .to_owned();
+        Self {
+            configured,
+            canonical,
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct AntigravitySettings {
+    #[serde(default)]
+    auth: Option<AntigravityAuthSettings>,
+}
+
+#[derive(serde::Deserialize)]
+struct AntigravityAuthSettings {
+    #[serde(default, rename = "type")]
+    method: Option<String>,
+}
+
+fn configured_antigravity_auth_method() -> Result<Option<ConfiguredAuthMethod>, HarnessError> {
     let Some(path) =
         antigravity_home().map(|home| home.join("antigravity-acp").join("settings.json"))
     else {
         return Ok(None);
     };
-    let settings = match std::fs::read_to_string(&path) {
+    configured_auth_method_in(&path)
+}
+
+fn configured_auth_method_in(path: &Path) -> Result<Option<ConfiguredAuthMethod>, HarnessError> {
+    let settings = match std::fs::read_to_string(path) {
         Ok(settings) => settings,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
@@ -551,23 +625,23 @@ fn configured_antigravity_auth_method() -> Result<Option<String>, HarnessError> 
             )));
         }
     };
-    let settings: Value = serde_json::from_str(&settings).map_err(|error| {
+    let settings: AntigravitySettings = deser_hjson::from_str(&settings).map_err(|error| {
         HarnessError::Protocol(format!(
             "could not parse Antigravity auth settings at {}: {error}",
             path.display()
         ))
     })?;
     Ok(settings
-        .pointer("/auth/type")
-        .and_then(Value::as_str)
+        .auth
+        .and_then(|auth| auth.method)
         .filter(|method| !method.is_empty())
-        .map(str::to_owned))
+        .map(ConfiguredAuthMethod::new))
 }
 
 fn sign_in_auth_method(
     initialized: &Value,
     default_method: &str,
-    configured_method: Option<&str>,
+    configured_method: Option<&ConfiguredAuthMethod>,
 ) -> Result<String, HarnessError> {
     let available: Vec<&str> = initialized
         .get("authMethods")
@@ -577,17 +651,16 @@ fn sign_in_auth_method(
         .iter()
         .filter_map(|method| method.get("id").and_then(Value::as_str))
         .collect();
-    let selected = configured_method.unwrap_or(default_method);
+    let selected = configured_method.map_or(default_method, |method| method.canonical.as_str());
     if available.contains(&selected) {
         return Ok(selected.to_owned());
     }
-    let source = if configured_method.is_some() {
-        "configured"
-    } else {
-        "default"
+    let (source, named) = match configured_method {
+        Some(method) => ("configured", method.configured.as_str()),
+        None => ("default", default_method),
     };
     Err(HarnessError::Protocol(format!(
-        "Antigravity's {source} auth method {selected} is not advertised by the server; available methods: {}",
+        "Antigravity's {source} auth method {named} is not advertised by the server; available methods: {}",
         available.join(", ")
     )))
 }
@@ -986,7 +1059,7 @@ impl AcpHarness {
                 .request("initialize", initialize_params(self.spec.id))
                 .await?;
             let method =
-                sign_in_auth_method(&initialized, default_method, configured_method.as_deref())?;
+                sign_in_auth_method(&initialized, default_method, configured_method.as_ref())?;
             request_draining(
                 &client,
                 &mut incoming,
@@ -3789,18 +3862,36 @@ async fn run_session(session: Session) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn antigravity_sign_in_preserves_an_advertised_configured_method() {
-        let initialized = json!({
+    fn all_antigravity_auth_methods() -> Value {
+        json!({
             "authMethods": [
                 {"id": "oauth-personal"},
                 {"id": "oauth-business"},
                 {"id": "agent-platform"},
                 {"id": "gemini-api-key"}
             ]
-        });
+        })
+    }
+
+    fn settings_holding(body: &str) -> (tempfile::TempDir, PathBuf) {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("antigravity-acp");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, body).unwrap();
+        (home, path)
+    }
+
+    #[test]
+    fn antigravity_sign_in_preserves_an_advertised_configured_method() {
+        let initialized = all_antigravity_auth_methods();
         assert_eq!(
-            sign_in_auth_method(&initialized, "oauth-personal", Some("oauth-business")).unwrap(),
+            sign_in_auth_method(
+                &initialized,
+                "oauth-personal",
+                Some(&ConfiguredAuthMethod::new("oauth-business".into()))
+            )
+            .unwrap(),
             "oauth-business"
         );
         assert_eq!(
@@ -3814,13 +3905,128 @@ mod tests {
         let initialized = json!({
             "authMethods": [{"id": "oauth-personal"}]
         });
-        let error = sign_in_auth_method(&initialized, "oauth-personal", Some("oauth-business"))
-            .unwrap_err();
+        let error = sign_in_auth_method(
+            &initialized,
+            "oauth-personal",
+            Some(&ConfiguredAuthMethod::new("oauth-business".into())),
+        )
+        .unwrap_err();
         assert!(
             error
                 .to_string()
                 .contains("configured auth method oauth-business")
         );
+    }
+
+    #[test]
+    fn antigravity_sign_in_resolves_the_vertex_ai_alias() {
+        assert_eq!(
+            sign_in_auth_method(
+                &all_antigravity_auth_methods(),
+                "oauth-personal",
+                Some(&ConfiguredAuthMethod::new("vertex-ai".into()))
+            )
+            .unwrap(),
+            "agent-platform"
+        );
+    }
+
+    #[test]
+    fn antigravity_sign_in_still_refuses_an_unknown_configured_method() {
+        let error = sign_in_auth_method(
+            &all_antigravity_auth_methods(),
+            "oauth-personal",
+            Some(&ConfiguredAuthMethod::new("totally-made-up".into())),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("configured auth method totally-made-up")
+        );
+    }
+
+    #[test]
+    fn antigravity_settings_reader_accepts_plain_json() {
+        let (_home, path) = settings_holding(r#"{"auth": {"type": "oauth-business"}}"#);
+        assert_eq!(
+            configured_auth_method_in(&path)
+                .unwrap()
+                .unwrap()
+                .configured,
+            "oauth-business"
+        );
+    }
+
+    #[test]
+    fn antigravity_settings_reader_accepts_hjson() {
+        let (_home, path) = settings_holding(
+            "{\n  // the account this machine signs in with\n  auth: {\n    type: gemini-api-key\n  }\n}\n",
+        );
+        let method = configured_auth_method_in(&path).unwrap().unwrap();
+        assert_eq!(method.configured, "gemini-api-key");
+        assert_eq!(method.canonical, "gemini-api-key");
+    }
+
+    #[test]
+    fn antigravity_settings_reader_canonicalizes_vertex_ai() {
+        let (_home, path) = settings_holding(r#"{"auth": {"type": "vertex-ai"}}"#);
+        let method = configured_auth_method_in(&path).unwrap().unwrap();
+        assert_eq!(method.configured, "vertex-ai");
+        assert_eq!(method.canonical, "agent-platform");
+    }
+
+    #[test]
+    fn antigravity_settings_reader_reports_no_method_when_unset() {
+        let (_home, empty) = settings_holding("{}");
+        assert!(configured_auth_method_in(&empty).unwrap().is_none());
+
+        let (_home, blank) = settings_holding(r#"{"auth": {"type": ""}}"#);
+        assert!(configured_auth_method_in(&blank).unwrap().is_none());
+
+        let (missing, _) = settings_holding("{}");
+        let absent = missing.path().join("nowhere").join("settings.json");
+        assert!(configured_auth_method_in(&absent).unwrap().is_none());
+    }
+
+    #[test]
+    fn antigravity_home_expands_a_home_relative_gemini_home() {
+        let home = tempfile::tempdir().unwrap();
+        let expanded = expand_user(Path::new("~/gemini-home"), Some(home.path()));
+        assert_eq!(expanded, home.path().join("gemini-home"));
+
+        assert_eq!(expand_user(Path::new("~"), Some(home.path())), home.path());
+        assert_eq!(
+            expand_user(Path::new("/absolute/gemini"), Some(home.path())),
+            Path::new("/absolute/gemini")
+        );
+        // `~user` needs the passwd lookup python falls back on, so it stays literal.
+        assert_eq!(
+            expand_user(Path::new("~someone/gemini"), Some(home.path())),
+            Path::new("~someone/gemini")
+        );
+        assert_eq!(
+            expand_user(Path::new("~/gemini"), None),
+            Path::new("~/gemini")
+        );
+    }
+
+    #[test]
+    fn antigravity_home_relative_settings_still_resolve_the_configured_method() {
+        let home = tempfile::tempdir().unwrap();
+        let gemini_home = expand_user(Path::new("~/.gemini"), Some(home.path()));
+        let dir = gemini_home.join("antigravity-acp");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"auth": {"type": "oauth-business"}}"#,
+        )
+        .unwrap();
+
+        let method = configured_auth_method_in(&dir.join("settings.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(method.canonical, "oauth-business");
     }
 
     #[test]

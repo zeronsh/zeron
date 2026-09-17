@@ -25,6 +25,7 @@ futures.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+deser-hjson.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
