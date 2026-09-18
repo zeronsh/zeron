@@ -1591,13 +1591,8 @@ pub struct Shell {
     /// Short debounce that aggregates providers finishing the same check at
     /// slightly different times into one banner.
     harness_update_banner_task: Option<Task<()>>,
-    /// Direct action launched from the Home update card. The status watch owns
-    /// visible progress, so this task only keeps the RPC request alive.
-    harness_update_task: Option<Task<()>>,
-    harness_update_watch: Option<Task<()>>,
-    harness_update_target: Option<(String, bool, bool)>,
-    harness_update_rows: Vec<zeron_proto::HarnessUpdateStatus>,
-    harness_update_connected: bool,
+    /// Independent watches retain device identity across selection changes.
+    harness_update_devices: std::collections::BTreeMap<String, harness_updates::DeviceUpdates>,
     harness_update_expanded: bool,
     harness_update_transition: Option<WidthTween>,
     harness_update_geometry: [Option<WidthTween>; 2],
@@ -1973,11 +1968,7 @@ impl Shell {
             attention_sound_gate: Default::default(),
             harness_update_seen: std::collections::HashSet::new(),
             harness_update_banner_task: None,
-            harness_update_task: None,
-            harness_update_watch: None,
-            harness_update_target: None,
-            harness_update_rows: Vec::new(),
-            harness_update_connected: false,
+            harness_update_devices: Default::default(),
             harness_update_expanded: false,
             harness_update_transition: None,
             harness_update_geometry: [None; 2],
