@@ -457,13 +457,21 @@ final class SessionStore {
                             continuationOf: m["continuationOf"]?.stringValue)
     }
 
-    nonisolated private static func partFrom(_ value: LoroValue) -> MessagePart? {
+    nonisolated static func partFrom(_ value: LoroValue) -> MessagePart? {
         guard let m = value.mapValue,
               let id = m["id"]?.stringValue,
               let kind = m["kind"]?.stringValue else { return nil }
         switch kind {
         case "text":
             return .text(id: id, text: m["text"]?.stringValue ?? "")
+        case "image":
+            let reference = GeneratedImageReference(path: m["path"]?.stringValue ?? "",
+                                                    name: m["name"]?.stringValue ?? "",
+                                                    mimeType: m["mimeType"]?.stringValue ?? "")
+            guard reference.isValid else {
+                return .error(id: id, message: "Generated image unavailable")
+            }
+            return .image(id: id, reference: reference)
         case "tool":
             guard let callMap = m["call"]?.mapValue else { return nil }
             let tag = callMap["kind"]?.stringValue ?? "unknown"

@@ -38,6 +38,9 @@ struct FakeOpencode {
     /// (the no-replay bus makes prompting before the subscription a real
     /// event-loss race — observed live on fast-failing turns).
     first_prompt_had_subscriber: Arc<Mutex<Option<bool>>>,
+    /// Leading 500s to answer `POST /session` with (the opencode
+    /// lazy-migration crash class: first access 500s, retry succeeds).
+    fail_session_creates: Arc<Mutex<u32>>,
 }
 
 impl FakeOpencode {
@@ -52,6 +55,7 @@ impl FakeOpencode {
             posts: Arc::new(Mutex::new(Vec::new())),
             providers: Arc::new(Mutex::new(json!({ "all": [], "default": {} }))),
             first_prompt_had_subscriber: Arc::new(Mutex::new(None)),
+            fail_session_creates: Arc::new(Mutex::new(0)),
         };
         let accept = fake.clone();
         tokio::spawn(async move {
@@ -199,7 +203,24 @@ impl FakeOpencode {
                 "200 OK",
                 json!([{ "name": "init", "description": "Create AGENTS.md" }]),
             ),
-            ("POST", "/session") => ("200 OK", json!({ "id": "ses_test" })),
+            ("POST", "/session") => {
+                let mut fails = self.fail_session_creates.lock().unwrap();
+                if *fails > 0 {
+                    *fails -= 1;
+                    (
+                        "500 Internal Server Error",
+                        json!({
+                            "name": "UnknownError",
+                            "data": {
+                                "message": "Unexpected server error. Check server logs for details.",
+                                "ref": "err_test",
+                            },
+                        }),
+                    )
+                } else {
+                    ("200 OK", json!({ "id": "ses_test" }))
+                }
+            }
             ("GET", "/session/ses_resume") => ("200 OK", json!({ "id": "ses_resume" })),
             ("GET", p) if p.starts_with("/session/") => ("404 Not Found", json!({})),
             ("POST", p) if p.ends_with("/prompt_async") => ("204 No Content", json!({})),
@@ -400,6 +421,49 @@ async fn thinking_streams_and_the_turn_settles_only_on_idle() {
             session_id: Some(sid),
             ..
         }) if sid == "ses_test"
+    ));
+}
+
+#[tokio::test]
+async fn session_create_retries_once_through_the_lazy_migration_500() {
+    // opencode 1.18.x's first directory-scoped request can 500 inside
+    // Project.migrateProjectId while still committing the project row, so
+    // the retried create succeeds — the turn must not die (field report:
+    // `POST /session: 500 UnknownError`, ref-keyed `no such column:
+    // project_id` in the server log).
+    let fake = FakeOpencode::start().await;
+    *fake.fail_session_creates.lock().unwrap() = 1;
+    let (controls, _steer, _token) = controls();
+    let mut stream = harness(&fake)
+        .run(request("hi"), controls)
+        .await
+        .expect("run starts");
+
+    let started = next_event(&mut stream).await;
+    assert!(matches!(
+        &started,
+        AgentEvent::SessionStarted { session_id, .. } if session_id == "ses_test"
+    ));
+    let commands = next_event(&mut stream).await;
+    assert!(matches!(&commands, AgentEvent::AvailableCommands { .. }));
+
+    // Exactly one retry: the 500 must not surface as a chip or a dead turn.
+    let creates = wait_posts(&fake, "/session", 2).await;
+    assert_eq!(creates.len(), 2);
+    assistant_message(&fake, "ses_test", "msg_1");
+    idle(&fake, "ses_test");
+    let events = drain_to_done(&mut stream).await;
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, AgentEvent::Error { .. }))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
     ));
 }
 
@@ -871,4 +935,63 @@ async fn models_discover_from_the_provider_catalog() {
     // Commands were primed off the same probe.
     let commands = harness.commands().await.expect("commands");
     assert_eq!(commands[0].name, "init");
+}
+
+#[tokio::test]
+async fn models_refresh_large_provider_catalogs_and_recover_after_disconnect() {
+    let fake = FakeOpencode::start().await;
+    let harness = harness(&fake);
+    let models: serde_json::Map<String, Value> = (0..512)
+        .map(|i| (format!("model-{i}"), json!({"name": "x".repeat(2048)})))
+        .collect();
+    let catalog = json!({
+        "all": [{"id": "provider", "models": models}],
+        "connected": ["provider"],
+    });
+    fake.set_providers(catalog.clone());
+    assert_eq!(harness.models().await.unwrap().len(), 512);
+
+    fake.set_providers(json!({"all": [], "connected": []}));
+    assert!(
+        harness.models().await.is_err(),
+        "must not return the old account's catalog"
+    );
+
+    fake.set_providers(json!({
+        "all": [{"id": "new-account", "models": {"fresh": {"name": "Fresh"}}}],
+        "connected": ["new-account"],
+    }));
+    let refreshed = harness.models().await.unwrap();
+    assert_eq!(refreshed.len(), 1);
+    assert_eq!(refreshed[0].id, "new-account/fresh");
+}
+
+#[tokio::test]
+async fn repeated_session_create_failure_stops_after_one_retry() {
+    let fake = FakeOpencode::start().await;
+    *fake.fail_session_creates.lock().unwrap() = 10;
+    let (controls, _, _) = controls();
+    let mut stream = harness(&fake).run(request("hi"), controls).await.unwrap();
+    let events = drain_to_done(&mut stream).await;
+    assert_eq!(
+        fake.posts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(path, _)| path == "/session")
+            .count(),
+        2
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SessionStarted { .. }))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            ..
+        })
+    ));
 }

@@ -18,6 +18,19 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
 }
 
+/// Synchronous command/doc callbacks still need commit-before-send semantics.
+/// Relinquish a multithread runtime's core BEFORE either SQLite or its mutex
+/// can block; moving only the snapshot writer leaves these contenders fatal.
+fn store_blocking<T>(f: impl FnOnce() -> T) -> T {
+    if tokio::runtime::Handle::try_current()
+        .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+    {
+        tokio::task::block_in_place(f)
+    } else {
+        f()
+    }
+}
+
 /// Ordered, append-only migrations. Each entry runs once inside a transaction;
 /// `schema_migrations` records what has been applied.
 const MIGRATIONS: &[&str] = &[
@@ -48,6 +61,9 @@ const MIGRATIONS: &[&str] = &[
      ) STRICT;
      CREATE INDEX chat_outbox_doc ON chat_outbox(doc_id,ordinal);
      CREATE TABLE chat_outbox_initialized (doc_id TEXT PRIMARY KEY) STRICT;",
+    // Older cursors may have advanced over parked imports. Trust only writes
+    // made by the causal-aware persister, not every legacy epoch-2 snapshot.
+    "ALTER TABLE snapshots ADD COLUMN cursor_verified INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// SQLite-backed store under a data directory (`{data_dir}/docs.sqlite3`).
@@ -58,6 +74,8 @@ const MIGRATIONS: &[&str] = &[
 pub struct DocsStore {
     conn: Mutex<Connection>,
     failed_publications: Mutex<HashSet<String>>,
+    /// Snapshot jobs wait here asynchronously before entering the blocking pool.
+    pub snapshot_writer: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl DocsStore {
@@ -73,11 +91,21 @@ impl DocsStore {
         Ok(Self {
             conn: Mutex::new(conn),
             failed_publications: Mutex::new(HashSet::new()),
+            snapshot_writer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
     /// Insert before sending. Stable IDs make crash-after-ACK replay idempotent.
     pub fn enqueue_chat_update(
+        &self,
+        doc_id: &str,
+        batch_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), StoreError> {
+        store_blocking(|| self.enqueue_chat_update_blocking(doc_id, batch_id, bytes))
+    }
+
+    fn enqueue_chat_update_blocking(
         &self,
         doc_id: &str,
         batch_id: &str,
@@ -98,6 +126,13 @@ impl DocsStore {
     }
 
     pub fn pending_chat_updates(&self, doc_id: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+        store_blocking(|| self.pending_chat_updates_blocking(doc_id))
+    }
+
+    fn pending_chat_updates_blocking(
+        &self,
+        doc_id: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
         let conn = self.conn();
         let mut stmt = conn
             .prepare("SELECT batch_id,bytes FROM chat_outbox WHERE doc_id=?1 ORDER BY ordinal")?;
@@ -107,6 +142,10 @@ impl DocsStore {
     }
 
     pub fn reject_chat_update(&self, doc_id: &str, batch_id: &str) -> Result<(), StoreError> {
+        store_blocking(|| self.reject_chat_update_blocking(doc_id, batch_id))
+    }
+
+    fn reject_chat_update_blocking(&self, doc_id: &str, batch_id: &str) -> Result<(), StoreError> {
         self.conn().execute(
             "UPDATE chat_outbox SET needs_checkpoint=1 WHERE doc_id=?1 AND batch_id=?2",
             params![doc_id, batch_id],
@@ -118,6 +157,13 @@ impl DocsStore {
         &self,
         doc_id: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+        store_blocking(|| self.rejected_chat_updates_blocking(doc_id))
+    }
+
+    fn rejected_chat_updates_blocking(
+        &self,
+        doc_id: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
         let conn = self.conn();
         let mut stmt = conn.prepare("SELECT batch_id,bytes FROM chat_outbox WHERE doc_id=?1 AND needs_checkpoint=1 ORDER BY ordinal")?;
         Ok(stmt
@@ -126,6 +172,14 @@ impl DocsStore {
     }
 
     pub fn acknowledge_chat_update(&self, doc_id: &str, batch_id: &str) -> Result<(), StoreError> {
+        store_blocking(|| self.acknowledge_chat_update_blocking(doc_id, batch_id))
+    }
+
+    fn acknowledge_chat_update_blocking(
+        &self,
+        doc_id: &str,
+        batch_id: &str,
+    ) -> Result<(), StoreError> {
         self.conn().execute(
             "DELETE FROM chat_outbox WHERE doc_id=?1 AND batch_id=?2",
             params![doc_id, batch_id],
@@ -134,6 +188,10 @@ impl DocsStore {
     }
 
     pub fn chat_outbox_initialized(&self, doc_id: &str) -> Result<bool, StoreError> {
+        store_blocking(|| self.chat_outbox_initialized_blocking(doc_id))
+    }
+
+    fn chat_outbox_initialized_blocking(&self, doc_id: &str) -> Result<bool, StoreError> {
         Ok(self
             .conn()
             .query_row(
@@ -148,6 +206,14 @@ impl DocsStore {
     /// Upgrade legacy snapshots (including orphaned local history) once. The
     /// marker and complete replay obligation commit together; never reset cursors.
     pub fn initialize_chat_outbox(
+        &self,
+        doc_id: &str,
+        updates: &[Vec<u8>],
+    ) -> Result<(), StoreError> {
+        store_blocking(|| self.initialize_chat_outbox_blocking(doc_id, updates))
+    }
+
+    fn initialize_chat_outbox_blocking(
         &self,
         doc_id: &str,
         updates: &[Vec<u8>],
@@ -172,6 +238,10 @@ impl DocsStore {
 
     /// Latest saved snapshot for `doc_id`, if any.
     pub fn load_snapshot(&self, doc_id: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        store_blocking(|| self.load_snapshot_blocking(doc_id))
+    }
+
+    fn load_snapshot_blocking(&self, doc_id: &str) -> Result<Option<Vec<u8>>, StoreError> {
         let bytes = self
             .conn()
             .query_row(
@@ -185,6 +255,10 @@ impl DocsStore {
 
     /// Save (upsert) the snapshot for `doc_id`.
     pub fn save_snapshot(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
+        store_blocking(|| self.save_snapshot_blocking(doc_id, bytes))
+    }
+
+    fn save_snapshot_blocking(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         tx.execute(
@@ -207,12 +281,22 @@ impl DocsStore {
         cursor: u64,
         epoch: u32,
     ) -> Result<(), StoreError> {
+        store_blocking(|| self.save_snapshot_with_cursor_blocking(doc_id, bytes, cursor, epoch))
+    }
+
+    fn save_snapshot_with_cursor_blocking(
+        &self,
+        doc_id: &str,
+        bytes: &[u8],
+        cursor: u64,
+        epoch: u32,
+    ) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at,
-                 cursor = excluded.cursor, epoch = excluded.epoch",
+                 cursor = excluded.cursor, epoch = excluded.epoch, cursor_verified = 0",
             params![doc_id, bytes, now_ms(), cursor as i64, epoch as i64],
         )?;
         self.invalidate_failed_publication(&tx, doc_id)?;
@@ -220,9 +304,78 @@ impl DocsStore {
         Ok(())
     }
 
+    pub fn save_verified_snapshot_with_cursor(
+        &self,
+        doc_id: &str,
+        bytes: &[u8],
+        cursor: u64,
+        epoch: u32,
+    ) -> Result<(), StoreError> {
+        store_blocking(|| {
+            self.save_verified_snapshot_with_cursor_blocking(doc_id, bytes, cursor, epoch)
+        })
+    }
+
+    fn save_verified_snapshot_with_cursor_blocking(
+        &self,
+        doc_id: &str,
+        bytes: &[u8],
+        cursor: u64,
+        epoch: u32,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch, cursor_verified) VALUES (?1, ?2, ?3, ?4, ?5, 1)
+             ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at,
+                 cursor = excluded.cursor, epoch = excluded.epoch, cursor_verified = 1",
+            params![doc_id, bytes, now_ms(), cursor as i64, epoch as i64],
+        )?;
+        self.invalidate_failed_publication(&tx, doc_id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn snapshot_cursor(&self, doc_id: &str) -> Result<u64, StoreError> {
+        store_blocking(|| {
+            Ok(self
+                .conn()
+                .query_row(
+                    "SELECT COALESCE(cursor, 0) FROM snapshots WHERE doc_id = ?1",
+                    params![doc_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .unwrap_or(0) as u64)
+        })
+    }
+
+    pub fn snapshot_cursor_verified(&self, doc_id: &str) -> Result<bool, StoreError> {
+        store_blocking(|| self.snapshot_cursor_verified_blocking(doc_id))
+    }
+
+    fn snapshot_cursor_verified_blocking(&self, doc_id: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT cursor_verified FROM snapshots WHERE doc_id = ?1",
+                params![doc_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
     /// Snapshot + chat2 cursor + epoch. Pre-migration rows (or rows written
     /// by [`Self::save_snapshot`]) read back as `(bytes, 0, 0)`.
     pub fn load_snapshot_with_cursor(
+        &self,
+        doc_id: &str,
+    ) -> Result<Option<(Vec<u8>, u64, u32)>, StoreError> {
+        store_blocking(|| self.load_snapshot_with_cursor_blocking(doc_id))
+    }
+
+    fn load_snapshot_with_cursor_blocking(
         &self,
         doc_id: &str,
     ) -> Result<Option<(Vec<u8>, u64, u32)>, StoreError> {
@@ -246,6 +399,10 @@ impl DocsStore {
     /// Delete the snapshot row for `doc_id` (destructive schema breaks: the
     /// legacy `workspace` row is dropped on open). Missing rows are a no-op.
     pub fn delete_snapshot(&self, doc_id: &str) -> Result<(), StoreError> {
+        store_blocking(|| self.delete_snapshot_blocking(doc_id))
+    }
+
+    fn delete_snapshot_blocking(&self, doc_id: &str) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM snapshots WHERE doc_id = ?1", params![doc_id])?;
@@ -260,6 +417,10 @@ impl DocsStore {
 
     /// Whether a snapshot row exists for `doc_id` — presence only, no blob read.
     pub fn has_snapshot(&self, doc_id: &str) -> Result<bool, StoreError> {
+        store_blocking(|| self.has_snapshot_blocking(doc_id))
+    }
+
+    fn has_snapshot_blocking(&self, doc_id: &str) -> Result<bool, StoreError> {
         let hit = self
             .conn()
             .query_row(
@@ -274,6 +435,10 @@ impl DocsStore {
     /// The full command ledger — profile-import reads the source's claims so
     /// imported pending commands can never re-execute under the new profile.
     pub fn processed_commands(&self) -> Result<Vec<(String, i64)>, StoreError> {
+        store_blocking(|| self.processed_commands_blocking())
+    }
+
+    fn processed_commands_blocking(&self) -> Result<Vec<(String, i64)>, StoreError> {
         let conn = self.conn();
         let mut stmt = conn.prepare("SELECT command_id, processed_at FROM processed_commands")?;
         let rows = stmt
@@ -285,6 +450,13 @@ impl DocsStore {
     /// Merge foreign ledger claims (profile import). Existing claims win;
     /// returns how many rows were newly inserted.
     pub fn import_processed_commands(&self, rows: &[(String, i64)]) -> Result<usize, StoreError> {
+        store_blocking(|| self.import_processed_commands_blocking(rows))
+    }
+
+    fn import_processed_commands_blocking(
+        &self,
+        rows: &[(String, i64)],
+    ) -> Result<usize, StoreError> {
         let mut inserted = 0;
         let conn = self.conn();
         for (command_id, processed_at) in rows {
@@ -298,6 +470,10 @@ impl DocsStore {
 
     /// Whether `command_id` has already been claimed for execution.
     pub fn is_processed(&self, command_id: &str) -> Result<bool, StoreError> {
+        store_blocking(|| self.is_processed_blocking(command_id))
+    }
+
+    fn is_processed_blocking(&self, command_id: &str) -> Result<bool, StoreError> {
         let hit = self
             .conn()
             .query_row(
@@ -313,6 +489,10 @@ impl DocsStore {
     /// a crash mid-execution must never re-run the command). Returns `true`
     /// if this call claimed it, `false` if it was already processed.
     pub fn mark_processed(&self, command_id: &str) -> Result<bool, StoreError> {
+        store_blocking(|| self.mark_processed_blocking(command_id))
+    }
+
+    fn mark_processed_blocking(&self, command_id: &str) -> Result<bool, StoreError> {
         let changed = self.conn().execute(
             "INSERT OR IGNORE INTO processed_commands (command_id, processed_at) VALUES (?1, ?2)",
             params![command_id, now_ms()],
@@ -387,6 +567,77 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn contended_connection_does_not_starve_a_two_worker_runtime() {
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let holder = store.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let holding = std::thread::spawn(move || {
+            let _connection = holder.conn();
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(600));
+        });
+        locked_rx.recv().unwrap();
+        let started = std::time::Instant::now();
+        let write = store.clone();
+        let a = tokio::spawn(async move {
+            write.save_snapshot("whale", &[0; 1024]).unwrap();
+        });
+        let read = store.clone();
+        let b = tokio::spawn(async move {
+            read.load_snapshot("registry1").unwrap();
+        });
+        // Both contenders have a chance to enter the shared connection wait.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(300),
+            "SQLite contenders monopolized both runtime workers"
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socket = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let _accepted = listener.accept().await.unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(300),
+            "network progress waited for SQLite"
+        );
+        drop(socket);
+        a.await.unwrap();
+        b.await.unwrap();
+        holding.join().unwrap();
+    }
+
+    #[test]
+    fn verified_cursor_marker_tracks_atomic_snapshot_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        store
+            .save_snapshot_with_cursor("chat", b"old", 69000, 2)
+            .unwrap();
+        assert!(!store.snapshot_cursor_verified("chat").unwrap());
+        store
+            .save_verified_snapshot_with_cursor("chat", b"safe", 69001, 2)
+            .unwrap();
+        assert!(store.snapshot_cursor_verified("chat").unwrap());
+        drop(store);
+        let store = DocsStore::open(dir.path()).unwrap();
+        assert!(store.snapshot_cursor_verified("chat").unwrap());
+        assert_eq!(
+            store.load_snapshot_with_cursor("chat").unwrap(),
+            Some((b"safe".to_vec(), 69001, 2))
+        );
+        store
+            .save_snapshot_with_cursor("chat", b"replacement", 0, 2)
+            .unwrap();
+        assert!(
+            !store.snapshot_cursor_verified("chat").unwrap(),
+            "unverified replacement invalidates trust"
+        );
+    }
 
     #[test]
     fn snapshot_roundtrip_and_overwrite() {

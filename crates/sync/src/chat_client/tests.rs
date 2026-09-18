@@ -47,9 +47,11 @@ impl BinConnector for ChanConnector {
 #[derive(Default)]
 struct RecordingSink {
     rows: Mutex<Vec<(Vec<u8>, u64)>>,
+    replay_rows: Mutex<Vec<u64>>,
     checkpoints: Mutex<Vec<(Vec<u8>, u64)>>,
     cursor_advances: Mutex<Vec<u64>>,
     frontier_contained: std::sync::atomic::AtomicBool,
+    verified_cursor: std::sync::atomic::AtomicBool,
     pending_until_checkpoint: std::sync::atomic::AtomicBool,
     /// Global apply order across rows and checkpoints — the overlap test
     /// pins "checkpoint imports before any row that buffered during it".
@@ -57,6 +59,15 @@ struct RecordingSink {
 }
 
 impl ChatDocSink for RecordingSink {
+    fn cursor_is_verified(&self) -> bool {
+        self.verified_cursor
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn apply_replay_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
+        lock(&self.replay_rows).push(cursor);
+        self.apply_row(bytes, cursor)
+    }
     fn apply_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
         if self
             .pending_until_checkpoint
@@ -101,14 +112,10 @@ impl CheckpointFetcher for FixedFetcher {
 // ── server-side script helpers ──────────────────────────────────────────────
 
 async fn expect_kind(end: &mut ServerEnd, kind: u8) -> wire::WireFrame {
-    loop {
-        let bytes = end.rx.recv().await.expect("client hung up");
-        let frame = decode(&bytes).expect("client sent undecodable frame");
-        if frame.kind == kind {
-            return frame;
-        }
-        panic!("expected frame {kind:#x}, got {:#x}", frame.kind);
-    }
+    let bytes = end.rx.recv().await.expect("client hung up");
+    let frame = decode(&bytes).expect("client sent undecodable frame");
+    assert_eq!(frame.kind, kind, "unexpected protocol frame");
+    frame
 }
 
 async fn send(end: &ServerEnd, kind: u8, header: serde_json::Value, payload: &[u8]) {
@@ -261,7 +268,7 @@ async fn fresh_join_backfills_rows_and_advances_cursor() {
     )
     .await
     .expect("join succeeds");
-    server.await.unwrap();
+    let end = server.await.unwrap();
 
     assert_eq!(
         *lock(&sink.rows),
@@ -272,6 +279,23 @@ async fn fresh_join_backfills_rows_and_advances_cursor() {
     let stats = client.stats();
     assert!(stats.connected);
     assert_eq!(stats.cursor, 2);
+    assert_eq!(*lock(&sink.replay_rows), vec![1, 2]);
+    let mut events = client.events();
+    send(
+        &end,
+        frame_type::ROW,
+        serde_json::json!({"seq": 3, "device": "dev-b", "batchId": "live"}),
+        b"live",
+    )
+    .await;
+    while client.stats().cursor != 3 {
+        events.recv().await.unwrap();
+    }
+    assert_eq!(
+        *lock(&sink.replay_rows),
+        vec![1, 2],
+        "steady-state arrivals must remain live"
+    );
     client.shutdown().await;
 }
 
@@ -805,6 +829,15 @@ async fn checkpoint_fetch_overlaps_row_backfill() {
             &[],
         )
         .await;
+        // A live row can buffer after ROWS_DONE while the checkpoint is
+        // still downloading. Crossing that boundary must retain its origin.
+        send(
+            &end,
+            frame_type::ROW,
+            serde_json::json!({"seq": 8, "device": "dev-b", "batchId": "live8"}),
+            b"live8",
+        )
+        .await;
         // Only now does the "download" complete.
         let _ = gate_tx.send(());
         end
@@ -822,12 +855,21 @@ async fn checkpoint_fetch_overlaps_row_backfill() {
     .expect("join succeeds with rows served before the checkpoint bytes");
 
     let _end = server.await.unwrap();
+    let mut events = client.events();
+    while client.stats().cursor != 8 {
+        events.recv().await.unwrap();
+    }
     assert_eq!(
         *lock(&sink.ops),
-        vec!["ckpt@5", "row@6", "row@7"],
+        vec!["ckpt@5", "row@6", "row@7", "row@8"],
         "checkpoint imports before any row that buffered during the download"
     );
-    assert_eq!(client.stats().cursor, 7);
+    assert_eq!(client.stats().cursor, 8);
+    assert_eq!(
+        *lock(&sink.replay_rows),
+        vec![6, 7],
+        "buffered backfill keeps its origin after checkpoint download"
+    );
     client.shutdown().await;
 }
 
@@ -935,7 +977,7 @@ fn empty_frontier_with_real_checkpoint_is_not_contained() {
 /// Tests that flip the process-global OS-path flag or assert precise dial
 /// timing serialize through this: a park triggered by one test inflates
 /// another's measured backoff gaps.
-static PATH_AND_TIMING: Mutex<()> = Mutex::new(());
+static PATH_AND_TIMING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct FlakyConnector {
     /// One entry per dial: `Some(pipe)` connects, `None` refuses.
@@ -975,7 +1017,7 @@ fn empty_state_json() -> serde_json::Value {
 /// the UI-truth signal the pill and Queued badges ride on.
 #[tokio::test(start_paused = true)]
 async fn drops_and_refused_dials_deliver_the_push_exactly_once() {
-    let _serial = lock(&PATH_AND_TIMING);
+    let _serial = PATH_AND_TIMING.lock().await;
     let (pipe1, mut end1) = pipe_pair();
     let (pipe2, mut end2) = pipe_pair();
     let sink = Arc::new(RecordingSink::default());
@@ -1069,7 +1111,7 @@ async fn drops_and_refused_dials_deliver_the_push_exactly_once() {
 /// healthy past STABLE_RESET earns the fresh 250ms base again.
 #[tokio::test(start_paused = true)]
 async fn connect_and_die_sessions_grow_backoff_until_a_stable_session_resets_it() {
-    let _serial = lock(&PATH_AND_TIMING);
+    let _serial = PATH_AND_TIMING.lock().await;
     let mut pipes = Vec::new();
     let mut ends = VecDeque::new();
     for _ in 0..5 {
@@ -1156,7 +1198,7 @@ async fn connect_and_die_sessions_grow_backoff_until_a_stable_session_resets_it(
 /// timer luck).
 #[tokio::test(start_paused = true)]
 async fn os_offline_parks_dials_and_the_online_event_unparks_immediately() {
-    let _serial = lock(&PATH_AND_TIMING);
+    let _serial = PATH_AND_TIMING.lock().await;
     let (pipe1, mut end1) = pipe_pair();
     let sink = Arc::new(RecordingSink::default());
     let (fetch, _) = fetcher(b"");
@@ -1451,6 +1493,98 @@ struct FixedHttpRows {
     body: Vec<u8>,
     requests: Mutex<Vec<u64>>,
 }
+
+#[tokio::test(start_paused = true)]
+async fn http_polling_returns_to_live_after_replay_and_rearms_on_revisit_or_failure() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+    struct HttpRows {
+        head: AtomicU64,
+        fail_next: AtomicBool,
+    }
+    impl ChatTransport for HttpRows {
+        fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+            let head = self.head.load(Relaxed);
+            let fail = self.fail_next.swap(false, Relaxed);
+            Box::pin(async move {
+                if fail {
+                    return Err(SyncError::Closed);
+                }
+                let mut frames = vec![encode(
+                    frame_type::STATE,
+                    &serde_json::json!({
+                        "headSeq": head, "seqFloor": 0, "checkpointSeq": 0,
+                        "checkpointSize": 0, "rowCount": head, "rowBytes": head,
+                    }),
+                    &[],
+                )];
+                for seq in after + 1..=head {
+                    frames.push(encode(
+                        frame_type::ROW,
+                        &serde_json::json!({
+                            "seq": seq, "device": "dev-b", "batchId": format!("b{seq}"),
+                        }),
+                        &[seq as u8],
+                    ));
+                }
+                frames.push(encode(
+                    frame_type::ROWS_DONE,
+                    &serde_json::json!({"headSeq": head}),
+                    &[],
+                ));
+                let mut body = Vec::new();
+                for frame in frames {
+                    body.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+                    body.extend_from_slice(&frame);
+                }
+                Ok(body)
+            })
+        }
+        fn push(&self, _: String, _: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+            Box::pin(async { panic!("read-only test") })
+        }
+    }
+    let transport = Arc::new(HttpRows {
+        head: AtomicU64::new(1),
+        fail_next: AtomicBool::new(false),
+    });
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+    let client = ChatClient::connect_with_transport(
+        connector(vec![]),
+        sink.clone(),
+        fetch,
+        "dev-a",
+        0,
+        ChatTuning::default(),
+        Some(transport.clone()),
+    )
+    .await
+    .unwrap();
+    for head in 1..=5 {
+        if head == 3 {
+            client.probe();
+        } // reopening the transcript
+        if head == 5 {
+            transport.fail_next.store(true, Relaxed);
+        }
+        transport.head.store(head, Relaxed);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while client.stats().cursor != head {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "HTTP delivery stalled at {head}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    assert_eq!(
+        *lock(&sink.replay_rows),
+        vec![1, 3, 5],
+        "ordinary foreground HTTP polls must retain live entrances"
+    );
+    client.shutdown().await;
+}
+
 impl ChatTransport for FixedHttpRows {
     fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
         lock(&self.requests).push(after);
@@ -1520,6 +1654,11 @@ async fn http_catchup_crosses_a_contained_checkpoint_and_repairs_causal_gaps() {
         assert_eq!(calls.load(Relaxed), u64::from(pending_dependencies));
         assert_eq!(lock(&transport.requests)[0], 1);
         assert_eq!(lock(&sink.rows).last().unwrap().1, 6);
+        assert_eq!(
+            *lock(&sink.replay_rows).last().unwrap(),
+            6,
+            "HTTP recovery must carry the same replay provenance"
+        );
         if pending_dependencies {
             assert_eq!(
                 lock(&transport.requests)[1],
@@ -1530,4 +1669,309 @@ async fn http_catchup_crosses_a_contained_checkpoint_and_repairs_causal_gaps() {
         }
         client.shutdown().await;
     }
+}
+
+struct JournalSink(crate::DocsStore, RecordingSink);
+impl ChatDocSink for JournalSink {
+    fn pending_updates(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
+        self.0
+            .pending_chat_updates("impaired")
+            .map_err(|e| e.to_string())
+    }
+    fn persist_update(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
+        self.0
+            .enqueue_chat_update("impaired", id, bytes)
+            .map_err(|e| e.to_string())
+    }
+    fn acknowledge_update(&self, id: &str) -> Result<(), String> {
+        self.0
+            .acknowledge_chat_update("impaired", id)
+            .map_err(|e| e.to_string())
+    }
+    fn apply_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
+        self.1.apply_row(bytes, cursor)
+    }
+    fn apply_checkpoint(&self, bytes: &[u8], cursor: u64) -> Result<(), String> {
+        self.1.apply_checkpoint(bytes, cursor)
+    }
+    fn contains_frontier(&self, bytes: &[u8]) -> bool {
+        self.1.contains_frontier(bytes)
+    }
+    fn advance_cursor(&self, cursor: u64) {
+        self.1.advance_cursor(cursor);
+    }
+}
+
+/// HTTP seam fault injector. Requests cost 1.2 s; the first push commits but
+/// its acknowledgment is lost. WebSocket dials are refused independently.
+type AttemptedBatches = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
+#[derive(Default)]
+struct LostAckHttp {
+    attempts: AttemptedBatches,
+    committed: Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
+}
+impl ChatTransport for LostAckHttp {
+    fn push(&self, id: String, bytes: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+        let attempts = self.attempts.clone();
+        let committed = self.committed.clone();
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            lock(&attempts).push((id.clone(), bytes.clone()));
+            let dup = lock(&committed).insert(id.clone(), bytes).is_some();
+            if !dup {
+                return Err(SyncError::Closed);
+            }
+            Ok(serde_json::json!({"batchId": id, "seq": 2, "dup": true}).to_string())
+        })
+    }
+    fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        let committed = self.committed.clone();
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            let committed = lock(&committed);
+            let head = if committed.is_empty() { 1 } else { 2 };
+            let mut frames = vec![encode(
+                frame_type::STATE,
+                &serde_json::json!({
+                    "headSeq": head, "seqFloor": 0, "checkpointSeq": 0,
+                    "checkpointSize": 0, "rowCount": head, "rowBytes": 20
+                }),
+                &[],
+            )];
+            if after < 1 {
+                frames.push(encode(
+                    frame_type::ROW,
+                    &serde_json::json!({
+                        "seq": 1, "device": "remote", "batchId": "remote-batch"
+                    }),
+                    b"remote-row",
+                ));
+            }
+            if after < 2 {
+                for (id, bytes) in committed.iter() {
+                    frames.push(encode(
+                        frame_type::ROW,
+                        &serde_json::json!({
+                            "seq": 2, "device": "local", "batchId": id
+                        }),
+                        bytes,
+                    ));
+                }
+            }
+            frames.push(encode(
+                frame_type::ROWS_DONE,
+                &serde_json::json!({"headSeq": head}),
+                &[],
+            ));
+            let mut body = Vec::new();
+            for frame in frames {
+                body.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+                body.extend(frame);
+            }
+            Ok(body)
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn blocked_websockets_deliver_reopened_outbox_over_http_despite_lost_ack() {
+    let _serial = PATH_AND_TIMING.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = b"durable-local-row";
+    {
+        let store = crate::DocsStore::open(dir.path()).unwrap();
+        store
+            .enqueue_chat_update("impaired", "stable-batch", bytes)
+            .unwrap();
+    } // Reopen the database, as after a process restart while offline.
+    let sink = Arc::new(JournalSink(
+        crate::DocsStore::open(dir.path()).unwrap(),
+        RecordingSink::default(),
+    ));
+    let transport = Arc::new(LostAckHttp::default());
+    let blocked = FlakyConnector::new(vec![]);
+    let (fetch, _) = fetcher(b"");
+    let started = tokio::time::Instant::now();
+    let client = ChatClient::connect_with_transport(
+        blocked.clone(),
+        sink.clone(),
+        fetch,
+        "local",
+        0,
+        ChatTuning::default(),
+        Some(transport.clone()),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while client.stats().pending_pushes != 0 || client.stats().cursor != 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("HTTP fallback did not drain the durable outbox");
+    assert!(!client.stats().connected, "no WebSocket ever connected");
+    assert!(!blocked.dial_times().is_empty());
+    assert_eq!(
+        *lock(&transport.attempts),
+        vec![("stable-batch".into(), bytes.to_vec()); 2]
+    );
+    assert_eq!(lock(&transport.committed).len(), 1);
+    assert!(sink.pending_updates().unwrap().is_empty());
+    assert_eq!(lock(&sink.1.rows)[0], (b"remote-row".to_vec(), 1));
+    println!(
+        "HTTP seam: all WS refused, reopened SQLite outbox, 1.2s/request, first ACK lost; attempts=2, unique batches=1, cursor=2, pending=0, convergence={:?}",
+        started.elapsed()
+    );
+    client.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn edits_do_not_retransmit_batches_waiting_for_slow_acknowledgments() {
+    let (pipe, mut end) = pipe_pair();
+    let (fetch, _) = fetcher(b"");
+    let server = tokio::spawn(async move {
+        serve_join(&mut end, empty_state_json(), &[], vec![], false).await;
+        end
+    });
+    let client = ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        Arc::new(RecordingSink::default()),
+        fetch,
+        "sender",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+    let mut end = server.await.unwrap();
+    let mut observed = Vec::new();
+    // Each earlier ACK is still in transit when the next edit is queued.
+    // A sender that replays the whole outbox produces b0,b0,b1,... here.
+    for i in 0..20 {
+        client.enqueue_batch(format!("b{i}"), vec![i]);
+        let push = expect_kind(&mut end, frame_type::PUSH).await;
+        assert_eq!(push.header["batchId"], format!("b{i}"));
+        assert_eq!(push.payload, vec![i]);
+        observed.push(push);
+    }
+    assert_eq!(client.stats().pending_pushes, 20);
+    assert!(end.rx.try_recv().is_err(), "only 20 frames for 20 edits");
+    for (i, push) in observed.iter().enumerate() {
+        send(
+            &end,
+            frame_type::ACK,
+            serde_json::json!({"batchId":push.header["batchId"],"seq":i+1,"dup":false}),
+            &[],
+        )
+        .await;
+    }
+    let mut events = client.events();
+    while client.stats().pending_pushes != 0 {
+        events.recv().await.unwrap();
+    }
+    assert_eq!(client.stats().cursor, 20);
+    client.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn verified_snapshot_does_not_replay_thirteen_thousand_checkpoint_rows() {
+    let (pipe, mut end) = pipe_pair();
+    let sink = Arc::new(RecordingSink::default());
+    sink.verified_cursor
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    sink.frontier_contained
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let (fetch, calls) = fetcher(b"checkpoint");
+    let server = tokio::spawn(async move {
+        let after = serve_join(
+            &mut end,
+            serde_json::json!({"headSeq": 69000, "seqFloor": 53000, "checkpointSeq": 53984,
+                "checkpointSize": 21000000, "rowCount": 16000, "rowBytes": 30000000}),
+            b"frontier",
+            vec![],
+            false,
+        )
+        .await;
+        assert_eq!(
+            after, 69000,
+            "verified cursor must not clamp to the old checkpoint"
+        );
+        end
+    });
+    let client = ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        sink.clone(),
+        fetch,
+        "dev-a",
+        69000,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+    let end = server.await.unwrap();
+    assert!(lock(&sink.rows).is_empty());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(client.stats().cursor, 69000);
+    drop(end);
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutdown_cancels_dial_and_joins_http_fallback() {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    struct HungConnector;
+    impl BinConnector for HungConnector {
+        fn connect(&self) -> BoxFuture<'static, Result<BinPipe, SyncError>> {
+            Box::pin(std::future::pending())
+        }
+    }
+    struct HungTransport(Arc<AtomicBool>);
+    impl ChatTransport for HungTransport {
+        fn fetch_rows(&self, _: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+            struct InFlight(Arc<AtomicBool>);
+            impl Drop for InFlight {
+                fn drop(&mut self) {
+                    self.0.store(false, SeqCst);
+                }
+            }
+            let active = self.0.clone();
+            Box::pin(async move {
+                active.store(true, SeqCst);
+                let _guard = InFlight(active);
+                std::future::pending().await
+            })
+        }
+        fn push(&self, _: String, _: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+            Box::pin(std::future::pending())
+        }
+    }
+    let active = Arc::new(AtomicBool::new(false));
+    let (fetch, _) = fetcher(b"");
+    let client = ChatClient::connect_with_transport(
+        Arc::new(HungConnector),
+        Arc::new(RecordingSink::default()),
+        fetch,
+        "device",
+        0,
+        ChatTuning::default(),
+        Some(Arc::new(HungTransport(active.clone()))),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !active.load(SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_millis(200), client.shutdown())
+        .await
+        .expect("shutdown must interrupt both hanging transports");
+    assert!(
+        !active.load(SeqCst),
+        "fallback must be dropped before final snapshot"
+    );
 }

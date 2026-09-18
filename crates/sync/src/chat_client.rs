@@ -13,22 +13,17 @@
 //! transport pings prove nothing about the DO; room health is judged only by
 //! protocol frames with probe deadlines.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use futures::{SinkExt, StreamExt};
-use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::chat_frames::{self as wire, frame_type};
 use crate::types::{StaticUrl, SyncError, UrlProvider};
 
-const PING_INTERVAL: Duration = Duration::from_secs(15);
-const SILENCE_LEASE: Duration = Duration::from_secs(45);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
 /// Backfill after hello must complete (rowsDone) within this deadline —
@@ -52,7 +47,7 @@ const PROBE_QUIET_DEFAULT: Duration = Duration::from_secs(900);
 /// and the session redials (the fetch itself is Range-resumable, so a retry
 /// picks up where the bytes stopped). Sized for MAX_CHECKPOINT_BYTES over
 /// the 1.2 Mbps links this design exists for.
-const CHECKPOINT_FETCH_DEADLINE: Duration = Duration::from_secs(120);
+const CHECKPOINT_FETCH_DEADLINE: Duration = Duration::from_secs(300);
 /// Re-push cadence after a `quota` rejection (server window is 60 s; pending
 /// batches must not wait for the next enqueue/probe to retry).
 const QUOTA_RETRY: Duration = Duration::from_secs(5);
@@ -114,10 +109,17 @@ pub enum RowImportOutcome {
     PendingDependencies,
 }
 
-/// Where remote bytes land. The engine implements this over its doc handle;
-/// every method persists doc content AND the room cursor in one transaction
-/// (`DocsStore::save_snapshot_with_cursor`) so they can never diverge.
+/// Where remote bytes land. Imports may be coalesced in memory, but durable
+/// snapshots must commit content AND an applied cursor in one transaction.
+/// Capture the cursor before exporting, so disk may lag without skipping rows.
 pub trait ChatDocSink: Send + Sync + 'static {
+    /// Only causal-aware snapshot/cursor transactions may skip legacy repair.
+    fn cursor_is_verified(&self) -> bool {
+        false
+    }
+    /// Catch-up may lower the room cursor after a reset or legacy repair.
+    fn reset_cursor(&self, _cursor: u64) {}
+
     /// Durable publication hooks. In-memory/test sinks may use the defaults.
     fn pending_updates(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
         Ok(Vec::new())
@@ -136,6 +138,11 @@ pub trait ChatDocSink: Send + Sync + 'static {
     /// Import one remote update row with a proposed contiguous cursor. A
     /// pending import must not persist that cursor; the client repairs it.
     fn apply_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome;
+    /// Historical rows from a backfill/HTTP pull. The default keeps existing
+    /// sinks compatible; presentation-aware sinks record a replay cutoff.
+    fn apply_replay_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
+        self.apply_row(bytes, cursor)
+    }
     /// Replace/merge from a checkpoint blob; `cursor` is its checkpointSeq.
     fn apply_checkpoint(&self, bytes: &[u8], cursor: u64) -> Result<(), String>;
     /// Client-side precision (replaces the server VV diff): is the server
@@ -233,63 +240,21 @@ impl BinConnector for WsBinConnector {
                 .map_err(|e| SyncError::WebSocket(e.to_string()))?;
             let (out_tx, out_rx) = mpsc::channel(64);
             let (in_tx, in_rx) = mpsc::channel(64);
-            tokio::spawn(pump(ws, out_rx, in_tx));
+            tokio::spawn(crate::socket::pump(
+                ws,
+                out_rx,
+                in_tx,
+                WsMessage::Binary,
+                |frame| match frame {
+                    WsMessage::Binary(bytes) => Some(bytes),
+                    _ => None,
+                },
+            ));
             Ok(BinPipe {
                 tx: out_tx,
                 rx: in_rx,
             })
         })
-    }
-}
-
-/// Shuttle binary frames between the WebSocket and the actor's channels; the
-/// text `"ping"` keepalive rides the same socket (runtime-answered pair).
-async fn pump(
-    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
-    mut out_rx: mpsc::Receiver<Vec<u8>>,
-    in_tx: mpsc::Sender<Vec<u8>>,
-) {
-    let (mut sink, mut stream) = ws.split();
-    let mut ping = tokio::time::interval(PING_INTERVAL);
-    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ping.tick().await;
-    let mut last_rx = tokio::time::Instant::now();
-    loop {
-        tokio::select! {
-            frame = out_rx.recv() => match frame {
-                Some(bytes) => {
-                    if sink.send(WsMessage::Binary(bytes.into())).await.is_err() {
-                        break;
-                    }
-                }
-                None => {
-                    let _ = sink.send(WsMessage::Close(None)).await;
-                    break;
-                }
-            },
-            frame = stream.next() => match frame {
-                Some(Ok(WsMessage::Binary(bytes))) => {
-                    last_rx = tokio::time::Instant::now();
-                    if in_tx.send(bytes.to_vec()).await.is_err() {
-                        break;
-                    }
-                }
-                Some(Ok(_)) => {
-                    // Text pong / control frames: transport liveness only.
-                    last_rx = tokio::time::Instant::now();
-                }
-                Some(Err(_)) | None => break,
-            },
-            _ = ping.tick() => {
-                if sink.send(WsMessage::Text("ping".into())).await.is_err() {
-                    break;
-                }
-            }
-            _ = tokio::time::sleep_until(last_rx + SILENCE_LEASE) => {
-                tracing::warn!("chat2 socket silent past lease; treating as dead");
-                break;
-            }
-        }
     }
 }
 
@@ -325,6 +290,12 @@ struct Shared {
     /// wedge); instead this flag asks the session loop for a rowsReq
     /// backfill from the honest cursor.
     gap_repair: bool,
+    replaying_gap: bool,
+    /// HTTP polling also has a live mode. Reopening/probing a chat or losing
+    /// delivery starts a new replay epoch; a complete pull establishes its
+    /// baseline. Failed socket dials alone do not disable live HTTP animation.
+    http_replay_epoch: u64,
+    http_live_epoch: Option<u64>,
     /// Contiguous room rows can still lack CRDT dependencies. Re-fetch the
     /// checkpoint even if its advertised frontier appears locally contained.
     needs_checkpoint: bool,
@@ -361,7 +332,43 @@ fn ensure_durable(shared: &Mutex<Shared>, sink: &dyn ChatDocSink, push: &Pending
     }
 }
 
-fn apply_remote_row(shared: &Mutex<Shared>, sink: &dyn ChatDocSink, bytes: &[u8], seq: u64) {
+// Old clients could persist cursors beyond missing causal history. Repair
+// legacy snapshots once, on either transport; verified atomic snapshots keep
+// their cursor even if the host has been unable to upload a large checkpoint.
+fn apply_cursor_amnesty(
+    shared: &Mutex<Shared>,
+    sink: &dyn ChatDocSink,
+    state: &wire::StateHeader,
+    done: &std::sync::atomic::AtomicBool,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if done.swap(true, Relaxed) || sink.cursor_is_verified() {
+        return;
+    }
+    let clamp_to = if state.checkpoint_size > 0 {
+        state.checkpoint_seq
+    } else {
+        0
+    };
+    let mut shared = lock(shared);
+    if shared.cursor > clamp_to {
+        tracing::info!(
+            from = shared.cursor,
+            to = clamp_to,
+            "chat2: one-time legacy cursor repair"
+        );
+        sink.reset_cursor(0);
+        shared.cursor = clamp_to;
+    }
+}
+
+fn apply_remote_row(
+    shared: &Mutex<Shared>,
+    sink: &dyn ChatDocSink,
+    bytes: &[u8],
+    seq: u64,
+    replay: bool,
+) {
     let cursor = {
         let mut shared = lock(shared);
         if seq > shared.cursor.saturating_add(1) {
@@ -373,7 +380,11 @@ fn apply_remote_row(shared: &Mutex<Shared>, sink: &dyn ChatDocSink, bytes: &[u8]
     };
     // Import may fire document subscriptions, so never hold the client lock
     // across the sink call.
-    let outcome = sink.apply_row(bytes, cursor);
+    let outcome = if replay {
+        sink.apply_replay_row(bytes, cursor)
+    } else {
+        sink.apply_row(bytes, cursor)
+    };
     let mut shared = lock(shared);
     match outcome {
         RowImportOutcome::Applied => shared.cursor = shared.cursor.max(cursor),
@@ -434,6 +445,7 @@ pub struct ChatClient {
     presence_out: mpsc::Sender<(i64, Vec<u8>)>,
     flags: Arc<Flags>,
     task: Option<tokio::task::JoinHandle<()>>,
+    offline_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 #[derive(Default)]
@@ -568,6 +580,7 @@ impl ChatClient {
             ..Shared::default()
         }));
         let flags = Arc::new(Flags::default());
+        let offline_task = Arc::new(Mutex::new(None));
 
         let actor = Actor {
             shared: shared.clone(),
@@ -584,8 +597,9 @@ impl ChatClient {
             presence_rx,
             flags: flags.clone(),
             resumed: false,
-            cursor_amnesty_done: std::sync::atomic::AtomicBool::new(false),
+            cursor_amnesty_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             transport,
+            offline_task: offline_task.clone(),
             sync_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let task = tokio::spawn(actor.run(ready_tx));
@@ -602,6 +616,7 @@ impl ChatClient {
                 presence_out: presence_tx,
                 flags,
                 task: Some(task),
+                offline_task,
             }),
             Ok(Err(err)) => {
                 task.abort();
@@ -671,6 +686,9 @@ impl ChatClient {
 
     /// Liveness hint: probe the room now (deadline-checked).
     pub fn probe(&self) {
+        let mut shared = lock(&self.shared);
+        shared.http_replay_epoch = shared.http_replay_epoch.wrapping_add(1);
+        drop(shared);
         let _ = self.probe.try_send(());
     }
 
@@ -732,11 +750,21 @@ impl ChatClient {
         if let Some(task) = self.task.take() {
             let _ = task.await;
         }
+        // A fallback pull may still be importing after the socket actor exits.
+        // Join its cancellation before the host takes its final snapshot.
+        let offline = lock(&self.offline_task).take();
+        if let Some(task) = offline {
+            task.abort();
+            let _ = task.await;
+        }
     }
 }
 
 impl Drop for ChatClient {
     fn drop(&mut self) {
+        if let Some(task) = lock(&self.offline_task).take() {
+            task.abort();
+        }
         if let Some(task) = &self.task {
             task.abort();
         }
@@ -761,9 +789,10 @@ struct Actor {
     flags: Arc<Flags>,
     /// Once-per-actor cursor amnesty (see run_session): a cursor above the
     /// room's checkpoint is re-verified by refetching the rows above it.
-    cursor_amnesty_done: std::sync::atomic::AtomicBool,
+    cursor_amnesty_done: Arc<std::sync::atomic::AtomicBool>,
     /// Plain-HTTPS pull/push (None = socket-only: tests, dev bearers).
     transport: Option<Arc<dyn ChatTransport>>,
+    offline_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// One offline sync in flight at a time.
     sync_busy: Arc<std::sync::atomic::AtomicBool>,
     /// False until the first backfill of THIS client instance completes.
@@ -820,7 +849,10 @@ impl Actor {
                 .dial_seq
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 + 1;
-            let dial = tokio::time::timeout(CONNECT_TIMEOUT, self.connector.connect()).await;
+            let dial = tokio::select! {
+                result = tokio::time::timeout(CONNECT_TIMEOUT, self.connector.connect()) => result,
+                _ = self.shutdown.changed() => return,
+            };
             let pipe = match dial {
                 Ok(Ok(pipe)) => pipe,
                 Ok(Err(err)) => {
@@ -864,6 +896,10 @@ impl Actor {
                     // without any reset, ~7 flaps pinned every future
                     // reconnect at the cap for the life of the client.
                     let joined = self.flags.connected.swap(false, Relaxed);
+                    if joined {
+                        let mut shared = lock(&self.shared);
+                        shared.http_replay_epoch = shared.http_replay_epoch.wrapping_add(1);
+                    }
                     self.flags.disconnects.fetch_add(1, Relaxed);
                     let _ = self.events.send(ChatEvent::Disconnected);
                     if ready.is_some() {
@@ -964,6 +1000,7 @@ impl Actor {
             return SessionEnd::Reconnect;
         };
         lock(&self.shared).server = Some(state);
+        lock(&self.shared).replaying_gap = false;
         // Server behind our cursor = the room was reset/wiped. Detect on the
         // RAW persisted cursor, BEFORE the amnesty below rewrites it —
         // plan_catch_up treats the cursor as fresh; SURFACE the signal too:
@@ -971,6 +1008,7 @@ impl Actor {
         // event, and masking it was exactly how the s2 wedge class stayed
         // invisible.
         if lock(&self.shared).cursor > state.head_seq {
+            self.sink.reset_cursor(0);
             self.flags.server_resets.fetch_add(1, Relaxed);
             tracing::warn!(
                 cursor = lock(&self.shared).cursor,
@@ -980,36 +1018,12 @@ impl Actor {
             );
             let _ = self.events.send(ChatEvent::ServerReset);
         }
-        // Cursor amnesty, once per client: a cursor above the checkpoint seq
-        // claims history the doc may have silently parked and dropped —
-        // parked imports vanish on export while the cursor advances, and
-        // nothing ever re-reads below the cursor ("Add Tweets" wedge:
-        // cursor 75 over a checkpoint-only doc, 2026-08-18). Clamp and
-        // refetch: re-imports are no-ops and the trim policy bounds the
-        // cost to the rows since the last checkpoint.
-        if !self.cursor_amnesty_done.swap(true, Relaxed) {
-            // Checkpoint-less rooms amnesty to ZERO: the same parked-import
-            // wedge (empty doc under an advanced cursor — 2026-08-19: a live
-            // broadcast mid-join outran the backfill and the cursor skipped
-            // the hole) with no checkpoint to clamp to. Refetching the whole
-            // log is bounded by the checkpoint threshold policy (a room
-            // past ~200 rows/512KB HAS a checkpoint) and re-imports are
-            // no-ops, so this is the cheap universal heal.
-            let clamp_to = if state.checkpoint_size > 0 {
-                state.checkpoint_seq
-            } else {
-                0
-            };
-            let mut shared = lock(&self.shared);
-            if shared.cursor > clamp_to {
-                tracing::info!(
-                    from = shared.cursor,
-                    to = clamp_to,
-                    "chat2: cursor amnesty — refetching rows the doc may have parked"
-                );
-                shared.cursor = clamp_to;
-            }
-        }
+        apply_cursor_amnesty(
+            &self.shared,
+            self.sink.as_ref(),
+            &state,
+            &self.cursor_amnesty_done,
+        );
         let cursor = lock(&self.shared).cursor;
         self.flags.connected.store(true, Relaxed);
         if ready.is_none() {
@@ -1063,7 +1077,8 @@ impl Actor {
         // so a message written on a dead network flushes ~2 RTTs after the
         // socket lands instead of waiting out a whole checkpoint download +
         // backfill ("typing works even when load doesn't").
-        if !self.push_pending(&mut pipe).await {
+        let mut in_flight = HashSet::new();
+        if !self.push_pending(&mut pipe, &mut in_flight).await {
             return SessionEnd::Reconnect;
         }
         let mut buffered: Vec<wire::WireFrame> = Vec::new();
@@ -1138,7 +1153,7 @@ impl Actor {
                 head_seq = Some(done.head_seq);
                 continue; // frames after ROWS_DONE are steady-state; keep them
             }
-            if !self.handle_frame(frame) {
+            if !self.handle_frame_with_replay(frame, head_seq.is_none()) {
                 return SessionEnd::Reconnect;
             }
         }
@@ -1158,7 +1173,7 @@ impl Actor {
                                 return Some(done.head_seq);
                             }
                             _ => {
-                                if !self.handle_frame(frame) {
+                                if !self.handle_frame_with_replay(frame, true) {
                                     return None;
                                 }
                             }
@@ -1216,7 +1231,7 @@ impl Actor {
                     }
                 }
                 _ = self.nudge_rx.recv() => {
-                    if !self.push_pending(&mut pipe).await {
+                    if !self.push_pending(&mut pipe, &mut in_flight).await {
                         return SessionEnd::Reconnect;
                     }
                 }
@@ -1319,7 +1334,8 @@ impl Actor {
         let fetcher = self.fetcher.clone();
         let events = self.events.clone();
         let busy = self.sync_busy.clone();
-        tokio::spawn(async move {
+        let amnesty = self.cursor_amnesty_done.clone();
+        let task = tokio::spawn(async move {
             let batches: Vec<PendingPush> = lock(&shared).pending.iter().cloned().collect();
             for push in batches {
                 if !ensure_durable(&shared, sink.as_ref(), &push) {
@@ -1355,11 +1371,17 @@ impl Actor {
                     }
                 }
             }
-            let cursor = lock(&shared).cursor;
+            let (cursor, replay_epoch, mut was_live) = {
+                let mut sh = lock(&shared);
+                let was_live = sh.http_live_epoch.take() == Some(sh.http_replay_epoch);
+                (sh.cursor, sh.http_replay_epoch, was_live)
+            };
             let body = match transport.fetch_rows(cursor).await {
                 Ok(body) => body,
                 Err(err) => {
                     tracing::warn!(error = %err, "chat2: http pull failed; will retry");
+                    let mut sh = lock(&shared);
+                    sh.http_replay_epoch = sh.http_replay_epoch.wrapping_add(1);
                     busy.store(false, Relaxed);
                     return;
                 }
@@ -1390,6 +1412,15 @@ impl Actor {
                     serde_json::from_value::<wire::StateHeader>(state_frame.header.clone())
                 {
                     lock(&shared).server = Some(state);
+                    apply_cursor_amnesty(&shared, sink.as_ref(), &state, &amnesty);
+                    let repaired_cursor = lock(&shared).cursor;
+                    if repaired_cursor < cursor && cursor <= state.head_seq {
+                        // This response was requested above the repaired
+                        // frontier. Discard it and repull from the honest
+                        // cursor rather than certifying an unfilled hole.
+                        busy.store(false, Relaxed);
+                        return;
+                    }
                     let (repair_causal_history, repair_generation) = {
                         let shared = lock(&shared);
                         (shared.needs_checkpoint, shared.causal_gap_generation)
@@ -1397,7 +1428,14 @@ impl Actor {
                     let contained = state.checkpoint_size == 0
                         || (!repair_causal_history && sink.contains_frontier(&state_frame.payload));
                     let plan = plan_catch_up(cursor, &state, contained);
+                    if repair_causal_history || cursor > state.head_seq {
+                        was_live = false;
+                    }
+                    if cursor > state.head_seq {
+                        sink.reset_cursor(0);
+                    }
                     if let CatchUpPlan::CheckpointThenRows { .. } = plan {
+                        was_live = false;
                         let fetched =
                             tokio::time::timeout(CHECKPOINT_FETCH_DEADLINE, fetcher.fetch()).await;
                         match fetched {
@@ -1444,10 +1482,26 @@ impl Actor {
                         // contiguous — but hold the rule anyway: a jump
                         // (trimmed log, server surprise) must not stamp the
                         // cursor over rows the doc never saw.
-                        apply_remote_row(&shared, sink.as_ref(), &frame.payload, row.seq);
+                        let replay = {
+                            let sh = lock(&shared);
+                            !was_live || sh.http_replay_epoch != replay_epoch || sh.needs_checkpoint
+                        };
+                        apply_remote_row(&shared, sink.as_ref(), &frame.payload, row.seq, replay);
                         applied = true;
                     }
-                    frame_type::ROWS_DONE => {}
+                    frame_type::ROWS_DONE => {
+                        if let Ok(done) =
+                            serde_json::from_value::<wire::RowsDoneHeader>(frame.header)
+                        {
+                            let mut sh = lock(&shared);
+                            if sh.http_replay_epoch == replay_epoch
+                                && sh.cursor >= done.head_seq
+                                && !sh.needs_checkpoint
+                            {
+                                sh.http_live_epoch = Some(replay_epoch);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1456,6 +1510,7 @@ impl Actor {
             }
             busy.store(false, Relaxed);
         });
+        *lock(&self.offline_task) = Some(task);
     }
 
     /// If a row/ack gap was flagged, request a backfill from the honest
@@ -1477,6 +1532,7 @@ impl Actor {
         if !repair {
             return true;
         }
+        lock(&self.shared).replaying_gap = true;
         *repairs += 1;
         if *repairs > MAX_GAP_REPAIRS_PER_SESSION {
             tracing::warn!("chat2: gap repairs exhausted; redialing for a full catch-up");
@@ -1498,8 +1554,23 @@ impl Actor {
         pipe.tx.send(req).await.is_ok()
     }
 
-    async fn push_pending(&self, pipe: &mut BinPipe) -> bool {
-        let batches: Vec<PendingPush> = lock(&self.shared).pending.iter().cloned().collect();
+    async fn push_pending(&self, pipe: &mut BinPipe, in_flight: &mut HashSet<String>) -> bool {
+        let batches: Vec<PendingPush> = {
+            let shared = lock(&self.shared);
+            // New edits must not retransmit every slow-to-ack batch. Keep
+            // this set local to the session so a reconnect still replays
+            // the durable outbox with exactly the same batch IDs.
+            in_flight.retain(|id| shared.pending.iter().any(|p| &p.batch_id == id));
+            if shared.quota_blocked {
+                return true;
+            } // push_head owns quota retries
+            shared
+                .pending
+                .iter()
+                .filter(|p| !in_flight.contains(&p.batch_id))
+                .cloned()
+                .collect()
+        };
         for push in batches {
             if !ensure_durable(&self.shared, self.sink.as_ref(), &push) {
                 return false;
@@ -1514,12 +1585,17 @@ impl Actor {
             if pipe.tx.send(frame).await.is_err() {
                 return false;
             }
+            in_flight.insert(push.batch_id);
         }
         true
     }
 
     /// Apply one inbound protocol frame. False = protocol breakdown, redial.
     fn handle_frame(&self, frame: wire::WireFrame) -> bool {
+        self.handle_frame_with_replay(frame, false)
+    }
+
+    fn handle_frame_with_replay(&self, frame: wire::WireFrame, replay: bool) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
         match frame.kind {
             frame_type::ROW => {
@@ -1534,7 +1610,14 @@ impl Actor {
                 // gap means rows we never received (live broadcast mid-join)
                 // — apply the bytes (loro parks dependents harmlessly), keep
                 // the honest cursor, and ask for a backfill repair.
-                apply_remote_row(&self.shared, self.sink.as_ref(), &frame.payload, row.seq);
+                let replay = replay || lock(&self.shared).replaying_gap;
+                apply_remote_row(
+                    &self.shared,
+                    self.sink.as_ref(),
+                    &frame.payload,
+                    row.seq,
+                    replay,
+                );
                 let _ = self.events.send(ChatEvent::Applied);
             }
             frame_type::ACK => {
@@ -1576,6 +1659,9 @@ impl Actor {
             }
             frame_type::PRESENCE => {
                 let _ = self.events.send(ChatEvent::Presence);
+            }
+            frame_type::ROWS_DONE => {
+                lock(&self.shared).replaying_gap = false;
             }
             frame_type::PROBE_OK => {
                 if let Ok(probe) = serde_json::from_value::<wire::ProbeOkHeader>(frame.header) {

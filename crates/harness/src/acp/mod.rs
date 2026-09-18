@@ -3,9 +3,10 @@
 //!
 //! KEPT ONLY for agents built ground-up on ACP: Grok ([`AcpHarness::grok`],
 //! `grok agent stdio`), Devin ([`AcpHarness::devin`], `devin acp`) and Hermes
-//! ([`AcpHarness::hermes`], `hermes acp`) — plus pi
-//! ([`AcpHarness::pi`]) via the community `pi-acp` adapter until a native
-//! driver exists. Claude, Codex and Cursor moved to native drivers
+//! ([`AcpHarness::hermes`], `hermes acp`) and Antigravity
+//! ([`AcpHarness::antigravity`], Google's `agy_acp_server`, installed from its
+//! pinned release archive) — plus pi ([`AcpHarness::pi`]) via the community
+//! `pi-acp` adapter until a native driver exists. Claude, Codex and Cursor moved to native drivers
 //! ([`crate::ClaudeHarness`], [`crate::CodexHarness`], [`crate::CursorHarness`])
 //! after adapter-mediated ACP kept manufacturing done-status bugs the native
 //! wires don't have (turn-hold bookkeeping vs the CLI's own eager result).
@@ -27,15 +28,15 @@
 //! - Interrupt: `session/cancel`, escalating SIGTERM → SIGKILL; the stream
 //!   always ends with `Done { status: Interrupted }`.
 
+mod antigravity_paths;
 mod devin_models;
 mod normalize;
 mod subagent;
 mod subagent_devin;
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
-use std::process::Stdio;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -43,7 +44,6 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use serde_json::{Value, json};
 use tokio::io::AsyncBufReadExt;
-use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
 use zeron_proto::{
@@ -52,6 +52,7 @@ use zeron_proto::{
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
+use crate::process::{Child, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
 use normalize::{map_update, parse_commands, preferred_allow_option};
 use subagent::SubagentTracker;
@@ -74,6 +75,10 @@ struct AcpAgentSpec {
     /// spawns `node <entry>` directly, keeping npm (and every way a user's
     /// npm state can break) out of chat turns. See [`crate::adapter_install`].
     npm_package: Option<&'static str>,
+    /// pinned release archive for this platform, installed once into the
+    /// managed adapters dir when the binary isn't already present. See
+    /// [`crate::archive_install`].
+    archive: Option<crate::archive_install::ArchivePin>,
     /// Extra install locations to probe after PATH.
     extra_paths: fn() -> Vec<PathBuf>,
     /// The agent's own CLI binary (`claude`, `codex`, …) — what "installed"
@@ -117,6 +122,18 @@ struct AcpAgentSpec {
     /// Agent-specific advice appended to the stall error chip: what a wedge
     /// usually means for THIS agent and what the user can check.
     stall_hint: &'static str,
+    /// the agent advertises every effort as its own model id (`…-low`,
+    /// `…-high`) instead of a `thought_level` option: discovered variants fold
+    /// into one row with a ladder, and a run sends the variant for its level.
+    effort_in_model_id: bool,
+    /// auth method to sign in with when `session/new` answers auth_required —
+    /// for agents that expect the client to pick one before the first session.
+    auth_method: Option<&'static str>,
+    /// folders of `<skill>/SKILL.md` the agent loads itself but never
+    /// advertises, listed as slash commands alongside its own.
+    skill_dirs: fn() -> Vec<PathBuf>,
+    /// advertised commands the picker leaves out.
+    hidden_commands: &'static [&'static str],
 }
 
 fn identity_transform(_reasoning: Option<ReasoningLevel>, text: &str) -> String {
@@ -125,28 +142,7 @@ fn identity_transform(_reasoning: Option<ReasoningLevel>, text: &str) -> String 
 
 /// PATH + login-shell + extra dirs + node-version-manager scan for a binary.
 pub(crate) fn find_on_paths(exe: &str, extra: Vec<PathBuf>) -> Option<PathBuf> {
-    let mut candidates: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|path| {
-            std::env::split_paths(&path)
-                .filter(|d| !d.as_os_str().is_empty())
-                .map(|d| d.join(exe))
-                .collect()
-        })
-        .unwrap_or_default();
-    if let Some(shell_path) = crate::shell_env::login_shell_path() {
-        candidates.extend(
-            std::env::split_paths(shell_path)
-                .filter(|d| !d.as_os_str().is_empty())
-                .map(|d| d.join(exe)),
-        );
-    }
-    candidates.extend(extra);
-    candidates.extend(
-        crate::node_version_manager_bins()
-            .into_iter()
-            .map(|d| d.join(exe)),
-    );
-    candidates.into_iter().find(|p| p.exists())
+    crate::executable::find_on_paths(exe, extra)
 }
 
 /// Generic effort ladder for agents without their own clamping rules.
@@ -182,7 +178,7 @@ fn npm_global_paths(exe: &'static str) -> fn() -> Vec<PathBuf> {
 
 fn npm_global_bins(exe: &str) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = crate::executable::home_dir() {
         dirs.push(home.join(".local").join("bin").join(exe));
         dirs.push(home.join(".npm-global").join("bin").join(exe));
     }
@@ -193,7 +189,7 @@ fn npm_global_bins(exe: &str) -> Vec<PathBuf> {
 
 fn grok_install_paths() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = crate::executable::home_dir() {
         dirs.push(home.join(".local").join("bin").join("grok"));
         dirs.push(home.join(".grok").join("bin").join("grok"));
         dirs.push(home.join(".npm-global").join("bin").join("grok"));
@@ -218,6 +214,7 @@ fn grok_spec() -> AcpAgentSpec {
         // (the user's TUI) reads as total silent non-response in zeron.
         args: &["--no-auto-update", "agent", "--no-leader", "stdio"],
         npm_package: Some("@xai-official/grok@1.0.4"),
+        archive: None,
         extra_paths: grok_install_paths,
         cli_executable: "grok",
         cli_extra_paths: grok_install_paths,
@@ -258,12 +255,16 @@ fn grok_spec() -> AcpAgentSpec {
         stall_hint: "The agent process is likely wedged — a stale shared leader \
              process or a hung startup check; zeron launches it with --no-leader \
              and --no-auto-update to avoid both.",
+        effort_in_model_id: false,
+        auth_method: None,
+        skill_dirs: Vec::new,
+        hidden_commands: &[],
     }
 }
 
 fn devin_install_paths() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = crate::executable::home_dir() {
         // The official installer's launcher symlink (the binary lives below
         // ~/.local/share/devin/cli/_versions).
         dirs.push(home.join(".local").join("bin").join("devin"));
@@ -282,6 +283,7 @@ fn devin_spec() -> AcpAgentSpec {
         args: &["acp"],
         // Native ACP server — no adapter package in between.
         npm_package: None,
+        archive: None,
         extra_paths: devin_install_paths,
         cli_executable: "devin",
         cli_extra_paths: devin_install_paths,
@@ -329,12 +331,16 @@ fn devin_spec() -> AcpAgentSpec {
         prompt_complete_extension: false,
         prompt_stall: None,
         stall_hint: "The agent process is likely wedged.",
+        effort_in_model_id: false,
+        auth_method: None,
+        skill_dirs: Vec::new,
+        hidden_commands: &[],
     }
 }
 
 fn hermes_install_paths() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = crate::executable::home_dir() {
         dirs.push(home.join(".local").join("bin").join("hermes"));
         dirs.push(home.join(".hermes").join("bin").join("hermes"));
     }
@@ -352,6 +358,7 @@ fn hermes_spec() -> AcpAgentSpec {
         args: &["acp"],
         // Python/uv install — no npm fallback exists.
         npm_package: None,
+        archive: None,
         extra_paths: hermes_install_paths,
         cli_executable: "hermes",
         cli_extra_paths: hermes_install_paths,
@@ -394,6 +401,10 @@ fn hermes_spec() -> AcpAgentSpec {
         prompt_complete_extension: false,
         prompt_stall: None,
         stall_hint: "The agent process is likely wedged.",
+        effort_in_model_id: false,
+        auth_method: None,
+        skill_dirs: Vec::new,
+        hidden_commands: &[],
     }
 }
 
@@ -405,6 +416,7 @@ fn pi_spec() -> AcpAgentSpec {
         env_override: "PI_ACP_EXECUTABLE",
         args: &[],
         npm_package: Some("pi-acp@0.0.33"),
+        archive: None,
         extra_paths: npm_global_paths("pi-acp"),
         cli_executable: "pi",
         cli_extra_paths: || npm_global_bins("pi"),
@@ -450,14 +462,329 @@ fn pi_spec() -> AcpAgentSpec {
         prompt_complete_extension: false,
         prompt_stall: None,
         stall_hint: "The agent process is likely wedged.",
+        effort_in_model_id: false,
+        auth_method: None,
+        skill_dirs: Vec::new,
+        hidden_commands: &[],
     }
+}
+
+/// google's builds as the acp registry lists them (`antigravity-acp`); `None`
+/// on platforms without one, where only an explicit override can launch.
+fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
+    let (url, entry, sha512) = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-agy_acp_server_1.1.1-darwin-arm64.zip",
+            "agy_acp_server.par",
+            "82576ba00164331daeba798db43f9e7c9097b76f0cd536cc07956f976e0132e3500f51b28288f07bdb5a3f90f9702dabc20ca0627edb25aa7e8e50f9fac29b8a",
+        )
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-x86_64.zip",
+            "agy_acp_server.par",
+            "bccda188b2903d3ff7a56691064fc8698f76d7bc2bb0f24e99bb5f8cda02c77f77629edc5dba640d6e713edf8e6576dfa38e88fb532752a53e26710934b5e4f0",
+        )
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-arm64.zip",
+            "agy_acp_server.par",
+            "f895b4ade624e25f9765c90df66f3a864b19b2d1f2bde2fc485de6b6782ce30be458abed2da587d7cdd2272ea0812a8452639682c6318127e4fe0b4b8fc62dcf",
+        )
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-agy_acp_server_1.1.1-windows-x86_64.zip",
+            "agy_acp_server.exe",
+            "5f1c7ad17a3f3a877552bcb9c75da7c53d05417916728a3436962d81a136bb136e9d9e35a880c9c8ca4db0fcbab9c76e959b26965c5ce6e16ebdea51e4ea28b5",
+        )
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-agy_acp_server_1.1.1-windows-arm64.zip",
+            "agy_acp_server.exe",
+            "5ac47faa3d74a447f8c2b0aa6d174360c2fd08d0009368c2eff97ed8f24d0fedc6b798e5709e91d18ab756af9b06657dd9d90103cd37c67392afb94229fcc536",
+        )
+    } else {
+        return None;
+    };
+    Some(crate::archive_install::ArchivePin {
+        name: "antigravity-acp",
+        version: "1.1.1",
+        url,
+        entry,
+        sha512,
+    })
+}
+
+/// the user-global skill folders the server loads (`resolve_skills_paths`).
+/// its project-level `.gemini/skills` and `.agents/skills` depend on a session
+/// cwd the command listing doesn't have, so those still reach the agent when
+/// typed but aren't listed.
+fn antigravity_skill_dirs() -> Vec<PathBuf> {
+    antigravity_paths::home()
+        .map(|home| {
+            vec![
+                home.join("config").join("skills"),
+                home.join("antigravity-cli").join("skills"),
+            ]
+        })
+        .unwrap_or_default()
+}
+
+/// the pinned server keeps accepting `vertex-ai` for the method its
+/// `initialize` advertises as `agent-platform`, so a settings file saved under
+/// the old name still has to resolve.
+const ANTIGRAVITY_AUTH_ALIASES: &[(&str, &str)] = &[("vertex-ai", "agent-platform")];
+
+struct ConfiguredAuthMethod {
+    /// what the settings file holds, so an error names what the user wrote.
+    configured: String,
+    /// the id `initialize` advertises for it.
+    canonical: String,
+}
+
+impl ConfiguredAuthMethod {
+    fn new(configured: String) -> Self {
+        let canonical = ANTIGRAVITY_AUTH_ALIASES
+            .iter()
+            .find(|(alias, _)| *alias == configured)
+            .map_or(configured.as_str(), |(_, canonical)| canonical)
+            .to_owned();
+        Self {
+            configured,
+            canonical,
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct AntigravitySettings {
+    #[serde(default)]
+    auth: Option<AntigravityAuthSettings>,
+}
+
+#[derive(serde::Deserialize)]
+struct AntigravityAuthSettings {
+    #[serde(default, rename = "type")]
+    method: Option<String>,
+}
+
+fn configured_auth_method_in(path: &Path) -> Result<Option<ConfiguredAuthMethod>, HarnessError> {
+    let settings = match std::fs::read_to_string(path) {
+        Ok(settings) => settings,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(HarnessError::Protocol(format!(
+                "could not read Antigravity auth settings at {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    let settings: AntigravitySettings = deser_hjson::from_str(&settings).map_err(|error| {
+        HarnessError::Protocol(format!(
+            "could not parse Antigravity auth settings at {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(settings
+        .auth
+        .and_then(|auth| auth.method)
+        .filter(|method| !method.is_empty())
+        .map(ConfiguredAuthMethod::new))
+}
+
+fn sign_in_auth_method(
+    initialized: &Value,
+    default_method: &str,
+    configured_method: Option<&ConfiguredAuthMethod>,
+) -> Result<String, HarnessError> {
+    let available: Vec<&str> = initialized
+        .get("authMethods")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|method| method.get("id").and_then(Value::as_str))
+        .collect();
+    let selected = configured_method.map_or(default_method, |method| method.canonical.as_str());
+    if available.contains(&selected) {
+        return Ok(selected.to_owned());
+    }
+    let (source, named) = match configured_method {
+        Some(method) => ("configured", method.configured.as_str()),
+        None => ("default", default_method),
+    };
+    Err(HarnessError::Protocol(format!(
+        "Antigravity's {source} auth method {named} is not advertised by the server; available methods: {}",
+        available.join(", ")
+    )))
+}
+
+/// one command per `<dir>/<skill>/SKILL.md`, in folder order and
+/// alphabetically within each folder; the first folder wins a repeated name.
+fn skill_commands(dirs: &[PathBuf]) -> Vec<SlashCommand> {
+    let mut commands: Vec<SlashCommand> = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut skill_files: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("SKILL.md"))
+            .filter(|path| path.is_file())
+            .collect();
+        skill_files.sort();
+        for file in skill_files {
+            let Some((name, description)) = std::fs::read_to_string(&file)
+                .ok()
+                .and_then(|text| skill_frontmatter(&text))
+            else {
+                continue;
+            };
+            if commands.iter().any(|command| command.name == name) {
+                continue;
+            }
+            commands.push(SlashCommand {
+                name,
+                description: first_sentence(&description),
+                input_hint: None,
+            });
+        }
+    }
+    commands
+}
+
+/// `name` and `description` from a `SKILL.md` YAML frontmatter block,
+/// including folded (`>`) or literal (`|`) multi-line descriptions.
+fn skill_frontmatter(text: &str) -> Option<(String, String)> {
+    let body = text.trim_start().strip_prefix("---")?;
+    let end = body.find("\n---")?;
+    let lines: Vec<&str> = body[..end].lines().collect();
+    let field = |key: &str| -> Option<String> {
+        let index = lines.iter().position(|line| {
+            line.strip_prefix(key)
+                .is_some_and(|rest| rest.starts_with(':'))
+        })?;
+        let value = lines[index][key.len() + 1..].trim();
+        let value = if matches!(value, "" | ">" | "|" | ">-" | "|-") {
+            lines[index + 1..]
+                .iter()
+                .take_while(|line| line.starts_with(' ') || line.starts_with('\t'))
+                .map(|line| line.trim())
+                .collect::<Vec<_>>()
+                .join(" ")
+        } else {
+            value.trim_matches(|c| c == '"' || c == '\'').to_owned()
+        };
+        Some(value)
+    };
+    let name = field("name").filter(|name| !name.is_empty())?;
+    Some((name, field("description").unwrap_or_default()))
+}
+
+/// skill descriptions are model-facing paragraphs; a picker row only has room
+/// for the opening sentence.
+fn first_sentence(text: &str) -> String {
+    let text = text.trim();
+    match text.find(". ") {
+        Some(end) => text[..=end].to_owned(),
+        None => text.to_owned(),
+    }
+}
+
+/// the registry launches linux builds with an empty `--uid`, which keeps a
+/// root-started server running as the invoking user.
+const ANTIGRAVITY_LINUX_ARGS: &[&str] = &["--uid="];
+
+fn antigravity_spec() -> AcpAgentSpec {
+    AcpAgentSpec {
+        id: HarnessId::Antigravity,
+        display_name: "Antigravity",
+        executable: "agy_acp_server",
+        env_override: "ANTIGRAVITY_ACP_EXECUTABLE",
+        args: if cfg!(target_os = "linux") {
+            ANTIGRAVITY_LINUX_ARGS
+        } else {
+            &[]
+        },
+        npm_package: None,
+        archive: antigravity_archive(),
+        extra_paths: Vec::new,
+        cli_executable: "agy_acp_server",
+        cli_extra_paths: Vec::new,
+        install_hint: "agy_acp_server (zeron downloads Google's pinned Antigravity ACP \
+             server 1.1.1 on first use, but this platform has no published build; set \
+             ANTIGRAVITY_ACP_EXECUTABLE to a server binary to override)",
+        models: || {
+            use ReasoningLevel::{High, Low, Medium};
+            vec![
+                Model {
+                    id: "gemini-3.7-flash".into(),
+                    label: "Gemini 3.7 Flash".into(),
+                    description: None,
+                    reasoning_levels: vec![Low, Medium, High],
+                    options: Vec::new(),
+                },
+                Model {
+                    id: "gemini-3.1-pro".into(),
+                    label: "Gemini 3.1 Pro".into(),
+                    description: None,
+                    reasoning_levels: vec![Low, High],
+                    options: Vec::new(),
+                },
+            ]
+        },
+        steering_mode: SteeringMode::TurnBoundary,
+        reasoning_levels: &[],
+        prompt_transform: identity_transform,
+        effort_values: default_effort_values,
+        ladder_extras: &[],
+        prompt_complete_extension: false,
+        prompt_stall: None,
+        stall_hint: "The agent process is likely wedged.",
+        effort_in_model_id: true,
+        // the personal oauth method is only the first-run default; sign-in
+        // preserves any method already selected in antigravity's settings.
+        auth_method: Some("oauth-personal"),
+        skill_dirs: antigravity_skill_dirs,
+        // signing out belongs to the Settings toggle, which keeps enablement
+        // and the stored login in step
+        hidden_commands: &["logout"],
+    }
+}
+
+/// how long a sign-in may wait on the browser: the antigravity server gives
+/// its loopback redirect 300s, plus room for the token exchange.
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(330);
+/// sign-out is local credential removal; this bound covers the server's cold
+/// start.
+const SIGN_OUT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// milestones of [`AcpHarness::sign_in`] a caller can surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignInProgress {
+    /// the server is being downloaded before sign-in can start.
+    Installing,
+    /// the agent is waiting on the user at this sign-in url.
+    OpenBrowser(String),
+}
+
+fn sign_in_url(line: &str) -> Option<String> {
+    let start = [line.find("https://"), line.find("http://")]
+        .into_iter()
+        .flatten()
+        .min()?;
+    let url = line[start..]
+        .split_whitespace()
+        .next()?
+        .trim_end_matches(['.', ',', ';', ')', ']', '}']);
+    reqwest::Url::parse(url).ok().map(|url| url.to_string())
 }
 
 /// Background-install managed npm adapters for agents whose CLI is present
 /// on this device, so a first chat never pays (or trips over) an npm run.
 /// Skips agents whose adapter is already resolvable; failures are logged and
 /// retried on the next daemon start or blocking launch. A no-op outside a
-/// tokio runtime.
+/// tokio runtime. Archive-distributed servers install when their sign-in
+/// runs instead.
 pub fn prewarm_managed_adapters() {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
@@ -500,6 +827,10 @@ enum Launch {
         bin_name: &'static str,
         args: Vec<String>,
     },
+    Archive {
+        pin: crate::archive_install::ArchivePin,
+        args: Vec<String>,
+    },
 }
 
 /// The ACP harness. Construct with [`AcpHarness::grok`]; tests point it at a
@@ -523,12 +854,9 @@ pub struct AcpHarness {
     model_discovery_timeout: Duration,
     /// Discovery result cache: the advertised commands survive across calls.
     commands: tokio::sync::OnceCell<Vec<SlashCommand>>,
-    /// Model discovery cache: only a successful, non-empty probe is cached,
-    /// so a mis-authed agent retries on the next picker open.
-    models_cache: tokio::sync::OnceCell<Vec<Model>>,
-    /// Coalesce concurrent picker/title probes. Starting several OpenCode
-    /// processes at once makes cold plugin loading slower and wastes memory.
-    models_probe: tokio::sync::Mutex<()>,
+    /// Share successful catalogs only with overlapping requests. Later picker
+    /// opens must see account changes and newly available models.
+    models_cache: tokio::sync::Mutex<Option<(Instant, Vec<Model>)>>,
     devin_models: devin_models::Catalog,
 }
 
@@ -546,8 +874,7 @@ impl AcpHarness {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             model_discovery_timeout: DEFAULT_MODEL_DISCOVERY_TIMEOUT,
             commands: tokio::sync::OnceCell::new(),
-            models_cache: tokio::sync::OnceCell::new(),
-            models_probe: tokio::sync::Mutex::new(()),
+            models_cache: tokio::sync::Mutex::new(None),
             devin_models: devin_models::Catalog::default(),
         }
     }
@@ -571,6 +898,142 @@ impl AcpHarness {
     /// pi's RPC mode.
     pub fn pi() -> Self {
         Self::with_spec(pi_spec())
+    }
+
+    /// google antigravity over its acp server (`agy_acp_server`).
+    pub fn antigravity() -> Self {
+        Self::with_spec(antigravity_spec())
+    }
+
+    /// sign the agent out with acp `logout`, clearing the credentials its
+    /// sign-in stored.
+    pub async fn sign_out(&self) -> Result<(), HarnessError> {
+        let home = std::env::var("HOME").ok();
+        let (mut child, _stderr) = self.spawn_agent(home.as_deref(), false, &[]).await?;
+        let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
+            (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
+            _ => {
+                shutdown_child(&mut child, self.kill_grace).await;
+                return Err(HarnessError::Protocol("agent child has no stdio".into()));
+            }
+        };
+        let flow = async {
+            client
+                .request("initialize", initialize_params(self.spec.id))
+                .await?;
+            request_draining(&client, &mut incoming, "logout", json!({})).await
+        };
+        let result = tokio::time::timeout(SIGN_OUT_TIMEOUT, flow).await;
+        shutdown_child(&mut child, self.kill_grace).await;
+        match result {
+            Ok(outcome) => outcome.map(|_| ()),
+            Err(_) => Err(HarnessError::Protocol(format!(
+                "{} sign-out did not finish within {}s",
+                self.spec.display_name,
+                SIGN_OUT_TIMEOUT.as_secs()
+            ))),
+        }
+    }
+
+    /// run the agent's own sign-in outside any chat: install the server if
+    /// needed, then `authenticate` with the spec's method. The server opens
+    /// the sign-in page through `browser` (`$BROWSER`), so a caller that opens
+    /// the reported url itself can pass a no-op to avoid a second tab.
+    pub async fn sign_in(
+        &self,
+        browser: Option<PathBuf>,
+        on_progress: impl Fn(SignInProgress) + Send + Sync + 'static,
+    ) -> Result<(), HarnessError> {
+        let display_name = self.spec.display_name;
+        let Some(default_method) = self.spec.auth_method else {
+            return Err(HarnessError::Protocol(format!(
+                "{display_name} has no sign-in flow"
+            )));
+        };
+        let gemini_home = (self.spec.id == HarnessId::Antigravity)
+            .then(antigravity_paths::home)
+            .transpose()?;
+        let configured_method = gemini_home
+            .as_ref()
+            .map(|home| {
+                configured_auth_method_in(&home.join("antigravity-acp").join("settings.json"))
+            })
+            .transpose()?
+            .flatten();
+        if let Launch::Archive { pin, .. } = self.resolve_launch()?
+            && crate::archive_install::installed_entry(&pin).is_none()
+        {
+            on_progress(SignInProgress::Installing);
+        }
+        let (exe, args) = self.resolve_program(true).await?;
+        let mut cmd = Command::new(&exe);
+        cmd.args(args);
+        crate::compose_child_path(&mut cmd, &exe);
+        if let Some(home) = std::env::var_os("HOME") {
+            cmd.current_dir(home);
+        }
+        if let Some(home) = gemini_home {
+            cmd.env("GEMINI_HOME", home);
+        }
+        if let Some(browser) = browser {
+            cmd.env("BROWSER", browser);
+        }
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                HarnessError::NotInstalled(exe.display().to_string())
+            } else {
+                HarnessError::Io(e)
+            }
+        })?;
+        let on_progress = std::sync::Arc::new(on_progress);
+        if let Some(stderr) = child.stderr.take() {
+            let on_progress = on_progress.clone();
+            tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                let mut announced = false;
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!(target: "zeron_harness::acp", "sign-in stderr: {line}");
+                    if !announced && let Some(url) = sign_in_url(&line) {
+                        announced = true;
+                        on_progress(SignInProgress::OpenBrowser(url));
+                    }
+                }
+            });
+        }
+        let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
+            (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
+            _ => {
+                shutdown_child(&mut child, self.kill_grace).await;
+                return Err(HarnessError::Protocol("agent child has no stdio".into()));
+            }
+        };
+        let flow = async {
+            let initialized = client
+                .request("initialize", initialize_params(self.spec.id))
+                .await?;
+            let method =
+                sign_in_auth_method(&initialized, default_method, configured_method.as_ref())?;
+            request_draining(
+                &client,
+                &mut incoming,
+                "authenticate",
+                json!({ "methodId": method }),
+            )
+            .await
+        };
+        let result = tokio::time::timeout(SIGN_IN_TIMEOUT, flow).await;
+        shutdown_child(&mut child, self.kill_grace).await;
+        match result {
+            Ok(outcome) => outcome.map(|_| ()),
+            Err(_) => Err(HarnessError::Protocol(format!(
+                "{display_name} sign-in did not finish within {} minutes",
+                SIGN_IN_TIMEOUT.as_secs() / 60
+            ))),
+        }
     }
 
     /// Use a fixed agent binary instead of PATH/known-location resolution.
@@ -622,6 +1085,8 @@ impl AcpHarness {
                         .ok_or_else(|| HarnessError::NotInstalled(self.spec.install_hint.into())),
                 }
             }
+            Launch::Archive { pin, .. } => crate::archive_install::entry_path(&pin)
+                .ok_or_else(|| HarnessError::NotInstalled(self.spec.install_hint.into())),
         }
     }
 
@@ -631,12 +1096,14 @@ impl AcpHarness {
     fn resolve_launch(&self) -> Result<Launch, HarnessError> {
         let spec_args: Vec<String> = self.spec.args.iter().map(|a| a.to_string()).collect();
         if let Some(p) = &self.executable {
-            return Ok(Launch::Program(p.clone(), spec_args));
+            return crate::executable::validate_native_override(p)
+                .map(|program| Launch::Program(program, spec_args));
         }
         if let Some(p) = std::env::var_os(self.spec.env_override)
             && !p.is_empty()
         {
-            return Ok(Launch::Program(PathBuf::from(p), spec_args));
+            return crate::executable::validate_native_override(&PathBuf::from(p))
+                .map(|program| Launch::Program(program, spec_args));
         }
         if let Some(found) = find_on_paths(self.spec.executable, (self.spec.extra_paths)()) {
             return Ok(Launch::Program(found, spec_args));
@@ -652,6 +1119,12 @@ impl AcpHarness {
                     args: spec_args,
                 });
             }
+        }
+        if let Some(pin) = self.spec.archive {
+            return Ok(Launch::Archive {
+                pin,
+                args: spec_args,
+            });
         }
         Err(HarnessError::NotInstalled(self.spec.install_hint.into()))
     }
@@ -708,6 +1181,29 @@ impl AcpHarness {
                 node_args.extend(args);
                 Ok((program, node_args))
             }
+            Launch::Archive { pin, args } => {
+                if let Some(entry) = crate::archive_install::installed_entry(&pin) {
+                    return Ok((entry, args));
+                }
+                let display_name = self.spec.display_name;
+                if block_on_install {
+                    let entry = crate::archive_install::ensure_installed(pin, display_name).await?;
+                    return Ok((entry, args));
+                }
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        crate::archive_install::ensure_installed(pin, display_name).await
+                    {
+                        tracing::warn!(
+                            target: "zeron_harness::adapter_install",
+                            "background ACP server install failed: {e}"
+                        );
+                    }
+                });
+                Err(HarnessError::Protocol(format!(
+                    "{display_name} ACP server is installing in the background"
+                )))
+            }
         }
     }
 
@@ -724,6 +1220,9 @@ impl AcpHarness {
         crate::compose_child_path(&mut cmd, &exe);
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
+        }
+        if self.spec.id == HarnessId::Antigravity {
+            cmd.env("GEMINI_HOME", antigravity_paths::home()?);
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -770,7 +1269,7 @@ impl AcpHarness {
                 .await?;
             let mut commands = scan_available_commands(&init);
             if commands.is_empty() {
-                let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+                let cwd = crate::executable::home_or_current_dir();
                 let session = client
                     .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
                     .await;
@@ -832,7 +1331,7 @@ impl AcpHarness {
             client
                 .request("initialize", initialize_params(self.spec.id))
                 .await?;
-            let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+            let cwd = crate::executable::home_or_current_dir();
             let session = client
                 .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
                 .await?;
@@ -847,6 +1346,9 @@ impl AcpHarness {
                         }
                     }
                 }
+            }
+            if self.spec.effort_in_model_id {
+                models = group_effort_variants(models);
             }
             Ok::<Vec<Model>, HarnessError>(models)
         };
@@ -1143,17 +1645,26 @@ impl Harness for AcpHarness {
     /// adapter does NOT count when the CLI itself is missing. Explicit
     /// executables (tests, `*_EXECUTABLE` overrides) always count.
     fn installed(&self) -> bool {
-        if self.executable.is_some() {
-            return true;
+        // Overrides go through the same validation as `resolve_launch`, so an
+        // override that points at nothing reports not-installed instead of an
+        // agent that shows up in the composer and then fails to launch.
+        if let Some(p) = &self.executable {
+            return crate::executable::validate_native_override(p).is_ok();
         }
-        if std::env::var_os(self.spec.env_override).is_some_and(|v| !v.is_empty()) {
+        if let Some(p) = std::env::var_os(self.spec.env_override)
+            && !p.is_empty()
+        {
+            return crate::executable::validate_native_override(&PathBuf::from(p)).is_ok();
+        }
+        // a published server build is enough: signing in installs it
+        if self.spec.archive.is_some() {
             return true;
         }
         find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)()).is_some()
     }
 
     /// Devin refreshes through its native catalog command on each request.
-    /// Other ACP agents use a cached session probe, with the spec's static
+    /// Other ACP agents use a fresh session probe, with the spec's static
     /// catalog as fallback when they advertise nothing or probing fails.
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.resolve_launch()?;
@@ -1164,28 +1675,48 @@ impl Harness for AcpHarness {
                 .refresh(&exe, self.model_discovery_timeout)
                 .await;
         }
-        if let Some(models) = self.models_cache.get() {
-            return Ok(models.clone());
-        }
-        let _probe = self.models_probe.lock().await;
-        if let Some(models) = self.models_cache.get() {
+        let requested_at = Instant::now();
+        let mut latest = self.models_cache.lock().await;
+        if let Some((completed_at, models)) = &*latest
+            && *completed_at >= requested_at
+        {
             return Ok(models.clone());
         }
         match self.discover_models().await {
             Ok(models) if !models.is_empty() => {
-                let _ = self.models_cache.set(models.clone());
-                Ok(self.models_cache.get().cloned().unwrap_or(models))
+                *latest = Some((Instant::now(), models.clone()));
+                Ok(models)
             }
             Ok(_) => Ok((self.spec.models)()),
-            Err(_) => Ok((self.spec.models)()),
+            Err(error) => {
+                tracing::warn!(harness = %self.spec.display_name, %error, "Model discovery failed; using fallback");
+                Ok((self.spec.models)())
+            }
         }
     }
 
+    /// the agent's advertised commands minus the spec's hidden ones, then its
+    /// skills. Skills are read fresh on every call so a newly added one shows
+    /// up, and they still list when discovery fails (a signed-out agent).
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        self.commands
+        let discovered = self
+            .commands
             .get_or_try_init(|| self.discover_commands())
             .await
-            .cloned()
+            .cloned();
+        let skills = skill_commands(&(self.spec.skill_dirs)());
+        let mut commands = match discovered {
+            Ok(commands) => commands,
+            Err(_) if !skills.is_empty() => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        commands.retain(|command| !self.spec.hidden_commands.contains(&command.name.as_str()));
+        for skill in skills {
+            if !commands.iter().any(|command| command.name == skill.name) {
+                commands.push(skill);
+            }
+        }
+        Ok(commands)
     }
 
     async fn run(
@@ -1243,6 +1774,8 @@ impl Harness for AcpHarness {
             prompt_complete_extension: self.spec.prompt_complete_extension,
             prompt_stall: self.spec.prompt_stall,
             stall_hint: self.spec.stall_hint,
+            effort_in_model_id: self.spec.effort_in_model_id,
+            auth_method: self.spec.auth_method,
             sessions_root: self.sessions_root.clone(),
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
@@ -1273,6 +1806,8 @@ struct Session {
     prompt_complete_extension: bool,
     prompt_stall: Option<Duration>,
     stall_hint: &'static str,
+    effort_in_model_id: bool,
+    auth_method: Option<&'static str>,
     /// Sessions-root override for the subagent transcript tail (tests).
     sessions_root: Option<PathBuf>,
     prompt_transform: fn(Option<ReasoningLevel>, &str) -> String,
@@ -1465,6 +2000,59 @@ fn first_class_model_change(
         return Ok(None);
     }
     Ok(Some(requested.to_owned()))
+}
+
+fn validate_config_model_selection(
+    session_response: &Value,
+    requested: Option<&str>,
+    model_options: &serde_json::Map<String, Value>,
+) -> Result<(), HarnessError> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    let Some(option) = session_response
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .and_then(|options| {
+            options.iter().find(|option| {
+                option.get("type").and_then(Value::as_str) == Some("select")
+                    && option.get("category").and_then(Value::as_str) == Some("model")
+            })
+        })
+    else {
+        return Ok(());
+    };
+    let available: Vec<&str> = option
+        .get("options")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|choice| choice.get("value").and_then(Value::as_str))
+        .collect();
+    let context_1m = model_options
+        .get("contextWindow")
+        .and_then(Value::as_str)
+        .is_some_and(|window| window.eq_ignore_ascii_case("1m"));
+    if pick_model_value(requested, &available, context_1m).is_some() {
+        return Ok(());
+    }
+    Err(HarnessError::Protocol(format!(
+        "agent does not advertise requested model {requested}; available models: {}",
+        available.join(", ")
+    )))
+}
+
+fn is_model_config_option(session_response: &Value, config_id: &str) -> bool {
+    session_response
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .is_some_and(|options| {
+            options.iter().any(|option| {
+                option.get("id").and_then(Value::as_str) == Some(config_id)
+                    && option.get("category").and_then(Value::as_str) == Some("model")
+            })
+        })
 }
 
 /// The `session/set_config_option` calls a session response's `configOptions`
@@ -1833,6 +2421,173 @@ fn handle_server_request_live(
     Vec::new()
 }
 
+/// `session/new`. Agents that sign in from Settings never start a browser
+/// sign-in mid-chat; an auth_required answer points the user there instead.
+async fn new_session(
+    client: &RpcClient,
+    incoming: &mut mpsc::Receiver<Incoming>,
+    params: Value,
+    agent_name: &str,
+    signs_in_from_settings: bool,
+) -> Result<Value, HarnessError> {
+    match request_draining(client, incoming, "session/new", params).await {
+        Err(error) if signs_in_from_settings && is_auth_required(&error) => {
+            Err(HarnessError::Protocol(format!(
+                "{agent_name} isn't signed in. Turn it on again in Settings → Agents to sign in."
+            )))
+        }
+        other => other,
+    }
+}
+
+/// acp reserves -32000 for auth_required.
+fn is_auth_required(error: &HarnessError) -> bool {
+    matches!(error, HarnessError::Protocol(message) if message.contains("(code -32000)"))
+}
+
+const EFFORT_SUFFIXES: [(&str, &str, ReasoningLevel); 3] = [
+    ("-low", " (Low)", ReasoningLevel::Low),
+    ("-medium", " (Medium)", ReasoningLevel::Medium),
+    ("-high", " (High)", ReasoningLevel::High),
+];
+
+/// one picker row: either a single advertised model, or the effort variants
+/// of one model with the id the agent advertises for each level.
+struct EffortGroup<'a> {
+    id: String,
+    label: &'a str,
+    variants: Vec<(ReasoningLevel, &'a str)>,
+}
+
+/// group advertised `(id, name)` choices by their display name. antigravity
+/// names every effort variant "<model> (Low|Medium|High)", but its ids don't
+/// always follow (a signed-in account pairs `gemini-3.1-pro-low` with
+/// `gemini-pro-agent` for High), so the name is the only reliable key. A
+/// group's id is a variant id minus its level suffix, falling back to the
+/// first variant's id; ids come from the wire alone, so discovery and run
+/// time derive the same one.
+fn effort_groups<'a>(
+    choices: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Vec<EffortGroup<'a>> {
+    let mut groups: Vec<EffortGroup<'a>> = Vec::new();
+    for (id, name) in choices {
+        let variant = EFFORT_SUFFIXES.iter().find_map(|(_, label_suffix, level)| {
+            name.strip_suffix(label_suffix).map(|base| (base, *level))
+        });
+        let Some((base, level)) = variant else {
+            groups.push(EffortGroup {
+                id: id.to_owned(),
+                label: name,
+                variants: Vec::new(),
+            });
+            continue;
+        };
+        match groups
+            .iter_mut()
+            .find(|group| !group.variants.is_empty() && group.label == base)
+        {
+            Some(group) => group.variants.push((level, id)),
+            None => groups.push(EffortGroup {
+                id: String::new(),
+                label: base,
+                variants: vec![(level, id)],
+            }),
+        }
+    }
+    for group in groups.iter_mut().filter(|group| !group.variants.is_empty()) {
+        group.id = group
+            .variants
+            .iter()
+            .find_map(|(_, id)| {
+                EFFORT_SUFFIXES
+                    .iter()
+                    .find_map(|(id_suffix, _, _)| id.strip_suffix(id_suffix))
+            })
+            .unwrap_or(group.variants[0].1)
+            .to_owned();
+        group.variants.sort_by_key(|(level, _)| *level);
+    }
+    groups
+}
+
+/// fold effort variants into one row whose ladder lists the levels offered;
+/// models without a level in their name pass through.
+fn group_effort_variants(models: Vec<Model>) -> Vec<Model> {
+    let groups = effort_groups(models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
+    groups
+        .iter()
+        .filter_map(|group| {
+            let Some((_, first_id)) = group.variants.first() else {
+                return models.iter().find(|m| m.id == group.id).cloned();
+            };
+            let first = models.iter().find(|m| m.id == *first_id)?;
+            Some(Model {
+                id: group.id.clone(),
+                label: group.label.to_owned(),
+                // variant descriptions only restate their thinking level
+                description: None,
+                reasoning_levels: group.variants.iter().map(|(level, _)| *level).collect(),
+                options: first.options.clone(),
+            })
+        })
+        .collect()
+}
+
+/// the advertised variant id for a grouped model: the picked level when the
+/// model offers it, else its strongest level. Ids the agent already
+/// advertises (chats saved with a full variant id) pass through untouched.
+fn effort_variant_id(
+    session_response: &Value,
+    model: &str,
+    reasoning: Option<ReasoningLevel>,
+) -> String {
+    let choices: Vec<(&str, &str)> = session_response
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .and_then(|options| {
+            options
+                .iter()
+                .find(|o| o.get("category").and_then(Value::as_str) == Some("model"))
+        })
+        .and_then(|o| o.get("options").and_then(Value::as_array))
+        .map(|choices| {
+            choices
+                .iter()
+                .filter_map(|c| {
+                    let id = c.get("value").and_then(Value::as_str)?;
+                    Some((id, c.get("name").and_then(Value::as_str).unwrap_or(id)))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if choices.iter().any(|(id, _)| *id == model) {
+        return model.to_owned();
+    }
+    let groups = effort_groups(choices);
+    let Some(group) = groups.iter().find(|group| group.id == model) else {
+        return model.to_owned();
+    };
+    let offered = |level: ReasoningLevel| {
+        group
+            .variants
+            .iter()
+            .find(|(variant_level, _)| *variant_level == level)
+            .map(|(_, id)| (*id).to_owned())
+    };
+    reasoning
+        .and_then(offered)
+        .or_else(|| {
+            [
+                ReasoningLevel::High,
+                ReasoningLevel::Medium,
+                ReasoningLevel::Low,
+            ]
+            .into_iter()
+            .find_map(offered)
+        })
+        .unwrap_or_else(|| model.to_owned())
+}
+
 /// Await a setup request while draining incoming messages, so a `session/load`
 /// whose replay outruns the incoming channel's capacity can't deadlock the
 /// reader. Replayed `session/update`s are dropped (the doc already holds the
@@ -1953,6 +2708,8 @@ async fn run_session(session: Session) {
         prompt_complete_extension,
         prompt_stall,
         stall_hint,
+        effort_in_model_id,
+        auth_method,
         sessions_root,
         prompt_transform,
         effort_values,
@@ -1988,11 +2745,12 @@ async fn run_session(session: Session) {
                         target: "zeron_harness::acp",
                         "session/load failed (starting fresh): {e}"
                     );
-                    let new = request_draining(
+                    let new = new_session(
                         &client,
                         &mut incoming,
-                        "session/new",
                         session_params.clone(),
+                        agent_name,
+                        auth_method.is_some(),
                     )
                     .await?;
                     (
@@ -2005,8 +2763,14 @@ async fn run_session(session: Session) {
                 }
             }
         } else {
-            let new =
-                request_draining(&client, &mut incoming, "session/new", session_params).await?;
+            let new = new_session(
+                &client,
+                &mut incoming,
+                session_params,
+                agent_name,
+                auth_method.is_some(),
+            )
+            .await?;
             (
                 new.get("sessionId")
                     .and_then(Value::as_str)
@@ -2038,7 +2802,23 @@ async fn run_session(session: Session) {
         // follows the same split. Unlike the best-effort auxiliary options,
         // an explicit model switch is strict: prompting with a different
         // model than the picker shows is worse than surfacing the RPC error.
-        if let Some(model) = first_class_model_change(&session_response, request.model.as_deref())?
+        let requested_model: Option<String> = match request.model.as_deref() {
+            Some(model) if effort_in_model_id => Some(effort_variant_id(
+                &session_response,
+                model,
+                request.reasoning,
+            )),
+            model => model.map(str::to_owned),
+        };
+        if harness == HarnessId::Antigravity {
+            validate_config_model_selection(
+                &session_response,
+                requested_model.as_deref(),
+                &request.model_options,
+            )?;
+        }
+        if let Some(model) =
+            first_class_model_change(&session_response, requested_model.as_deref())?
         {
             request_draining(
                 &client,
@@ -2059,11 +2839,10 @@ async fn run_session(session: Session) {
         // traits: a rejected auxiliary set is logged and the agent default
         // runs.
         let efforts = effort_values(request.reasoning, request.model.as_deref());
-        let requested_model = request.model.as_deref();
         let options_snapshot = session_response;
         for (config_id, payload) in config_option_sets(
             &options_snapshot,
-            requested_model,
+            requested_model.as_deref(),
             &efforts,
             &request.model_options,
         ) {
@@ -2083,17 +2862,13 @@ async fn run_session(session: Session) {
             )
             .await
             {
-                if harness == HarnessId::Devin
-                    && options_snapshot["configOptions"]
-                        .as_array()
-                        .is_some_and(|options| {
-                            options
-                                .iter()
-                                .any(|o| o["id"] == config_id && o["category"] == "model")
-                        })
+                if matches!(harness, HarnessId::Antigravity | HarnessId::Devin)
+                    && requested_model.is_some()
+                    && is_model_config_option(&options_snapshot, &config_id)
                 {
                     return Err(HarnessError::Protocol(format!(
-                        "Devin rejected requested model {requested_model:?}: {e}"
+                        "agent rejected requested model {}: {e}",
+                        requested_model.as_deref().unwrap_or_default()
                     )));
                 }
                 tracing::debug!(
@@ -2960,12 +3735,12 @@ async fn run_session(session: Session) {
                     client.notify("session/cancel", Some(json!({ "sessionId": session_id })));
                     // Escalate if the agent doesn't wind down (stopReason
                     // "cancelled") within the grace periods.
-                    if let Some(pid) = child.id() {
+                    if let Some(pid) = crate::process::signal_target(&child) {
                         escalation = Some(tokio::spawn(async move {
                             tokio::time::sleep(interrupt_grace).await;
-                            send_signal(pid, Signal::Term);
+                            send_signal(&pid, Signal::Term);
                             tokio::time::sleep(kill_grace).await;
-                            send_signal(pid, Signal::Kill);
+                            send_signal(&pid, Signal::Kill);
                         }));
                     }
                 } else {
@@ -3068,6 +3843,266 @@ async fn run_session(session: Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn all_antigravity_auth_methods() -> Value {
+        json!({
+            "authMethods": [
+                {"id": "oauth-personal"},
+                {"id": "oauth-business"},
+                {"id": "agent-platform"},
+                {"id": "gemini-api-key"}
+            ]
+        })
+    }
+
+    fn settings_holding(body: &str) -> (tempfile::TempDir, PathBuf) {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("antigravity-acp");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, body).unwrap();
+        (home, path)
+    }
+
+    #[test]
+    fn antigravity_sign_in_preserves_an_advertised_configured_method() {
+        let initialized = all_antigravity_auth_methods();
+        assert_eq!(
+            sign_in_auth_method(
+                &initialized,
+                "oauth-personal",
+                Some(&ConfiguredAuthMethod::new("oauth-business".into()))
+            )
+            .unwrap(),
+            "oauth-business"
+        );
+        assert_eq!(
+            sign_in_auth_method(&initialized, "oauth-personal", None).unwrap(),
+            "oauth-personal"
+        );
+    }
+
+    #[test]
+    fn antigravity_sign_in_refuses_to_replace_an_unavailable_configured_method() {
+        let initialized = json!({
+            "authMethods": [{"id": "oauth-personal"}]
+        });
+        let error = sign_in_auth_method(
+            &initialized,
+            "oauth-personal",
+            Some(&ConfiguredAuthMethod::new("oauth-business".into())),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("configured auth method oauth-business")
+        );
+    }
+
+    #[test]
+    fn antigravity_sign_in_resolves_the_vertex_ai_alias() {
+        assert_eq!(
+            sign_in_auth_method(
+                &all_antigravity_auth_methods(),
+                "oauth-personal",
+                Some(&ConfiguredAuthMethod::new("vertex-ai".into()))
+            )
+            .unwrap(),
+            "agent-platform"
+        );
+    }
+
+    #[test]
+    fn antigravity_sign_in_still_refuses_an_unknown_configured_method() {
+        let error = sign_in_auth_method(
+            &all_antigravity_auth_methods(),
+            "oauth-personal",
+            Some(&ConfiguredAuthMethod::new("totally-made-up".into())),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("configured auth method totally-made-up")
+        );
+    }
+
+    #[test]
+    fn antigravity_settings_reader_accepts_plain_json() {
+        let (_home, path) = settings_holding(r#"{"auth": {"type": "oauth-business"}}"#);
+        assert_eq!(
+            configured_auth_method_in(&path)
+                .unwrap()
+                .unwrap()
+                .configured,
+            "oauth-business"
+        );
+    }
+
+    #[test]
+    fn antigravity_settings_reader_accepts_hjson() {
+        let (_home, path) = settings_holding(
+            "{\n  // the account this machine signs in with\n  auth: {\n    type: gemini-api-key\n  }\n}\n",
+        );
+        let method = configured_auth_method_in(&path).unwrap().unwrap();
+        assert_eq!(method.configured, "gemini-api-key");
+        assert_eq!(method.canonical, "gemini-api-key");
+    }
+
+    #[test]
+    fn antigravity_settings_reader_canonicalizes_vertex_ai() {
+        let (_home, path) = settings_holding(r#"{"auth": {"type": "vertex-ai"}}"#);
+        let method = configured_auth_method_in(&path).unwrap().unwrap();
+        assert_eq!(method.configured, "vertex-ai");
+        assert_eq!(method.canonical, "agent-platform");
+    }
+
+    #[test]
+    fn antigravity_settings_reader_reports_no_method_when_unset() {
+        let (_home, empty) = settings_holding("{}");
+        assert!(configured_auth_method_in(&empty).unwrap().is_none());
+
+        let (_home, blank) = settings_holding(r#"{"auth": {"type": ""}}"#);
+        assert!(configured_auth_method_in(&blank).unwrap().is_none());
+
+        let (missing, _) = settings_holding("{}");
+        let absent = missing.path().join("nowhere").join("settings.json");
+        assert!(configured_auth_method_in(&absent).unwrap().is_none());
+    }
+
+    #[test]
+    fn antigravity_home_expands_a_home_relative_gemini_home() {
+        let home = tempfile::tempdir().unwrap();
+        let expanded =
+            antigravity_paths::expand_user(Path::new("~/gemini-home"), Some(home.path())).unwrap();
+        assert_eq!(expanded, home.path().join("gemini-home"));
+
+        assert_eq!(
+            antigravity_paths::expand_user(Path::new("~"), Some(home.path())).unwrap(),
+            home.path()
+        );
+        assert_eq!(
+            antigravity_paths::expand_user(Path::new("/absolute/gemini"), Some(home.path()))
+                .unwrap(),
+            Path::new("/absolute/gemini")
+        );
+        assert!(antigravity_paths::expand_user(Path::new("~/gemini"), None).is_err());
+    }
+
+    #[test]
+    fn antigravity_home_relative_settings_still_resolve_the_configured_method() {
+        let home = tempfile::tempdir().unwrap();
+        let gemini_home =
+            antigravity_paths::expand_user(Path::new("~/.gemini"), Some(home.path())).unwrap();
+        let dir = gemini_home.join("antigravity-acp");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"auth": {"type": "oauth-business"}}"#,
+        )
+        .unwrap();
+
+        let method = configured_auth_method_in(&dir.join("settings.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(method.canonical, "oauth-business");
+    }
+
+    fn selected_auth_in_home(gemini_home: &Path) -> String {
+        let configured =
+            configured_auth_method_in(&gemini_home.join("antigravity-acp").join("settings.json"))
+                .unwrap();
+        sign_in_auth_method(
+            &all_antigravity_auth_methods(),
+            "oauth-personal",
+            configured.as_ref(),
+        )
+        .unwrap()
+    }
+
+    fn write_business_auth(gemini_home: &Path) {
+        let settings = gemini_home.join("antigravity-acp");
+        std::fs::create_dir_all(&settings).unwrap();
+        std::fs::write(
+            settings.join("settings.json"),
+            r#"{"auth":{"type":"oauth-business"}}"#,
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_named_home_settings_preserve_business_auth() {
+        let (username, real_home) = antigravity_paths::passwd_entry(None).unwrap();
+        let directory = tempfile::tempdir_in(&real_home).unwrap();
+        write_business_auth(directory.path());
+        let path =
+            PathBuf::from(format!("~{username}")).join(directory.path().file_name().unwrap());
+        let unrelated_home = tempfile::tempdir().unwrap();
+        let resolved = antigravity_paths::resolve_home(
+            Some(&path),
+            Some(unrelated_home.path()),
+            unrelated_home.path(),
+        )
+        .unwrap();
+        assert_eq!(resolved, directory.path());
+        assert_eq!(selected_auth_in_home(&resolved), "oauth-business");
+    }
+
+    #[test]
+    fn antigravity_relative_home_settings_use_the_child_working_directory() {
+        let parent_cwd = tempfile::tempdir().unwrap();
+        let child_cwd = tempfile::tempdir().unwrap();
+        let relative = Path::new("relative-gemini-home");
+        write_business_auth(&child_cwd.path().join(relative));
+        assert!(!parent_cwd.path().join(relative).exists());
+        let resolved = antigravity_paths::resolve_home(
+            Some(relative),
+            Some(child_cwd.path()),
+            child_cwd.path(),
+        )
+        .unwrap();
+        assert_eq!(resolved, child_cwd.path().join(relative));
+        assert_eq!(selected_auth_in_home(&resolved), "oauth-business");
+        let command_home = parent_cwd.path().join(&resolved);
+        assert_eq!(selected_auth_in_home(&command_home), "oauth-business");
+    }
+
+    #[test]
+    fn antigravity_empty_home_fails_before_auth_selection() {
+        let child_cwd = tempfile::tempdir().unwrap();
+        assert!(
+            antigravity_paths::resolve_home(
+                Some(Path::new("")),
+                Some(child_cwd.path()),
+                child_cwd.path(),
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_unknown_named_home_fails_before_auth_selection() {
+        let cwd = tempfile::tempdir().unwrap();
+        let path = PathBuf::from(format!("~zeron-missing-{}", uuid::Uuid::new_v4()));
+        assert!(
+            antigravity_paths::resolve_home(Some(&path), Some(cwd.path()), cwd.path()).is_err()
+        );
+    }
+
+    #[test]
+    fn antigravity_sign_in_accepts_the_configured_method_url() {
+        assert_eq!(
+            sign_in_url("Continue at https://business.example.test/login?id=7."),
+            Some("https://business.example.test/login?id=7".into())
+        );
+        assert_eq!(
+            sign_in_url("Open http://127.0.0.1:8080/callback"),
+            Some("http://127.0.0.1:8080/callback".into())
+        );
+    }
 
     #[test]
     fn devin_initialize_enables_only_the_supported_subagent_stream() {
@@ -3495,6 +4530,229 @@ mod tests {
         assert_eq!(
             config_option_sets(&codex, None, &[], &no_opts),
             vec![("mode".to_owned(), json!({ "value": "agent-full-access" }))]
+        );
+    }
+
+    fn antigravity_signed_in_catalog() -> Value {
+        json!({
+            "configOptions": [{
+                "id": "model",
+                "category": "model",
+                "type": "select",
+                "options": [
+                    {"value": "gemini-3.7-flash-high", "name": "Gemini 3.7 Flash (High)"},
+                    {"value": "gemini-3.7-flash-medium", "name": "Gemini 3.7 Flash (Medium)"},
+                    {"value": "gemini-3.7-flash-low", "name": "Gemini 3.7 Flash (Low)"},
+                    {"value": "gemini-pro-agent", "name": "Gemini 3.1 Pro (High)"},
+                    {"value": "gemini-3.1-pro-low", "name": "Gemini 3.1 Pro (Low)"},
+                    {"value": "gemini-legacy", "name": "Gemini Legacy"}
+                ]
+            }]
+        })
+    }
+
+    #[test]
+    fn effort_variants_group_by_name_even_when_ids_disagree() {
+        let models = models_from_session(&antigravity_signed_in_catalog(), &[]);
+        let rows: Vec<(String, String, Vec<ReasoningLevel>)> = group_effort_variants(models)
+            .into_iter()
+            .map(|m| (m.id, m.label, m.reasoning_levels))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "gemini-3.7-flash".into(),
+                    "Gemini 3.7 Flash".into(),
+                    vec![
+                        ReasoningLevel::Low,
+                        ReasoningLevel::Medium,
+                        ReasoningLevel::High
+                    ]
+                ),
+                (
+                    "gemini-3.1-pro".into(),
+                    "Gemini 3.1 Pro".into(),
+                    vec![ReasoningLevel::Low, ReasoningLevel::High]
+                ),
+                ("gemini-legacy".into(), "Gemini Legacy".into(), vec![]),
+            ]
+        );
+    }
+
+    /// the pinned 1.1.1 server fetches a signed-in account's flash list
+    /// dynamically, so a newer flagship than the static catalog knows about can
+    /// arrive on the wire; it has to reach the picker on its own merits rather
+    /// than be filtered down to the ids we happen to have curated.
+    #[test]
+    fn antigravity_surfaces_a_newer_flash_the_live_catalog_advertises() {
+        let live = json!({
+            "configOptions": [{
+                "id": "model",
+                "category": "model",
+                "type": "select",
+                "options": [
+                    {"value": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash (High)"},
+                    {"value": "gemini-3.8-flash-medium", "name": "Gemini 3.8 Flash (Medium)"},
+                    {"value": "gemini-3.8-flash-low", "name": "Gemini 3.8 Flash (Low)"},
+                    {"value": "gemini-3.7-flash-high", "name": "Gemini 3.7 Flash (High)"},
+                    {"value": "gemini-3.7-flash-medium", "name": "Gemini 3.7 Flash (Medium)"},
+                    {"value": "gemini-3.7-flash-low", "name": "Gemini 3.7 Flash (Low)"},
+                    {"value": "gemini-pro-agent", "name": "Gemini 3.1 Pro (High)"},
+                    {"value": "gemini-3.1-pro-low", "name": "Gemini 3.1 Pro (Low)"}
+                ]
+            }]
+        });
+        let models = models_from_session(&live, &(antigravity_spec().models)());
+        let rows: Vec<(String, String, Vec<ReasoningLevel>)> = group_effort_variants(models)
+            .into_iter()
+            .map(|m| (m.id, m.label, m.reasoning_levels))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "gemini-3.8-flash".into(),
+                    "Gemini 3.8 Flash".into(),
+                    vec![
+                        ReasoningLevel::Low,
+                        ReasoningLevel::Medium,
+                        ReasoningLevel::High
+                    ]
+                ),
+                (
+                    "gemini-3.7-flash".into(),
+                    "Gemini 3.7 Flash".into(),
+                    vec![
+                        ReasoningLevel::Low,
+                        ReasoningLevel::Medium,
+                        ReasoningLevel::High
+                    ]
+                ),
+                (
+                    "gemini-3.1-pro".into(),
+                    "Gemini 3.1 Pro".into(),
+                    vec![ReasoningLevel::Low, ReasoningLevel::High]
+                ),
+            ]
+        );
+        assert_eq!(
+            effort_variant_id(&live, "gemini-3.8-flash", Some(ReasoningLevel::Medium)),
+            "gemini-3.8-flash-medium"
+        );
+    }
+
+    /// the offline list is what an unreachable or signed-out server falls back
+    /// to, so it stays at what the pinned 1.1.1 archive itself bundles. a newer
+    /// flash belongs here only once that pin advertises it.
+    #[test]
+    fn antigravity_static_fallback_stays_on_the_pinned_servers_models() {
+        let fallback: Vec<(String, Vec<ReasoningLevel>)> = (antigravity_spec().models)()
+            .into_iter()
+            .map(|m| (m.id, m.reasoning_levels))
+            .collect();
+        assert_eq!(
+            fallback,
+            vec![
+                (
+                    "gemini-3.7-flash".into(),
+                    vec![
+                        ReasoningLevel::Low,
+                        ReasoningLevel::Medium,
+                        ReasoningLevel::High
+                    ]
+                ),
+                (
+                    "gemini-3.1-pro".into(),
+                    vec![ReasoningLevel::Low, ReasoningLevel::High]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn effort_variant_id_resolves_the_advertised_id_for_each_level() {
+        let catalog = antigravity_signed_in_catalog();
+        let id = |model, reasoning| effort_variant_id(&catalog, model, reasoning);
+        assert_eq!(
+            id("gemini-3.1-pro", Some(ReasoningLevel::High)),
+            "gemini-pro-agent"
+        );
+        assert_eq!(
+            id("gemini-3.1-pro", Some(ReasoningLevel::Low)),
+            "gemini-3.1-pro-low"
+        );
+        assert_eq!(
+            id("gemini-3.1-pro", Some(ReasoningLevel::Medium)),
+            "gemini-pro-agent"
+        );
+        assert_eq!(id("gemini-3.1-pro", None), "gemini-pro-agent");
+        assert_eq!(
+            id("gemini-3.7-flash", Some(ReasoningLevel::Medium)),
+            "gemini-3.7-flash-medium"
+        );
+        assert_eq!(
+            id("gemini-pro-agent", Some(ReasoningLevel::Low)),
+            "gemini-pro-agent"
+        );
+        assert_eq!(
+            id("gemini-legacy", Some(ReasoningLevel::High)),
+            "gemini-legacy"
+        );
+        assert_eq!(id("unknown-model", None), "unknown-model");
+    }
+
+    #[test]
+    fn skills_list_from_their_frontmatter_first_folder_winning() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let skill = |dir: &std::path::Path, folder: &str, text: &str| {
+            std::fs::create_dir_all(dir.join(folder)).unwrap();
+            std::fs::write(dir.join(folder).join("SKILL.md"), text).unwrap();
+        };
+        skill(
+            first.path(),
+            "animate",
+            "---\nname: animate\ndescription: Build an animation. Use when asked to animate.\n---\n# body",
+        );
+        skill(
+            first.path(),
+            "brandkit",
+            "---\nname: \"brandkit\"\ndescription: >\n  Brand boards and\n  logo systems\n---\n",
+        );
+        skill(
+            first.path(),
+            "no-name",
+            "---\ndescription: missing name\n---\n",
+        );
+        std::fs::create_dir_all(first.path().join("empty-folder")).unwrap();
+        skill(
+            second.path(),
+            "animate",
+            "---\nname: animate\ndescription: shadowed duplicate\n---\n",
+        );
+        skill(
+            second.path(),
+            "zeta",
+            "---\nname: zeta\ndescription: Last one\n---\n",
+        );
+
+        let commands = skill_commands(&[
+            first.path().to_path_buf(),
+            PathBuf::from("/nonexistent/skills"),
+            second.path().to_path_buf(),
+        ]);
+        let listed: Vec<(&str, &str)> = commands
+            .iter()
+            .map(|c| (c.name.as_str(), c.description.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("animate", "Build an animation."),
+                ("brandkit", "Brand boards and logo systems"),
+                ("zeta", "Last one"),
+            ]
         );
     }
 

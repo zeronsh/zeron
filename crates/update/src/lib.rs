@@ -28,6 +28,9 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::watch;
 
+#[cfg(windows)]
+pub mod windows;
+
 /// The version compiled into this binary (the workspace version).
 pub const fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -63,19 +66,39 @@ pub struct FileMeta {
     pub sha256: Option<String>,
 }
 
-/// Artifact-name platform pair — `uname`-style strings matching the packaging
-/// scripts: `linux-x86_64`, `linux-aarch64`, `macos-arm64`.
+/// Artifact-name platform pair matching the packaging scripts. Unsupported
+/// updater targets retain their real OS name rather than impersonating Linux.
 pub fn platform_key() -> (&'static str, &'static str) {
-    let os = if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        "linux"
-    };
+    let os = std::env::consts::OS;
     let arch = match (os, std::env::consts::ARCH) {
         ("macos", "aarch64") => "arm64",
         (_, arch) => arch,
     };
     (os, arch)
+}
+
+fn managed_updates_supported(os: &str) -> bool {
+    matches!(os, "linux" | "macos")
+}
+
+fn require_managed_update_platform() -> anyhow::Result<()> {
+    if !managed_updates_supported(std::env::consts::OS) {
+        bail!(
+            "managed updates are not supported on {}",
+            std::env::consts::OS
+        );
+    }
+    Ok(())
+}
+
+fn require_mac_app_update_platform() -> anyhow::Result<()> {
+    if std::env::consts::OS != "macos" {
+        bail!(
+            "macOS app updates are not supported on {}",
+            std::env::consts::OS
+        );
+    }
+    Ok(())
 }
 
 /// `zeron-<ver>-<os>-<arch>.tar.gz` — the headless/CLI tarball (Linux CI builds).
@@ -112,9 +135,9 @@ pub fn version_newer(latest: &str, current: &str) -> bool {
 /// Fetch the newest release metadata: `manifest.json`, falling back to
 /// `latest.txt` (version only, no checksums) for pre-manifest releases.
 pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
-    let base = edge_url.trim_end_matches('/');
+    let base = release_base(edge_url)?;
     let client = http_client()?;
-    let manifest_url = format!("{base}/releases/manifest.json");
+    let manifest_url = format!("{base}/manifest.json");
     match client.get(&manifest_url).send().await {
         Ok(resp) if resp.status().is_success() => {
             let manifest: Manifest = resp.json().await.context("parsing manifest.json")?;
@@ -128,7 +151,7 @@ pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
         }
         Err(err) => tracing::debug!(error = %err, "manifest.json fetch failed; trying latest.txt"),
     }
-    let latest_url = format!("{base}/releases/latest.txt");
+    let latest_url = format!("{base}/latest.txt");
     let version = client
         .get(&latest_url)
         .send()
@@ -151,10 +174,64 @@ pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
 }
 
 fn http_client() -> anyhow::Result<reqwest::Client> {
+    http_client_with_timeouts(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(30),
+    )
+}
+
+fn http_client_with_timeouts(
+    connect: std::time::Duration,
+    read: std::time::Duration,
+) -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
+        .connect_timeout(connect)
+        // Inactivity timeout, not a total download cap: slow progressing
+        // updates remain viable on constrained links.
+        .read_timeout(read)
         .user_agent(concat!("zeron/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many update redirects");
+            }
+            if attempt.previous().iter().any(|url| url.scheme() == "https")
+                && attempt.url().scheme() != "https"
+            {
+                return attempt.error("update redirect would downgrade HTTPS");
+            }
+            attempt.follow()
+        }))
         .build()
         .context("building http client")
+}
+
+fn validate_release_override(value: &str) -> anyhow::Result<String> {
+    let url = reqwest::Url::parse(value.trim()).context("invalid update feed URL")?;
+    anyhow::ensure!(
+        url.scheme() == "https" && url.host_str().is_some(),
+        "update feed must use HTTPS"
+    );
+    anyhow::ensure!(
+        url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "update feed must be a base URL without credentials, query, or fragment"
+    );
+    Ok(url.as_str().trim_end_matches('/').to_owned())
+}
+
+fn release_base(edge_url: &str) -> anyhow::Result<String> {
+    if let Ok(url) = std::env::var("ZERON_RELEASES_URL")
+        && !url.trim().is_empty()
+    {
+        return validate_release_override(&url);
+    }
+    #[cfg(windows)]
+    if let Some(url) = windows::release_url()? {
+        return Ok(url.trim_end_matches('/').to_owned());
+    }
+    Ok(format!("{}/releases", edge_url.trim_end_matches('/')))
 }
 
 // ---------------------------------------------------------------------------
@@ -169,8 +246,52 @@ pub enum InstallKind {
     Managed { app_root: PathBuf },
     /// Running out of a macOS `.app` bundle.
     MacApp { bundle: PathBuf },
+    /// Portable Windows package with an explicit update-feed configuration.
+    #[cfg(windows)]
+    WindowsPortable { directory: PathBuf },
     /// Source build or hand-copied binary — updates are report-only.
     Unmanaged,
+}
+
+impl InstallKind {
+    pub fn supports_desktop_update(&self) -> bool {
+        match self {
+            Self::MacApp { .. } => true,
+            #[cfg(windows)]
+            Self::WindowsPortable { .. } => true,
+            _ => false,
+        }
+    }
+
+    pub async fn stage_desktop(
+        &self,
+        edge_url: &str,
+        manifest: &Manifest,
+        data_dir: &Path,
+    ) -> anyhow::Result<PathBuf> {
+        match self {
+            Self::MacApp { .. } => stage_mac_app(edge_url, manifest, data_dir).await,
+            #[cfg(windows)]
+            Self::WindowsPortable { directory } => {
+                windows::stage(edge_url, manifest, directory).await
+            }
+            _ => bail!("this installation does not support desktop updates"),
+        }
+    }
+
+    /// Install and arrange a relaunch. The UI must quit after this succeeds.
+    pub fn apply_desktop(&self, staged: &Path) -> anyhow::Result<()> {
+        match self {
+            Self::MacApp { bundle } => {
+                apply_mac_app(staged, bundle)?;
+                relaunch_app_after_exit(bundle);
+                Ok(())
+            }
+            #[cfg(windows)]
+            Self::WindowsPortable { directory } => windows::apply(staged, directory, true),
+            _ => bail!("this installation does not support desktop updates"),
+        }
+    }
 }
 
 pub fn detect_install() -> InstallKind {
@@ -182,6 +303,21 @@ pub fn detect_install() -> InstallKind {
 }
 
 fn detect_install_from(exe: &Path, home: Option<&Path>) -> InstallKind {
+    detect_install_from_for_os(exe, home, std::env::consts::OS)
+}
+
+fn detect_install_from_for_os(exe: &Path, home: Option<&Path>, os: &str) -> InstallKind {
+    #[cfg(windows)]
+    if os == "windows" && windows::is_managed(exe) {
+        return InstallKind::WindowsPortable {
+            directory: exe.parent().unwrap().to_owned(),
+        };
+    }
+    // Never interpret a coincidental Windows `%HOME%\.zeron\app` layout as
+    // the Unix symlink-managed installation.
+    if !managed_updates_supported(os) {
+        return InstallKind::Unmanaged;
+    }
     if let Some(home) = home {
         // `current_exe` resolves the `current` symlink to the versioned dir.
         let app_root = home.join(".zeron").join("app");
@@ -214,7 +350,7 @@ pub async fn download_release_file(
     file: &str,
     dest: &Path,
 ) -> anyhow::Result<()> {
-    let url = format!("{}/releases/{file}", edge_url.trim_end_matches('/'));
+    let url = format!("{}/{file}", release_base(edge_url)?);
     let expected = manifest.files.get(file).and_then(|m| m.sha256.as_deref());
     if expected.is_none() {
         tracing::warn!(
@@ -282,6 +418,8 @@ pub async fn stage_headless(
     manifest: &Manifest,
     app_root: &Path,
 ) -> anyhow::Result<PathBuf> {
+    // Reject unsupported targets before creating a stage or making a request.
+    require_managed_update_platform()?;
     let version = &manifest.version;
     let dest = app_root.join(version);
     if dest.join("zeron").exists() {
@@ -344,7 +482,8 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
     #[cfg(not(unix))]
     {
         let _ = (app_root, version);
-        bail!("managed installs are unix-only");
+        require_managed_update_platform()?;
+        unreachable!("supported managed-update platforms are Unix")
     }
 }
 
@@ -352,6 +491,7 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
 /// curl|sh installer manage). Called after a symlink swap so the running daemon
 /// picks up the new binary.
 pub fn restart_service() -> anyhow::Result<()> {
+    require_managed_update_platform()?;
     if cfg!(target_os = "macos") {
         let output = std::process::Command::new("id").arg("-u").output()?;
         let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -375,6 +515,8 @@ pub async fn stage_mac_app(
     manifest: &Manifest,
     data_dir: &Path,
 ) -> anyhow::Result<PathBuf> {
+    // Reject unsupported targets before creating a stage or making a request.
+    require_mac_app_update_platform()?;
     let version = &manifest.version;
     let dir = data_dir.join("updates").join(version);
     let staged = dir.join("Zeron.app");
@@ -406,6 +548,7 @@ pub async fn stage_mac_app(
 /// the target (metadata-preserving, cross-volume safe), then two renames — the
 /// old bundle is restored if the second rename fails.
 pub fn apply_mac_app(staged: &Path, bundle: &Path) -> anyhow::Result<()> {
+    require_mac_app_update_platform()?;
     let parent = bundle
         .parent()
         .context("app bundle has no parent directory")?;
@@ -704,6 +847,114 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn stalled_update_headers_and_body_time_out_but_progressing_body_survives() {
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for stall_body in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                socket.read(&mut request).await.unwrap();
+                if stall_body {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nx")
+                        .await
+                        .unwrap();
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            });
+            let client =
+                http_client_with_timeouts(Duration::from_millis(200), Duration::from_millis(100))
+                    .unwrap();
+            let request = async {
+                client
+                    .get(format!("http://{address}"))
+                    .send()
+                    .await?
+                    .bytes()
+                    .await
+            };
+            let error = tokio::time::timeout(Duration::from_secs(1), request)
+                .await
+                .expect("bounded read")
+                .unwrap_err();
+            assert!(error.is_timeout());
+            server.abort();
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n")
+                .await
+                .unwrap();
+            for _ in 0..10 {
+                socket.write_all(b"x").await.unwrap();
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+        });
+        let client =
+            http_client_with_timeouts(Duration::from_secs(1), Duration::from_millis(200)).unwrap();
+        assert_eq!(
+            client
+                .get(format!("http://{address}"))
+                .send()
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+                .len(),
+            10
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_update_tls_handshake_has_a_connect_deadline() {
+        use std::time::Duration;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+        let client =
+            http_client_with_timeouts(Duration::from_millis(100), Duration::from_secs(30)).unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.get(format!("https://{address}")).send(),
+        )
+        .await
+        .expect("bounded TLS handshake")
+        .unwrap_err();
+        assert!(error.is_timeout());
+        server.abort();
+    }
+
+    #[test]
+    fn update_feed_override_requires_an_https_base_url() {
+        assert_eq!(
+            validate_release_override(" https://example.com/releases/ ").unwrap(),
+            "https://example.com/releases"
+        );
+        for url in [
+            "http://example.com/releases",
+            "file:///tmp/update",
+            "https://user:password@example.com",
+            "https://example.com?feed=x",
+            "https://example.com/#fragment",
+        ] {
+            assert!(validate_release_override(url).is_err(), "accepted {url}");
+        }
+    }
+
     #[test]
     fn version_compare() {
         assert!(version_newer("0.1.1", "0.1.0"));
@@ -721,18 +972,20 @@ mod tests {
     #[test]
     fn install_kind_detection() {
         assert_eq!(
-            detect_install_from(
+            detect_install_from_for_os(
                 Path::new("/home/u/.zeron/app/0.1.1/zeron"),
                 Some(Path::new("/home/u")),
+                "linux",
             ),
             InstallKind::Managed {
                 app_root: PathBuf::from("/home/u/.zeron/app")
             }
         );
         assert_eq!(
-            detect_install_from(
+            detect_install_from_for_os(
                 Path::new("/Applications/Zeron.app/Contents/MacOS/zeron"),
                 Some(Path::new("/Users/u")),
+                "macos",
             ),
             InstallKind::MacApp {
                 bundle: PathBuf::from("/Applications/Zeron.app")
@@ -740,13 +993,14 @@ mod tests {
         );
         // A path merely containing `.app` without the bundle layout is not a bundle.
         assert_eq!(
-            detect_install_from(Path::new("/tmp/foo.app/zeron"), None),
+            detect_install_from_for_os(Path::new("/tmp/foo.app/zeron"), None, "macos"),
             InstallKind::Unmanaged
         );
         assert_eq!(
-            detect_install_from(
+            detect_install_from_for_os(
                 Path::new("/src/target/release/zeron"),
-                Some(Path::new("/home/u"))
+                Some(Path::new("/home/u")),
+                "linux",
             ),
             InstallKind::Unmanaged
         );
@@ -761,6 +1015,67 @@ mod tests {
             format!("zeron-0.2.0-{os}-{arch}.tar.gz")
         );
         assert!(mac_app_artifact("0.2.0").ends_with("-app.tar.gz"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_is_not_misclassified_as_linux() {
+        assert_eq!(platform_key().0, "windows");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_install_is_always_unmanaged() {
+        assert_eq!(
+            detect_install_from(
+                Path::new(r"C:\Users\u\.zeron\app\0.2.0\zeron.exe"),
+                Some(Path::new(r"C:\Users\u")),
+            ),
+            InstallKind::Unmanaged
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_rejects_platform_specific_updates_before_side_effects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = Manifest {
+            version: "9.9.9".into(),
+            files: BTreeMap::new(),
+        };
+        let app_root = tmp.path().join("app");
+        let data_dir = tmp.path().join("data");
+
+        let managed_err = stage_headless("http://127.0.0.1:1", &manifest, &app_root)
+            .await
+            .unwrap_err();
+        assert!(managed_err.to_string().contains("not supported on windows"));
+        assert!(!app_root.exists(), "managed staging must not touch disk");
+
+        let mac_err = stage_mac_app("http://127.0.0.1:1", &manifest, &data_dir)
+            .await
+            .unwrap_err();
+        assert!(mac_err.to_string().contains("not supported on windows"));
+        assert!(!data_dir.exists(), "macOS staging must not touch disk");
+
+        assert!(
+            apply_headless(&app_root, &manifest.version)
+                .unwrap_err()
+                .to_string()
+                .contains("not supported on windows")
+        );
+        assert!(
+            apply_mac_app(&data_dir.join("Zeron.app"), &data_dir.join("Installed.app"))
+                .unwrap_err()
+                .to_string()
+                .contains("not supported on windows")
+        );
+        assert!(
+            restart_service()
+                .unwrap_err()
+                .to_string()
+                .contains("not supported on windows")
+        );
     }
 
     #[test]

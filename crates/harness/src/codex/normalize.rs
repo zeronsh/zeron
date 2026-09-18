@@ -240,6 +240,67 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
     let id = str_field(item, &["id"]);
     let status = str_field(item, &["status"]);
     match item_type(item) {
+        "imageGeneration" | "image_generation" => {
+            let call = ToolCall::Unknown {
+                name: "Generate image".into(),
+                input: None,
+            };
+            if phase == Phase::Started {
+                return vec![AgentEvent::ToolCall { id, call }];
+            }
+            // `result` can be megabytes of inline media. Never inspect, clone,
+            // log, or forward it: savedPath is the sole supported source.
+            let path = str_field(item, &["savedPath", "saved_path"]);
+            let failure = item.get("failure").filter(|v| !v.is_null());
+            let error = if let Some(failure) = failure {
+                Some(
+                    if matches!(
+                        failure.get("type").and_then(Value::as_str),
+                        Some("usageLimitExceeded" | "usage_limit_exceeded")
+                    ) {
+                        "Image generation usage limit exceeded"
+                    } else {
+                        "Image generation failed"
+                    },
+                )
+            } else if matches!(status.as_str(), "failed" | "cancelled" | "canceled") {
+                Some("Image generation failed")
+            } else if path.trim().is_empty() {
+                Some("Image generation completed without a saved file")
+            } else {
+                None
+            };
+            let mut events = vec![
+                AgentEvent::ToolCall {
+                    id: id.clone(),
+                    call,
+                },
+                AgentEvent::ToolResult {
+                    id: id.clone(),
+                    is_error: error.is_some(),
+                    output: None,
+                    diff: None,
+                },
+            ];
+            if let Some(message) = error {
+                events.push(AgentEvent::Error {
+                    message: message.into(),
+                });
+            } else {
+                let name = std::path::Path::new(&path)
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or("generated.png")
+                    .to_owned();
+                events.push(AgentEvent::GeneratedImage {
+                    id: format!("{id}:image"),
+                    path,
+                    name,
+                    mime_type: String::new(),
+                });
+            }
+            events
+        }
         "commandExecution" | "command_execution" => match phase {
             Phase::Started => vec![AgentEvent::ToolCall {
                 id,
@@ -984,5 +1045,92 @@ mod context_tests {
             context_usage_event(&json!({"tokenUsage": {"total": {"totalTokens": 100}}})),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod generated_image_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn image_generation_lifecycle_ignores_inline_result_and_preserves_ids() {
+        for (kind, path_key) in [
+            ("imageGeneration", "savedPath"),
+            ("image_generation", "saved_path"),
+        ] {
+            let mut item = json!({"id":"img-1", "type":kind, "status":"completed", "result":"INLINE_IMAGE_SENTINEL".repeat(200_000), "revisedPrompt":"private prompt", "failure":null});
+            item[path_key] = json!("/codex/generated_images/picture.png");
+            let started = map_item(Phase::Started, &item);
+            assert_eq!(
+                started,
+                vec![AgentEvent::ToolCall {
+                    id: "img-1".into(),
+                    call: ToolCall::Unknown {
+                        name: "Generate image".into(),
+                        input: None
+                    }
+                }]
+            );
+            let completed = map_item(Phase::Completed, &item);
+            assert_eq!(completed.len(), 3);
+            assert_eq!(completed[0], started[0]);
+            assert!(
+                matches!(&completed[1], AgentEvent::ToolResult { id, is_error: false, output: None, .. } if id == "img-1")
+            );
+            assert!(
+                matches!(&completed[2], AgentEvent::GeneratedImage { id, path, name, .. } if id == "img-1:image" && path == "/codex/generated_images/picture.png" && name == "picture.png")
+            );
+            assert_eq!(map_item(Phase::Completed, &item), completed);
+            let wire = serde_json::to_string(&completed).unwrap();
+            assert!(wire.len() < 500);
+            assert!(!wire.contains("INLINE_IMAGE_SENTINEL"));
+            assert!(!wire.contains("private prompt"));
+        }
+    }
+
+    #[test]
+    fn image_generation_errors_resolve_the_chip_without_an_image() {
+        for (extra, expected) in [
+            (
+                json!({"failure":{"type":"usageLimitExceeded"}, "savedPath":"/must/not/use.png"}),
+                "Image generation usage limit exceeded",
+            ),
+            (
+                json!({"failure":{"type":"futureFailure","message":"untrusted payload"}}),
+                "Image generation failed",
+            ),
+            (
+                json!({"status":"failed", "savedPath":"/must/not/use.png"}),
+                "Image generation failed",
+            ),
+            (
+                json!({"savedPath":null}),
+                "Image generation completed without a saved file",
+            ),
+            (
+                json!({"savedPath":"  "}),
+                "Image generation completed without a saved file",
+            ),
+            (json!({}), "Image generation completed without a saved file"),
+        ] {
+            let mut item = json!({"type":"imageGeneration", "id":"i", "status":"completed", "result":"INLINE_SENTINEL"});
+            item.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let events = map_item(Phase::Completed, &item);
+            assert_eq!(events.len(), 3);
+            assert!(matches!(events[0], AgentEvent::ToolCall { .. }));
+            assert!(matches!(
+                events[1],
+                AgentEvent::ToolResult { is_error: true, .. }
+            ));
+            assert_eq!(
+                events[2],
+                AgentEvent::Error {
+                    message: expected.into()
+                }
+            );
+        }
     }
 }

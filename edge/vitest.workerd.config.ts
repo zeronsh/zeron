@@ -20,6 +20,7 @@ export default defineConfig({
         compatibilityDate: "2026-07-01",
         durableObjects: {
           TEST_LOG: { className: "TestLogRoom", useSQLite: true },
+          CHAT_ROOMS: { className: "ChatRoom", useSQLite: true },
           PREVIEW_ROOMS: { className: "PreviewRoom", useSQLite: true }
         }
       }

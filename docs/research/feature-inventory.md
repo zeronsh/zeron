@@ -195,6 +195,14 @@ display EXCLUDED. File paths refer to the reference repo.
   ([1m] suffix), fast mode, always-thinking models, AskUserQuestion -> requestInput, steering via
   persistent streaming input, system:init dedup, subagent frame filtering, rate-limit events.
 - Codex: app-server JSON-RPC (thread/start, sendUserMessage, sandbox policy, service tier).
+  Generated images: `imageGeneration` / `image_generation` shows a lifecycle chip and
+  an inline assistant image, with the existing attachment lightbox. Only `savedPath`
+  under `$CODEX_HOME/generated_images` is accepted; PNG/JPEG/WebP/GIF signatures,
+  24 MiB intake cap, atomic copy into profile uploads, metadata-only session parts.
+  Readers use the message owner, then chat host/local fallbacks over attachment RPC.
+  Missing/offline media shows an unavailable placeholder with the existing retry ladder.
+  Inline `result`, SVG, workspace export, and regeneration are outside this feature.
+  Validation: [generated image checks](../generated-images-validation.md).
 - Cursor: turn-boundary steering. Mock for tests.
 
 ## 5. Session doc schema (MUST stay shape-compatible with TS packages/session-doc)

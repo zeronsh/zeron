@@ -839,6 +839,10 @@ pub struct AgentLoginPoll {
     pub status: AgentLoginStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// a sign-in page that only became known after the start reply (the
+    /// agent had to install first); the app opens it once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

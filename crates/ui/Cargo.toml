@@ -6,7 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [features]
+project-palette-fixture = []
+
 browser-fixture = []
+windows-render-fixture = []
 appshots-fixture = ["gpui_platform/test-support"]
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
 
@@ -23,8 +26,16 @@ name = "browser-fixture"
 required-features = ["browser-fixture"]
 
 [[example]]
+name = "windows-render-fixture"
+required-features = ["windows-render-fixture"]
+
+[[example]]
 name = "appshots-fixture"
 required-features = ["appshots-fixture"]
+
+[[example]]
+name = "new-project-fixture"
+required-features = ["project-palette-fixture"]
 
 [dependencies]
 url = "2"
@@ -94,3 +105,6 @@ gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 mimalloc.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }

@@ -27,6 +27,7 @@ use zeron_proto::{TerminalEvent, TerminalSession};
 use zeron_rpc::methods;
 
 use crate::motion::{self, AnimationExt as _, TAB_SLIDE};
+use crate::popover::{MenuScrollbarMetrics, MenuScrollbarState, ScrollRailHost};
 use crate::settings::{TERMINAL_MAX_VH, TERMINAL_MIN_HEIGHT};
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
@@ -41,11 +42,6 @@ use super::view::{
 pub const TAB_WIDTH: f32 = 118.0;
 pub const TAB_BAR_HEIGHT: f32 = 40.0;
 const SELECTION_SCROLL_TICK_MS: u64 = 24;
-const SCROLLBAR_TRACK_INSET: f32 = 4.0;
-const SCROLLBAR_HIT_WIDTH: f32 = 10.0;
-const SCROLLBAR_THUMB_WIDTH: f32 = 3.0;
-const SCROLLBAR_HOVER_THUMB_WIDTH: f32 = 4.5;
-const SCROLLBAR_MIN_THUMB: f32 = 24.0;
 
 actions!(terminal, [ToggleTerminal]);
 
@@ -218,53 +214,18 @@ struct SelectionDrag {
     armed: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ScrollbarDrag {
-    grab_offset: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ScrollbarMetrics {
-    track_top: f32,
-    track_height: f32,
-    thumb_top: f32,
-    thumb_height: f32,
-    history_lines: usize,
-}
-
-impl ScrollbarMetrics {
-    fn travel(self) -> f32 {
-        (self.track_height - self.thumb_height).max(0.0)
-    }
-}
-
-fn scrollbar_metrics(
-    bounds: gpui::Bounds<Pixels>,
-    rows: usize,
-    history_lines: usize,
-    display_offset: usize,
-) -> Option<ScrollbarMetrics> {
-    if history_lines == 0 {
-        return None;
-    }
-    let track_height = (f32::from(bounds.size.height) - SCROLLBAR_TRACK_INSET * 2.0).max(0.0);
-    if track_height <= 0.0 {
-        return None;
-    }
-    let total_lines = history_lines.saturating_add(rows).max(1);
-    let thumb_height = (track_height * rows as f32 / total_lines as f32)
-        .max(SCROLLBAR_MIN_THUMB)
-        .min(track_height);
-    let travel = (track_height - thumb_height).max(0.0);
-    let offset = display_offset.min(history_lines);
-    let progress_from_top = 1.0 - offset as f32 / history_lines as f32;
-    Some(ScrollbarMetrics {
-        track_top: f32::from(bounds.top()) + SCROLLBAR_TRACK_INSET,
-        track_height,
-        thumb_top: travel * progress_from_top,
-        thumb_height,
-        history_lines,
-    })
+/// The shared rail's geometry inputs from the grid's own extents, in px:
+/// `(viewport, content, offset)` — viewport = visible rows, content =
+/// history + visible rows, offset = position from the TOP of the scrollback.
+/// The terminal's display offset counts from the live bottom, so the two are
+/// mirrored.
+fn rail_parts(line_h: f32, rows: usize, history: usize, display_offset: usize) -> (f32, f32, f32) {
+    let from_top = history.saturating_sub(display_offset);
+    (
+        rows as f32 * line_h,
+        (history + rows) as f32 * line_h,
+        from_top as f32 * line_h,
+    )
 }
 
 /// Terminal scroll direction for a selection near the grid edge.
@@ -369,6 +330,12 @@ pub struct TerminalPanel {
     /// through the changing clip, but do not feed transient widths into the
     /// emulator: alternate-screen rows truncate rather than reflow.
     resize_suspended: bool,
+    /// Whether this docked panel's bottom-left/right corners sit at the
+    /// WINDOW's corners — the shell sets these per frame so the panel's fill
+    /// can carry the CSD window's rounded corners (gpui cannot clip children
+    /// rounded; each full-bleed layer rounds itself).
+    window_corner_bl: bool,
+    window_corner_br: bool,
     tab_seq: u64,
     drag: Option<DragState>,
     last_selected: Option<String>,
@@ -379,12 +346,14 @@ pub struct TerminalPanel {
     /// One-shot timer rescheduled only while a live selection remains in an
     /// edge zone.
     selection_scroll_task: Option<Task<()>>,
-    /// Active scrollbar thumb/track drag.
-    scrollbar_drag: Option<ScrollbarDrag>,
-    /// The terminal owns the cursor. The scrollbar is an on-demand affordance
-    /// rather than a permanently painted rail beside the panel.
-    terminal_hovered: bool,
-    scrollbar_hovered: bool,
+    /// The tab the rail is bound to this frame; see [`Self::sync_rail_tab`].
+    rail_tab_key: Option<u64>,
+    /// The floating scrollbar rail. The shared model owns all of its state —
+    /// hover, drag, and the linger/fade clock — so the panel keeps no
+    /// parallel hover or drag flags. It is an on-demand affordance rather
+    /// than a permanently painted rail beside the panel: the terminal owns
+    /// the cursor.
+    bar: MenuScrollbarState,
     _observe: Subscription,
 }
 
@@ -399,15 +368,16 @@ impl TerminalPanel {
             open: false,
             embedded: false,
             resize_suspended: false,
+            window_corner_bl: false,
+            window_corner_br: false,
             tab_seq: 0,
             drag: None,
             last_selected: None,
             geometry: None,
             selection_drag: None,
             selection_scroll_task: None,
-            scrollbar_drag: None,
-            terminal_hovered: false,
-            scrollbar_hovered: false,
+            rail_tab_key: None,
+            bar: MenuScrollbarState::default(),
             _observe: observe,
         }
     }
@@ -431,6 +401,17 @@ impl TerminalPanel {
 
     pub fn set_resize_suspended(&mut self, suspended: bool) {
         self.resize_suspended = suspended;
+    }
+
+    /// Shell hook: whether the panel's bottom corners sit at the window's
+    /// corners (Linux CSD floating window). Notifies only on change so the
+    /// per-frame shell call stays cheap.
+    pub fn set_window_corners(&mut self, bl: bool, br: bool, cx: &mut Context<Self>) {
+        if self.window_corner_bl != bl || self.window_corner_br != br {
+            self.window_corner_bl = bl;
+            self.window_corner_br = br;
+            cx.notify();
+        }
     }
 
     /// Shell toggle hook. Opening lazily creates the first tab for the
@@ -1080,14 +1061,6 @@ impl TerminalPanel {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(drag) = self.scrollbar_drag {
-            if event.dragging() {
-                self.scrollbar_to_pointer(event.position.y, drag.grab_offset, cx);
-            } else {
-                self.scrollbar_drag = None;
-            }
-            return;
-        }
         if !event.dragging() {
             return;
         }
@@ -1131,7 +1104,6 @@ impl TerminalPanel {
     ) {
         self.selection_drag = None;
         self.selection_scroll_task = None;
-        self.scrollbar_drag = None;
     }
 
     /// Copy the selection. Returns whether anything was copied, so the caller
@@ -1203,119 +1175,87 @@ impl TerminalPanel {
         self.schedule_selection_scroll(cx);
     }
 
-    fn active_scrollbar_metrics(&self, cx: &App) -> Option<ScrollbarMetrics> {
+    /// Pin the rail to the rendered tab. The shared rail host methods run
+    /// without an `&App`, so they cannot read the selected chat — render
+    /// records the tab here and they resolve it by key. A switch also drops
+    /// the rail's activity baseline, so the incoming tab's offset lands as a
+    /// first observation rather than as scroll motion.
+    fn sync_rail_tab(&mut self, cx: &App) {
+        let key = self.active_tab(cx).map(|tab| tab.key);
+        if self.rail_tab_key != key {
+            self.rail_tab_key = key;
+            self.bar.clear_scroll_baseline();
+        }
+    }
+
+    fn rail_tab(&self) -> Option<&TerminalTab> {
+        let key = self.rail_tab_key?;
+        self.chats
+            .values()
+            .find_map(|tabs| tabs.tabs.iter().find(|tab| tab.key == key))
+    }
+
+    fn rail_tab_mut(&mut self) -> Option<&mut TerminalTab> {
+        let key = self.rail_tab_key?;
+        self.chats
+            .values_mut()
+            .find_map(|tabs| tabs.tabs.iter_mut().find(|tab| tab.key == key))
+    }
+
+    /// The rendered grid's rail geometry in the shared metrics domain, plus
+    /// the track's window y (the grid bounds — the rail strip spans the
+    /// terminal body) and the scroll position in px from the top of the
+    /// scrollback.
+    fn rail_frame(&self) -> Option<(MenuScrollbarMetrics, Pixels, f32)> {
         let geometry = self.geometry?;
-        let tab = self.active_tab(cx)?;
-        scrollbar_metrics(
-            geometry.bounds,
+        let tab = self.rail_tab()?;
+        let (viewport, content, offset) = rail_parts(
+            geometry.line_h,
             tab.emulator.rows(),
             tab.emulator.history_lines(),
             tab.emulator.display_offset(),
-        )
+        );
+        Some((
+            MenuScrollbarMetrics::from_parts(viewport, content, offset)?,
+            geometry.bounds.top(),
+            offset,
+        ))
     }
 
-    fn scrollbar_to_pointer(
-        &mut self,
-        pointer_y: Pixels,
-        grab_offset: f32,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(metrics) = self.active_scrollbar_metrics(cx) else {
-            return;
+    /// Apply an engaged drag's target to the emulator. The shared target is a
+    /// fraction of the scrollback from the TOP; the emulator's scroll-to API
+    /// takes lines from the live bottom.
+    fn apply_rail_drag(&mut self, pointer_y: Pixels) -> bool {
+        let Some(line_h) = self.geometry.map(|geometry| geometry.line_h) else {
+            return false;
         };
-        let thumb_top =
-            (f32::from(pointer_y) - metrics.track_top - grab_offset).clamp(0.0, metrics.travel());
-        let offset = if metrics.travel() <= 0.0 {
-            0
-        } else {
-            ((1.0 - thumb_top / metrics.travel()) * metrics.history_lines as f32).round() as usize
+        let Some((metrics, track_top, _)) = self.rail_frame() else {
+            return false;
         };
-        self.with_active_emulator(cx, |emu| emu.scroll_to_offset(offset));
-        cx.notify();
+        let Some(fraction) = self.bar.drag_target_in(&metrics, track_top, pointer_y) else {
+            return false;
+        };
+        let lines = (((1.0 - fraction) * metrics.max_scroll) / line_h).round() as usize;
+        let Some(tab) = self.rail_tab_mut() else {
+            return false;
+        };
+        tab.emulator.scroll_to_offset(lines);
+        true
     }
 
-    fn on_scrollbar_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(metrics) = self.active_scrollbar_metrics(cx) else {
-            return;
-        };
-        window.focus(&self.focus_handle, cx);
-        let pointer_on_track = f32::from(event.position.y) - metrics.track_top;
-        let grab_offset = if (metrics.thumb_top..=metrics.thumb_top + metrics.thumb_height)
-            .contains(&pointer_on_track)
-        {
-            pointer_on_track - metrics.thumb_top
-        } else {
-            metrics.thumb_height / 2.0
-        };
-        self.scrollbar_drag = Some(ScrollbarDrag { grab_offset });
-        self.scrollbar_to_pointer(event.position.y, grab_offset, cx);
-        cx.stop_propagation();
-    }
-
-    fn on_terminal_hover(
-        &mut self,
-        hovered: &bool,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.terminal_hovered != *hovered {
-            self.terminal_hovered = *hovered;
-            if !*hovered {
-                self.scrollbar_hovered = false;
-            }
+    fn on_terminal_hover(&mut self, hovered: &bool, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.bar.set_list_hovered(*hovered) {
             cx.notify();
         }
     }
 
-    fn render_scrollbar(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if !self.terminal_hovered {
-            return None;
-        }
-        let metrics = self.active_scrollbar_metrics(cx)?;
-        let thumb_width = if self.scrollbar_hovered {
-            SCROLLBAR_HOVER_THUMB_WIDTH
-        } else {
-            SCROLLBAR_THUMB_WIDTH
-        };
-        Some(
-            div()
-                .id("terminal-scrollbar")
-                .absolute()
-                .top(px(0.0))
-                .bottom(px(0.0))
-                .right(px(0.0))
-                .w(px(SCROLLBAR_HIT_WIDTH))
-                .cursor_pointer()
-                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                    if this.scrollbar_hovered != *hovered {
-                        this.scrollbar_hovered = *hovered;
-                        cx.notify();
-                    }
-                }))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(Self::on_scrollbar_mouse_down),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(SCROLLBAR_TRACK_INSET + metrics.thumb_top))
-                        .right(px(2.0))
-                        // This is an absolute child inside a fixed-width hit
-                        // rail, so the hover expansion changes only paint
-                        // geometry and never reflows the terminal.
-                        .w(px(thumb_width))
-                        .h(px(metrics.thumb_height))
-                        .rounded(px(thumb_width / 2.0))
-                        .bg(theme.text_faint.opacity(0.52)),
-                )
-                .into_any_element(),
-        )
+    fn render_scrollbar(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        self.sync_rail_tab(cx);
+        crate::popover::rail(self, "terminal-scrollbar", theme, cx)
     }
 
     // ---- tab management ----
@@ -1539,18 +1479,20 @@ impl TerminalPanel {
                                     this.close_tab(&chat_close, key, window, cx);
                                 }),
                             )
-                            .on_drag(
-                                TabDragPayload {
-                                    chat: chat_drag,
-                                    from: ix,
-                                    title: ghost_title,
-                                },
-                                |payload, _point, _, cx| {
-                                    let title = payload.title.clone();
-                                    cx.stop_propagation();
-                                    cx.new(|_| TabGhost { title })
-                                },
-                            )
+                            .when(crate::click_activation_drag_enabled(), |el| {
+                                el.on_drag(
+                                    TabDragPayload {
+                                        chat: chat_drag,
+                                        from: ix,
+                                        title: ghost_title,
+                                    },
+                                    |payload, _point, _, cx| {
+                                        let title = payload.title.clone();
+                                        cx.stop_propagation();
+                                        cx.new(|_| TabGhost { title })
+                                    },
+                                )
+                            })
                             .when(exited, |el| el.opacity(0.55))
                             .child(
                                 crate::icons::icon(crate::icons::TERMINAL)
@@ -1646,6 +1588,41 @@ impl TerminalPanel {
     }
 }
 
+impl ScrollRailHost for TerminalPanel {
+    fn rail_bar(&mut self) -> &mut MenuScrollbarState {
+        &mut self.bar
+    }
+
+    /// Handle-less owner: the grid's own extents stand in for a scroll
+    /// handle's bounds.
+    fn rail_metrics(&mut self) -> Option<MenuScrollbarMetrics> {
+        let (metrics, _, offset) = self.rail_frame()?;
+        // The activity signal is the view's place in the scrollback, not the
+        // thumb's: appended output grows history and display offset together
+        // (the viewport stays anchored) and a resize trades history rows for
+        // viewport rows, so neither moves this value — only real scrolling
+        // lights the rail. Tab switches re-baseline in [`Self::sync_rail_tab`].
+        self.bar.note_scroll_offset(offset);
+        Some(metrics)
+    }
+
+    fn rail_press(&mut self, pointer_y: Pixels) -> bool {
+        let Some((metrics, track_top, _)) = self.rail_frame() else {
+            return false;
+        };
+        self.bar.begin_press_in(&metrics, track_top, pointer_y);
+        // Pressing the rail claims terminal focus, as it did before the
+        // shared rail; the next render's focus_pending pass applies it.
+        self.focus_pending = true;
+        self.apply_rail_drag(pointer_y);
+        true
+    }
+
+    fn rail_drag_to(&mut self, pointer_y: Pixels) -> bool {
+        self.apply_rail_drag(pointer_y)
+    }
+}
+
 enum StreamDisposition {
     Continue,
     Stop,
@@ -1662,10 +1639,18 @@ impl Render for TerminalPanel {
         // fill here stacked another shade on the pane (user report); the
         // drawer keeps its own tone.
         let panel_bg: Option<gpui::Hsla> = (!self.embedded).then(|| terminal_panel_bg(&theme));
+        // Docked at the window's bottom edge, the panel's own fill carries
+        // the CSD window's bottom corners when it sits at them (the shell
+        // decides per frame; embedded panels never do).
+        let corner_bl = self.window_corner_bl;
+        let corner_br = self.window_corner_br;
+        let corner = px(crate::shell::LINUX_WINDOW_CORNER_RADIUS);
         let Some(chat) = self.selected_chat(cx) else {
             return div()
                 .size_full()
                 .when_some(panel_bg, |el, bg| el.bg(bg))
+                .when(corner_bl, |el| el.rounded_bl(corner))
+                .when(corner_br, |el| el.rounded_br(corner))
                 .font_family(theme.font_sans_fixed.clone())
                 .flex()
                 .items_center()
@@ -1693,6 +1678,8 @@ impl Render for TerminalPanel {
             // paints its viewport independently with the technical mono role.
             .font_family(theme.font_sans_fixed.clone())
             .when_some(panel_bg, |el, bg| el.bg(bg))
+            .when(corner_bl, |el| el.rounded_bl(corner))
+            .when(corner_br, |el| el.rounded_br(corner))
             .children(tab_bar)
             .child(
                 div()
@@ -1715,8 +1702,15 @@ impl Render for TerminalPanel {
                     .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
                         let lines = match event.delta {
                             ScrollDelta::Lines(delta) => delta.y,
+                            // Against the measured row height, not the default:
+                            // a user-chosen font size changes how many lines a
+                            // pixel delta covers.
                             ScrollDelta::Pixels(delta) => {
-                                f32::from(delta.y) / super::view::TERM_LINE_HEIGHT
+                                let line_h = this
+                                    .geometry
+                                    .map(|g| g.line_h)
+                                    .unwrap_or(super::view::TERM_LINE_HEIGHT);
+                                f32::from(delta.y) / line_h
                             }
                         };
                         let step = lines.round() as i32;
@@ -1780,16 +1774,35 @@ mod tests {
     }
 
     #[test]
-    fn scrollbar_thumb_maps_history_top_and_bottom() {
-        let bounds = test_geometry().bounds;
-        assert!(scrollbar_metrics(bounds, 20, 0, 0).is_none());
+    fn rail_parts_map_history_top_and_bottom() {
+        // No scrollback → the shared metrics report nothing to scroll.
+        assert_eq!(rail_parts(18.0, 20, 0, 0), (360.0, 360.0, 0.0));
+        assert!(MenuScrollbarMetrics::from_parts(360.0, 360.0, 0.0).is_none());
 
-        let bottom = scrollbar_metrics(bounds, 20, 80, 0).unwrap();
-        let top = scrollbar_metrics(bounds, 20, 80, 80).unwrap();
-        assert!((bottom.thumb_height - 38.4).abs() < 0.01);
-        assert!((bottom.thumb_top - bottom.travel()).abs() < 0.01);
-        assert_eq!(top.thumb_top, 0.0);
-        assert_eq!(top.thumb_height, bottom.thumb_height);
+        // Live bottom: the display offset counts from the bottom, so the
+        // scrollback position from the top is the whole history.
+        let (viewport, content, bottom) = rail_parts(18.0, 20, 80, 0);
+        assert_eq!((viewport, content, bottom), (360.0, 1800.0, 1440.0));
+        let metrics = MenuScrollbarMetrics::from_parts(viewport, content, bottom).unwrap();
+        assert!((metrics.thumb_height - 70.4).abs() < 0.01);
+        assert!((metrics.thumb_top - metrics.travel()).abs() < 0.01);
+
+        // Top of the history: the thumb rides the top of the track.
+        let top = rail_parts(18.0, 20, 80, 80).2;
+        assert_eq!(
+            MenuScrollbarMetrics::from_parts(viewport, content, top)
+                .unwrap()
+                .thumb_top,
+            0.0
+        );
+
+        // Output appended while scrolled up grows history and display offset
+        // together, so the position from the top — the rail's activity signal
+        // — does not move: no false flash.
+        assert_eq!(
+            rail_parts(18.0, 20, 80, 40).2,
+            rail_parts(18.0, 20, 120, 80).2
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use zeron_proto::PreviewService;
 #[async_trait::async_trait]
 pub trait TokenSource: Send + Sync {
-    async fn token(&self) -> Option<String>;
+    async fn token(&self) -> anyhow::Result<String>;
 }
 pub struct Config {
     pub edge_url: String,
@@ -61,11 +61,7 @@ async fn connect(
     peers: &Peers,
     outgoing: &mut mpsc::Receiver<OutgoingSignal>,
 ) -> anyhow::Result<()> {
-    let token = config
-        .tokens
-        .token()
-        .await
-        .ok_or_else(|| anyhow::anyhow!("preview authentication unavailable"))?;
+    let token = config.tokens.token().await?;
     let mut url = reqwest::Url::parse(&config.edge_url)?;
     let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
     url.set_scheme(scheme)

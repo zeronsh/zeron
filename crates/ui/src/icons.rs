@@ -50,6 +50,8 @@ macro_rules! icon_assets {
 icon_assets![
     // Solar Icons (Linear), CC BY 4.0 — 480 Design.
     (MONITOR, "monitor"),
+    (SUN, "sun"),
+    (MOON, "moon"),
     // Browser globe, drawn in the same linear weight as the toolbar family.
     (GLOBE, "globe"),
     (LAPTOP, "laptop"),
@@ -133,9 +135,12 @@ icon_assets![
     (PEN, "pen"),
     (ARCHIVE_MINIMALISTIC, "archive-minimalistic"),
     (TRASH_BIN_MINIMALISTIC, "trash-bin-minimalistic"),
+    // Shared settings glyph: user-supplied horizontal sliders.
     (SETTINGS_MINIMALISTIC, "settings-minimalistic"),
     (LOGOUT_2, "logout-2"),
     (MAGNIFER, "magnifer"),
+    // Compact magnifier with a distinct handle, matching the linear icon family.
+    (PALETTE_SEARCH, "palette-search"),
     (COMMAND, "command"),
     (DOCUMENT, "document"),
     (DOCUMENT_ADD, "document-add"),
@@ -197,6 +202,7 @@ icon_assets![
     (HERMES_MARK, "hermes-mark"),
     (PI_MARK, "pi-mark"),
     (OPENCODE_MARK, "opencode-mark"),
+    (ANTIGRAVITY_MARK, "antigravity-mark"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity

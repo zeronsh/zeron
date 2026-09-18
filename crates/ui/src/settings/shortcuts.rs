@@ -9,9 +9,11 @@ use gpui::{
 };
 
 use crate::appshots::{AppshotCapabilities, AppshotDestination};
+use crate::popover::{self, ScrollRailHost};
 
 #[path = "appshots.rs"]
 mod appshots_page;
+use crate::settings::widgets;
 use crate::settings::{
     ComposerSendBehavior, KeymapConfig, ShortcutId, combo_from_keystroke, display_combo,
 };
@@ -57,6 +59,7 @@ pub enum ShortcutsEvent {
 pub struct ShortcutsPage {
     appshots_page: bool,
     appshots_focus_pending: bool,
+    scroll: crate::settings::widgets::PageScroll,
     /// Working copy (kept in sync with the shell via change events).
     keymap: KeymapConfig,
     escape_stops_active_agent: bool,
@@ -97,6 +100,7 @@ impl ShortcutsPage {
         Self {
             appshots_page: false,
             appshots_focus_pending: false,
+            scroll: crate::settings::widgets::PageScroll::default(),
             keymap,
             escape_stops_active_agent,
             composer_send_behavior,
@@ -121,6 +125,9 @@ impl ShortcutsPage {
             self.conflict_notice = None;
             self.appshots_page = appshots;
             self.appshots_focus_pending = appshots;
+            // One scroll state serves both pages — rewind it so each opens
+            // at the top instead of where the other was left.
+            self.scroll.reset();
         }
     }
 
@@ -391,6 +398,50 @@ impl ShortcutsPage {
                     .child(chip_text),
             )
     }
+
+    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        if self.scroll.set_list_hovered(*hovered) {
+            cx.notify();
+        }
+    }
+
+    // Kept for the appshots half of this page (appshots.rs), whose host still
+    // carries the drag-move listener itself.
+    fn on_bar_drag_move(
+        &mut self,
+        event: &gpui::DragMoveEvent<popover::MenuScrollbarDrag>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.rail_drag_to(event.event.position.y) {
+            cx.notify();
+        }
+    }
+
+    /// The shared rail under the id of whichever page is showing. Kept as a
+    /// method because the appshots half of this page renders through it.
+    fn render_scrollbar(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let id = if self.appshots_page {
+            "appshots-settings-page-scrollbar"
+        } else {
+            "shortcuts-page-scrollbar"
+        };
+        popover::rail(self, id, theme, cx)
+    }
+}
+
+impl popover::ScrollRailHost for ShortcutsPage {
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        self.scroll.rail_bar()
+    }
+
+    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
+        self.scroll.rail_scroll()
+    }
 }
 
 /// The shortcut (other than `id`) already bound to `combo`, if any. Pure.
@@ -413,11 +464,12 @@ pub fn modifier_send_label(is_macos: bool) -> &'static str {
 /// extends the match and appears on the page by construction
 /// (`every_shortcut_lands_in_a_rendered_group` holds the other half: its group
 /// name must be listed here).
-const GROUP_ORDER: [&str; 6] = [
+const GROUP_ORDER: [&str; 7] = [
     "Files",
     "Browser",
     "Panels",
     "Sessions",
+    "Projects",
     "Jump to session",
     "Appshots",
 ];
@@ -431,7 +483,9 @@ fn group(id: ShortcutId) -> &'static str {
         ShortcutId::ToggleSidebar | ShortcutId::ToggleChanges | ShortcutId::ToggleTerminal => {
             "Panels"
         }
-        ShortcutId::NewSession
+        ShortcutId::NewProject => "Projects",
+        ShortcutId::OpenModelPicker
+        | ShortcutId::NewSession
         | ShortcutId::NextSession
         | ShortcutId::PrevSession
         | ShortcutId::ArchiveSession => "Sessions",
@@ -452,6 +506,8 @@ fn description(id: ShortcutId) -> &'static str {
         ShortcutId::ToggleChanges => "Show or hide the right sidebar for the current session.",
         ShortcutId::ToggleTerminal => "Show or hide the terminal for the current session.",
         ShortcutId::NewSession => "Open a blank session canvas to start a new session.",
+        ShortcutId::NewProject => "Open the new project dialog.",
+        ShortcutId::OpenModelPicker => "Open the model picker for the current session.",
         ShortcutId::NextSession => "Select the next session in the sidebar, wrapping at the end.",
         ShortcutId::PrevSession => {
             "Select the previous session in the sidebar, wrapping at the start."
@@ -465,7 +521,6 @@ fn description(id: ShortcutId) -> &'static str {
 
 impl Render for ShortcutsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        use crate::settings::widgets;
         self.appshot_capabilities = crate::appshots::capabilities();
         if self.appshots_page {
             if std::mem::take(&mut self.appshots_focus_pending) {
@@ -620,13 +675,16 @@ impl Render for ShortcutsPage {
         // One card per group, each under its small section label — the flat
         // 16-row table read as one undifferentiated wall. `ix` (the id's
         // position in ALL) keys the interactive elements, so ids stay unique
-        // across cards.
+        // across cards. The label nests tight to its card (8px); the card's
+        // own `section_card` top margin is zeroed here or it stacks on the
+        // wrapper gap and reads as a separate, floating block — group
+        // separation comes from the 28px between wrappers instead.
         let mut groups: Vec<gpui::AnyElement> = Vec::new();
         for name in GROUP_ORDER {
             if name == "Appshots" {
                 continue;
             }
-            let mut card = widgets::section_card(&theme);
+            let mut card = widgets::section_card(&theme).mt(px(0.0));
             let ids = ShortcutId::ALL.into_iter().filter(|&id| group(id) == name);
             for (gx, id) in ids.enumerate() {
                 let ix = ShortcutId::ALL.iter().position(|&a| a == id).unwrap_or(0);
@@ -636,7 +694,7 @@ impl Render for ShortcutsPage {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(12.0))
+                    .gap(px(8.0))
                     .child(widgets::field_label(&theme, name))
                     .child(card)
                     .into_any_element(),
@@ -653,92 +711,109 @@ impl Render for ShortcutsPage {
             "Shortcuts must be unique.".into()
         };
 
+        let scrollbar = self.render_scrollbar(&theme, cx);
         div()
-            .id("shortcuts-page")
+            .id("shortcuts-page-host")
+            .relative()
             .size_full()
-            .overflow_y_scroll()
-            .track_focus(&self.focus)
+            .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                widgets::page_column()
+                div()
+                    .id("shortcuts-page")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll.scroll)
+                    .track_focus(&self.focus)
                     .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_start()
-                            .justify_between()
-                            .gap(px(24.0))
+                        widgets::page_column()
                             .child(
                                 div()
                                     .flex()
-                                    .flex_col()
-                                    .child(widgets::page_header(&theme, "Keyboard shortcuts", None))
+                                    .flex_row()
+                                    .items_start()
+                                    .justify_between()
+                                    .gap(px(24.0))
                                     .child(
-                                        widgets::page_subtitle(
-                                            &theme,
-                                            "Click a binding, then press the key combination you \
-                                             want to use. Changes apply immediately and stay on \
-                                             this device.",
-                                        )
-                                        .max_w(px(512.0))
-                                        .line_height(px(20.0)),
-                                    ),
-                            )
-                            .child({
-                                // `disabled:opacity-35` when nothing is
-                                // customized or while recording.
-                                let disabled = !customized || recording.is_some();
-                                widgets::ghost_action(&theme)
-                                    .id("shortcuts-restore-defaults")
-                                    .flex_none()
-                                    .when(disabled, |el| el.opacity(0.35))
-                                    .when(!disabled, |el| {
-                                        el.hover(|s| {
-                                            s.bg(crate::theme::ink(0.04)).text_color(theme.text)
-                                        })
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.keymap = KeymapConfig::default();
-                                                this.stop_recording();
-                                                this.conflict_notice = None;
-                                                this.commit(cx);
-                                                this.set_escape_stops_active_agent(false, cx);
-                                                this.set_composer_send_behavior(
-                                                    ComposerSendBehavior::Enter,
-                                                    cx,
-                                                );
-                                            }),
-                                        )
-                                    })
-                                    .child(
-                                        crate::icons::icon(crate::icons::RESTART)
-                                            .size(px(14.0))
-                                            .text_color(theme.text_muted),
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .child(widgets::page_header(
+                                                &theme,
+                                                "Keyboard shortcuts",
+                                                None,
+                                            ))
+                                            .child(
+                                                widgets::page_subtitle(
+                                                    &theme,
+                                                    "Click a binding, then press the key combination you \
+                                                     want to use. Changes apply immediately and stay on \
+                                                     this device.",
+                                                )
+                                                .max_w(px(512.0))
+                                                .line_height(px(20.0)),
+                                            ),
                                     )
-                                    .child(SharedString::from("Restore defaults"))
-                            }),
-                    )
-                    .child(send_behavior_row.mt(px(32.0)))
-                    .child(
-                        div()
-                            .mt(px(28.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(28.0))
-                            .children(groups),
-                    )
-                    .child(
-                        div()
-                            .mt(px(12.0))
-                            .px(px(4.0))
-                            .min_h(px(20.0))
-                            .flex()
-                            .justify_center()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text_muted)
-                            .child(helper),
-                    )
-                    .child(escape_behavior_row),
+                                    .child({
+                                        // `disabled:opacity-35` when nothing is
+                                        // customized or while recording.
+                                        let disabled = !customized || recording.is_some();
+                                        widgets::ghost_action(&theme)
+                                            .id("shortcuts-restore-defaults")
+                                            .flex_none()
+                                            .when(disabled, |el| el.opacity(0.35))
+                                            .when(!disabled, |el| {
+                                                el.hover(|s| {
+                                                    s.bg(crate::theme::ink(0.04))
+                                                        .text_color(theme.text)
+                                                })
+                                                .on_click(
+                                                    cx.listener(|this, _, _, cx| {
+                                                        this.keymap = KeymapConfig::default();
+                                                        this.stop_recording();
+                                                        this.conflict_notice = None;
+                                                        this.commit(cx);
+                                                        this.set_escape_stops_active_agent(
+                                                            false, cx,
+                                                        );
+                                                        this.set_composer_send_behavior(
+                                                            ComposerSendBehavior::Enter,
+                                                            cx,
+                                                        );
+                                                    }),
+                                                )
+                                            })
+                                            .child(
+                                                crate::icons::icon(crate::icons::RESTART)
+                                                    .size(px(14.0))
+                                                    .text_color(theme.text_muted),
+                                            )
+                                            .child(SharedString::from("Restore defaults"))
+                                    }),
+                            )
+                            .child(send_behavior_row.mt(px(32.0)))
+                            .child(
+                                div()
+                                    .mt(px(28.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(28.0))
+                                    .children(groups),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(12.0))
+                                    .px(px(4.0))
+                                    .min_h(px(20.0))
+                                    .flex()
+                                    .justify_center()
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .text_color(theme.text_muted)
+                                    .child(helper),
+                            )
+                            .child(escape_behavior_row),
+                    ),
             )
+            .children(scrollbar)
             .into_any_element()
     }
 }

@@ -38,9 +38,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_FRAME_BYTES = MAX_ROW_BYTES + 8192;
 /** Host-published sidecar budget (tail JSON / diff payload). */
 const MAX_SIDECAR_BYTES = 4 * 1024 * 1024;
-/** Checkpoint upload budget — a REBUILT thin doc is ~KB-to-100s-of-KB scale;
- * 16MB is deliberate headroom over any sane doc, not a target. */
-const MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024;
+/** Existing long-running sessions exceed 16 MiB. Keep uploads bounded,
+ * but allow their checkpoints to advance instead of stranding the row log. */
+export const MAX_CHECKPOINT_BYTES = 32 * 1024 * 1024;
 /** Presence beats older than this are swept before relay/stats. */
 const PRESENCE_TTL_MS = 30_000;
 /** Per-device push quota, rolling window (in-memory; resets on hibernation —

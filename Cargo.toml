@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.65"
+version = "0.2.77"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -64,16 +64,17 @@ loro-protocol = "0.3"
 # stopped vending CABackdropLayer for Selection — window blur went dead);
 # b68970e rasterizes BackdropBlur in the wgpu renderer (frosted floats on
 # Linux — the Metal path's snapshot/blur/composite, ported).
-# Paint-time rounded image masks (zeronsh/zui#9).
-gpui = { git = "https://github.com/zeronsh/zui", rev = "aa009411c2dbfb39556bff1b1febed0512fdf609" }
-gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "aa009411c2dbfb39556bff1b1febed0512fdf609", features = [
+# Paint-time rounded image masks (#9), bounded Windows backdrop blur and
+# translucent compositing, plus blur-aware scene batching (#10).
+gpui = { git = "https://github.com/zeronsh/zui", rev = "c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add" }
+gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "aa009411c2dbfb39556bff1b1febed0512fdf609" }
-gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "94c1bbaf6311b9f36f5e7438aaf5aeadd38740da" }
+gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add" }
+gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "03cd9947a6aa07921cb284ad66c87fd6735e55b0" }
 
 # diffs
 similar = "2"
@@ -91,6 +92,9 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 json5 = "0.4"
+# antigravity writes `settings.json` but reads it back with `hjson.load`, so a
+# user's comments and unquoted keys have to survive our read of the same file.
+deser-hjson = "2.2"
 plist = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
@@ -114,6 +118,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
+zip = { version = "7.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 notify = "7"
 portable-pty = "0.8"
 alacritty_terminal = "0.26"
@@ -138,3 +143,11 @@ opt-level = 0
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# Temporary renderer override for the companion per-pixel text fade PR.
+# Replace with an upstream revision once it merges.
+[patch."https://github.com/zeronsh/zui"]
+gpui = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }
+gpui_macros = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }
+gpui_platform = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }
+gpui_tokio = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }

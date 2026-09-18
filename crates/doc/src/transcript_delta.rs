@@ -10,6 +10,7 @@
 //! that must not diverge per surface live in one place).
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::parts::MessagePart;
 use crate::schema::SessionMessageEntry;
@@ -23,6 +24,80 @@ pub struct TranscriptUpdate {
     pub frame: TranscriptFrame,
     #[serde(default)]
     pub context_usage: Option<zeron_proto::ContextUsage>,
+    /// Historical content included in this update, independent of reset/delta
+    /// encoding. Omitted on ordinary live updates and by older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_baseline: Option<TranscriptBaseline>,
+}
+
+/// Compact presentation watermark: stable part ids and text byte lengths.
+/// Keeping the cutoff (rather than a one-frame boolean) lets a viewport
+/// coalesce historical and live updates without animating the history or
+/// swallowing the first live arrival. No transcript text is duplicated.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptBaseline {
+    pub entries: HashMap<String, HashMap<String, usize>>,
+}
+
+impl TranscriptBaseline {
+    /// Fully historical entries can reuse the viewport's already parsed rows.
+    pub fn covers(&self, entry: &SessionMessageEntry) -> bool {
+        let Some(parts) = self.entries.get(&entry.id) else {
+            return false;
+        };
+        entry.parts.iter().all(|part| {
+            parts.get(part.id()).is_some_and(|&len| match part {
+                MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => {
+                    len >= text.len()
+                }
+                _ => true,
+            })
+        })
+    }
+
+    pub fn capture(entries: &[SessionMessageEntry]) -> Self {
+        Self {
+            entries: entries
+                .iter()
+                .map(|entry| {
+                    let parts = entry
+                        .parts
+                        .iter()
+                        .map(|part| {
+                            let len = match part {
+                                MessagePart::Text { text, .. }
+                                | MessagePart::Reasoning { text, .. } => text.len(),
+                                _ => 0,
+                            };
+                            (part.id().to_owned(), len)
+                        })
+                        .collect();
+                    (entry.id.clone(), parts)
+                })
+                .collect(),
+        }
+    }
+
+    /// Reconstruct just the historical prefix from the current content.
+    /// Invalid/stale byte cutoffs never slice through a UTF-8 character.
+    pub fn historical_entry(&self, entry: &SessionMessageEntry) -> Option<SessionMessageEntry> {
+        let parts = self.entries.get(&entry.id)?;
+        let mut historical = entry.clone();
+        historical.parts.retain_mut(|part| {
+            let Some(&len) = parts.get(part.id()) else {
+                return false;
+            };
+            if let MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } = part {
+                let mut end = len.min(text.len());
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                text.truncate(end);
+            }
+            true
+        });
+        Some(historical)
+    }
 }
 
 /// One `WatchDocMessages` stream item.
@@ -433,8 +508,10 @@ mod context_update_tests {
         let old = serde_json::json!({"reset": []});
         let update: TranscriptUpdate = serde_json::from_value(old).unwrap();
         assert_eq!(update.context_usage, None);
+        assert!(update.replay_baseline.is_none());
         let value = serde_json::to_value(TranscriptUpdate {
             frame: TranscriptFrame::reset(&[]),
+            replay_baseline: Some(TranscriptBaseline::default()),
             context_usage: Some(zeron_proto::ContextUsage {
                 tokens: Some(0),
                 window: Some(200000),
@@ -442,9 +519,61 @@ mod context_update_tests {
         })
         .unwrap();
         assert_eq!(value["contextUsage"]["tokens"], 0);
+        let roundtrip: TranscriptUpdate = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            roundtrip.replay_baseline,
+            Some(TranscriptBaseline::default())
+        );
         assert!(matches!(
             serde_json::from_value::<TranscriptFrame>(value).unwrap(),
             TranscriptFrame::Reset { .. }
         ));
+    }
+
+    #[test]
+    fn replay_cutoff_keeps_only_historical_parts_and_unicode_text_prefixes() {
+        let mut entry = SessionMessageEntry {
+            id: "message".into(),
+            role: crate::MessageRole::Assistant,
+            parts: vec![MessagePart::Text {
+                id: "text".into(),
+                text: "café".into(),
+            }],
+            created_at: 0,
+            device_id: "host".into(),
+            status: Some(crate::MessageStatus::Streaming),
+            continuation_of: None,
+        };
+        let baseline = TranscriptBaseline::capture(&[entry.clone()]);
+        assert!(baseline.covers(&entry));
+        entry.parts[0] = MessagePart::Text {
+            id: "text".into(),
+            text: "café recién hecho".into(),
+        };
+        entry.parts.push(MessagePart::Reasoning {
+            id: "new".into(),
+            text: "live".into(),
+        });
+        assert!(!baseline.covers(&entry));
+        let historical = baseline.historical_entry(&entry).unwrap();
+        assert_eq!(
+            historical.parts,
+            vec![MessagePart::Text {
+                id: "text".into(),
+                text: "café".into()
+            }]
+        );
+        // A replaced text can invalidate a former byte boundary.
+        entry.parts[0] = MessagePart::Text {
+            id: "text".into(),
+            text: "🙂🙂".into(),
+        };
+        assert_eq!(
+            baseline.historical_entry(&entry).unwrap().parts[0],
+            MessagePart::Text {
+                id: "text".into(),
+                text: "🙂".into()
+            }
+        );
     }
 }

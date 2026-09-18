@@ -8,13 +8,19 @@ import SwiftUI
 enum Route: Hashable {
     case space(String)
     case chat(String)
-    case newSession(spaceId: String)
+    case newSession(NewSessionDestination)
+
+    // Keep existing project navigation and launch/deep-link call sites valid.
+    static func newSession(spaceId: String) -> Route {
+        .newSession(.project(spaceId: spaceId))
+    }
 }
 
 struct HomeView: View {
     @Environment(AppModel.self) private var model
     @State private var path: [Route] = []
     @State private var showNewSpace = false
+    @State private var showProjectlessDevices = false
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
 
@@ -43,7 +49,7 @@ struct HomeView: View {
                 switch route {
                 case .space(let id): SpaceView(spaceId: id, path: $path)
                 case .chat(let id): SessionView(chatId: id)
-                case .newSession(let spaceId): NewSessionView(spaceId: spaceId, path: $path)
+                case .newSession(let destination): NewSessionView(destination: destination, path: $path)
                 }
             }
             .toolbar {
@@ -109,6 +115,12 @@ struct HomeView: View {
             .sheet(isPresented: $showNewSpace) {
                 NewSpaceSheet { spaceId in
                     path.append(.space(spaceId))
+                }
+            }
+            .sheet(isPresented: $showProjectlessDevices) {
+                SessionHostPickerSheet { deviceId in
+                    spaceFilter = ""
+                    path.append(.newSession(.projectless(deviceId: deviceId)))
                 }
             }
             .task(id: model.overviewChats.map(\.id).joined()) {
@@ -205,42 +217,42 @@ struct HomeView: View {
         }
     }
 
-    /// "+" starts a session in the scoped space; under All it asks which
-    /// space first. With no spaces yet it falls through to space creation.
-    @ViewBuilder private var newButton: some View {
-        if let space = selectedSpace {
-            Button {
-                path.append(.newSession(spaceId: space.id))
-            } label: {
-                Image(systemName: "plus")
-            }
-            .accessibilityLabel("New session")
-        } else if model.spaces.isEmpty {
-            Button {
-                showNewSpace = true
-            } label: {
-                Image(systemName: "plus")
-            }
-            .accessibilityLabel("New space")
-        } else {
-            Menu {
+    /// Both destinations are available even when Home is scoped to a project
+    /// or the workspace has no projects yet.
+    private var newButton: some View {
+        Menu {
+            if let space = selectedSpace {
+                Button("New session in \(space.displayName)") {
+                    path.append(.newSession(spaceId: space.id))
+                }
+            } else if !model.spaces.isEmpty {
                 Section("New session in…") {
                     ForEach(model.spaces) { space in
                         Button {
                             path.append(.newSession(spaceId: space.id))
                         } label: {
-                            // Button rows render the second Text as the
-                            // subtitle line (same pattern as the space menu).
                             Text(space.displayName)
                             Text(deviceTag(space))
                         }
                     }
                 }
-            } label: {
-                Image(systemName: "plus")
             }
-            .accessibilityLabel("New session")
+            Button {
+                showProjectlessDevices = true
+            } label: {
+                Label("Session without a project…", systemImage: "xmark")
+            }
+            .accessibilityIdentifier("new-projectless-session")
+            Button {
+                showNewSpace = true
+            } label: {
+                Label("New space…", systemImage: "folder.badge.plus")
+            }
+        } label: {
+            Image(systemName: "plus")
         }
+        .accessibilityLabel("New session")
+        .accessibilityIdentifier("new-session")
     }
 
     // MARK: Sessions
@@ -249,9 +261,7 @@ struct HomeView: View {
         Section {
             let chats = selectedSpace.map { model.chats(in: $0.id) } ?? model.overviewChats
             if chats.isEmpty {
-                Text(model.spaces.isEmpty
-                    ? "No spaces yet — add one from a desktop device"
-                    : "No sessions yet")
+                Text("No sessions yet — start one with +")
                     .font(Theme.sans(12))
                     .foregroundStyle(Theme.textFaint)
                     .listRowBackground(Color.clear)
@@ -411,9 +421,11 @@ struct ChatRow: View {
     /// space has been renamed, or when the session runs in a worktree off to
     /// the side. No offline marker: the dropdown carries device liveness.
     private var location: String {
-        let space = model.space(for: chat)?.displayName
-            ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
-            ?? "?"
+        let space = chat.spaceId == nil ? "No project" : (
+            model.space(for: chat)?.displayName
+                ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
+                ?? "?"
+        )
         return "\(space) @ \(model.deviceName(chat.deviceId))"
     }
 }

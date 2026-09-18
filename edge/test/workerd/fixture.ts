@@ -1,4 +1,5 @@
 import { previewRoute } from "../../src/preview-route";
+export { ChatRoom } from "../../src/chat-room";
 export { PreviewRoom } from "../../src/preview-room";
 import { DurableObject } from "cloudflare:workers";
 

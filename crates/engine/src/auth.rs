@@ -23,16 +23,46 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
+use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 
 use crate::EngineError;
+use crate::http_error::describe_http_error;
+use zeron_rpc::TokenError;
 
 const SIGN_IN_TTL: Duration = Duration::from_secs(15 * 60);
 /// Refresh when the cached token has less than this much life left.
 const TOKEN_SLACK: Duration = Duration::from_secs(30);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+const REFRESH_RETRY_BASE: Duration = Duration::from_secs(1);
+/// DNS can recover without an OS path event. Keep polling even at the cap.
+const REFRESH_RETRY_CAP: Duration = Duration::from_secs(5);
+
+type RefreshFlight =
+    futures::future::Shared<futures::future::BoxFuture<'static, Result<Option<String>, String>>>;
+
+#[derive(Default)]
+struct RefreshRetry {
+    generation: u64,
+    failures: u32,
+    failure: Option<RefreshFailure>,
+}
+
+struct RefreshFailure {
+    message: String,
+    at: tokio::time::Instant,
+    wall: std::time::SystemTime,
+    delay: Duration,
+}
+
+impl RefreshFailure {
+    fn remaining(&self) -> Duration {
+        let wall = self.wall.elapsed().unwrap_or(Duration::ZERO);
+        self.delay.saturating_sub(self.at.elapsed().max(wall))
+    }
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -222,6 +252,11 @@ struct AuthInner {
     /// Single-flight refresh: WorkOS refresh tokens are single-use (rotated per
     /// exchange); two concurrent refreshes would race and could revoke the session.
     refresh_gate: tokio::sync::Mutex<()>,
+    refresh_flight: Mutex<Option<RefreshFlight>>,
+    /// Failed refreshes are shared across every HTTP/WS token consumer, not
+    /// just delayed by the background loop. Resettable without waiting on HTTP.
+    refresh_retry: Mutex<RefreshRetry>,
+    retry_tx: watch::Sender<u64>,
     /// Loopback callback listener port, bound lazily on the first headed sign-in.
     loopback: tokio::sync::Mutex<Option<u16>>,
 }
@@ -268,6 +303,7 @@ impl Auth {
         let loaded_workos_session = workos.is_some() && stored.is_some();
         let (state_tx, _) = watch::channel(initial);
         let (token_tx, _) = watch::channel(0);
+        let (retry_tx, _) = watch::channel(0);
         let http = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .build()
@@ -284,6 +320,9 @@ impl Auth {
                 access: Mutex::new(None),
                 sign_in: Mutex::new(SignInLifecycle::default()),
                 refresh_gate: tokio::sync::Mutex::new(()),
+                refresh_flight: Mutex::new(None),
+                refresh_retry: Mutex::new(RefreshRetry::default()),
+                retry_tx,
                 loopback: tokio::sync::Mutex::new(None),
             }),
         }
@@ -351,25 +390,47 @@ impl Auth {
         self.state().user().map(|u| u.id.clone())
     }
 
-    /// Current bearer for edge rooms / the device relay — `None` when signed out.
+    /// Current bearer. Network failures preserve the session and return
+    /// `TemporarilyUnavailable`; only absent/revoked credentials are `SignedOut`.
     /// Dev mode: the configured user id. WorkOS: cached access token, refreshed when
     /// it has under 30s left.
-    pub async fn access_token(&self) -> Option<String> {
+    pub async fn access_token(&self) -> Result<String, TokenError> {
         if self.inner.workos.is_none() {
-            return Some(self.inner.config.dev_user_id.clone());
+            return Ok(self.inner.config.dev_user_id.clone());
         }
         if let Some(entry) = &*lock(&self.inner.access)
             && entry.remaining() > TOKEN_SLACK
         {
-            return Some(entry.token.clone());
+            return Ok(entry.token.clone());
         }
-        match self.refresh(None).await {
-            Ok(token) => token,
-            Err(err) => {
-                tracing::warn!(error = %err, "auth: refresh failed");
-                None
-            }
+        let result = self.refresh(None).await;
+        // Sign-in/out may replace the session while a shared request is in
+        // flight. Report the current credentials, never a discarded response's
+        // `None` as a revocation of the replacement session.
+        let _session = lock(&self.inner.sign_in);
+        if lock(&self.inner.stored).is_none() {
+            return Err(TokenError::SignedOut);
         }
+        if let Some(entry) = &*lock(&self.inner.access)
+            && entry.remaining() > TOKEN_SLACK
+        {
+            return Ok(entry.token.clone());
+        }
+        result
+            .map_err(|e| TokenError::TemporarilyUnavailable(e.to_string()))?
+            .ok_or_else(|| {
+                TokenError::TemporarilyUnavailable("session changed during refresh; retry".into())
+            })
+    }
+
+    /// Allow one fresh attempt after a connectivity hint or an explicit Retry.
+    /// Consumers still serialize on the refresh gate and share its outcome.
+    pub fn retry_refresh(&self) {
+        let mut retry = lock(&self.inner.refresh_retry);
+        retry.generation = retry.generation.wrapping_add(1);
+        retry.failures = 0;
+        retry.failure = None;
+        self.inner.retry_tx.send_replace(retry.generation);
     }
 
     /// Sleep-until-near-expiry refresh loop so long-lived dials (relay, rooms) always
@@ -383,6 +444,7 @@ impl Auth {
             let mut state_rx = auth.watch_state();
             let mut wake = zeron_sync::wake::subscribe();
             let mut online = zeron_sync::wake::subscribe_online();
+            let mut retry_rx = auth.inner.retry_tx.subscribe();
             loop {
                 if !state_rx.borrow().is_signed_in() {
                     if state_rx.changed().await.is_err() {
@@ -394,7 +456,7 @@ impl Auth {
                     .as_ref()
                     .map(AccessEntry::remaining)
                     .unwrap_or(Duration::ZERO);
-                let wait = remaining.saturating_sub(Duration::from_secs(60));
+                let wait = remaining.saturating_sub(TOKEN_SLACK);
                 if wait > Duration::ZERO {
                     // Re-evaluate at least once a minute rather than parking
                     // on one long timer: tokio timers ride the monotonic
@@ -415,16 +477,21 @@ impl Auth {
                         _ = wake.recv() => {}
                     }
                 }
-                if let Err(err) = auth.refresh(None).await {
-                    tracing::warn!(error = %err, "auth: background refresh failed");
+                if auth.refresh(None).await.is_err() {
                     // A failed refresh is usually the network, not WorkOS —
                     // retry the moment connectivity returns (online bus)
                     // instead of always waiting out the full pause.
                     while online.try_recv().is_ok() {}
+                    let wait = lock(&auth.inner.refresh_retry)
+                        .failure
+                        .as_ref()
+                        .map(RefreshFailure::remaining)
+                        .unwrap_or(Duration::ZERO);
                     tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(30)) => {}
-                        _ = wake.recv() => {}
-                        _ = online.recv() => {}
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = wake.recv() => { auth.retry_refresh(); }
+                        _ = online.recv() => { auth.retry_refresh(); }
+                        _ = retry_rx.changed() => {}
                     }
                 }
             }
@@ -479,10 +546,15 @@ impl Auth {
 
     pub fn sign_out(&self) {
         let mut sign_in = lock(&self.inner.sign_in);
+        self.clear_session(&mut sign_in);
+    }
+
+    fn clear_session(&self, sign_in: &mut SignInLifecycle) {
         sign_in.generation = sign_in.generation.wrapping_add(1);
         sign_in.pending.clear();
         *lock(&self.inner.stored) = None;
         *lock(&self.inner.access) = None;
+        self.retry_refresh();
         self.persist::<&StoredSession>(None);
         self.inner.state_tx.send_replace(AuthState::SignedOut);
         self.inner
@@ -610,17 +682,24 @@ impl Auth {
             .json(&serde_json::json!({ "code": code }))
             .send()
             .await
-            .map_err(|e| EngineError::Other(format!("the edge is unreachable: {e}")))?;
+            .map_err(|e| {
+                EngineError::Other(format!(
+                    "the edge is unreachable: {}",
+                    describe_http_error(e)
+                ))
+            })?;
         if !res.status().is_success() {
             return Err(EngineError::Other(format!(
                 "sign-in failed during token exchange ({}) — the code may have expired; start again",
                 res.status().as_u16()
             )));
         }
-        let body: Exchange = res
-            .json()
-            .await
-            .map_err(|e| EngineError::Other(format!("malformed exchange response: {e}")))?;
+        let body: Exchange = res.json().await.map_err(|e| {
+            EngineError::Other(format!(
+                "malformed exchange response: {}",
+                describe_http_error(e)
+            ))
+        })?;
         let name = [body.user.first_name, body.user.last_name]
             .into_iter()
             .flatten()
@@ -657,6 +736,7 @@ impl Auth {
         };
         self.persist(Some(&session));
         *lock(&self.inner.stored) = Some(session);
+        self.retry_refresh();
         tracing::info!(email = %result.user.email, org = org_id.as_deref().unwrap_or("<none>"),
             "auth: signed in");
         self.inner
@@ -672,6 +752,42 @@ impl Auth {
     /// session to that org; routine refreshes keep the current scope. Returns the new
     /// access token, `None` when signed out / the refresh could not run.
     async fn refresh(&self, organization_id: Option<&str>) -> Result<Option<String>, EngineError> {
+        if organization_id.is_some() {
+            return self.refresh_serialized(organization_id).await;
+        }
+        let flight = {
+            let mut active = lock(&self.inner.refresh_flight);
+            if let Some(flight) = active.as_ref() {
+                flight.clone()
+            } else {
+                let auth = self.clone();
+                // A room's connect timeout must not cancel a rotating refresh
+                // token exchange that sibling rooms are also waiting for.
+                let task = tokio::spawn(async move {
+                    let result = auth
+                        .refresh_serialized(None)
+                        .await
+                        .map_err(|e| e.to_string());
+                    *lock(&auth.inner.refresh_flight) = None;
+                    result
+                });
+                let flight = async move {
+                    task.await
+                        .map_err(|e| format!("refresh task stopped: {e}"))?
+                }
+                .boxed()
+                .shared();
+                *active = Some(flight.clone());
+                flight
+            }
+        };
+        flight.await.map_err(EngineError::Other)
+    }
+
+    async fn refresh_serialized(
+        &self,
+        organization_id: Option<&str>,
+    ) -> Result<Option<String>, EngineError> {
         let _gate = self.inner.refresh_gate.lock().await;
         // Re-check under the gate: the refresh we queued behind may have done the work.
         if organization_id.is_none()
@@ -680,11 +796,62 @@ impl Auth {
         {
             return Ok(Some(entry.token.clone()));
         }
-        let Some(refresh_token) = lock(&self.inner.stored)
-            .as_ref()
-            .map(|s| s.refresh_token.clone())
-        else {
-            return Ok(None);
+        let generation = {
+            let retry = lock(&self.inner.refresh_retry);
+            // An explicit org switch must not reuse another scope's error.
+            if organization_id.is_none()
+                && let Some(failure) = &retry.failure
+                && !failure.remaining().is_zero()
+            {
+                return Err(EngineError::Other(failure.message.clone()));
+            }
+            retry.generation
+        };
+        let result = self.refresh_locked(organization_id).await;
+        let mut retry = lock(&self.inner.refresh_retry);
+        // A Retry/sign-in/sign-out during the request invalidates its cooldown.
+        if retry.generation == generation {
+            match &result {
+                Err(err) if organization_id.is_none() => {
+                    retry.failures = retry.failures.saturating_add(1);
+                    let backoff =
+                        REFRESH_RETRY_BASE.saturating_mul(1 << (retry.failures - 1).min(8));
+                    let jitter =
+                        Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]));
+                    let delay = (backoff + jitter).min(REFRESH_RETRY_CAP);
+                    tracing::warn!(error = %err, retry_ms = delay.as_millis() as u64,
+                        "auth: refresh failed; cooling down");
+                    retry.failure = Some(RefreshFailure {
+                        message: err.to_string(),
+                        at: tokio::time::Instant::now(),
+                        wall: std::time::SystemTime::now(),
+                        delay,
+                    });
+                }
+                Ok(_) => {
+                    retry.failures = 0;
+                    retry.failure = None;
+                }
+                Err(_) => {}
+            }
+        }
+        result
+    }
+
+    /// Called only while holding the gate, including org-scoped refreshes.
+    async fn refresh_locked(
+        &self,
+        organization_id: Option<&str>,
+    ) -> Result<Option<String>, EngineError> {
+        let (generation, refresh_token) = {
+            let sign_in = lock(&self.inner.sign_in);
+            let Some(refresh_token) = lock(&self.inner.stored)
+                .as_ref()
+                .map(|s| s.refresh_token.clone())
+            else {
+                return Ok(None);
+            };
+            (sign_in.generation, refresh_token)
         };
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -713,13 +880,24 @@ impl Auth {
                 // Network failure is transient: keep the session, but surface the
                 // error so the background loop applies its retry delay.
                 return Err(EngineError::Other(format!(
-                    "could not reach the edge during refresh: {err}"
+                    "could not reach the edge during refresh: {}",
+                    describe_http_error(err)
                 )));
             }
         };
         let status = res.status().as_u16();
-        if (400..500).contains(&status) && organization_id.is_none() {
-            // A definitive 4xx means the refresh token itself is dead (revoked session,
+        if (400..500).contains(&status) && !matches!(status, 408 | 429) && organization_id.is_none()
+        {
+            let mut sign_in = lock(&self.inner.sign_in);
+            if sign_in.generation != generation
+                || lock(&self.inner.stored)
+                    .as_ref()
+                    .is_none_or(|s| s.refresh_token != refresh_token)
+            {
+                return Ok(None);
+            }
+            // Timeouts/rate limits are retryable. Other 4xx responses mean a
+            // rejected refresh (revoked session,
             // deleted user) — it can NEVER succeed again. Degrade to SignedOut so every
             // downstream retry loop quiets down. (Org-switch refreshes are exempt: a 4xx
             // there means "not a member", not a dead session.)
@@ -727,7 +905,7 @@ impl Auth {
                 status,
                 "auth: refresh rejected — session revoked; signing out"
             );
-            self.sign_out();
+            self.clear_session(&mut sign_in);
             return Ok(None);
         }
         if !res.status().is_success() {
@@ -739,10 +917,20 @@ impl Auth {
             access_token: String,
             refresh_token: String,
         }
-        let tokens: Tokens = res
-            .json()
-            .await
-            .map_err(|e| EngineError::Other(format!("malformed refresh response: {e}")))?;
+        let tokens: Tokens = res.json().await.map_err(|e| {
+            EngineError::Other(format!(
+                "malformed refresh response: {}",
+                describe_http_error(e)
+            ))
+        })?;
+        let sign_in = lock(&self.inner.sign_in);
+        if sign_in.generation != generation
+            || lock(&self.inner.stored)
+                .as_ref()
+                .is_none_or(|s| s.refresh_token != refresh_token)
+        {
+            return Ok(None);
+        }
         let org_id = jwt_claims(&tokens.access_token).and_then(|c| c.org_id);
         let entry = AccessEntry::fresh(tokens.access_token.clone());
         tracing::info!(ttl_s = entry.ttl.as_secs(), "auth: access token refreshed");
@@ -797,10 +985,7 @@ impl Auth {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<T, EngineError> {
-        let token = self
-            .access_token()
-            .await
-            .ok_or_else(|| EngineError::Other("not signed in".into()))?;
+        let token = self.access_token().await?;
         let url = format!(
             "{}{}",
             self.inner.config.edge_url.trim_end_matches('/'),
@@ -810,19 +995,21 @@ impl Auth {
         if let Some(body) = body {
             req = req.json(&body);
         }
-        let res = req
-            .send()
-            .await
-            .map_err(|e| EngineError::Other(format!("the edge is unreachable: {e}")))?;
+        let res = req.send().await.map_err(|e| {
+            EngineError::Other(format!(
+                "the edge is unreachable: {}",
+                describe_http_error(e)
+            ))
+        })?;
         if !res.status().is_success() {
             return Err(EngineError::Other(format!(
                 "workspace request failed ({})",
                 res.status().as_u16()
             )));
         }
-        res.json::<T>()
-            .await
-            .map_err(|e| EngineError::Other(format!("malformed response: {e}")))
+        res.json::<T>().await.map_err(|e| {
+            EngineError::Other(format!("malformed response: {}", describe_http_error(e)))
+        })
     }
 
     // -- loopback callback server ------------------------------------------
@@ -871,9 +1058,9 @@ fn state_for(user: AuthUser, org_id: Option<String>) -> AuthState {
 /// and link cache always dial with a fresh bearer after refreshes.
 #[async_trait::async_trait]
 impl zeron_rpc::TokenSource for Auth {
-    async fn token(&self) -> Option<String> {
+    async fn token(&self) -> Result<String, TokenError> {
         if self.inner.workos.is_some() && !self.state().is_signed_in() {
-            return None;
+            return Err(TokenError::SignedOut);
         }
         self.access_token().await
     }
@@ -1101,6 +1288,62 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn concurrent_dns_failure_is_shared_with_http_and_room_consumers() {
+        use crate::http_error::test_support::FailingDns;
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("session.json"),
+            r#"{"refreshToken":"refresh-secret","user":{"id":"user_1","email":"u@example.com"},"orgId":"org_1"}"#,
+        ).unwrap();
+        let mut config = AuthConfig::new("https://edge.invalid", dir.path());
+        config.workos_client_id = Some("client_test".into());
+        let mut auth = Auth::new(config);
+        let dns = Arc::new(FailingDns::default());
+        Arc::get_mut(&mut auth.inner).unwrap().http = dns.client();
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(20));
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..20 {
+            let auth = auth.clone();
+            let barrier = barrier.clone();
+            tasks.spawn(async move {
+                barrier.wait().await;
+                auth.access_token().await
+            });
+        }
+        let mut failures = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            match result.unwrap() {
+                Err(TokenError::TemporarilyUnavailable(reason)) => failures.push(reason),
+                other => panic!("DNS failure misclassified: {other:?}"),
+            }
+        }
+        let reason = &failures[0];
+        assert!(reason.contains("injected DNS lookup failure"), "{reason}");
+        assert!(!reason.contains("refresh-secret"));
+        assert!(failures.iter().all(|failure| failure == reason));
+
+        let edge = crate::EdgeConfig::new("https://edge.invalid", Arc::new(auth.clone()));
+        assert!(matches!(
+            edge.room_url("/registry/org_1/ws").url().await,
+            Err(zeron_sync::SyncError::TemporarilyUnavailable(message)) if &message == reason
+        ));
+        assert!(matches!(
+            auth.list_orgs().await,
+            Err(EngineError::Token(TokenError::TemporarilyUnavailable(message))) if &message == reason
+        ));
+        assert_eq!(
+            dns.calls.load(Ordering::SeqCst),
+            1,
+            "cooldown must cover all consumers"
+        );
+        assert!(auth.state().is_signed_in());
+        assert!(dir.path().join("session.json").exists());
+    }
+
     #[test]
     fn base64url_round_trips_jwt_payload() {
         let payload = br#"{"exp":100,"iat":40,"org_id":"org_1"}"#;
@@ -1184,7 +1427,7 @@ mod tests {
 
 #[async_trait::async_trait]
 impl zeron_preview::signaling::TokenSource for Auth {
-    async fn token(&self) -> Option<String> {
-        self.access_token().await
+    async fn token(&self) -> anyhow::Result<String> {
+        Ok(self.access_token().await?)
     }
 }

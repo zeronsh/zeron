@@ -8,6 +8,7 @@
 use gpui::{Context, EventEmitter, SharedString, Window, div, prelude::*, px};
 
 use crate::icons;
+use crate::popover;
 use crate::settings::widgets;
 use crate::theme::Theme;
 
@@ -25,6 +26,7 @@ pub enum NotificationsEvent {
 }
 
 pub struct NotificationsPage {
+    scroll: widgets::PageScroll,
     sound: bool,
     completion_sound: bool,
     input_sound: bool,
@@ -81,6 +83,7 @@ impl NotificationsPage {
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
+            scroll: widgets::PageScroll::default(),
             sound,
             completion_sound,
             input_sound,
@@ -113,6 +116,22 @@ impl NotificationsPage {
         *value = !*value;
         self.emit(cx);
         cx.notify();
+    }
+
+    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        if self.scroll.set_list_hovered(*hovered) {
+            cx.notify();
+        }
+    }
+}
+
+impl popover::ScrollRailHost for NotificationsPage {
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        self.scroll.rail_bar()
+    }
+
+    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
+        self.scroll.rail_scroll()
     }
 }
 
@@ -369,24 +388,34 @@ impl Render for NotificationsPage {
                     ),
             );
 
+        let scrollbar = popover::rail(self, "notifications-page-scrollbar", &theme, cx);
         div()
-            .id("notifications-page")
+            .id("notifications-page-host")
+            .relative()
             .size_full()
-            .overflow_y_scroll()
+            .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                widgets::page_column()
-                    .child(widgets::page_header(&theme, "Notifications", None))
+                div()
+                    .id("notifications-page")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll.scroll)
                     .child(
-                        widgets::page_subtitle(
-                            &theme,
-                            "Choose which session events can play a sound, and when desktop \
-                             notifications appear.",
-                        )
-                        .max_w(px(512.0))
-                        .line_height(px(20.0)),
-                    )
-                    .child(card),
+                        widgets::page_column()
+                            .child(widgets::page_header(&theme, "Notifications", None))
+                            .child(
+                                widgets::page_subtitle(
+                                    &theme,
+                                    "Choose which session events can play a sound, and when desktop \
+                                     notifications appear.",
+                                )
+                                .max_w(px(512.0))
+                                .line_height(px(20.0)),
+                            )
+                            .child(card),
+                    ),
             )
+            .children(scrollbar)
     }
 }
 

@@ -96,7 +96,7 @@ jobs:
       - name: test
         if: steps.changed.outputs.changed == 'true'
         working-directory: apps/landing
-        run: node --test telemetry.test.mjs
+        run: node --test *.test.mjs
       - name: deploy
         if: steps.changed.outputs.changed == 'true' && env.CLOUDFLARE_API_TOKEN != ''
         working-directory: apps/landing

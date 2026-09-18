@@ -1,0 +1,23 @@
+{
+  "date": "2026-09-15",
+  "main_revision": "67c960f4",
+  "worker_version": "c2c7587e-b5f7-49ae-aefe-d9b54fc95039",
+  "worker_source_revision": "67c960f4",
+  "worker_name": "zeron-transport-385-20260915",
+  "baseline_binary_sha256": "b07dbfb2d755bab0de4952d2420fc905cf4d0f16e29c4c806f4c903df7690410",
+  "notes": [
+    "Fresh synthetic room and proxy per run. No production routes or data.",
+    "Streaming completion includes the final unthrottled stats verification request.",
+    "Byte counts are forwarded HTTP/WebSocket bytes, excluding TLS/TCP/IP overhead.",
+    "The proxy forces HTTP connection close; connection counts do not measure production HTTP pooling.",
+    "p95 is not used for comparisons: duplicate-arrival filtering was added during testing.",
+    "Upload reports elapsed time from setup, through upload, peer delivery and sender ACK.",
+    "No physical packet loss, airplane Wi-Fi, mobile lifecycle or arbitrary relay RPC benchmark."
+  ],
+  "fixed_source_sha256": {
+    "crates/sync/src/chat_client.rs": "ce3ff691774c3660792a3376bee91ecd2daa9d04a82a8fe0ea304569cb0a792a",
+    "crates/sync/src/socket.rs": "f8f5bb85e5bb7fa5f187ea36caea99a555d2fd1e377ff8456a1fecbe224cc0a2",
+    "crates/sync/src/socket/progress.rs": "717fbbc19beea2b2539f0d8cf9699a71647713581e4bb1213a4bd7a52bda1ed0",
+    "crates/sync/src/dial.rs": "adc44a93f66756be7e7113c15f6441c744c17eff253664babdebf323f014531b"
+  }
+}

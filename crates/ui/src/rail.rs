@@ -503,6 +503,7 @@ impl Transcript {
                     .as_deref()
                     .map(|r| truncate_preview(r, PREVIEW_REPLY_CHARS));
                 let card: Option<AnyElement> = is_hovered.then(|| {
+                    let theme = theme.for_popup();
                     let card = popover::popover_card(&theme)
                         .w(px(280.0))
                         .p(px(Theme::SPACE_SM))
@@ -529,7 +530,7 @@ impl Transcript {
                             el.child(
                                 div()
                                     .text_size(crate::typography::ui_rems(10.0))
-                                    .text_color(theme.text_muted.opacity(0.7))
+                                    .text_color(theme.text_muted)
                                     .child(SharedString::from(format!("{bucket_len} prompts"))),
                             )
                         });

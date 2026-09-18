@@ -1,0 +1,70 @@
+// Isolated development-auth test deployment. No production routes.
+// Delete this worker and its bucket after running the transport matrix.
+{
+  "name": "zeron-transport-385-20260915",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "workers_dev": true,
+  "rules": [
+    {
+      "type": "Text",
+      "globs": [
+        "**/*.sh"
+      ],
+      "fallthrough": true
+    }
+  ],
+  "alias": {
+    "loro-crdt": "./node_modules/loro-crdt/base64/index.js"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SESSION_ROOMS",
+        "class_name": "SessionRoom"
+      },
+      {
+        "name": "DEVICE_ROOMS",
+        "class_name": "DeviceRoom"
+      },
+      {
+        "name": "REGISTRY_ROOMS",
+        "class_name": "RegistryRoom"
+      },
+      {
+        "name": "CHAT_ROOMS",
+        "class_name": "ChatRoom"
+      },
+      {
+        "name": "PREVIEW_ROOMS",
+        "class_name": "PreviewRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "SessionRoom",
+        "DeviceRoom",
+        "RegistryRoom",
+        "ChatRoom",
+        "PreviewRoom"
+      ]
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BLOBS",
+      "bucket_name": "zeron-transport-385-20260915"
+    },
+    {
+      "binding": "RELEASES",
+      "bucket_name": "zeron-transport-385-20260915"
+    }
+  ],
+  "vars": {
+    "AUTH_MODE": "dev",
+    "WORKOS_CLIENT_ID": "unused-test-only"
+  }
+}

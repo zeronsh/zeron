@@ -3,24 +3,23 @@
 use gpui::{Context, EventEmitter, SharedString, Window, div, prelude::*, px};
 
 use super::widgets;
+use crate::popover;
 use crate::{icons, theme::Theme};
 
 const DELAY_OPTIONS: [u64; 5] = [300, 600, 900, 1_500, 3_000];
-const FONT_SIZE_OPTIONS: [f32; 5] = [10.0, 11.5, 13.0, 15.0, 17.0];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FilesSettingsEvent {
     AutosaveChanged(bool),
     AutosaveDelayChanged(u64),
-    EditorFontSizeChanged(f32),
     WordWrapChanged(bool),
     ShowAllFilesChanged(bool),
 }
 
 pub struct FilesSettingsPage {
+    scroll: widgets::PageScroll,
     autosave_enabled: bool,
     autosave_delay_ms: u64,
-    editor_font_size: f32,
     word_wrap: bool,
     show_all_files: bool,
 }
@@ -31,15 +30,14 @@ impl FilesSettingsPage {
     pub fn new(
         autosave_enabled: bool,
         autosave_delay_ms: u64,
-        editor_font_size: f32,
         word_wrap: bool,
         show_all_files: bool,
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
+            scroll: widgets::PageScroll::default(),
             autosave_enabled,
             autosave_delay_ms,
-            editor_font_size,
             word_wrap,
             show_all_files,
         }
@@ -60,6 +58,22 @@ impl FilesSettingsPage {
         self.show_all_files = show_all_files;
         cx.notify();
     }
+
+    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        if self.scroll.set_list_hovered(*hovered) {
+            cx.notify();
+        }
+    }
+}
+
+impl popover::ScrollRailHost for FilesSettingsPage {
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        self.scroll.rail_bar()
+    }
+
+    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
+        self.scroll.rail_scroll()
+    }
 }
 
 impl Render for FilesSettingsPage {
@@ -67,7 +81,6 @@ impl Render for FilesSettingsPage {
         let theme = Theme::of(cx).clone();
         let autosave_enabled = self.autosave_enabled;
         let selected = self.autosave_delay_ms;
-        let selected_font_size = self.editor_font_size;
         let word_wrap = self.word_wrap;
         let show_all_files = self.show_all_files;
         let options = DELAY_OPTIONS.into_iter().map(|delay| {
@@ -105,44 +118,6 @@ impl Render for FilesSettingsPage {
                     format!("{delay} ms")
                 })
         });
-        let font_size_options = FONT_SIZE_OPTIONS.into_iter().map(|font_size| {
-            let active = font_size == selected_font_size;
-            div()
-                .id(SharedString::from(format!(
-                    "files-editor-font-size-{font_size}"
-                )))
-                .h(px(28.0))
-                .px(px(10.0))
-                .rounded(px(7.0))
-                .border_1()
-                .border_color(if active {
-                    theme.accent.opacity(0.7)
-                } else {
-                    theme.border
-                })
-                .bg(if active {
-                    theme.accent.opacity(0.11)
-                } else {
-                    crate::theme::wash(0.025)
-                })
-                .text_size(px(11.5))
-                .text_color(if active { theme.text } else { theme.text_muted })
-                .flex()
-                .items_center()
-                .cursor_pointer()
-                .hover(|style| style.bg(crate::theme::wash(0.08)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.editor_font_size = font_size;
-                    cx.emit(FilesSettingsEvent::EditorFontSizeChanged(font_size));
-                    cx.notify();
-                }))
-                .child(if font_size.fract() == 0.0 {
-                    format!("{font_size:.0} px")
-                } else {
-                    format!("{font_size:.1} px")
-                })
-        });
-
         let card = widgets::section_card(&theme)
             .child(
                 widgets::card_row(&theme, true)
@@ -205,35 +180,6 @@ impl Render for FilesSettingsPage {
                         ),
                 )
             })
-            .child(
-                widgets::card_row(&theme, true)
-                    .items_start()
-                    .child(widgets::row_tile(&theme, icons::TUNING))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(widgets::row_title(&theme, "Editor font size"))
-                            .child(widgets::meta_line(
-                                &theme,
-                                vec![
-                                    div()
-                                        .child("Set the text size in workspace file editors.")
-                                        .into_any_element(),
-                                ],
-                            ))
-                            .child(
-                                div()
-                                    .mt(px(12.0))
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap(px(7.0))
-                                    .children(font_size_options),
-                            ),
-                    ),
-            )
             .child(
                 widgets::card_row(&theme, true)
                     .child(widgets::row_tile(&theme, icons::LIST))
@@ -299,22 +245,32 @@ impl Render for FilesSettingsPage {
                     ),
             );
 
+        let scrollbar = popover::rail(self, "files-settings-page-scrollbar", &theme, cx);
         div()
-            .id("files-settings-page")
+            .id("files-settings-page-host")
+            .relative()
             .size_full()
-            .overflow_y_scroll()
+            .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                widgets::page_column()
-                    .child(widgets::page_header(&theme, "Files", None))
+                div()
+                    .id("files-settings-page")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll.scroll)
                     .child(
-                        widgets::page_subtitle(
-                            &theme,
-                            "Control how workspace files are displayed and saved while you edit.",
-                        )
-                        .max_w(px(512.0))
-                        .line_height(px(20.0)),
-                    )
-                    .child(card),
+                        widgets::page_column()
+                            .child(widgets::page_header(&theme, "Files", None))
+                            .child(
+                                widgets::page_subtitle(
+                                    &theme,
+                                    "Control how workspace files are displayed and saved while you edit.",
+                                )
+                                .max_w(px(512.0))
+                                .line_height(px(20.0)),
+                            )
+                            .child(card),
+                    ),
             )
+            .children(scrollbar)
     }
 }

@@ -739,8 +739,14 @@ pub struct Theme {
     pub font_sans: SharedString,
     /// Fixed Geist chrome for code-adjacent surfaces and recovery controls.
     pub font_sans_fixed: SharedString,
-    /// Monospace family for code/terminal.
+    /// User-selected family for code, diffs, and file editors.
     pub font_mono: SharedString,
+    /// User-selected family for terminal output.
+    pub font_terminal: SharedString,
+    /// Absolute pixel sizes for those two surfaces. They live on the theme
+    /// because every render site that needs them already holds a `Theme`.
+    pub code_font_size: f32,
+    pub terminal_font_size: f32,
     /// Explicit system fallbacks, for callers that want to skip the lookup.
     pub font_sans_fallback: SharedString,
     pub font_mono_fallback: SharedString,
@@ -776,15 +782,19 @@ impl TerminalColors {
 
 impl Theme {
     // ---- numbers drive layout (px) ----
-    /// Frost translucency over the blurred window background (macOS vibrancy).
-    /// Opaque elsewhere: Linux/Windows get no compositor-blur guarantee, and a
-    /// merely transparent window would show raw desktop through the sidebar.
+    /// Frost translucency over the blurred window background (macOS vibrancy
+    /// or Windows Acrylic). Linux stays opaque because compositor blur is not
+    /// guaranteed; a merely transparent window would expose the raw desktop.
     /// Darkness matched by eye to a reference Electron app's dark glass. That
     /// scrim is 0.76 over `hsl(0 0% 3%)`, but it sits on Electron's
     /// `under-window` vibrancy MATERIAL, which pre-darkens the blur; our bare
     /// backdrop blur has no material layer, so the scrim runs heavier to land
     /// on the same perceived tone (see [`Theme::glass`]).
-    pub const GLASS_ALPHA: f32 = if cfg!(target_os = "macos") { 0.80 } else { 1.0 };
+    pub const GLASS_ALPHA: f32 = if cfg!(any(target_os = "macos", target_os = "windows")) {
+        0.80
+    } else {
+        1.0
+    };
     /// Light-mode frost alpha — glass-forward, like dark mode.
     ///
     /// A light tint controls the blur less than a dark one: the desktop's
@@ -794,7 +804,11 @@ impl Theme {
     /// vibrancy material is mostly white). Floating cards compensate further:
     /// see [`Self::glass_overlay`], where light coverage steps up to keep menu
     /// text legible over an unknown backdrop.
-    pub const GLASS_ALPHA_LIGHT: f32 = if cfg!(target_os = "macos") { 0.80 } else { 1.0 };
+    pub const GLASS_ALPHA_LIGHT: f32 = if cfg!(any(target_os = "macos", target_os = "windows")) {
+        0.80
+    } else {
+        1.0
+    };
     /// Main-panel header height (zeron `h-11`) — in-card headers (changes pane).
     pub const HEADER_HEIGHT: f32 = 44.0;
     /// The unified window titlebar (traffic lights + cluster + tabs). Content
@@ -878,8 +892,8 @@ impl Theme {
     }
 
     /// Whether this appearance paints translucent chrome over the blurred
-    /// desktop. Glass-only recipes — backdrop blurs, translucent popover
-    /// tints, per-glyph edge fades — must gate on this, not on
+    /// desktop. Window-glass recipes such as translucent chrome and per-glyph
+    /// edge fades must gate on this, not on
     /// [`Self::GLASS_ALPHA`]: that constant is platform-wide, while the frost
     /// alpha (and with it whether glass is on at all) is per-appearance.
     pub fn is_glass(&self) -> bool {
@@ -890,12 +904,16 @@ impl Theme {
     /// backdrop blur and translucent tints. Unlike [`Self::is_glass`] this is
     /// scene-level: the blur runs on in-app content inside the window, not on
     /// the desktop behind it, so it needs no compositor vibrancy — macOS
-    /// rasterizes it in Metal and Linux in the vendored wgpu renderer (other
-    /// wgpu platforms keep opaque floats until tested). The window chrome
-    /// itself stays opaque off macOS either way.
+    /// rasterizes it in Metal, Linux in wgpu, and Windows in Direct3D.
+    /// Windows window chrome uses native Acrylic independently of these
+    /// scene-level blurs.
     pub fn is_frost(&self) -> bool {
         self.surface_treatment == SurfaceTreatment::Frosted
-            && cfg!(any(target_os = "macos", target_os = "linux"))
+            && cfg!(any(
+                target_os = "macos",
+                target_os = "linux",
+                target_os = "windows"
+            ))
     }
 
     /// Theme-owned hover wash for chrome that sits on glass (sidebar rows,
@@ -903,6 +921,17 @@ impl Theme {
     /// theme, so forcing frost does not reintroduce Zeron's neutral hover.
     pub fn glass_hover(&self) -> Hsla {
         self.element_hover
+    }
+
+    /// Muted popup text is the theme foreground composited onto the glass.
+    /// Fixed opaque grays turn muddy over colorful or bright backgrounds.
+    pub fn for_popup(&self) -> Self {
+        let mut popup = self.clone();
+        if self.is_frost() {
+            popup.text_muted = self.text.opacity(0.64);
+            popup.text_faint = self.text.opacity(0.48);
+        }
+        popup
     }
 
     /// The theme-owned tint floating cards paint over their backdrop blur (see
@@ -1000,8 +1029,16 @@ impl Theme {
     /// the re-apply in `appearance::apply` is what restores vibrancy when the
     /// user switches back to dark. See zed's `crates/zed/src/main.rs`, which
     /// runs the same loop on every settings change.
+    ///
+    /// Linux composites with alpha instead: the shell draws CSD chrome, and
+    /// rounded window corners (when floating) need the corner cutouts to be
+    /// genuinely transparent. The frost itself is opaque off macOS
+    /// ([`Self::GLASS_ALPHA`]), so nothing else shows through — only the
+    /// corners.
     pub fn window_background_appearance(&self) -> gpui::WindowBackgroundAppearance {
-        if self.is_glass() {
+        if cfg!(target_os = "linux") {
+            gpui::WindowBackgroundAppearance::Transparent
+        } else if self.is_glass() {
             gpui::WindowBackgroundAppearance::Blurred
         } else {
             gpui::WindowBackgroundAppearance::Opaque
@@ -1075,6 +1112,9 @@ impl Theme {
             font_sans: "Geist".into(),
             font_sans_fixed: "Geist".into(),
             font_mono: "Geist Mono".into(),
+            font_terminal: "Geist Mono".into(),
+            code_font_size: crate::typography::CODE_FONT_SIZE_DEFAULT,
+            terminal_font_size: crate::typography::TERMINAL_FONT_SIZE_DEFAULT,
             font_sans_fallback: system_sans().into(),
             font_mono_fallback: system_mono().into(),
         }
@@ -1171,6 +1211,9 @@ impl Theme {
             font_sans: "Geist".into(),
             font_sans_fixed: "Geist".into(),
             font_mono: "Geist Mono".into(),
+            font_terminal: "Geist Mono".into(),
+            code_font_size: crate::typography::CODE_FONT_SIZE_DEFAULT,
+            terminal_font_size: crate::typography::TERMINAL_FONT_SIZE_DEFAULT,
             font_sans_fallback: system_sans().into(),
             font_mono_fallback: system_mono().into(),
         }
@@ -1190,6 +1233,26 @@ impl Theme {
 
     fn with_font_sans(mut self, family: SharedString) -> Self {
         self.font_sans = family;
+        self
+    }
+
+    fn with_font_mono(mut self, family: SharedString) -> Self {
+        self.font_mono = family;
+        self
+    }
+
+    fn with_font_terminal(mut self, family: SharedString) -> Self {
+        self.font_terminal = family;
+        self
+    }
+
+    fn with_code_font_size(mut self, size: f32) -> Self {
+        self.code_font_size = size;
+        self
+    }
+
+    fn with_terminal_font_size(mut self, size: f32) -> Self {
+        self.terminal_font_size = size;
         self
     }
 
@@ -1329,7 +1392,11 @@ impl Theme {
             .is_some_and(|theme| theme.accent_color != accent);
         set_current_appearance(appearance);
         let next = Self::for_preferences(appearance, accent)
-            .with_font_sans(crate::typography::effective_family_name(cx));
+            .with_font_sans(crate::typography::effective_family_name(cx))
+            .with_font_mono(crate::typography::code_effective_family_name(cx))
+            .with_font_terminal(crate::typography::terminal_effective_family_name(cx))
+            .with_code_font_size(crate::typography::code_font_size(cx))
+            .with_terminal_font_size(crate::typography::terminal_font_size(cx));
         sync_gpui_base_scrollbar(&next, cx);
         cx.set_global(next);
         // An accent-only swap leaves CURRENT_APPEARANCE unchanged, but cached
@@ -1387,7 +1454,11 @@ impl Theme {
     ) {
         let next =
             Self::for_selection(appearance, variant_id, accent_selection, surface_preference)
-                .with_font_sans(crate::typography::effective_family_name(cx));
+                .with_font_sans(crate::typography::effective_family_name(cx))
+                .with_font_mono(crate::typography::code_effective_family_name(cx))
+                .with_font_terminal(crate::typography::terminal_effective_family_name(cx))
+                .with_code_font_size(crate::typography::code_font_size(cx))
+                .with_terminal_font_size(crate::typography::terminal_font_size(cx));
         let changed = cx.try_global::<Theme>().is_some_and(|theme| {
             theme.variant_id != next.variant_id
                 || theme.accent_selection != next.accent_selection
@@ -1930,6 +2001,15 @@ mod tests {
         assert_eq!(frosted.glass().h, frosted.surface.h);
         assert_eq!(frosted.glass().s, frosted.surface.s);
         assert_eq!(frosted.glass().l, frosted.surface.l);
+        #[cfg(target_os = "windows")]
+        {
+            assert!(frosted.is_glass());
+            assert_eq!(
+                frosted.window_background_appearance(),
+                gpui::WindowBackgroundAppearance::Blurred
+            );
+            assert!(frosted.is_frost());
+        }
 
         let opaque_zeron = Theme::for_selection(
             Appearance::Dark,
@@ -2517,8 +2597,8 @@ mod tests {
         set_current_appearance(Appearance::Dark);
     }
 
-    /// Both appearances are glass-forward on macOS. Light frost runs heavier
-    /// than dark's (a light tint controls the blur less), and floating cards
+    /// Both appearances are glass-forward on macOS and Windows. Light frost
+    /// runs heavier than dark's (a light tint controls the blur less), and floating cards
     /// step their tint coverage up in light so menu text stays on a
     /// known-enough background — assert both relationships so the frost and
     /// the overlay can't drift apart.
@@ -2532,6 +2612,10 @@ mod tests {
                 light.glass().a > dark.glass().a - f32::EPSILON,
                 "a light tint dominates the blur less, so it must not run looser than dark"
             );
+            assert!(dark.is_frost());
+            assert!(light.is_frost());
+            assert!(dark.glass_overlay().a < 1.0);
+            assert!(light.glass_overlay().a < 1.0);
             assert!(
                 light.glass_overlay().a > dark.glass_overlay().a,
                 "light floating cards need more coverage over blur for legible rows"
@@ -2651,6 +2735,37 @@ mod tests {
         assert!((mid.l - 0.5).abs() < 1e-6 && (mid.a - 0.5).abs() < 1e-6);
         // Out-of-range t clamps.
         assert_eq!(mix(a, b, 2.0), b);
+    }
+
+    #[test]
+    fn popup_foregrounds_keep_glass_and_solid_theme_surfaces_unchanged() {
+        for mut theme in [Theme::dark(), Theme::light()] {
+            theme.surface_treatment = SurfaceTreatment::Frosted;
+            let popup = theme.for_popup();
+            assert_eq!(popup.composer_sidebar_tint(), theme.composer_sidebar_tint());
+            assert_eq!(popup.surface_overlay, theme.surface_overlay);
+            assert_eq!(popup.text, theme.text);
+            for background in [
+                theme.bg,
+                hsla(0.60, 0.55, 0.35, 1.0),
+                hsla(0.57, 0.35, 0.82, 1.0),
+            ] {
+                let primary = painted_contrast(popup.text, background);
+                let secondary = painted_contrast(popup.text_muted, background);
+                let hint = painted_contrast(popup.text_faint, background);
+                assert!(
+                    primary > secondary && secondary > hint,
+                    "glass text hierarchy collapsed on {background:?}"
+                );
+                assert!(
+                    flatten(popup.text_muted, background) != popup.text_muted,
+                    "muted text must blend with the background"
+                );
+            }
+            theme.surface_treatment = SurfaceTreatment::Opaque;
+            assert_eq!(theme.for_popup().text_muted, theme.text_muted);
+            assert_eq!(theme.for_popup().text_faint, theme.text_faint);
+        }
     }
 
     #[test]

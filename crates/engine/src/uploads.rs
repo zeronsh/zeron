@@ -473,12 +473,21 @@ mod tests {
         assert!(racing.exists(), "fresh empty staging dir was reclaimed");
 
         let stale = std::time::SystemTime::now() - (STAGING_TTL + Duration::from_secs(60));
-        std::fs::File::open(&racing)
-            .unwrap()
-            .set_modified(stale)
-            .unwrap();
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // A directory handle needs backup semantics; setting its timestamp
+            // needs FILE_WRITE_ATTRIBUTES rather than write access to its data.
+            options.custom_flags(0x02000000).access_mode(0x100);
+        }
+        options.open(&racing).unwrap().set_modified(stale).unwrap();
         uploads.append("upload-other", "aGk=", Some(0)).unwrap();
-        assert!(!racing.exists(), "abandoned empty staging dir must be swept");
+        assert!(
+            !racing.exists(),
+            "abandoned empty staging dir must be swept"
+        );
     }
 
     #[test]
@@ -543,5 +552,349 @@ mod tests {
         let target = uploads.pending_target("../../../etc", "../../passwd");
         assert!(target.starts_with(dir.path()));
         assert!(!target.to_string_lossy().contains(".."));
+    }
+}
+
+/// Imported generated media: only these sanitized fields may leave the engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedImage {
+    pub path: String,
+    pub name: String,
+    pub mime_type: String,
+    pub size: u64,
+}
+
+const MAX_GENERATED_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
+
+fn raster_signature(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(("png", "image/png"))
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some(("jpg", "image/jpeg"))
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some(("webp", "image/webp"))
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(("gif", "image/gif"))
+    } else {
+        None
+    }
+}
+
+fn same_generated_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if a.dev() != b.dev()
+            || a.ino() != b.ino()
+            || a.ctime() != b.ctime()
+            || a.ctime_nsec() != b.ctime_nsec()
+        {
+            return false;
+        }
+    }
+    a.is_file() && b.is_file() && a.len() == b.len() && a.modified().ok() == b.modified().ok()
+}
+
+/// Walk canonical descendants relative to a pinned directory descriptor. A
+/// concurrent directory/symlink replacement cannot redirect the source open.
+#[cfg(unix)]
+fn open_generated_file(
+    root: &Path,
+    relative: &Path,
+) -> std::io::Result<(std::fs::File, Vec<std::fs::File>)> {
+    use std::os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root)?;
+    let components: Vec<_> = relative.components().collect();
+    for (i, component) in components.iter().enumerate() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(std::io::Error::other("Invalid generated image path"));
+        };
+        let name = std::ffi::CString::new(name.as_bytes())?;
+        let flags = libc::O_RDONLY
+            | libc::O_CLOEXEC
+            | libc::O_NOFOLLOW
+            | libc::O_NONBLOCK
+            | if i + 1 < components.len() {
+                libc::O_DIRECTORY
+            } else {
+                0
+            };
+        // SAFETY: a live directory fd and a NUL-terminated component; ownership
+        // of the returned fd transfers exactly once into File.
+        let fd = unsafe { libc::openat(file.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        file = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    Ok((file, Vec::new()))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_generated_file(
+    root: &Path,
+    relative: &Path,
+) -> std::io::Result<(std::fs::File, Vec<std::fs::File>)> {
+    Ok((std::fs::File::open(root.join(relative))?, Vec::new()))
+}
+
+// Windows has no openat equivalent in std. Hold every traversed directory
+// without delete sharing, reject reparse points, and deny write/delete sharing
+// on the source until publication. This prevents path replacement and writes
+// even when NTFS timestamps and file lengths would compare equal.
+#[cfg(windows)]
+fn open_generated_file(
+    root: &Path,
+    relative: &Path,
+) -> std::io::Result<(std::fs::File, Vec<std::fs::File>)> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    const FILE_SHARE_READ: u32 = 1;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x00200000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let invalid = || std::io::Error::other("Invalid generated image path");
+    let open_directory = |path: &Path| -> std::io::Result<std::fs::File> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(invalid());
+        }
+        Ok(file)
+    };
+    let mut parents = vec![open_directory(root)?];
+    let mut path = root.to_path_buf();
+    let components: Vec<_> = relative.components().collect();
+    if components.is_empty() {
+        return Err(invalid());
+    }
+    for (index, component) in components.iter().enumerate() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(invalid());
+        };
+        path.push(name);
+        if index + 1 < components.len() {
+            parents.push(open_directory(&path)?);
+        }
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(invalid());
+    }
+    Ok((file, parents))
+}
+
+impl Uploads {
+    /// Copy a Codex-owned raster into the active profile without exposing the
+    /// original path to the journal, document, RPC readers, or relay.
+    pub fn import_generated_image(
+        &self,
+        source: &Path,
+        allowed_root: &Path,
+        stable_key: &str,
+    ) -> Result<ImportedImage, EngineError> {
+        self.import_generated_image_after_copy(source, allowed_root, stable_key, || {})
+    }
+
+    fn import_generated_image_after_copy(
+        &self,
+        source: &Path,
+        allowed_root: &Path,
+        stable_key: &str,
+        after_copy: impl FnOnce(),
+    ) -> Result<ImportedImage, EngineError> {
+        use sha2::{Digest, Sha256};
+        use std::io::{Read, Write};
+        let invalid = || EngineError::Other("Generated image source is invalid or changed".into());
+        if !source.is_absolute() {
+            return Err(invalid());
+        }
+        let root = allowed_root.canonicalize()?;
+        let canonical = source.canonicalize()?;
+        let relative = canonical.strip_prefix(&root).map_err(|_| invalid())?;
+        if relative.as_os_str().is_empty() {
+            return Err(invalid());
+        }
+        let (mut input, _pinned_directories) = open_generated_file(&root, relative)?;
+        let before = input.metadata()?;
+        if !before.is_file() || before.len() > MAX_GENERATED_IMAGE_BYTES {
+            return Err(invalid());
+        }
+        let mut header = [0u8; 12];
+        let count = input.read(&mut header)?;
+        let (ext, mime) = raster_signature(&header[..count]).ok_or_else(invalid)?;
+        std::fs::create_dir_all(self.dir())?;
+        let uploads_root = self.dir().canonicalize()?;
+        let name = format!("generated.{ext}");
+        let hash = format!("{:x}", Sha256::digest(stable_key.as_bytes()));
+        let destination = uploads_root.join(format!("{hash}-{name}"));
+        let mut temporary = tempfile::NamedTempFile::new_in(&uploads_root)?;
+        temporary.write_all(&header[..count])?;
+        let copied = std::io::copy(
+            &mut (&mut input).take(MAX_GENERATED_IMAGE_BYTES + 1 - count as u64),
+            &mut temporary,
+        )? + count as u64;
+        after_copy();
+        // Check both the open inode and the name: replacement, growth, and
+        // same-size writes all invalidate this attempt before publication.
+        if copied != before.len()
+            || copied > MAX_GENERATED_IMAGE_BYTES
+            || !same_generated_file(&before, &input.metadata()?)
+            || source.canonicalize()? != canonical
+            || !same_generated_file(&before, &std::fs::metadata(&canonical)?)
+        {
+            return Err(invalid());
+        }
+        temporary.flush()?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(&destination)
+            .map_err(|e| EngineError::Io(e.error))?;
+        Ok(ImportedImage {
+            path: destination.to_string_lossy().into_owned(),
+            name,
+            mime_type: mime.into(),
+            size: copied,
+        })
+    }
+}
+
+#[cfg(test)]
+mod generated_image_tests {
+    use super::*;
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfixture";
+
+    #[test]
+    fn generated_image_formats_are_sniffed_and_replays_are_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let uploads = Uploads::from_root(store.path());
+        for (bytes, ext, mime) in [
+            (PNG, "png", "image/png"),
+            (b"\xff\xd8\xfffixture".as_slice(), "jpg", "image/jpeg"),
+            (b"RIFFxxxxWEBPfixture".as_slice(), "webp", "image/webp"),
+            (b"GIF89afixture".as_slice(), "gif", "image/gif"),
+        ] {
+            let source = root.path().join("wrong.extension");
+            std::fs::write(&source, bytes).unwrap();
+            let key = format!("chat\0{ext}:image");
+            let image = uploads
+                .import_generated_image(&source, root.path(), &key)
+                .unwrap();
+            let again = uploads
+                .import_generated_image(&source, root.path(), &key)
+                .unwrap();
+            assert_eq!(image, again);
+            assert_eq!(image.mime_type, mime);
+            assert_eq!(image.name, format!("generated.{ext}"));
+            assert_eq!(image.size, bytes.len() as u64);
+            assert_eq!(std::fs::read(&image.path).unwrap(), bytes);
+            assert!(source.exists());
+            let reply = uploads.read_chunk(&image.path, 0, &[]).unwrap();
+            assert_eq!(BASE64.decode(reply.data).unwrap(), bytes);
+            assert_eq!(reply.mime_type, mime);
+            assert!(reply.done);
+        }
+        assert_eq!(std::fs::read_dir(store.path()).unwrap().count(), 4);
+    }
+
+    #[test]
+    fn generated_image_rejects_untrusted_sources_without_publishing_files() {
+        let root = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), PNG).unwrap();
+        let uploads = Uploads::from_root(store.path());
+        let unknown = root.path().join("bad.png");
+        std::fs::write(&unknown, b"not a raster").unwrap();
+        let big = root.path().join("big.png");
+        let file = std::fs::File::create(&big).unwrap();
+        file.set_len(MAX_GENERATED_IMAGE_BYTES + 1).unwrap();
+        let mut paths = vec![
+            PathBuf::from("relative.png"),
+            outside.path().into(),
+            root.path().into(),
+            unknown,
+            big,
+        ];
+        #[cfg(unix)]
+        {
+            let link = root.path().join("escape.png");
+            std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+            paths.push(link);
+        }
+        for source in paths {
+            assert!(
+                uploads
+                    .import_generated_image(&source, root.path(), "key")
+                    .is_err(),
+                "accepted {source:?}"
+            );
+        }
+        assert_eq!(std::fs::read_dir(store.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_image_changed_during_copy_leaves_no_partial_final_or_temp() {
+        let root = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let uploads = Uploads::from_root(store.path());
+        let source = root.path().join("source.png");
+        for replace in [false, true] {
+            std::fs::write(&source, PNG).unwrap();
+            let result =
+                uploads.import_generated_image_after_copy(&source, root.path(), "key", || {
+                    if replace {
+                        let replacement = root.path().join("replacement.png");
+                        std::fs::write(&replacement, PNG).unwrap();
+                        std::fs::rename(replacement, &source).unwrap();
+                    } else {
+                        std::fs::write(&source, b"changed").unwrap();
+                    }
+                });
+            assert!(result.is_err());
+            assert_eq!(std::fs::read_dir(store.path()).unwrap().count(), 0);
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn generated_image_copy_locks_source_and_parent_against_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let parent = root.path().join("nested");
+        std::fs::create_dir(&parent).unwrap();
+        let source = parent.join("source.png");
+        let replacement = root.path().join("replacement.png");
+        std::fs::write(&source, PNG).unwrap();
+        std::fs::write(&replacement, PNG).unwrap();
+        let uploads = Uploads::from_root(store.path());
+        let result = uploads
+            .import_generated_image_after_copy(&source, root.path(), "key", || {
+                assert!(std::fs::write(&source, b"changed").is_err());
+                assert!(std::fs::rename(&replacement, &source).is_err());
+                assert!(std::fs::rename(&parent, root.path().join("moved")).is_err());
+            })
+            .unwrap();
+        assert_eq!(std::fs::read(&result.path).unwrap(), PNG);
+        assert_eq!(std::fs::read_dir(store.path()).unwrap().count(), 1);
+        // All locks must be released after the operation.
+        std::fs::write(&source, b"changed").unwrap();
+        std::fs::rename(&parent, root.path().join("moved")).unwrap();
     }
 }

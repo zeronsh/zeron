@@ -1,0 +1,194 @@
+{
+  "validatedDate": "2026-09-18",
+  "platform": "Linux",
+  "node": "v22.22.1",
+  "cursorCli": "2026.09.15-d2fe57e",
+  "cursorSdk": "1.0.28",
+  "baseCommit": "4368e926",
+  "live": {
+    "modelBurst": {
+      "elapsedMs": 2711,
+      "failures": 0,
+      "models": 39,
+      "requests": 10001
+    },
+    "modelOutage": {
+      "elapsedMs": 125373,
+      "failures": 0,
+      "models": 39,
+      "requests": 10002,
+      "measuredShimStarts": 3,
+      "outage": "Injected rate-limit after warming real catalog; final refresh uses live service"
+    },
+    "sdkResume": {
+      "checkpointRecallFailures": 0,
+      "rounds": 20,
+      "kills": 4,
+      "cancellations": 3,
+      "streamDrops": 3
+    },
+    "sdkParked": {
+      "failures": 0,
+      "parkedTurns": 20,
+      "resumedAfterClose": true
+    },
+    "sdkToolSideEffects": {
+      "checkpointRecallFailures": 0,
+      "rounds": 6,
+      "verifiedAppends": 3,
+      "duplicateAppends": 0,
+      "faults": [
+        "kill",
+        "interrupt",
+        "drop"
+      ]
+    },
+    "nativeCli": {
+      "cli": "2026.09.15-d2fe57e",
+      "results": [
+        {
+          "round": 1,
+          "passed": true,
+          "seconds": 4.269,
+          "exit": 0
+        },
+        {
+          "round": 2,
+          "passed": true,
+          "seconds": 3.414,
+          "exit": 0
+        },
+        {
+          "round": 3,
+          "passed": true,
+          "seconds": 3.405,
+          "exit": 0
+        },
+        {
+          "round": 4,
+          "passed": true,
+          "seconds": 3.152,
+          "exit": 0
+        },
+        {
+          "round": 5,
+          "passed": true,
+          "seconds": 3.655,
+          "exit": 0
+        },
+        {
+          "round": 6,
+          "passed": true,
+          "seconds": 3.511,
+          "exit": 0
+        },
+        {
+          "round": 7,
+          "passed": true,
+          "seconds": 4.387,
+          "exit": 0
+        },
+        {
+          "round": 8,
+          "passed": true,
+          "seconds": 3.222,
+          "exit": 0
+        },
+        {
+          "round": 9,
+          "passed": true,
+          "seconds": 3.692,
+          "exit": 0
+        },
+        {
+          "round": 10,
+          "passed": true,
+          "seconds": 3.771,
+          "exit": 0
+        },
+        {
+          "round": 11,
+          "passed": true,
+          "seconds": 3.628,
+          "exit": 0
+        },
+        {
+          "round": 12,
+          "passed": true,
+          "seconds": 3.273,
+          "exit": 0
+        }
+      ]
+    },
+    "steeringBurst": {
+      "completed": 25,
+      "failures": 0,
+      "interrupted": 0,
+      "queued": 24,
+      "resumed": true,
+      "steered": 24
+    },
+    "cancelSteeringBurst": {
+      "completed": 0,
+      "failures": 0,
+      "interrupted": 1,
+      "queued": 100,
+      "resumed": true,
+      "steered": 0
+    }
+  },
+  "deterministic": {
+    "catalogOutages": 100,
+    "overlappingRequests": 10000,
+    "catalogProbes": 200,
+    "coldFailureCallers": 1000,
+    "coldFailureProbes": 1,
+    "subprocessModels": 256,
+    "subprocessProbes": 41,
+    "subprocessOutages": 10,
+    "immutableShimPublications": 800,
+    "concurrentShimVersions": 8,
+    "sessionFaults": 100,
+    "sameSessionRecoveries": 100,
+    "requestedSends": 201,
+    "replayedSends": 0,
+    "steeringBurstPrompts": 2000,
+    "cancelledQueuePrompts": 2000,
+    "cancellationBursts": 20
+  },
+  "engineRestartAndPublicationTests": {
+    "passed": 11,
+    "failed": 0,
+    "ignored": 3
+  },
+  "baselineSessionRecovery": {
+    "expectedFailure": true,
+    "firstKilledRunRecoveryPassed": false
+  },
+  "sourceSha256": {
+    "crates/harness/src/adapter_install.rs": "0db9b17196a09ce0ff1ed07606bb5fc26fc78815425f41d2871d9cf4066e3c83",
+    "crates/harness/src/cursor/mod.rs": "8d31ee5208287febe6c0afa3a69280dcec596ba526a6fb3afc8231f9845e1c81",
+    "crates/harness/src/cursor/catalog.rs": "1e41857c1af6eced71edb584c4dc8335cea2df7fd4da144ce3f9568c7e24a2b6",
+    "crates/harness/src/cursor/state.rs": "496f580025406cf4be92a9cdbc0ad96b16e844ae20b00e71ae12190eb5b7db15",
+    "crates/harness/src/cursor/shim.mjs": "6b9029c1db07faac3e764f98435251153293820fac35d41d7236a799e8d3ec01",
+    "crates/harness/examples/cursor_stability_probe.rs": "2e151c07e6c7e9b49e040da3a9b7ba29eb82cda5bd572c4083680d2ed96fe0dc",
+    "crates/harness/tests/cursor_shim.rs": "ea5d7f644c63bf74fd089da6c97c8fa5894fd203663d51fd667d045c21e50d9a",
+    "crates/harness/tests/fixtures/fake-cursor-sdk.mjs": "a2f614ed092969da92bda9be2f444357d0786c466ac9fa324f0e981dacf20a53",
+    "crates/harness/tests/fixtures/cursor-stress-proxy.py": "98327eafee131bb3c1cf09a06ffaa586bbf73f8e2a9b7196ec761849151a83e0",
+    "crates/harness/tests/cursor.rs": "6c176ceb76db53bab770b6964d351be17c9ad0a1252639709beebf65af32b138",
+    "crates/harness/tests/fixtures/cursor-steering-peer.mjs": "5c4dcc978058728acf188e46fb6ed8e575899c651c79d75084c334147e01c674"
+  },
+  "limitations": [
+    "Finite Linux tests; not a guarantee against future provider failures.",
+    "Actual provider ERROR_NOT_LOGGED_IN incident covered by fixture, not reproduced live.",
+    "New recovery applies to Zeron-managed per-agent stores; remote owning engine must be updated.",
+    "Model last-good cache is process-local.",
+    "Cancelling the first turn before a provider checkpoint exists can lose that unfinished turn context on resume; established checkpoint recall passed."
+  ],
+  "harnessTests": {
+    "command": "cargo test -p zeron-harness",
+    "passed": 297,
+    "failed": 0,
+    "ignored": 10
+  }
+}

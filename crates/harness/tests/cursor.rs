@@ -1,6 +1,8 @@
 //! CursorHarness integration tests against the fake shim in
 //! `tests/fixtures/fake-cursor-shim.sh` (no node/@cursor/sdk involved).
 
+#![cfg(unix)]
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -315,4 +317,170 @@ async fn model_discovery_maps_the_live_catalog() {
     // A parameter without displayName labels by id; default = first value.
     assert_eq!(models[1].options[0].id, "thinking");
     assert_eq!(models[1].options[0].default_choice, "enabled");
+}
+
+#[tokio::test]
+async fn followup_crash_is_not_hidden_by_a_previous_completed_turn() {
+    let (controls, steer, _token) = controls();
+    let mut stream = harness()
+        .run(request("scenario:followup-crash"), controls)
+        .await
+        .unwrap();
+    let dones = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut dones = Vec::new();
+        while let Some(event) = stream.next().await {
+            if let AgentEvent::Done { status, error, .. } = event.unwrap() {
+                dones.push((status, error));
+                if dones.len() == 1 {
+                    steer
+                        .send(SteerMessage {
+                            prompt: "follow up".into(),
+                            message_id: None,
+                        })
+                        .await
+                        .unwrap();
+                } else {
+                    break;
+                }
+            }
+        }
+        dones
+    })
+    .await
+    .unwrap();
+    assert_eq!(dones.len(), 2);
+    assert_eq!(dones[0].0, DoneStatus::Completed);
+    assert_eq!(dones[1].0, DoneStatus::Errored);
+    assert!(dones[1].1.as_deref().unwrap().contains("followup exploded"));
+}
+
+#[tokio::test]
+async fn cancellation_racing_a_fatal_error_emits_exactly_one_terminal_event() {
+    let (controls, _steer, token) = controls();
+    let mut stream = harness()
+        .run(request("scenario:interrupt-fatal"), controls)
+        .await
+        .unwrap();
+    let statuses = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut statuses = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                AgentEvent::TextDelta { .. } => token.cancel(),
+                AgentEvent::Done { status, .. } => statuses.push(status),
+                _ => {}
+            }
+        }
+        statuses
+    })
+    .await
+    .unwrap();
+    assert_eq!(statuses, vec![DoneStatus::Interrupted]);
+}
+
+#[tokio::test]
+async fn steering_spam_preserves_every_turn_in_order_and_closes_cleanly() {
+    for _ in 0..10 {
+        let (controls, steer, _) = controls();
+        let mut stream = harness()
+            .run(request("scenario:burst"), controls)
+            .await
+            .unwrap();
+        let producer = tokio::spawn(async move {
+            for n in 0..200 {
+                steer
+                    .send(SteerMessage {
+                        prompt: format!("ITEM-{n}"),
+                        message_id: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut texts = Vec::new();
+        let mut dones = 0;
+        let mut transitions = 0;
+        let mut ids = std::collections::HashSet::new();
+        let mut current = None;
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while let Some(event) = stream.next().await {
+                match event.unwrap() {
+                    AgentEvent::SessionStarted {
+                        assistant_message_id,
+                        ..
+                    } => {
+                        ids.insert(assistant_message_id.clone());
+                        current = Some(assistant_message_id);
+                    }
+                    AgentEvent::Steered {
+                        assistant_message_id,
+                        next_assistant_message_id,
+                    } => {
+                        assert_eq!(assistant_message_id, current);
+                        let next = next_assistant_message_id.unwrap();
+                        assert!(ids.insert(next.clone()));
+                        current = Some(next);
+                        transitions += 1;
+                    }
+                    AgentEvent::TextDelta { text } => texts.push(text),
+                    AgentEvent::Done { status, .. } => {
+                        assert_eq!(status, DoneStatus::Completed);
+                        dones += 1;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        producer.await.unwrap();
+        assert_eq!(
+            texts,
+            std::iter::once("INITIAL".into())
+                .chain((0..200).map(|n| format!("ITEM-{n}")))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(dones, 201);
+        assert_eq!(transitions, 200);
+        assert_eq!(ids.len(), 201);
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_saturated_steering_queue_never_starts_queued_turns() {
+    for _ in 0..20 {
+        let (controls, steer, token) = controls();
+        let mut stream = harness()
+            .run(request("scenario:burst-cancel"), controls)
+            .await
+            .unwrap();
+        for n in 0..100 {
+            steer
+                .send(SteerMessage {
+                    prompt: format!("MUST-NOT-RUN-{n}"),
+                    message_id: None,
+                })
+                .await
+                .unwrap();
+        }
+        token.cancel();
+        drop(steer);
+        let mut dones = 0;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                match event.unwrap() {
+                    AgentEvent::Steered { .. } | AgentEvent::TextDelta { .. } => {
+                        panic!("cancelled queue executed")
+                    }
+                    AgentEvent::Done { status, .. } => {
+                        assert_eq!(status, DoneStatus::Interrupted);
+                        dones += 1;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(dones, 1);
+    }
 }

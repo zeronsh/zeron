@@ -629,6 +629,7 @@ impl super::BrowserSurface {
         theme: &crate::theme::Theme,
         cx: &mut gpui::Context<Self>,
     ) -> Option<gpui::AnyElement> {
+        let theme = &theme.for_popup();
         use gpui::{IntoElement, div, prelude::*, px};
         let native = self.native.as_ref()?;
         let menu = native.menu.as_ref()?;

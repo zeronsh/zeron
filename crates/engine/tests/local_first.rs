@@ -1,7 +1,7 @@
 //! Local-first startup boundaries and captured synced-session behavior.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
@@ -60,6 +60,7 @@ async fn rejecting_edge() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<
 
 struct DaemonEdge {
     url: String,
+    offline: Arc<AtomicBool>,
     active: Arc<Mutex<HashMap<String, usize>>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -69,6 +70,8 @@ impl DaemonEdge {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let active = Arc::new(Mutex::new(HashMap::new()));
+        let offline = Arc::new(AtomicBool::new(false));
+        let offline_for_task = offline.clone();
         let active_for_task = active.clone();
         let task = tokio::spawn(async move {
             loop {
@@ -76,10 +79,20 @@ impl DaemonEdge {
                     return;
                 };
                 let active = active_for_task.clone();
-                tokio::spawn(async move { serve_daemon_edge(stream, active).await });
+                let offline = offline_for_task.clone();
+                tokio::spawn(async move {
+                    if !offline.load(Ordering::SeqCst) {
+                        serve_daemon_edge(stream, active).await;
+                    }
+                });
             }
         });
-        Self { url, active, task }
+        Self {
+            url,
+            offline,
+            active,
+            task,
+        }
     }
 
     fn active_matching(&self, prefix: &str) -> usize {
@@ -409,6 +422,55 @@ async fn transient_refresh_failure_keeps_synced_recovery_supervisors_alive() {
 }
 
 #[tokio::test]
+async fn workspace_recovers_from_an_unreachable_edge_without_restarting() {
+    let edge = DaemonEdge::start().await;
+    edge.offline.store(true, Ordering::SeqCst);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("session.json"),
+        r#"{"refreshToken":"still-valid","user":{"id":"user_1","email":"u@example.com"},"orgId":"org_1"}"#,
+    ).unwrap();
+    let config = config(dir.path(), edge.url.clone(), Some("client_test"), None);
+    let auth = Engine::build_auth(&config).await;
+    let scope = Engine::initial_workspace_scope(&auth);
+    let profile = Engine::resolve_profile(&config, &auth, scope)
+        .unwrap()
+        .unwrap();
+    let runtime = Engine::assemble_runtime(&config, auth.clone(), profile)
+        .await
+        .unwrap();
+    let refresh_loop = auth.spawn_refresh_loop();
+    assert!(matches!(
+        auth.access_token().await,
+        Err(zeron_rpc::TokenError::TemporarilyUnavailable(_))
+    ));
+    wait_until(
+        || runtime.core().workspace.sync_status().is_some(),
+        "temporary token failure must not retire the registry supervisor",
+    )
+    .await;
+
+    // The same engine must recover through its timers; no Retry or path event.
+    edge.offline.store(false, Ordering::SeqCst);
+    wait_until(
+        || {
+            runtime
+                .core()
+                .workspace
+                .sync_status()
+                .is_some_and(|s| s.connected)
+        },
+        "workspace must reconnect after the edge becomes reachable",
+    )
+    .await;
+    assert!(auth.state().is_signed_in());
+    assert!(dir.path().join("session.json").exists());
+    assert_eq!(scope, WorkspaceScope::Synced);
+    refresh_loop.abort();
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn development_without_an_explicit_bearer_stays_offline() {
     let dir = tempfile::tempdir().unwrap();
     let (edge_url, requests, edge_task) = rejecting_edge().await;
@@ -420,7 +482,7 @@ async fn development_without_an_explicit_bearer_stays_offline() {
         .expect("development profile is ready");
 
     assert_eq!(scope, WorkspaceScope::Development);
-    assert_eq!(auth.access_token().await.as_deref(), Some("dev-user"));
+    assert_eq!(auth.access_token().await.as_deref(), Ok("dev-user"));
     let runtime = Engine::assemble_runtime(&config, auth, profile)
         .await
         .unwrap();

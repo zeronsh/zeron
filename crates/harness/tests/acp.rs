@@ -1,16 +1,19 @@
 //! AcpHarness integration tests against the fake ACP agent in
 //! `tests/fixtures/fake-acp.sh` (no real `grok` binary involved).
 
+#![cfg(unix)]
+
 use std::path::PathBuf;
 use std::time::Duration;
 
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
+use zeron_harness::acp::SignInProgress;
 use zeron_harness::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, RunRequest, SandboxLevel, SteeringMode, TodoItem, ToolCall,
-    UserInputAnswer,
+    AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SteeringMode,
+    TodoItem, ToolCall, UserInputAnswer,
 };
 
 fn fixture_path() -> PathBuf {
@@ -550,10 +553,32 @@ async fn models_enrich_from_the_static_catalog_on_id_match() {
 
 #[tokio::test]
 async fn models_fall_back_to_the_static_catalog_when_the_probe_fails() {
-    let harness = AcpHarness::pi().with_executable("/nonexistent/never-a-pi-acp");
+    // An agent that exists but cannot speak ACP: the discovery probe fails
+    // after launch, and the static catalog is served instead.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let broken = dir.path().join("broken-pi-acp");
+    std::fs::write(&broken, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let harness = AcpHarness::pi().with_executable(broken);
+    assert!(harness.installed());
     let models = harness.models().await.expect("static fallback");
     let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(ids, vec!["default"], "{models:?}");
+}
+
+#[tokio::test]
+async fn missing_override_is_not_installed_and_fails_discovery() {
+    // An override that points at nothing is not an installed agent: the
+    // registry must not offer it, and discovery names the problem instead of
+    // quietly serving a catalog for a binary that can never launch.
+    let harness = AcpHarness::pi().with_executable("/nonexistent/never-a-pi-acp");
+    assert!(!harness.installed());
+    let err = harness.models().await.expect_err("missing override");
+    assert!(
+        matches!(err, zeron_harness::HarnessError::NotInstalled(_)),
+        "{err:?}"
+    );
 }
 
 #[cfg(unix)]
@@ -617,6 +642,187 @@ fn hermes_and_pi_descriptor_surfaces_match_registry_expectations() {
             zeron_proto::ReasoningLevel::Max,
         ]
     );
+}
+
+fn antigravity_harness() -> AcpHarness {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("fake-antigravity-acp.sh");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+    }
+    AcpHarness::antigravity().with_executable(path)
+}
+
+async fn antigravity_config_sets(
+    model: &str,
+    reasoning: Option<ReasoningLevel>,
+) -> Vec<AgentEvent> {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut req = request("hi");
+    req.model = Some(model.into());
+    req.reasoning = reasoning;
+    req.cwd = workspace.path().display().to_string();
+    let (controls, _steer, _token) = controls();
+    run_to_end(&antigravity_harness(), req, controls).await
+}
+
+#[tokio::test]
+async fn antigravity_sign_in_reports_the_browser_url_and_authenticates() {
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<SignInProgress>>> = Default::default();
+    let recorder = seen.clone();
+    antigravity_harness()
+        .sign_in(None, move |progress| {
+            recorder.lock().unwrap().push(progress);
+        })
+        .await
+        .expect("signed in");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![SignInProgress::OpenBrowser(
+            "https://accounts.google.com/o/oauth2/auth?client_id=fake".into()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn antigravity_commands_hide_logout_but_keep_the_servers_own() {
+    let commands = antigravity_harness().commands().await.expect("commands");
+    let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"plan"), "{names:?}");
+    assert!(!names.contains(&"logout"), "{names:?}");
+}
+
+#[tokio::test]
+async fn antigravity_sign_out_logs_the_server_out() {
+    antigravity_harness().sign_out().await.expect("signed out");
+}
+
+#[tokio::test]
+async fn antigravity_run_without_sign_in_points_to_settings_instead_of_a_browser() {
+    let workspace = tempfile::Builder::new()
+        .prefix("needs-login")
+        .tempdir()
+        .unwrap();
+    let mut req = request("hi");
+    req.model = None;
+    req.cwd = workspace.path().display().to_string();
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&antigravity_harness(), req, controls).await;
+    let dones = dones(&events);
+    assert_eq!(dones.len(), 1, "{events:?}");
+    assert_eq!(dones[0].0, DoneStatus::Errored);
+    let error = dones[0].1.as_deref().unwrap_or_default();
+    assert!(error.contains("Settings → Agents"), "{error}");
+}
+
+#[test]
+fn antigravity_descriptor_surface_matches_registry_expectations() {
+    let antigravity = AcpHarness::antigravity();
+    assert_eq!(antigravity.id(), HarnessId::Antigravity);
+    assert_eq!(antigravity.display_name(), "Antigravity");
+    assert!(antigravity.supports_steering());
+    assert_eq!(antigravity.steering_mode(), SteeringMode::TurnBoundary);
+    assert!(antigravity.reasoning_levels().is_empty());
+}
+
+#[tokio::test]
+async fn antigravity_runs_the_picked_effort_variant_unattended() {
+    let events = antigravity_config_sets("gemini-3.7-flash", Some(ReasoningLevel::Medium)).await;
+    assert!(
+        events.contains(&AgentEvent::TextDelta {
+            text: "sets:model=gemini-3.7-flash-medium;mode=yolo;".into()
+        }),
+        "{events:?}"
+    );
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn antigravity_stops_before_prompt_when_the_model_is_rejected() {
+    let workspace = tempfile::Builder::new()
+        .prefix("reject-model")
+        .tempdir()
+        .unwrap();
+    let mut req = request("hi");
+    req.model = Some("gemini-3.7-flash".into());
+    req.reasoning = Some(ReasoningLevel::Medium);
+    req.cwd = workspace.path().display().to_string();
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&antigravity_harness(), req, controls).await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TextDelta { .. })),
+        "{events:?}"
+    );
+    let done = dones(&events);
+    assert_eq!(done.len(), 1, "{events:?}");
+    assert_eq!(done[0].0, DoneStatus::Errored);
+    assert!(
+        done[0]
+            .1
+            .as_deref()
+            .is_some_and(|error| error.contains("rejected requested model")),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn antigravity_clamps_to_an_offered_level_and_keeps_saved_variant_ids() {
+    let clamped = antigravity_config_sets("gemini-3.1-pro", Some(ReasoningLevel::Medium)).await;
+    assert!(
+        clamped.contains(&AgentEvent::TextDelta {
+            text: "sets:model=gemini-pro-agent;mode=yolo;".into()
+        }),
+        "{clamped:?}"
+    );
+    let saved = antigravity_config_sets("gemini-3.7-flash-low", Some(ReasoningLevel::High)).await;
+    assert!(
+        saved.contains(&AgentEvent::TextDelta {
+            text: "sets:model=gemini-3.7-flash-low;mode=yolo;".into()
+        }),
+        "{saved:?}"
+    );
+}
+
+#[tokio::test]
+async fn antigravity_models_group_effort_variants_into_one_row() {
+    let models = antigravity_harness().models().await.expect("discovery");
+    let rows: Vec<(&str, &str, &[ReasoningLevel])> = models
+        .iter()
+        .map(|m| {
+            (
+                m.id.as_str(),
+                m.label.as_str(),
+                m.reasoning_levels.as_slice(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "gemini-3.7-flash",
+                "Gemini 3.7 Flash",
+                &[
+                    ReasoningLevel::Low,
+                    ReasoningLevel::Medium,
+                    ReasoningLevel::High
+                ][..]
+            ),
+            (
+                "gemini-3.1-pro",
+                "Gemini 3.1 Pro",
+                &[ReasoningLevel::Low, ReasoningLevel::High][..]
+            ),
+        ]
+    );
+    assert!(models.iter().all(|m| m.description.is_none()), "{models:?}");
 }
 
 #[tokio::test]
@@ -1028,4 +1234,52 @@ async fn devin_missing_variant_is_bounded_and_never_prompts() {
         "{events:?}"
     );
     assert!(!dir.path().join("prompted").exists());
+}
+
+#[test]
+fn antigravity_sign_in_preserves_relative_home_auth_in_a_separate_process() {
+    let parent_cwd = tempfile::tempdir().unwrap();
+    let child_home = tempfile::tempdir().unwrap();
+    let gemini_home = child_home.path().join("relative-gemini-home");
+    let settings = gemini_home.join("antigravity-acp");
+    std::fs::create_dir_all(&settings).unwrap();
+    std::fs::write(
+        settings.join("settings.json"),
+        r#"{"auth":{"type":"oauth-business"}}"#,
+    )
+    .unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "antigravity_auth_path_subprocess", "--nocapture"])
+        .current_dir(parent_cwd.path())
+        .env("HOME", child_home.path())
+        .env("GEMINI_HOME", "relative-gemini-home")
+        .env("ZERON_TEST_EXPECTED_GEMINI_HOME", &gemini_home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[tokio::test]
+async fn antigravity_auth_path_subprocess() {
+    if std::env::var_os("ZERON_TEST_EXPECTED_GEMINI_HOME").is_none() {
+        return;
+    }
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake-antigravity-auth-path.sh");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        AcpHarness::antigravity()
+            .with_executable(fixture)
+            .sign_in(None, |_| {}),
+    )
+    .await
+    .expect("sign-in timed out")
+    .expect("configured business sign-in");
 }

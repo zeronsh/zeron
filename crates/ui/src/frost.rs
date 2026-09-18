@@ -15,12 +15,9 @@ use gpui::{
 
 use crate::theme::Theme;
 
-/// Backdrop-blur sigma for floating menu/dialog glass — the reference zeron
-/// `.glass-surface` runs `blur(44px)` (feature-inventory §1.12), and the
-/// [`Theme::glass_overlay`] tint is thin enough that a 16px blur left
-/// backdrop detail ghosting through menu rows. The composer pill keeps its
-/// own lighter 16 (`chat-composer-glass` blurs 12–16 in the reference).
-pub const MENU_BLUR: f32 = 44.0;
+/// Shared backdrop-blur sigma for floating menus, popovers and palettes.
+/// Keep these on the same surface as Cmd+K and the composer.
+pub const MENU_BLUR: f32 = 16.0;
 
 /// Frost `child` (a popover card): backdrop-blurred on glass, pass-through on
 /// opaque platforms. `corner_radius` must match the card's rounding.

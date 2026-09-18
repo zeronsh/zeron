@@ -117,7 +117,7 @@ impl Element for LinkRanges {
             state.focused = focused;
             state.bounds = bounds;
             state.tooltip_bounds.set(None);
-            #[cfg(all(test, target_os = "linux"))]
+            #[cfg(all(test, any(target_os = "linux", windows)))]
             rendered_tests::TOOLTIP_BOUNDS.with(|bounds| {
                 *bounds.borrow_mut() = Some(state.tooltip_bounds.clone());
             });
@@ -146,6 +146,8 @@ impl Element for LinkRanges {
                     let click_ui = self.ui.clone();
                     let menu_focus_pending = state.menu_focus_pending.clone();
                     let pointer_focus_pending = menu_focus_pending.clone();
+                    let keyboard_dismissed = state.dismissed.clone();
+                    let keyboard_epoch = state.epoch.clone();
                     let hit = div()
                         .id(format!("link-{index}-{part}-{}", state.epoch.get()))
                         // Removing the builder cancels both visible tooltips
@@ -203,6 +205,8 @@ impl Element for LinkRanges {
                                 }
                                 "escape" => {
                                     keyboard_menu.borrow_mut().take();
+                                    keyboard_dismissed.set(true);
+                                    keyboard_epoch.set(keyboard_epoch.get().wrapping_add(1));
                                     window.refresh();
                                 }
                                 _ => {
@@ -233,12 +237,29 @@ impl Element for LinkRanges {
                             window,
                             cx,
                         );
-                        let mut popup = crate::popover::menu_at(
-                            "focused-link-destination",
-                            rect.bottom_left(),
-                            card,
-                            None,
-                        );
+                        let dismissed = state.dismissed.clone();
+                        let epoch = state.epoch.clone();
+                        // This disclosure is not a menu: menu_at consumes every
+                        // outside press, preventing other controls from receiving it.
+                        let mut popup = gpui::deferred(
+                            gpui::anchored()
+                                .position(rect.bottom_left())
+                                .anchor(gpui::Anchor::TopLeft)
+                                .snap_to_window_with_margin(px(8.))
+                                .child(
+                                    div()
+                                        .id("focused-link-destination")
+                                        .occlude()
+                                        .on_mouse_down_out(move |_, window, _| {
+                                            dismissed.set(true);
+                                            epoch.set(epoch.get().wrapping_add(1));
+                                            window.refresh();
+                                        })
+                                        .child(card),
+                                ),
+                        )
+                        .priority(1)
+                        .into_any_element();
                         popup.prepaint_as_root(
                             bounds.origin,
                             window.viewport_size().map(AvailableSpace::Definite),
@@ -250,6 +271,7 @@ impl Element for LinkRanges {
                 }
             }
             if let Some((index, position)) = *state.menu.borrow() {
+                let theme = theme.for_popup();
                 let menu = state.menu.clone();
                 let dismiss_menu = state.menu.clone();
                 let return_focus = state.focus[index].clone();
@@ -512,10 +534,14 @@ mod tests {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", windows)))]
 mod rendered_tests {
     use super::*;
     use gpui::{Context, Render};
+    #[cfg(windows)]
+    use gpui_platform::application as test_application;
+    #[cfg(target_os = "linux")]
+    use gpui_platform::headless as test_application;
     thread_local! {
         pub(super) static TOOLTIP_BOUNDS: RefCell<Option<Rc<Cell<Option<Bounds<Pixels>>>>>> = RefCell::default();
     }
@@ -577,9 +603,167 @@ mod rendered_tests {
         }
     }
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "requires a native desktop; run with --ignored --test-threads=1"
+    )]
+    fn escape_dismisses_focused_destination() {
+        test_application().run(|cx| {
+            cx.set_global(Theme::dark());
+            let window = cx
+                .open_window(Default::default(), |_, cx| {
+                    cx.new(|_| Fixture {
+                        markdown: "[Docs](https://example.com/docs)".into(),
+                        width: 320.,
+                        activated: Rc::default(),
+                    })
+                })
+                .unwrap();
+            cx.update_window(window.into(), |_, window, cx| {
+                draw_has_tooltip(window, cx);
+                window.focus_next(cx);
+                assert!(
+                    draw_has_tooltip(window, cx),
+                    "focused link shows destination"
+                );
+                key(window, "escape", cx);
+                assert!(
+                    !draw_has_tooltip(window, cx),
+                    "Escape must dismiss destination"
+                );
+            })
+            .unwrap();
+            cx.spawn(async move |cx| {
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+    }
+    struct OutsideClickFixture {
+        link: gpui::Entity<Fixture>,
+        clicks: Rc<Cell<usize>>,
+    }
+    impl Render for OutsideClickFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let clicks = self.clicks.clone();
+            div().size_full().child(self.link.clone()).child(
+                div()
+                    .id("outside-button")
+                    .absolute()
+                    .left(px(400.))
+                    .top(px(100.))
+                    .size(px(50.))
+                    .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+            )
+        }
+    }
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "requires a native desktop; run with --ignored --test-threads=1"
+    )]
+    fn focused_destination_does_not_block_other_controls() {
+        test_application().run(|cx| {
+            cx.set_global(Theme::dark());
+            let clicks = Rc::new(Cell::new(0));
+            let window = cx
+                .open_window(Default::default(), |_, cx| {
+                    let link = cx.new(|_| Fixture {
+                        markdown: "[Docs](https://example.com/docs)".into(),
+                        width: 320.,
+                        activated: Rc::default(),
+                    });
+                    cx.new(|_| OutsideClickFixture {
+                        link,
+                        clicks: clicks.clone(),
+                    })
+                })
+                .unwrap();
+            cx.update_window(window.into(), |_, window, cx| {
+                draw_has_tooltip(window, cx);
+                let (_, layout, _) =
+                    super::super::render::selection_test_snapshot("link-fixture:0");
+                let link_position = range_rects(&layout, &(0..4), 0., 0.)[0].center();
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                        position: link_position,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                draw_has_tooltip(window, cx);
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: link_position,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                draw_has_tooltip(window, cx);
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                        button: MouseButton::Left,
+                        position: link_position,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                assert!(draw_has_tooltip(window, cx));
+                let position = gpui::point(px(425.), px(125.));
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                        position,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                draw_has_tooltip(window, cx);
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                        button: MouseButton::Left,
+                        position,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                        button: MouseButton::Left,
+                        position,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                assert_eq!(
+                    clicks.get(),
+                    1,
+                    "destination must not swallow other controls' clicks"
+                );
+                assert!(
+                    !draw_has_tooltip(window, cx),
+                    "outside click dismisses destination"
+                );
+            })
+            .unwrap();
+            cx.spawn(async move |cx| {
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+    }
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "requires a native desktop; run with --ignored --test-threads=1"
+    )]
     fn context_menu_cancels_visible_and_pending_hover_tooltips() {
         let dir = tempfile::tempdir().unwrap();
-        gpui_platform::headless().run(move |cx| {
+        test_application().run(move |cx| {
             cx.set_global(Theme::dark());
             crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
             // Keep the headless event loop alive between scenario windows.
@@ -690,8 +874,12 @@ mod rendered_tests {
         });
     }
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "requires a native desktop; run with --ignored --test-threads=1"
+    )]
     fn keyboard_visits_each_range_and_opens_the_link_menu() {
-        gpui_platform::headless().run(|cx| {
+        test_application().run(|cx| {
             cx.set_global(Theme::dark());
             let activated = Rc::new(RefCell::new(Vec::new()));
             let log = activated.clone();
@@ -764,8 +952,12 @@ mod rendered_tests {
         });
     }
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "requires a native desktop; run with --ignored --test-threads=1"
+    )]
     fn rendered_truncation_resizes_and_selects_the_original_url() {
-        gpui_platform::headless().run(|cx| {
+        test_application().run(|cx| {
             cx.set_global(Theme::dark());
             let url = format!("https://example.com/{}", "long-segment-🙂/".repeat(20));
             let markdown = format!("[{url}]({url})");

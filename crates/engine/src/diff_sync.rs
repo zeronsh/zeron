@@ -670,8 +670,8 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
             };
             let url = format!("{}/diff/{}", edge.url.trim_end_matches('/'), chat.id);
             // Fresh bearer per request — never the boot-time snapshot.
-            let Some(bearer) = edge.bearer().await else {
-                tracing::debug!(chat = %chat.id, "diff-sync: sidecar skipped (signed out)");
+            let Ok(bearer) = edge.bearer().await else {
+                tracing::debug!(chat = %chat.id, "diff-sync: sidecar skipped (token unavailable)");
                 continue;
             };
             let result = inner
@@ -767,6 +767,11 @@ struct Capture {
 /// the cap is hit, so an arbitrarily large repository diff never buffers fully.
 async fn capture_git(cwd: &Path, args: &[&str], max_bytes: usize) -> Result<Capture, EngineError> {
     let mut cmd = tokio::process::Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.as_std_mut().creation_flags(0x08000000);
+    }
     cmd.arg("-C").arg(cwd).args(args);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
@@ -1376,6 +1381,11 @@ pub async fn snapshot_tree(root: &Path) -> Result<String, EngineError> {
     ));
     let run = |args: &[&str]| {
         let mut cmd = tokio::process::Command::new("git");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.as_std_mut().creation_flags(0x08000000);
+        }
         cmd.arg("-C").arg(root).args(args);
         cmd.env("GIT_INDEX_FILE", &index);
         cmd.stdin(std::process::Stdio::null());

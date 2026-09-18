@@ -127,6 +127,13 @@ pub enum MessagePart {
         id: String,
         text: String,
     },
+    #[serde(rename_all = "camelCase")]
+    Image {
+        id: String,
+        path: String,
+        name: String,
+        mime_type: String,
+    },
     /// Model thinking. Carries its body in a dedicated doc field (`reasoning`,
     /// never `text`) so pre-reasoning desktop builds — whose unknown-kind
     /// fallback renders `text` as prose — degrade to an invisible empty text
@@ -203,6 +210,7 @@ impl MessagePart {
     pub fn id(&self) -> &str {
         match self {
             MessagePart::Text { id, .. }
+            | MessagePart::Image { id, .. }
             | MessagePart::Reasoning { id, .. }
             | MessagePart::Tool { id, .. }
             | MessagePart::Input { id, .. }
@@ -232,6 +240,12 @@ impl MessagePart {
             MessagePart::Input { questions, .. } => {
                 serde_json::to_vec(questions).map_or(0, |v| v.len())
             }
+            MessagePart::Image {
+                id,
+                path,
+                name,
+                mime_type,
+            } => id.len() + path.len() + name.len() + mime_type.len(),
             MessagePart::Error { message, .. } => message.len(),
         }
     }
@@ -264,6 +278,24 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     id,
                     text: text.clone(),
                 });
+            }
+        }
+        AgentEvent::GeneratedImage {
+            id,
+            path,
+            name,
+            mime_type,
+        } => {
+            let image = MessagePart::Image {
+                id: id.clone(),
+                path: path.clone(),
+                name: name.clone(),
+                mime_type: mime_type.clone(),
+            };
+            if let Some(existing) = out.iter_mut().find(|p| p.id() == id) {
+                *existing = image;
+            } else {
+                out.push(image);
             }
         }
         AgentEvent::ReasoningDelta { text } => {
@@ -710,6 +742,34 @@ mod tests {
         );
         assert!(flat.iter().all(|p| p.byte_len() <= MSG_INLINE_MAX));
         assert_eq!(flat[1].id(), "r0~1");
+    }
+
+    #[test]
+    fn generated_image_fold_is_ordered_atomic_and_idempotent() {
+        let mut parts = vec![];
+        fold_event_into_parts(&mut parts, &text_delta("before"));
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolCall {
+                id: "i".into(),
+                call: ToolCall::Unknown {
+                    name: "Generate image".into(),
+                    input: None,
+                },
+            },
+        );
+        let event = AgentEvent::GeneratedImage {
+            id: "i:image".into(),
+            path: "/uploads/i.png".into(),
+            name: "generated.png".into(),
+            mime_type: "image/png".into(),
+        };
+        fold_event_into_parts(&mut parts, &event);
+        fold_event_into_parts(&mut parts, &text_delta("after"));
+        fold_event_into_parts(&mut parts, &event);
+        assert_eq!(parts.len(), 4);
+        assert!(matches!(&parts[2], MessagePart::Image { id, .. } if id == "i:image"));
+        assert_eq!(join_continuations(split_parts(&parts)), parts);
     }
 
     #[test]

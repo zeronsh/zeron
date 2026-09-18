@@ -43,6 +43,37 @@ The workflow uses the `AC_API_KEY_P8`, `AC_API_KEY_ID`, and
   explore the UI with no infrastructure. Launch args for screenshot rigs:
   `-demo [-route chat:<id>|space:<id>] [-stream]`.
 
+### Sessions without a project
+
+Home's **+ → Session without a project…** opens the execution-device picker,
+including when the account has no projects. Choose a desktop host (offline
+hosts are allowed); the draft shows **No project** and the host name. Tap the
+host above the composer to change it before sending. Catalogs and attachment
+delivery use that host, and Git/ref/worktree controls are hidden.
+
+Creation uses the same local registry outbox and durable session command
+ledger as project sessions: `spaceId` is omitted, `deviceId` names the selected
+host, `cwd` is `"~"`, and `roomGen` is `2`. Home's **All** list includes these
+sessions, including ones synchronized from desktop. A project filter excludes
+them. Active sessions pointing to a deleted/missing project remain hidden;
+the archived shelf retains its existing behavior.
+
+Regression coverage lives in `ProjectlessSessionTests` (registry persistence,
+incoming desktop rows, destination selection, configuration and first command)
+and `ProjectlessSessionUITests` (create/send/reopen, empty accounts, host changes,
+project filters and the existing project flow). Run on an Xcode 26+ Mac:
+
+```sh
+cd apps/ios
+xcodebuild -project Zeron.xcodeproj -scheme Zeron \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -only-testing:ZeronTests/ProjectlessSessionTests \
+  -only-testing:ZeronUITests/ProjectlessSessionUITests test
+```
+
+Demo fixtures accept `-no-projects` (empty spaces/chats), `-ios-only` (no
+execution hosts), and `-sethomefilter <spaceId>` (an empty value selects All).
+
 ## Architecture
 
 ```
@@ -106,8 +137,9 @@ see [mobile polish and simulator coverage](../../docs/mobile-polish.md).
 
 ### Writer discipline (what the phone writes)
 
-- Workspace doc: its own device row, chat creates (host = the space's owning
-  device), `archived`/`title`/`lastSeenAt` LWW sets, presence heartbeats.
+- Workspace registry: chat creates (host = the project's owning device or
+  the explicitly selected projectless host), `archived`/`title`/`lastSeenAt`
+  LWW sets, presence heartbeats. The phone owns no engine device row.
 - Session docs: append commands (`run`/`steer`/`interrupt`/`respondInput`)
   with client-minted message ids for optimistic echo; add and reorder shared
   queue rows. Queue edits and removals require host acknowledgement. The host

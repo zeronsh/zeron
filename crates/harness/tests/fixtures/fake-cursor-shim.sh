@@ -21,6 +21,18 @@ esac
 
 case "$first" in
 
+*scenario:burst*)
+  exec node "$(dirname "$0")/cursor-steering-peer.mjs" "$first"
+  ;;
+
+*scenario:followup-crash*)
+  emit '{"ev":"ready","agentId":"agent-crash-followup","model":"composer-2.5"}'
+  emit '{"ev":"turn","status":"finished"}'
+  read -r next || exit 0
+  echo "followup exploded" >&2
+  exit 3
+  ;;
+
 *scenario:happy*)
   emit '{"ev":"ready","agentId":"agent-1","model":"composer-2.5"}'
   emit '{"ev":"thinking","text":"planning"}'
@@ -46,6 +58,14 @@ case "$first" in
     ;;
   esac
   exit 0
+  ;;
+
+*scenario:interrupt-fatal*)
+  emit '{"ev":"ready","agentId":"agent-int-fatal","model":"auto"}'
+  emit '{"ev":"text","text":"working"}'
+  read -r msg || exit 0
+  emit '{"ev":"fatal","message":"transport closed during cancellation"}'
+  exit 1
   ;;
 
 *scenario:interrupt*)

@@ -43,17 +43,27 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 
+let beforeExit = async () => {};
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\n");
-const fatal = (message) => {
+// process.exit() does not drain a pipe. Wait for all queued frames, including
+// multi-megabyte catalogs, before stopping SDK background handles.
+const exitAfterFlush = async (code) => {
+  await beforeExit();
+  await new Promise((resolve, reject) => {
+    process.stdout.write("", (error) => error ? reject(error) : resolve());
+  });
+  process.exit(code);
+};
+const fatal = async (message) => {
   out({ ev: "fatal", message: String(message) });
-  process.exit(1);
+  await exitAfterFlush(1);
 };
 
 let sdk;
 try {
   sdk = await import("@cursor/sdk");
 } catch (e) {
-  fatal(`@cursor/sdk failed to load: ${e?.message ?? e}`);
+  await fatal(`@cursor/sdk failed to load: ${e?.message ?? e}`);
 }
 const { Agent, Cursor, FileCredentialStore, JsonlLocalAgentStore } = sdk;
 
@@ -78,47 +88,104 @@ function agentDirMarker(agentId) {
   return path.join(STATE_BASE, "by-agent", String(agentId));
 }
 
-function newRunStore() {
-  const dir = path.join(STATE_BASE, "agents", crypto.randomUUID());
+function newRunStore(storeDir) {
+  const dir = storeDir || path.join(STATE_BASE, "agents", crypto.randomUUID());
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   return { dir, store: new JsonlLocalAgentStore(dir) };
 }
 
 function storeForResume(agentId) {
-  try {
-    const dir = fs.readFileSync(agentDirMarker(agentId), "utf8").trim();
-    if (dir && fs.existsSync(dir)) return { dir, store: new JsonlLocalAgentStore(dir) };
-  } catch {
-    // No marker: a pre-isolation agent living in the SDK's default store.
+  let dir;
+  try { dir = fs.readFileSync(agentDirMarker(agentId), "utf8").trim(); }
+  catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
   }
-  return null;
+  if (!dir || !fs.existsSync(dir)) throw new Error("Cursor conversation storage is missing; restore its state directory before resuming.");
+  return { dir, store: new JsonlLocalAgentStore(dir) };
 }
 
 function rememberAgentDir(agentId, dir) {
-  try {
-    const marker = agentDirMarker(agentId);
-    fs.mkdirSync(path.dirname(marker), { recursive: true, mode: 0o700 });
-    const tmp = `${marker}.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, dir);
-    fs.renameSync(tmp, marker);
-  } catch {
-    // Fail soft: the run still works; only a future resume degrades to the
-    // default store (and surfaces as a fresh session, not a crash).
+  const marker = agentDirMarker(agentId);
+  fs.mkdirSync(path.dirname(marker), { recursive: true, mode: 0o700 });
+  const tmp = `${marker}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, dir, {mode: 0o600});
+  fs.renameSync(tmp, marker);
+}
+
+// The Rust harness holds an OS lock for this store until the child is reaped.
+// A PID marker additionally prevents a new engine from reclaiming an orphaned
+// but still-live shim after its parent engine crashes.
+let ownedStore = null;
+let ownerPath = null;
+async function claimStore(local) {
+  const marker = path.join(local.dir, ".zeron-owner.json");
+  let previous;
+  try { previous = JSON.parse(fs.readFileSync(marker, "utf8")); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  if (previous?.pid && previous.pid !== process.pid) {
+    const alive = (pid) => {
+      try { process.kill(pid, 0); return true; }
+      catch (error) { if (error.code === "ESRCH") return false; throw error; }
+    };
+    // A parent that died releases its OS lease immediately. Allow its shim's
+    // parent watchdog to finish bounded cleanup before reclaiming the store.
+    if (previous.parentPid && !alive(previous.parentPid)) {
+      const deadline = Date.now() + 3500;
+      while (fs.existsSync(marker) && alive(previous.pid) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    if (fs.existsSync(marker) && alive(previous.pid)) {
+      throw new Error("This Cursor conversation is still running in another process. Stop that run before retrying.");
+    }
   }
+  const temporary = `${marker}.${process.pid}`;
+  fs.writeFileSync(temporary, JSON.stringify({pid: process.pid, parentPid: process.ppid}), {mode: 0o600});
+  fs.renameSync(temporary, marker);
+  ownerPath = marker;
+  ownedStore = local.store;
+}
+
+async function recoverInterruptedRun(agentId) {
+  if (!ownedStore) return; // Legacy SDK-default stores aren't ours to edit.
+  const document = await ownedStore.agents.get({agentId});
+  if (!document || (!document.activeRunId && document.status !== "running")) return;
+  const interruptedRun = document.activeRunId
+    ? await ownedStore.runs.get({agentId, runId: document.activeRunId}) : null;
+  if (interruptedRun && ["queued", "running"].includes(interruptedRun.status)) {
+    await ownedStore.runs.update({run: {
+      ...interruptedRun, status: "cancelled", endedAt: Date.now(), updatedAt: Date.now(),
+      error: "The previous Zeron process stopped before completing this turn.",
+    }});
+  }
+  // Preserve the newest available conversation checkpoint; never start a new
+  // conversation or replay the interrupted prompt during recovery.
+  await ownedStore.agents.update({agent: {
+    ...document, status: "idle", activeRunId: null, updatedAt: Date.now(),
+    latestCheckpoint: interruptedRun?.latestCheckpointRef ?? document.latestCheckpoint,
+  }});
 }
 
 // ---- models mode ----------------------------------------------------------
 // `node <shim> models`: print the live catalog (`Cursor.models.list()` — no
-// auth required, verified live on 1.0.28) as one frame and exit. The harness
+// additional login: the SDK resolves CURSOR_API_KEY, then its saved login)
+// as one frame and exit. The harness
 // maps items (id/displayName/parameters/variants) into its picker models.
 if (process.argv[2] === "models") {
   try {
     const listed = await Cursor.models.list();
-    const items = Array.isArray(listed) ? listed : (listed?.items ?? []);
+    const catalog = Array.isArray(listed) ? listed : (listed?.items ?? []);
+    // The picker consumes parameter definitions and the default variant only,
+    // not the combinatorial list of every purchasable variant.
+    const items = catalog.map(({id, displayName, description, parameters, variants}) => ({
+      id, displayName, description, parameters,
+      variants: (variants ?? []).filter((variant) => variant.isDefault).slice(0, 1),
+    }));
     out({ ev: "models", items });
-    process.exit(0);
+    await exitAfterFlush(0);
   } catch (e) {
-    fatal(`cursor model discovery failed: ${e?.message ?? e}`);
+    await fatal(`cursor model discovery failed: ${e?.message ?? e}`);
   }
 }
 
@@ -128,7 +195,7 @@ if (process.argv[2] === "models") {
 // minted key lands in the engine-chosen store file, never the live login.
 if (process.argv[2] === "login") {
   const storePath = process.argv[3];
-  if (!storePath) fatal("login mode needs a store path");
+  if (!storePath) await fatal("login mode needs a store path");
   try {
     const result = await Cursor.auth.login({
       openBrowser: false,
@@ -141,15 +208,44 @@ if (process.argv[2] === "login") {
       ...(result?.email ? { email: result.email } : {}),
       ...(result?.apiKeyExpiresAtMs ? { expiresAtMs: result.apiKeyExpiresAtMs } : {}),
     });
-    process.exit(0);
+    await exitAfterFlush(0);
   } catch (e) {
-    fatal(`cursor login failed: ${e?.message ?? e}`);
+    await fatal(`cursor login failed: ${e?.message ?? e}`);
   }
 }
 
 let agent = null;
 let run = null;
 let interrupted = false;
+let closing = false;
+let cleanupPromise;
+beforeExit = () => cleanupPromise ??= (async () => {
+  closing = true;
+  // Cancellation may itself wedge on a dead transport. Keep teardown bounded;
+  // next resume repairs a leftover activeRunId after acquiring ownership.
+  if (run) {
+    await Promise.race([
+      run.cancel().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 1000)),
+    ]);
+  }
+  try { agent?.close(); } catch {}
+  if (ownerPath) {
+    try { fs.unlinkSync(ownerPath); } catch {}
+    ownerPath = null;
+  }
+})();
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.on(signal, () => { void exitAfterFlush(0); });
+}
+// If the engine itself crashes there is no EOF guarantee (a leaked descriptor
+// may keep stdin open). Do not leave a detached SDK run owning this conversation.
+const parentPid = process.ppid;
+setInterval(() => {
+  if (process.ppid !== parentPid) { void exitAfterFlush(0); return; }
+  try { process.kill(parentPid, 0); }
+  catch (error) { if (error.code === "ESRCH") void exitAfterFlush(0); }
+}, 1000).unref();
 
 // One InteractionUpdate → zero or one frame. `parent` attributes nested
 // subagent traffic (tool-call-delta carries the child's updates tagged by
@@ -228,6 +324,7 @@ function withAuthHint(message) {
 }
 
 async function runTurn(prompt) {
+  if (closing) return;
   interrupted = false;
   try {
     run = await agent.send(prompt, {
@@ -244,6 +341,8 @@ async function runTurn(prompt) {
     run = null;
     return;
   }
+  // Interrupt may arrive while send() is still creating the run.
+  if (interrupted || closing) await run.cancel().catch(() => {});
   let result;
   try {
     result = await run.wait();
@@ -253,7 +352,6 @@ async function runTurn(prompt) {
       status: interrupted ? "cancelled" : "error",
       error: withAuthHint(e?.message ?? e),
     });
-    run = null;
     return;
   }
   run = null;
@@ -292,11 +390,14 @@ async function start(msg) {
   if (msg.resume) {
     const found = storeForResume(msg.resume);
     if (found) {
+      await claimStore(found);
+      await recoverInterruptedRun(msg.resume);
       local.store = found.store;
       runDir = found.dir;
     }
   } else {
-    const fresh = newRunStore();
+    const fresh = newRunStore(msg.storeDir);
+    await claimStore(fresh);
     local.store = fresh.store;
     runDir = fresh.dir;
   }
@@ -317,13 +418,13 @@ async function start(msg) {
     // `cursor-agent login` (verified) — name the fix precisely.
     const auth = await Cursor.auth.status().catch(() => null);
     if (!process.env.CURSOR_API_KEY && auth?.status !== "logged-in") {
-      fatal(
+      await fatal(
         "Cursor is not connected (its login is separate from " +
           "`cursor-agent login`): connect it in Settings → Accounts, or set " +
           `CURSOR_API_KEY from cursor.com/settings, then retry. (${e?.message ?? e})`,
       );
     }
-    fatal(`cursor agent failed to start: ${e?.message ?? e}`);
+    await fatal(`cursor agent failed to start: ${e?.message ?? e}`);
   }
   if (runDir) rememberAgentDir(agent.agentId, runDir);
   out({ ev: "ready", agentId: agent.agentId, model: agent.model?.id ?? model.id });
@@ -359,13 +460,6 @@ rl.on("line", (line) => {
   }
 });
 rl.on("close", () => {
-  // stdin EOF: the engine is done with the session.
-  const r = run;
-  run = null;
-  (r ? r.cancel().catch(() => {}) : Promise.resolve()).finally(() => {
-    try {
-      agent?.close();
-    } catch {}
-    process.exit(0);
-  });
+  // Parent teardown owns the lifetime; do not keep a run alive after EOF.
+  void exitAfterFlush(0);
 });

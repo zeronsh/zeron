@@ -636,6 +636,44 @@ async fn target_device_id_routes_over_the_relay() {
     };
     assert!(remote.is_array());
 
+    // Generated media uses the same jail locally and over a targeted peer RPC.
+    let generated_root = dirs.path().join("generated_images");
+    std::fs::create_dir_all(&generated_root).unwrap();
+    let source = generated_root.join("codex.png");
+    let payload = b"\x89PNG\r\n\x1a\nremote-generated-image";
+    std::fs::write(&source, payload).unwrap();
+    let image = core_b
+        .uploads
+        .import_generated_image(&source, &generated_root, "chat-remote\0image")
+        .unwrap();
+    let local_b = zeron_rpc::memory_client(core_b.rpc_service());
+    let local_image = local_b
+        .call(
+            methods::READ_ATTACHMENT_CHUNK,
+            serde_json::json!({"path": image.path, "offset": 0}),
+        )
+        .await
+        .unwrap();
+    let remote_image = client
+        .call(
+            methods::READ_ATTACHMENT_CHUNK,
+            serde_json::json!({"path": image.path, "offset": 0, "targetDeviceId": "device-b"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(remote_image, local_image);
+    assert_eq!(remote_image["mimeType"], "image/png");
+    assert_eq!(remote_image["done"], true);
+    assert!(
+        client
+            .call(
+                methods::READ_ATTACHMENT_CHUNK,
+                serde_json::json!({"path": source, "offset": 0, "targetDeviceId": "device-b"})
+            )
+            .await
+            .is_err()
+    );
+
     // The add-space picker's exact call: browse a folder ON B from A's IPC
     // surface (ListFolders + targetDeviceId, relay-forwarded).
     let browse_dir = dirs.path().join("b-folders");

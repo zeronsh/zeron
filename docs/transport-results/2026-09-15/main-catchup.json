@@ -1,0 +1,9 @@
+{
+  "profile": "catchup",
+  "rate_bytes_per_second_per_direction": 2048,
+  "added_one_way_ms": 600,
+  "exit_code": 101,
+  "stdout": "",
+  "stderr": "\nthread 'main' (533584) panicked at crates/sync/examples/transport_live.rs:196:14:\ncalled `Result::unwrap()` on an `Err` value: Protocol(\"chat2 handshake failed\")\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+  "proxy_stderr": ""
+}

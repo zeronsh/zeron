@@ -11,6 +11,7 @@ use super::{
 use crate::{
     file_icons::{self, FileIconIdentity},
     icons::{self, icon},
+    popover,
     theme::Theme,
 };
 
@@ -64,8 +65,90 @@ pub(super) fn sync_list_rows(
     list.scroll_to(anchor);
 }
 
+/// The tree rail's geometry straight from the list state: track origin and
+/// viewport from [`gpui::ListState::viewport_bounds`] (window space; zero
+/// until first layout, so the rail simply stays hidden), content extent from
+/// the measured item summaries via [`gpui::ListState::max_offset_for_scrollbar`],
+/// and the position from [`gpui::ListState::scroll_px_offset_for_scrollbar`]
+/// (negative while scrolled — flipped here to the positive distance). Row
+/// counts are never multiplied in: row variants need not share a height.
+fn tree_rail_geometry(
+    list: &gpui::ListState,
+) -> Option<(popover::MenuScrollbarMetrics, gpui::Pixels)> {
+    let bounds = list.viewport_bounds();
+    let viewport = f32::from(bounds.size.height);
+    let max_scroll = f32::from(list.max_offset_for_scrollbar().y);
+    let offset = -f32::from(list.scroll_px_offset_for_scrollbar().y);
+    let metrics =
+        popover::MenuScrollbarMetrics::from_parts(viewport, viewport + max_scroll, offset)?;
+    Some((metrics, bounds.top()))
+}
+
+/// The file tree's share of the shared floating rail: it owns no scroll
+/// handle, so geometry comes from the list state's own accessors and drags
+/// land through the list state's scrollbar offset setter.
+impl popover::ScrollRailHost for FilesSurface {
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        &mut self.tree_bar
+    }
+
+    fn rail_metrics(&mut self) -> Option<popover::MenuScrollbarMetrics> {
+        let (metrics, _) = tree_rail_geometry(&self.tree_list)?;
+        let offset = -f32::from(self.tree_list.scroll_px_offset_for_scrollbar().y);
+        self.rail_bar().note_scroll_offset(offset);
+        Some(metrics)
+    }
+
+    fn rail_press(&mut self, pointer_y: gpui::Pixels) -> bool {
+        let Some((metrics, track_top)) = tree_rail_geometry(&self.tree_list) else {
+            return false;
+        };
+        self.rail_bar()
+            .begin_press_in(&metrics, track_top, pointer_y);
+        self.apply_tree_rail_target(&metrics, track_top, pointer_y)
+    }
+
+    fn rail_drag_to(&mut self, pointer_y: gpui::Pixels) -> bool {
+        let Some((metrics, track_top)) = tree_rail_geometry(&self.tree_list) else {
+            return false;
+        };
+        self.apply_tree_rail_target(&metrics, track_top, pointer_y)
+    }
+}
+
 impl FilesSurface {
+    /// Apply a shared-rail drag target: the fraction of max scroll goes back
+    /// through the list state's own scrollbar offset setter, which clamps to
+    /// the live content height. `false` when no drag is engaged.
+    fn apply_tree_rail_target(
+        &mut self,
+        metrics: &popover::MenuScrollbarMetrics,
+        track_top: gpui::Pixels,
+        pointer_y: gpui::Pixels,
+    ) -> bool {
+        let Some(fraction) = self.tree_bar.drag_target_in(metrics, track_top, pointer_y) else {
+            return false;
+        };
+        let target = px(-fraction * metrics.max_scroll);
+        self.tree_list
+            .set_offset_from_scrollbar(gpui::Point::new(px(0.0), target));
+        true
+    }
+
+    pub(super) fn on_tree_scrolled(&mut self, cx: &mut Context<Self>) {
+        // The list repaints itself; the floating rail needs a view pass.
+        cx.notify();
+    }
+
+    fn on_tree_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        if self.tree_bar.set_list_hovered(*hovered) {
+            cx.notify();
+        }
+    }
+
     pub(super) fn render_tree(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let scrollbar = popover::rail(self, "files-tree-scrollbar", &theme, cx);
         div()
             .id("files-tree")
             .role(gpui::Role::Tree)
@@ -76,6 +159,7 @@ impl FilesSurface {
             .flex()
             .flex_col()
             .track_focus(&self.tree_focus)
+            .on_hover(cx.listener(Self::on_tree_hovered))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| this.tree_focus.focus(window, cx)),
@@ -89,6 +173,7 @@ impl FilesSurface {
                     .min_h_0()
                     .with_sizing_behavior(ListSizingBehavior::Auto),
             )
+            .children(scrollbar)
             .into_any_element()
     }
 
@@ -155,9 +240,11 @@ impl FilesSurface {
                         this.tree_focus.focus(window, cx);
                         this.activate_tree_path(path.clone(), cx);
                     }))
-                    .on_drag(drag_payload, |payload, _, _, cx| {
-                        cx.stop_propagation();
-                        workspace_path_drag_ghost(payload, cx)
+                    .when(crate::click_activation_drag_enabled(), |element| {
+                        element.on_drag(drag_payload, |payload, _, _, cx| {
+                            cx.stop_propagation();
+                            workspace_path_drag_ghost(payload, cx)
+                        })
                     })
                     .child(
                         div()

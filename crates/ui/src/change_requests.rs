@@ -79,11 +79,7 @@ impl Render for ChangeRequestTooltip {
             .rounded(px(6.0))
             .border_1()
             .border_color(theme.border_strong)
-            .bg(if theme.is_frost() {
-                theme.glass_overlay()
-            } else {
-                theme.surface_raised
-            })
+            .bg(crate::popover::surface_bg(theme))
             .shadow_md()
             .child(
                 div()
@@ -118,6 +114,16 @@ pub(crate) fn pull_request_badge(
     id: SharedString,
     summary: ChangeRequestSummary,
     surface: ChangeRequestBadgeSurface,
+    theme: &Theme,
+) -> AnyElement {
+    pull_request_badge_with_query(id, summary, surface, None, theme)
+}
+
+pub(crate) fn pull_request_badge_with_query(
+    id: SharedString,
+    summary: ChangeRequestSummary,
+    surface: ChangeRequestBadgeSurface,
+    query: Option<&str>,
     theme: &Theme,
 ) -> AnyElement {
     let model = ChangeRequestBadgeModel::from_summary(&summary);
@@ -163,7 +169,7 @@ pub(crate) fn pull_request_badge(
         .child(
             div()
                 .font_family(theme.font_mono.clone())
-                .child(model.number),
+                .child(crate::popover::search_highlight(model.number, query, theme)),
         )
         .into_any_element()
 }

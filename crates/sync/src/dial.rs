@@ -22,21 +22,34 @@ use std::time::Duration;
 
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::net::TcpStream;
+use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::{Error as WsError, UrlError};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 /// Delay before starting the next address attempt while one is still pending
 /// (RFC 8305 §5's "Connection Attempt Delay"; 250ms is its recommended value).
 const STAGGER: Duration = Duration::from_millis(250);
 
-pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+pub type WsStream = crate::socket::Connection<MaybeTlsStream<crate::socket::ProgressIo<TcpStream>>>;
 
 /// Dial `url` (ws/wss) with happy-eyeballs TCP racing, then run TLS + the
 /// WebSocket handshake on the winning stream. A success also broadcasts
 /// [`crate::wake::notify_online`] so sibling sockets waiting out a reconnect
 /// backoff redial immediately instead of sleeping through the recovery.
 pub async fn connect_ws(url: &str) -> Result<WsStream, WsError> {
+    // Bound DNS, all TCP attempts, TLS and HTTP upgrade together. Some
+    // callers (notably the host relay) have no outer connection deadline.
+    tokio::time::timeout(Duration::from_secs(20), connect_ws_inner(url))
+        .await
+        .map_err(|_| {
+            WsError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "WebSocket dial timed out",
+            ))
+        })?
+}
+
+async fn connect_ws_inner(url: &str) -> Result<WsStream, WsError> {
     let request = url.into_client_request()?;
     let uri = request.uri();
     let host = uri
@@ -57,10 +70,14 @@ pub async fn connect_ws(url: &str) -> Result<WsStream, WsError> {
         .map_err(|err| io::Error::new(err.kind(), format!("{host}:{port}: {err}")))?;
     // Best-effort: a socket that works without NODELAY beats no socket.
     let _ = stream.set_nodelay(true);
+    let (stream, progress) = crate::socket::ProgressIo::new(stream);
     let (ws, _response) =
         tokio_tungstenite::client_async_tls_with_config(request, stream, None, None).await?;
     crate::wake::notify_online();
-    Ok(ws)
+    Ok(crate::socket::Connection {
+        socket: ws,
+        progress,
+    })
 }
 
 /// Race TCP connects over an already-ordered address list: one new attempt per
@@ -132,6 +149,34 @@ mod tests {
 
     fn addr(s: &str) -> SocketAddr {
         s.parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn stalled_upgrade_has_an_overall_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            accepted_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut dial = tokio::spawn(async move { connect_ws(&url).await });
+        tokio::time::timeout(Duration::from_secs(5), accepted_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        // TCP is established. The peer never answers the HTTP upgrade.
+        tokio::time::pause();
+        let result = tokio::time::timeout(Duration::from_secs(21), &mut dial).await;
+        server.abort();
+        dial.abort();
+        let err = result
+            .expect("dial remained stuck after 21 seconds")
+            .unwrap()
+            .err()
+            .expect("dial unexpectedly succeeded");
+        assert!(matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::TimedOut));
     }
 
     #[test]

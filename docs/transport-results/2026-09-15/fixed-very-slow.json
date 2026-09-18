@@ -1,0 +1,9 @@
+{
+  "profile": "very-slow",
+  "rate_bytes_per_second_per_direction": 1024,
+  "added_one_way_ms": 1200,
+  "exit_code": 0,
+  "stdout": "RESULT {\"delivery_s\":19.140923299,\"elapsed_s\":24.260551435,\"head_seq\":20,\"mode\":\"stream\",\"p95_update_s\":17.122515973,\"pending\":0,\"push_outcomes\":{\"sender\":{\"lastOkAt\":1789507298670,\"ok\":20,\"rejected\":0}},\"receiver_disconnects\":0,\"row_count\":20,\"sender_disconnects\":0,\"text_bytes\":4900,\"update_bytes\":6756}\nPROXY {\"blocked_upgrades\":0,\"connections\":7,\"lost_post_acks\":0,\"received\":17075,\"resets\":0,\"sent\":9036,\"upgrades\":2}\n",
+  "stderr": "",
+  "proxy_stderr": ""
+}

@@ -12,7 +12,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,7 +30,7 @@ use zeron_rpc::device_room::{
 };
 use zeron_rpc::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
-    RpcError, RpcReply, RpcService, StaticToken, TokenSource, decode_device_frame,
+    RpcError, RpcReply, RpcService, StaticToken, TokenError, TokenSource, decode_device_frame,
     device_room_ws_url, encode_device_frame, methods,
 };
 
@@ -340,6 +340,7 @@ fn noop_nudge() -> zeron_rpc::NudgeHandler {
 
 struct RecoveringToken {
     value: Mutex<Option<String>>,
+    unavailable: AtomicBool,
     changes: tokio::sync::watch::Sender<u64>,
 }
 
@@ -348,18 +349,27 @@ impl RecoveringToken {
         let (changes, _) = tokio::sync::watch::channel(0);
         Self {
             value: Mutex::new(value.map(str::to_string)),
+            unavailable: AtomicBool::new(false),
             changes,
         }
     }
 
     fn replace(&self, value: &str) {
+        self.unavailable.store(false, Ordering::SeqCst);
         *self.value.lock().expect("lock") = Some(value.into());
         self.changes
             .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
     }
 
     fn clear(&self) {
+        self.unavailable.store(false, Ordering::SeqCst);
         *self.value.lock().expect("lock") = None;
+        self.changes
+            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+    }
+
+    fn fail_temporarily(&self) {
+        self.unavailable.store(true, Ordering::SeqCst);
         self.changes
             .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
     }
@@ -367,8 +377,17 @@ impl RecoveringToken {
 
 #[async_trait]
 impl TokenSource for RecoveringToken {
-    async fn token(&self) -> Option<String> {
-        self.value.lock().expect("lock").clone()
+    async fn token(&self) -> Result<String, TokenError> {
+        if self.unavailable.load(Ordering::SeqCst) {
+            return Err(TokenError::TemporarilyUnavailable(
+                "resolver unavailable".into(),
+            ));
+        }
+        self.value
+            .lock()
+            .expect("lock")
+            .clone()
+            .ok_or(TokenError::SignedOut)
     }
 
     fn subscribe(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
@@ -409,6 +428,44 @@ async fn sign_out_closes_a_live_host_relay_immediately() {
     token.clear();
 
     wait_until(|| !relay.host_connected()).await;
+}
+
+#[tokio::test]
+async fn temporary_token_failure_keeps_live_host_and_peer_connections() {
+    let relay = FakeRelay::start().await;
+    let token = Arc::new(RecoveringToken::new(Some("test-user")));
+    let _host = HostRelay::spawn(
+        HostRelayConfig::new(relay.edge_url(), "dev-a", token.clone()),
+        TestService::new("host-a"),
+        noop_nudge(),
+    );
+    relay.wait_host_connected().await;
+    let links = LinkCache::new(LinkCacheConfig::new(relay.edge_url(), token.clone()));
+    let client = links
+        .client("dev-a")
+        .await
+        .expect("initial peer connection");
+
+    token.fail_temporarily();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        relay.host_connected(),
+        "a refresh failure is not a sign-out"
+    );
+    client
+        .call("Echo", serde_json::json!({}))
+        .await
+        .expect("live peer survives");
+    links
+        .client("dev-a")
+        .await
+        .expect("cached peer is not revoked");
+
+    token.replace("fresh-token");
+    client
+        .call("Echo", serde_json::json!({}))
+        .await
+        .expect("peer survives recovery");
 }
 
 #[tokio::test]

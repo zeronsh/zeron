@@ -1,0 +1,168 @@
+name: Windows tests
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'apps/zeron/**'
+      - 'dist/windows/**'
+      - 'crates/**'
+      - 'scripts/test-windows-*.ps1'
+      - 'scripts/package-windows.ps1'
+      - '.github/workflows/windows.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'apps/zeron/**'
+      - 'dist/windows/**'
+      - 'crates/**'
+      - 'scripts/test-windows-*.ps1'
+      - 'scripts/package-windows.ps1'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+    inputs:
+      native_gui:
+        description: 'Run native GUI/pixel probes (requires a usable desktop and Direct3D)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  tests:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Locate Windows SDK shader compiler
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/fxc.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-workspace-crates: true
+      - name: Native harness security and integration tests
+        run: cargo test --release --locked -p zeron-harness --features native-fixture --lib --test codex_availability --test windows_native
+      - name: UI tests
+        env:
+          RUST_BACKTRACE: '1'
+        run: |
+          # Native platform initialization runs in its own process. Keep the
+          # real-font assertion and the complete headless suite mandatory.
+          cargo test --release --locked -p zeron-ui --lib native_diff_font_geometry -- --test-threads=1 --nocapture
+          $nativeResult = $LASTEXITCODE
+          cargo test --release --locked -p zeron-ui --lib -- --test-threads=1 --skip native_diff_font_geometry --nocapture
+          $headlessResult = $LASTEXITCODE
+          if ($nativeResult -ne 0 -or $headlessResult -ne 0) { exit 1 }
+      - name: Build application
+        run: cargo build --release --locked -p zeron
+      - name: Verify portable packaging
+        run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
+      - name: Shader layout tests
+        run: cargo test --release --locked -p gpui_windows --lib layout
+      - name: Application and updater tests
+        run: cargo test --release --locked -p zeron -p zeron-update
+      - name: Engine unit tests
+        run: cargo test --release --locked -p zeron-engine --lib
+      - name: Harness catalog and login tests
+        run: cargo test --release --locked -p zeron-engine --test codex_catalog --test codex_login_resolution
+      - name: Auth integration tests
+        run: cargo test --release --locked -p zeron-engine --test auth
+      - name: GUI subsystem and redirected CLI output
+        run: ./scripts/test-windows-startup.ps1
+      - name: CLI startup without HOME
+        run: |
+          # Exercise real path resolution without touching the runner's account.
+          # Port zero cannot connect to another running engine.
+          $env:HOME = $null
+          $env:ZERON_DATA_DIR = $null
+          $env:ZERON_EDGE_TOKEN = $null
+          $env:ZERON_IPC_PORT = '0'
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "zeron smoke O'Brien 日本語"
+          $expected = Join-Path $env:LOCALAPPDATA 'Zeron'
+          $probe = [Diagnostics.ProcessStartInfo]::new()
+          $probe.FileName = (Resolve-Path -LiteralPath './target/release/zeron.exe').Path
+          $probe.Arguments = 'status'
+          $probe.UseShellExecute = $false
+          $probe.CreateNoWindow = $true
+          $probe.RedirectStandardOutput = $true
+          $probe.RedirectStandardError = $true
+          $process = [Diagnostics.Process]::Start($probe)
+          try {
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $stderr = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit(10000)) {
+              $process.Kill()
+              throw 'Isolated status probe timed out'
+            }
+            if ($process.ExitCode -ne 0) { throw "Status failed: $($stderr.Result)" }
+            $output = $stdout.Result -split '\r?\n'
+          } finally { $process.Dispose() }
+          $output
+          if (-not ($output -contains "Data dir: $expected")) {
+            throw 'Windows startup did not select LOCALAPPDATA/Zeron'
+          }
+          if (-not ($output -match '^Mode:\s+local only$')) {
+            throw 'An isolated Windows startup must select local-only mode'
+          }
+      - name: Build rendering fixture
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_gui }}
+        run: cargo build --release --locked -p zeron-ui --example windows-render-fixture --features windows-render-fixture
+      - name: Upload GUI test binaries
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_gui }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-gui-binaries
+          path: |
+            target/release/zeron.exe
+            target/release/examples/windows-render-fixture.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  native-gui:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_gui }}
+    needs: tests
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-gui-binaries
+          path: target/release
+      - name: App lifecycle tests
+        run: ./scripts/test-windows-lifecycle.ps1
+      - name: Rendering tests
+        run: ./scripts/test-windows-rendering.ps1
+      - name: Upload GUI test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-probes
+          path: |
+            target/windows-render-*/capture.png
+            target/windows-render-*/measurements.json
+            target/windows-render-*/stdout.txt
+            target/windows-render-*/stderr.txt
+            target/windows-lifecycle-*/result.txt
+            target/windows-lifecycle-*/run-*.txt
+          if-no-files-found: warn

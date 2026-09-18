@@ -20,6 +20,8 @@ pub enum SyncError {
     Loro(String),
     #[error("auth: {0}")]
     Auth(String),
+    #[error("temporarily unavailable: {0}")]
+    TemporarilyUnavailable(String),
     #[error("client is shut down")]
     Closed,
 }

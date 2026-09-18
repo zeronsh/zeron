@@ -78,6 +78,9 @@ struct TranscriptView: View {
                     userExpansionHeights[row.entryId] = height
                     scroll.refreshLayout?()
                 })
+            case .generatedImage(let owner, let reference):
+                GeneratedImageView(owner: owner, host: store.hostDeviceId ?? "", reference: reference,
+                                   onResize: { scroll.refreshLayout?() })
             case .markdown(let block, let streaming):
                 MarkdownRowView(row: row, block: block, streaming: streaming, veils: veils)
             case .toolGroup(let tools, let autoOpen):

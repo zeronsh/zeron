@@ -75,6 +75,19 @@ tid=$(rid "$turnline")
 
 case "$turnline" in
 
+*scenario:image-*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"item/started","params":{"threadId":"th-1","item":{"id":"image-1","type":"imageGeneration","status":"in_progress","result":""}}}'
+  if has "$turnline" 'scenario:image-success'; then
+    emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"id":"image-1","type":"imageGeneration","status":"completed","result":"INLINE_IMAGE_SENTINEL","savedPath":"/codex/generated_images/goblin.png"}}}'
+  elif has "$turnline" 'scenario:image-failure'; then
+    emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"id":"image-1","type":"imageGeneration","status":"failed","result":"INLINE_IMAGE_SENTINEL","failure":{"type":"usageLimitExceeded"}}}}'
+  else
+    emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"id":"image-1","type":"imageGeneration","status":"completed","result":"INLINE_IMAGE_SENTINEL"}}}'
+  fi
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
 *scenario:title*)
   for want in '"sandbox":"read-only"' '"ephemeral":true' '"baseInstructions":"You generate session titles.' '"features.shell_tool":false' '"mcp_servers.test.enabled":false'; do
     has "$thread_line" "$want" || { fail_turn "$tid" "title restriction missing"; exit 0; }
