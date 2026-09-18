@@ -46,6 +46,7 @@ pub mod pickers;
 pub mod popover;
 pub mod queue;
 pub mod rail;
+pub mod remote_desktop;
 pub mod settings;
 pub mod shell;
 pub mod sound;
@@ -131,7 +132,8 @@ pub fn run_app(config: UiConfig) {
     // default runtime has only two workers, insufficient for a desktop engine.
     let runtime = tokio::runtime::Runtime::new().expect("desktop Tokio runtime");
     let runtime_handle = runtime.handle().clone();
-    let app = gpui_platform::application().with_assets(icons::Assets);
+    let platform = gpui_platform::current_platform(false);
+    let app = gpui::Application::with_platform(platform.clone()).with_assets(icons::Assets);
     let (url_tx, mut url_rx) = futures::channel::mpsc::unbounded::<String>();
     let callback_tx = url_tx.clone();
     app.on_open_urls(move |urls| {
@@ -154,6 +156,7 @@ pub fn run_app(config: UiConfig) {
         }
     });
     app.run(move |cx: &mut App| {
+        remote_desktop::cursor::init(platform, cx);
         gpui_tokio::init_from_handle(cx, runtime_handle);
         gpui_base::init(cx);
         let data_dir = config.boot().data_dir.clone();

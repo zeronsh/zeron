@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/ironrdp-svc", "vendor/ironrdp-dvc"]
 members = [
     "crates/theme",
     "crates/proto",
@@ -11,6 +12,7 @@ members = [
     "crates/rpc",
     "crates/update",
     "crates/ui",
+    "crates/rdp",
     "crates/syntax",
     "apps/zeron",
 ]
@@ -31,6 +33,7 @@ zeron-engine = { path = "crates/engine" }
 zeron-rpc = { path = "crates/rpc" }
 zeron-update = { path = "crates/update" }
 zeron-ui = { path = "crates/ui" }
+zeron-rdp = { path = "crates/rdp" }
 zeron-syntax = { path = "crates/syntax" }
 zeron-theme = { path = "crates/theme" }
 
@@ -130,6 +133,10 @@ ttf-parser = "0.25.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 ignore = "0.4"
 nucleo-matcher = "0.3"
+
+[patch.crates-io]
+ironrdp-svc = { path = "vendor/ironrdp-svc" }
+ironrdp-dvc = { path = "vendor/ironrdp-dvc" }
 
 [profile.release]
 # Distribution profile (scripts/package-linux.sh): thin LTO buys most of fat

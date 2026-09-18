@@ -515,12 +515,21 @@ pub async fn exercise(
     cx.update(|cx| appearance::set_surface(zeron_theme::SurfacePreference::Opaque, cx));
     pause(cx, 300).await;
     capture(output, "browser-menu-opaque")?;
-    let bounds = page.read_with(cx, |b, _| b.fixture_linux_bounds());
+    // The menu grows as surfaces are added. Measure its rendered bounds so
+    // the blur sample stays in the empty corner instead of crossing a label.
+    let bounds = window
+        .update(cx, |s, _, _| s.fixture_browser_menu_bounds())?
+        .ok_or_else(|| anyhow::anyhow!("browser menu was not laid out"))?;
     let viewport =
         AnyWindowHandle::from(window).update(cx, |_, w, _| f32::from(w.viewport_size().width))?;
     super::validate_blur(
         output,
-        (f32::from(bounds.origin.x) as f64 + 124., 42., 168., 112.),
+        (
+            f32::from(bounds.origin.x) as f64,
+            f32::from(bounds.origin.y) as f64,
+            f32::from(bounds.size.width) as f64,
+            f32::from(bounds.size.height) as f64,
+        ),
         viewport,
     )?;
     window.update(cx, |s, _, cx| s.fixture_browser_menu(false, cx))?;
