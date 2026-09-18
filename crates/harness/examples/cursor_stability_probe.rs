@@ -20,6 +20,7 @@ async fn turn(
     let (tx, steering) = mpsc::channel(8);
     let token = CancellationToken::new();
     let controls = RunControls {
+        execution_lease: None,
         steering,
         interrupt: token.clone(),
         request_input: Box::new(|_| {
@@ -137,6 +138,7 @@ async fn parked(harness: &CursorHarness, count: usize) {
     let nonce = format!("PARKED-STABILITY-{}", uuid::Uuid::new_v4());
     let (tx, steering) = mpsc::channel(8);
     let controls = RunControls {
+        execution_lease: None,
         steering,
         interrupt: CancellationToken::new(),
         request_input: Box::new(|_| {
@@ -246,6 +248,7 @@ async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
     let (tx, steering) = mpsc::channel(8);
     let token = CancellationToken::new();
     let controls = RunControls {
+        execution_lease: None,
         steering,
         interrupt: token.clone(),
         request_input: Box::new(|_| {
@@ -381,6 +384,7 @@ async fn history(harness: &CursorHarness, count: usize) {
         .collect();
     let (tx, steering) = mpsc::channel(8);
     let controls = RunControls {
+        execution_lease: None,
         steering,
         interrupt: CancellationToken::new(),
         request_input: Box::new(|_| {
