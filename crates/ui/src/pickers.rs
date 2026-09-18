@@ -3520,6 +3520,13 @@ impl Pickers {
                         cx,
                     )]
                 }
+                // A loaded-but-empty catalog is a conclusion, not a loading
+                // gap — the skeleton would spin forever (opencode 2.0.5
+                // field report: detection failure surfaced as endless
+                // skeletons rather than any content).
+                Some(Loadable::Ready(models)) if models.is_empty() => {
+                    vec![empty_list_note(&theme, "No models found")]
+                }
                 _ => vec![popover::skeleton_menu_rows(
                     "model-skeleton",
                     &theme,
