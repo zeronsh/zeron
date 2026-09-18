@@ -692,6 +692,17 @@ impl AccountsPage {
         cx.notify();
     }
 
+    /// Cancel the add-account dialog. The shell asks in capture phase before
+    /// it leaves the settings route on Escape, so backing out of a login never
+    /// also closes Settings under it. Returns whether a dialog was open.
+    pub(crate) fn handle_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.login.is_none() {
+            return false;
+        }
+        self.cancel_login(cx);
+        true
+    }
+
     // ---- render pieces ----
 
     /// One usage window (zeron settings.agents.tsx `UsageMeter`): label ·
