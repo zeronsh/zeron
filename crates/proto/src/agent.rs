@@ -75,6 +75,44 @@ pub struct Model {
     pub options: Vec<ModelOption>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessAgent {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Public metadata for the execution device's OpenCode connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpencodeConnectionSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    pub username: String,
+    pub has_password: bool,
+}
+
+/// A password is never returned over the read RPC. Omission keeps the saved value.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpencodeConnectionUpdate {
+    #[serde(default)]
+    pub base_url: Option<String>,
+    pub username: String,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub clear_password: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpencodeConnectionTestResult {
+    pub version: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOption {
@@ -102,6 +140,8 @@ pub struct RunRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<HarnessId>,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     pub reasoning: Option<ReasoningLevel>,
     /// Harness-specific option selections (option id -> choice id), JSON round-tripped.
     #[serde(default)]
@@ -405,6 +445,19 @@ pub enum AgentEvent {
     AvailableCommands {
         commands: Vec<SlashCommand>,
     },
+    /// The harness changed the effective agent for this session (for example,
+    /// an OpenCode command or skill selected a different agent). The engine
+    /// mirrors this into the chat config so later turns and the picker stay in
+    /// sync with the server.
+    AgentChanged {
+        agent: String,
+    },
+    /// The session selected a model and its effective thinking level. `None`
+    /// clears the previous level when the model uses its default variant.
+    ModelChanged {
+        model: String,
+        reasoning: Option<ReasoningLevel>,
+    },
     Error {
         message: String,
     },
@@ -533,6 +586,7 @@ mod tests {
         let old = r#"{"prompt":"p","model":null,"reasoning":null,"cwd":".","sandbox":"workspace-write","resume":null}"#;
         let req: RunRequest = serde_json::from_str(old).unwrap();
         assert!(req.attachments.is_empty());
+        assert!(req.agent.is_none());
         // …and an empty list serializes away (old readers never see it).
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("attachments").is_none());
@@ -544,6 +598,26 @@ mod tests {
         let round: RunRequest =
             serde_json::from_value(serde_json::to_value(&req).unwrap()).unwrap();
         assert_eq!(round.attachments, vec!["/tmp/a.png".to_string()]);
+    }
+
+    #[test]
+    fn selected_agent_round_trips_without_affecting_old_requests() {
+        let old = r#"{"prompt":"p","model":null,"reasoning":null,"cwd":".","sandbox":"workspace-write","resume":null}"#;
+        let mut request: RunRequest = serde_json::from_str(old).unwrap();
+        assert!(request.agent.is_none());
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("agent")
+                .is_none()
+        );
+        request.agent = Some("custom/plan".into());
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["agent"], "custom/plan");
+        assert_eq!(
+            serde_json::from_value::<RunRequest>(value).unwrap().agent,
+            request.agent
+        );
     }
 
     #[test]

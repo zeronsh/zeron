@@ -37,6 +37,7 @@ type RequestLog = Arc<Mutex<Vec<RunRequest>>>;
 
 fn run_request(prompt: &str, cwd: &str) -> RunRequest {
     RunRequest {
+        agent: None,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -611,6 +612,9 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
 
         let journal = RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap();
         journal
+            .save_request_agent(CHAT, "msg-user-1", Some("custom/build"))
+            .unwrap();
+        journal
             .append(
                 CHAT,
                 &AgentEvent::SessionStarted {
@@ -685,6 +689,7 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
         Some("hs-crash"),
         "auto-resume must reattach the crashed harness session"
     );
+    assert_eq!(revived.agent.as_deref(), Some("custom/build"));
     core.shutdown().await;
 }
 
@@ -746,7 +751,17 @@ async fn startup_crash_retries_once_with_resume_kept() {
             fail_starts: Arc::new(Mutex::new(1)),
         },
     );
-    queue_run(&core, "second turn", "/tmp", "msg-user-2");
+    let mut selected = run_request("second turn", "/tmp");
+    selected.agent = Some("custom/plan".into());
+    core.doc_host
+        .queue_command(
+            CHAT,
+            SessionCommandPayload::Run {
+                request: selected,
+                message_id: "msg-user-2".into(),
+            },
+        )
+        .unwrap();
     wait_for(
         || complete_assistant_count(&core) == 2,
         "retried turn to complete",
@@ -764,6 +779,8 @@ async fn startup_crash_retries_once_with_resume_kept() {
             "the retry must keep the stored conversation"
         );
         assert_eq!(log[2].prompt, "second turn");
+        assert_eq!(log[1].agent.as_deref(), Some("custom/plan"));
+        assert_eq!(log[2].agent.as_deref(), Some("custom/plan"));
     }
     // The retry reused the same user entry — no duplicates, no error turn.
     let entries = entries_now(&core);
@@ -840,6 +857,7 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
     let cwd = cwd.to_string_lossy().to_string();
 
     let real_request = |prompt: &str| RunRequest {
+        agent: None,
         prompt: prompt.into(),
         harness: None,
         model: Some("haiku".into()),
@@ -947,6 +965,19 @@ async fn steer_after_restart_dispatches_new_turn_with_resume() {
             fail_starts: Default::default(),
         },
     );
+    core.workspace
+        .set_chat_config(
+            CHAT,
+            &zeron_proto::ChatConfig {
+                harness: HarnessId::Mock,
+                model: None,
+                agent: Some("custom/plan".into()),
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: SandboxLevel::WorkspaceWrite,
+            },
+        )
+        .unwrap();
     core.doc_host
         .queue_command(
             CHAT,
@@ -967,6 +998,7 @@ async fn steer_after_restart_dispatches_new_turn_with_resume() {
         assert_eq!(log.len(), 2);
         assert_eq!(log[1].prompt, "actually, also add tests");
         assert_eq!(log[1].cwd, "/tmp", "run config rebuilt from the chat row");
+        assert_eq!(log[1].agent.as_deref(), Some("custom/plan"));
         assert_eq!(
             log[1].resume.as_deref(),
             Some("hs-steer"),

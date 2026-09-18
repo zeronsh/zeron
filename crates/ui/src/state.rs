@@ -4064,6 +4064,7 @@ mod tests {
         let config = zeron_proto::ChatConfig {
             harness: HarnessId::ClaudeCode,
             model: Some("claude-fable-5".into()),
+            agent: None,
             reasoning: Some(zeron_proto::ReasoningLevel::XHigh),
             model_options: serde_json::Map::new(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
@@ -4088,6 +4089,7 @@ mod tests {
             zeron_proto::ChatConfig {
                 harness: HarnessId::ClaudeCode,
                 model: None,
+                agent: None,
                 reasoning: None,
                 model_options: serde_json::Map::new(),
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,

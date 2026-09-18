@@ -145,6 +145,7 @@ where
 
 fn run_request(prompt: &str) -> RunRequest {
     RunRequest {
+        agent: None,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -559,6 +560,7 @@ async fn chat_config_selects_the_run_harness() {
             Some("space-cfg"),
             None,
             Some(ChatConfig {
+                agent: None,
                 harness: HarnessId::Cursor,
                 model: None,
                 reasoning: None,

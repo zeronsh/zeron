@@ -56,6 +56,7 @@ async fn probe_once(harness: AcpHarness) -> ProbeOutcome {
                  with exactly the word PROBE-DONE."
             .into(),
         harness: None,
+        agent: None,
         model: None,
         reasoning: None,
         model_options: serde_json::Map::new(),

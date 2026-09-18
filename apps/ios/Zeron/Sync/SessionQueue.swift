@@ -27,6 +27,8 @@ extension SessionStore {
             id: id,
             text: text,
             attachments: (m["attachments"]?.listValue ?? []).compactMap(\.stringValue),
+            agent: m["agent"]?.stringValue,
+            agentSnapshot: m["agentSnapshot"]?.boolValue ?? false,
             issuedBy: m["issuedBy"]?.stringValue ?? "",
             issuedAt: m["issuedAt"]?.i64Value ?? 0,
             editedAt: m["editedAt"]?.i64Value,
@@ -55,7 +57,8 @@ extension SessionStore {
     /// Park a message on the queue. The host decides where it goes from there —
     /// straight into the running turn, or the front of the next one.
     @discardableResult
-    func enqueueMessage(text: String, attachments: [String] = [],
+    func enqueueMessage(text: String, attachments: [String] = [], agent: String? = nil,
+                        agentSnapshot: Bool = false,
                         holdForTurnEnd: Bool = true) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -67,6 +70,8 @@ extension SessionStore {
             try map.insert(key: "text", v: text)
             try map.insert(key: "issuedBy", v: deviceId)
             try map.insert(key: "issuedAt", v: nowMs())
+            if let agent { try map.insert(key: "agent", v: agent) }
+            if agentSnapshot { try map.insert(key: "agentSnapshot", v: true) }
             if holdForTurnEnd {
                 try map.insert(key: "holdForTurnEnd", v: true)
             }

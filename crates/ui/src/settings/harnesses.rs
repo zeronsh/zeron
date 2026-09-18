@@ -20,16 +20,20 @@
 //! self-corrects from the RPC reply.
 
 use gpui::{
-    AnyElement, Context, Entity, IntoElement, Render, SharedString, Task, Window, div, prelude::*,
-    px,
+    AnyElement, Context, Entity, Focusable, IntoElement, Render, SharedString, Task, Window, div,
+    prelude::*, px,
 };
+use gpui_base::input::{Input, InputEditorStyle, InputState};
 
 use std::time::Duration;
 use zeron_engine::registry::TitleSettings;
 use zeron_engine::registry::{HarnessDescriptor, descriptor_enabled};
 
 use zeron_proto::Model;
-use zeron_proto::{AgentLoginPoll, AgentLoginStart, AgentLoginStatus, HarnessId};
+use zeron_proto::{
+    AgentLoginPoll, AgentLoginStart, AgentLoginStatus, HarnessId, OpencodeConnectionSettings,
+    OpencodeConnectionTestResult, OpencodeConnectionUpdate,
+};
 use zeron_rpc::methods;
 
 use crate::pickers::visible_harnesses;
@@ -97,6 +101,17 @@ pub struct HarnessesPage {
     sign_in: Option<SignIn>,
     sign_in_failure: Option<SignInFailure>,
     sign_in_task: Option<Task<()>>,
+    connection: Loadable<OpencodeConnectionSettings>,
+    /// Draft connection mode. Keep this separate from the URL input so
+    /// switching to managed local does not destroy unsaved server details.
+    connection_existing: Option<bool>,
+    connection_url: Option<Entity<InputState>>,
+    connection_username: Option<Entity<InputState>>,
+    connection_password: Option<Entity<InputState>>,
+    connection_clear_password: bool,
+    connection_busy: bool,
+    connection_message: Option<String>,
+    connection_task: Option<Task<()>>,
 }
 
 struct SignIn {
@@ -166,8 +181,18 @@ impl HarnessesPage {
             sign_in: None,
             sign_in_failure: None,
             sign_in_task: None,
+            connection: Loadable::Idle,
+            connection_existing: None,
+            connection_url: None,
+            connection_username: None,
+            connection_password: None,
+            connection_clear_password: false,
+            connection_busy: false,
+            connection_message: None,
+            connection_task: None,
         };
         page.load(cx);
+        page.load_connection(cx);
         page
     }
 
@@ -194,10 +219,139 @@ impl HarnessesPage {
         self.title_menu = None;
         self.title_saving = false;
         self.target_device = target;
+        self.connection_task = None;
+        self.connection = Loadable::Idle;
+        self.connection_existing = None;
+        self.connection_url = None;
+        self.connection_username = None;
+        self.connection_password = None;
+        self.connection_clear_password = false;
+        self.connection_busy = false;
+        self.connection_message = None;
         self.error = None;
         self.sign_in_failure = None;
         self.harnesses = Loadable::Idle;
         self.load(cx);
+        self.load_connection(cx);
+        cx.notify();
+    }
+
+    fn load_connection(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let target = self.target_device.clone();
+        let params = self.with_target(serde_json::json!({}));
+        self.connection = Loadable::Loading;
+        self.connection_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::GET_OPENCODE_CONNECTION, params)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<OpencodeConnectionSettings>(value)
+                        .map_err(|error| error.to_string())
+                });
+            this.update(cx, |page, cx| {
+                if page.target_device != target {
+                    return;
+                }
+                page.connection = match result {
+                    Ok(settings) => Loadable::Ready(settings),
+                    Err(error) => Loadable::Error(error),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn connection_update(&self, cx: &mut Context<Self>) -> OpencodeConnectionUpdate {
+        let base_url = self.connection_existing.unwrap_or(false).then(|| {
+            self.connection_url
+                .as_ref()
+                .map(|input| input.read(cx).value().to_string())
+                .unwrap_or_default()
+        });
+        let username = self
+            .connection_username
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default();
+        let password = self
+            .connection_password
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .filter(|password| !password.is_empty());
+        OpencodeConnectionUpdate {
+            base_url,
+            username,
+            clear_password: self.connection_clear_password && password.is_none(),
+            password,
+        }
+    }
+
+    fn submit_connection(&mut self, save: bool, cx: &mut Context<Self>) {
+        if self.connection_busy {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let update = self.connection_update(cx);
+        let params = self.with_target(serde_json::to_value(update).unwrap());
+        let target = self.target_device.clone();
+        self.connection_busy = true;
+        self.connection_message = None;
+        self.connection_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(
+                    if save {
+                        methods::SET_OPENCODE_CONNECTION
+                    } else {
+                        methods::TEST_OPENCODE_CONNECTION
+                    },
+                    params,
+                )
+                .await;
+            this.update(cx, |page, cx| {
+                if page.target_device != target {
+                    return;
+                }
+                page.connection_busy = false;
+                match result {
+                    Ok(value) if save => {
+                        match serde_json::from_value::<OpencodeConnectionSettings>(value) {
+                            Ok(settings) => {
+                                page.connection_existing = Some(settings.base_url.is_some());
+                                page.connection = Loadable::Ready(settings);
+                                page.connection_url = None;
+                                page.connection_username = None;
+                                page.connection_password = None;
+                                page.connection_clear_password = false;
+                                page.connection_message = Some("OpenCode connection saved.".into());
+                                crate::pickers::bump_harness_catalog(cx);
+                                page.load(cx);
+                            }
+                            Err(error) => page.connection_message = Some(error.to_string()),
+                        }
+                    }
+                    Ok(value) => {
+                        page.connection_message = Some(
+                            match serde_json::from_value::<OpencodeConnectionTestResult>(value) {
+                                Ok(result) => format!("Connected to OpenCode {}.", result.version),
+                                Err(error) => error.to_string(),
+                            },
+                        );
+                    }
+                    Err(error) => page.connection_message = Some(error.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
         cx.notify();
     }
 
@@ -451,6 +605,222 @@ impl HarnessesPage {
             card = card.child(widgets::error_strip(theme, error.clone()));
         }
         card.into_any_element()
+    }
+
+    fn render_connection(
+        &mut self,
+        window: &mut Window,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut card = widgets::section_card(theme).mt(px(20.0)).p(px(16.0))
+            .child(widgets::row_title(theme, "OpenCode connection"))
+            .child(widgets::page_subtitle(theme,
+                "Use a managed local server, or connect to an existing OpenCode v2 server on localhost."));
+        let settings = match &self.connection {
+            Loadable::Ready(settings) => settings.clone(),
+            Loadable::Error(error) => {
+                return card
+                    .child(widgets::error_strip(theme, error.clone()))
+                    .child(
+                        widgets::ghost_action(theme)
+                            .id("opencode-connection-retry")
+                            .on_click(cx.listener(|page, _, _, cx| page.load_connection(cx)))
+                            .child("Retry"),
+                    )
+                    .into_any_element();
+            }
+            _ => {
+                return card
+                    .child(div().mt(px(8.0)).child("Loading connection settings…"))
+                    .into_any_element();
+            }
+        };
+        let url = self
+            .connection_url
+            .get_or_insert_with(|| {
+                let value = settings.base_url.clone().unwrap_or_default();
+                cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder("http://127.0.0.1:49374")
+                        .default_value(value)
+                })
+            })
+            .clone();
+        let username = self
+            .connection_username
+            .get_or_insert_with(|| {
+                let value = if settings.username.is_empty() {
+                    "opencode".to_string()
+                } else {
+                    settings.username.clone()
+                };
+                cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder("opencode")
+                        .default_value(value)
+                })
+            })
+            .clone();
+        let password = self
+            .connection_password
+            .get_or_insert_with(|| {
+                cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .masked(true)
+                        .placeholder("New password (leave blank to keep saved password)")
+                })
+            })
+            .clone();
+        let input_style = InputEditorStyle {
+            foreground: theme.text,
+            muted_foreground: theme.text_faint,
+            selection: theme.selection,
+            caret: theme.caret,
+            ..Default::default()
+        };
+        for input in [&url, &username, &password] {
+            input.update(cx, |input, _| input.set_editor_style(input_style.clone()));
+        }
+        let existing = *self
+            .connection_existing
+            .get_or_insert(settings.base_url.is_some());
+        let managed = !existing;
+        card = card.child(
+            div()
+                .mt(px(14.0))
+                .flex()
+                .flex_row()
+                .gap(px(8.0))
+                .child(
+                    widgets::ghost_action(theme)
+                        .id("opencode-managed")
+                        .when(managed, |el| el.bg(crate::theme::ink(0.08)))
+                        .hover(|s| widgets::ghost_hover(theme, s))
+                        .on_click(cx.listener(|page, _, _, cx| {
+                            page.connection_existing = Some(false);
+                            page.connection_message = None;
+                            cx.notify();
+                        }))
+                        .child("Managed local"),
+                )
+                .child(
+                    widgets::ghost_action(theme)
+                        .id("opencode-existing")
+                        .when(!managed, |el| el.bg(crate::theme::ink(0.08)))
+                        .hover(|s| widgets::ghost_hover(theme, s))
+                        .on_click(cx.listener({
+                            let url = url.clone();
+                            move |page, _, window, cx| {
+                                if url.read(cx).value().trim().is_empty() {
+                                    url.update(cx, |input, cx| {
+                                        input.set_value("http://127.0.0.1:49374", window, cx)
+                                    });
+                                }
+                                page.connection_existing = Some(true);
+                                page.connection_message = None;
+                                cx.notify();
+                            }
+                        }))
+                        .child("Existing server"),
+                ),
+        );
+        if !managed {
+            card = card
+                .child(div().mt(px(12.0)).child(widgets::field_label(theme, "Server URL (localhost, 127.0.0.1, or ::1)"))
+                    .child(popover::dialog_field(Input::new(&url).into_any_element())
+                        .track_focus(&url.focus_handle(cx))
+                        .focus(|style| style.border_color(theme.accent))
+                        .id("opencode-server-url").role(gpui::Role::UrlInput).aria_label("OpenCode server URL")))
+                .child(div().mt(px(10.0)).child(widgets::field_label(theme, "Username"))
+                    .child(popover::dialog_field(Input::new(&username).into_any_element())
+                        .track_focus(&username.focus_handle(cx))
+                        .focus(|style| style.border_color(theme.accent))
+                        .id("opencode-username").role(gpui::Role::TextInput).aria_label("OpenCode username")))
+                .child(div().mt(px(10.0)).child(widgets::field_label(theme, "Password"))
+                    .child(popover::dialog_field(Input::new(&password).into_any_element())
+                        .track_focus(&password.focus_handle(cx))
+                        .focus(|style| style.border_color(theme.accent))
+                        .id("opencode-password").role(gpui::Role::PasswordInput).aria_label("OpenCode password")))
+                .child(div().mt(px(8.0)).child(if self.connection_clear_password {
+                    "Saved password will be cleared when you save."
+                } else if settings.has_password {
+                    "A password is saved on this execution device. Leave this field blank to keep it."
+                } else {
+                    "No password is saved."
+                }))
+                .when(settings.has_password, |card| {
+                    card.child(
+                        widgets::ghost_action(theme)
+                            .id("opencode-clear-password")
+                            .mt(px(8.0))
+                            .hover(|s| widgets::ghost_hover(theme, s))
+                            .on_click(cx.listener({
+                                let password = password.clone();
+                                move |page, _, window, cx| {
+                                    password.update(cx, |input, cx| {
+                                        input.set_value("", window, cx)
+                                    });
+                                    page.connection_clear_password =
+                                        !page.connection_clear_password;
+                                    cx.notify();
+                                }
+                            }))
+                            .child(if self.connection_clear_password {
+                                "Keep saved password"
+                            } else {
+                                "Clear saved password"
+                            }),
+                    )
+                });
+        }
+        card = card.child(widgets::page_subtitle(theme,
+            "The server must run on the selected execution device so project and attachment paths refer to the same filesystem."));
+        if let Some(message) = &self.connection_message {
+            card = card.child(div().mt(px(8.0)).child(message.clone()));
+        }
+        card.child(
+            div()
+                .mt(px(12.0))
+                .flex()
+                .flex_row()
+                .gap(px(8.0))
+                .when(!managed, |row| {
+                    row.child(
+                        widgets::ghost_action(theme)
+                            .id("opencode-test")
+                            .border_1()
+                            .border_color(theme.border)
+                            .hover(|s| widgets::ghost_hover(theme, s))
+                            .when(self.connection_busy, |el| el.opacity(0.5))
+                            .when(!self.connection_busy, |el| {
+                                el.on_click(
+                                    cx.listener(|page, _, _, cx| page.submit_connection(false, cx)),
+                                )
+                            })
+                            .child(if self.connection_busy {
+                                "Working…"
+                            } else {
+                                "Test connection"
+                            }),
+                    )
+                })
+                .child(
+                    widgets::ghost_action(theme)
+                        .id("opencode-save")
+                        .bg(theme.text)
+                        .text_color(theme.on_solid)
+                        .hover(|s| s.bg(theme.text.opacity(0.86)))
+                        .when(self.connection_busy, |el| el.opacity(0.5))
+                        .when(!self.connection_busy, |el| {
+                            el.on_click(
+                                cx.listener(|page, _, _, cx| page.submit_connection(true, cx)),
+                            )
+                        })
+                        .child("Save"),
+                ),
+        )
+        .into_any_element()
     }
 
     /// Flip one harness on the target device. The reply carries the device's
@@ -1020,7 +1390,7 @@ impl popover::ScrollRailHost for HarnessesPage {
 }
 
 impl Render for HarnessesPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let body: gpui::AnyElement = match &self.harnesses {
             Loadable::Idle | Loadable::Loading => widgets::section_card(&theme)
@@ -1063,6 +1433,7 @@ impl Render for HarnessesPage {
             .map(|message| widgets::error_strip(&theme, message).into_any_element());
         let switcher = self.render_device_switcher(&theme, cx);
         let titles = self.render_titles(&theme, cx);
+        let connection = self.render_connection(window, &theme, cx);
         let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
 
         div()
@@ -1099,6 +1470,7 @@ impl Render for HarnessesPage {
                             )
                             .children(error)
                             .child(body)
+                            .child(connection)
                             .child(titles),
                     ),
             )

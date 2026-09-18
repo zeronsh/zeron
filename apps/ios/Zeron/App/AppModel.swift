@@ -58,6 +58,7 @@ final class AppModel {
     var workspace: WorkspaceStore?
     var demo: DemoDataset?
     var demoPinnedSessionIds: [String] = []
+    var opencodeConnectionGeneration: [String: Int] = [:]
     /// Graced connectivity truth — one stream every consumer inherits calm
     /// from (home pill, composer notice, Queued/Failed badges).
     let connectivity = ConnectivityCenter()
@@ -442,24 +443,37 @@ final class AppModel {
     /// Live model catalog from the selected execution device (the desktop's
     /// "catalog source = the device that runs the session" rule); static
     /// fallback when the device is unreachable.
-    func listModels(deviceId: String, harness: String) async -> [ModelInfo] {
+    func listModels(deviceId: String, harness: String, cwd: String? = nil) async -> ModelCatalog {
         if demo != nil {
             try? await Task.sleep(nanoseconds: 100_000_000)
-            return HarnessCatalog.models(for: harness)
+            return .loaded(HarnessCatalog.models(for: harness))
         }
-        if let live = await workspace?.listModels(deviceId: deviceId, harness: harness),
-           !live.isEmpty {
+        do {
+            guard let workspace else { throw RelayError.notConnected }
+            let live = try await workspace.listModels(deviceId: deviceId, harness: harness, cwd: cwd)
+            if harness == "opencode" { return .loaded(live) }
             let normalized = HarnessCatalog.normalize(harness: harness, models: live)
             if !normalized.isEmpty {
                 _ = DocDisk.saveModels(normalized, deviceId: deviceId, harness: harness)
-                return normalized
+                return .loaded(normalized)
             }
+        } catch {
+            if harness == "opencode" { return .failed(error.localizedDescription) }
         }
         if let cached = DocDisk.loadModels(deviceId: deviceId, harness: harness),
            !cached.isEmpty {
-            return cached
+            return .loaded(cached)
         }
-        return HarnessCatalog.models(for: harness)
+        return .loaded(HarnessCatalog.models(for: harness))
+    }
+
+    func listAgents(deviceId: String, cwd: String?) async -> Result<[AgentInfo], RelayError> {
+        do {
+            guard let workspace else { throw RelayError.notConnected }
+            return .success(try await workspace.listAgents(deviceId: deviceId, cwd: cwd))
+        } catch {
+            return .failure((error as? RelayError) ?? .rpc(error.localizedDescription))
+        }
     }
 
     /// Refs of the space's repo (git spaces only).

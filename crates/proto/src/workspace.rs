@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 /// builds may share a semver with upstream while exposing a different RPC and
 /// document surface.
 pub mod capabilities {
+    pub const OPENCODE_AGENT_SELECTION_V1: &str = "opencode-agent-selection-v1";
     pub const MESSAGE_QUEUE_V1: &str = "message-queue-v1";
     pub const MESSAGE_QUEUE_ACTIONS_V1: &str = "message-queue-actions-v1";
     pub const MESSAGE_QUEUE_ATTACHMENTS_V1: &str = "message-queue-attachments-v1";
@@ -14,6 +15,7 @@ pub mod capabilities {
     pub const MESSAGE_QUEUE_EDIT_LEASE_V1: &str = "message-queue-edit-lease-v1";
 
     pub const CURRENT: &[&str] = &[
+        OPENCODE_AGENT_SELECTION_V1,
         MESSAGE_QUEUE_V1,
         MESSAGE_QUEUE_ACTIONS_V1,
         MESSAGE_QUEUE_ATTACHMENTS_V1,
@@ -92,6 +94,7 @@ mod tests {
                 "workspaceScope": "local",
                 "cursorSdkVersion": "1.0.31",
                 "capabilities": [
+                    "opencode-agent-selection-v1",
                     "message-queue-v1",
                     "message-queue-actions-v1",
                     "message-queue-attachments-v1",

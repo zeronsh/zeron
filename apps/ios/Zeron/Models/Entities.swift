@@ -31,6 +31,7 @@ enum EngineCapability {
     static let messageQueueAttachmentsV1 = "message-queue-attachments-v1"
     static let messageQueueCleanAttachmentTextV1 = "message-queue-clean-attachment-text-v1"
     static let messageQueueEditLeaseV1 = "message-queue-edit-lease-v1"
+    static let opencodeAgentSelectionV1 = "opencode-agent-selection-v1"
 }
 
 /// proto/src/lib.rs version_triple: parse a leading major.minor.patch,
@@ -66,6 +67,7 @@ struct Space: Identifiable, Hashable {
 struct ChatConfig: Hashable, Codable {
     var harness: String
     var model: String?
+    var agent: String? = nil
     var reasoning: String?
     /// Harness-specific option picks (option id → choice id, proto
     /// `ChatConfig.model_options`). Round-tripped so a mobile config edit
@@ -362,6 +364,7 @@ struct RunRequest: Codable {
     /// still syncing.
     var harness: String?
     var model: String?
+    var agent: String? = nil
     var reasoning: String?
     var modelOptions: [String: JSONValue] = [:]
     var cwd: String
@@ -378,6 +381,33 @@ struct RunRequest: Codable {
     /// Worktree for the host to materialize at drain time (PR #159). Omitted
     /// from the JSON when nil, so old hosts see the legacy shape.
     var worktree: WorktreeSpec?
+}
+
+struct OpencodeConnectionSettings: Decodable {
+    let baseUrl: String?
+    let username: String
+    let hasPassword: Bool
+}
+
+struct OpencodeConnectionTestResult: Decodable {
+    let version: String
+}
+
+struct OpencodeConnectionUpdate {
+    let baseUrl: String?
+    let username: String
+    let password: String?
+    let clearPassword: Bool
+
+    var params: [String: Any] {
+        var result: [String: Any] = [
+            "baseUrl": baseUrl as Any? ?? NSNull(),
+            "username": username,
+            "clearPassword": clearPassword,
+        ]
+        if let password { result["password"] = password }
+        return result
+    }
 }
 
 enum SessionCommandPayload {

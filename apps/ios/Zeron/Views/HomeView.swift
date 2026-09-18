@@ -21,6 +21,7 @@ struct HomeView: View {
     @State private var path: [Route] = []
     @State private var showNewSpace = false
     @State private var showProjectlessDevices = false
+    @State private var showOpencodeConnection = false
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
 
@@ -106,6 +107,7 @@ struct HomeView: View {
                         if model.demo != nil {
                             Text("Demo mode")
                         }
+                        Button("OpenCode connection") { showOpencodeConnection = true }
                         Button("Sign out", role: .destructive) { model.signOut() }
                     } label: {
                         Image(systemName: "person.circle")
@@ -122,6 +124,9 @@ struct HomeView: View {
                     spaceFilter = ""
                     path.append(.newSession(.projectless(deviceId: deviceId)))
                 }
+            }
+            .sheet(isPresented: $showOpencodeConnection) {
+                OpenCodeConnectionSheet()
             }
             .task(id: model.overviewChats.map(\.id).joined()) {
                 model.preloadSessions()

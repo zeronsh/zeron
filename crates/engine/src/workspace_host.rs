@@ -1110,6 +1110,37 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_config(chat_id, config))?)
     }
 
+    /// Update only the selected agent under the registry lock. Harnesses can
+    /// change the effective agent while a turn is running; keeping this a
+    /// partial mutation avoids clobbering a concurrent model/reasoning edit.
+    pub fn set_chat_agent(&self, chat_id: &str, agent: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| {
+            let Some(mut config) = doc.chat(chat_id)?.and_then(|chat| chat.config) else {
+                return Ok(false);
+            };
+            config.agent = Some(agent.to_owned());
+            doc.set_chat_config(chat_id, &config)
+        })?)
+    }
+
+    /// Model and variant are one server selection. Preserve the remaining
+    /// config fields, including an agent change delivered just before this.
+    pub fn set_chat_model(
+        &self,
+        chat_id: &str,
+        model: &str,
+        reasoning: Option<zeron_proto::ReasoningLevel>,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| {
+            let Some(mut config) = doc.chat(chat_id)?.and_then(|chat| chat.config) else {
+                return Ok(false);
+            };
+            config.model = Some(model.to_owned());
+            config.reasoning = reasoning;
+            doc.set_chat_config(chat_id, &config)
+        })?)
+    }
+
     /// Tombstone: removes the chats (and session-status) row; the per-chat session
     /// doc remains untouched.
     pub fn delete_chat(&self, chat_id: &str) -> Result<bool, EngineError> {

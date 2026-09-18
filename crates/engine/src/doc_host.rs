@@ -2548,12 +2548,26 @@ impl DocHost {
         attachments: Vec<String>,
         hold_for_turn_end: bool,
     ) -> Result<String, EngineError> {
+        self.queue_message_with_agent(chat_id, text, attachments, hold_for_turn_end, None, false)
+    }
+
+    pub fn queue_message_with_agent(
+        &self,
+        chat_id: &str,
+        text: &str,
+        attachments: Vec<String>,
+        hold_for_turn_end: bool,
+        agent: Option<String>,
+        agent_snapshot: bool,
+    ) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
         let id = new_id();
         handle.doc.push_queued(&QueuedMessage {
             id: id.clone(),
             text: text.to_string(),
             attachments,
+            agent,
+            agent_snapshot,
             hold_for_turn_end,
             issued_by: self.inner.config.device_id.clone(),
             issued_at: now_ms(),
@@ -3233,6 +3247,9 @@ impl DocHost {
         request.resume = None; // dispatch re-derives the harness session
         request.attachments = item.attachments.clone();
         let harness = self.harness_for_request(chat_id, &request);
+        if harness == zeron_proto::HarnessId::Opencode && item.agent_snapshot {
+            request.agent = item.agent.clone();
+        }
         self.dispatch_with_source_context(&sessions, chat_id, harness, request, Some(message_id))
             .await?;
         Ok(())
@@ -4252,6 +4269,7 @@ impl DocHost {
                     let config = zeron_proto::ChatConfig {
                         harness,
                         model: request.model.clone(),
+                        agent: request.agent.clone(),
                         reasoning: request.reasoning,
                         model_options: request.model_options.clone(),
                         sandbox: request.sandbox,
@@ -4471,6 +4489,8 @@ impl DocHost {
             id: message_id.map(str::to_string).unwrap_or_else(new_id),
             text: prompt.to_string(),
             attachments: Vec::new(),
+            agent: None,
+            agent_snapshot: false,
             hold_for_turn_end: false,
             issued_by: self.inner.config.device_id.clone(),
             issued_at: now_ms(),
@@ -4659,6 +4679,7 @@ impl DocHost {
             prompt: prompt.to_string(),
             harness: config.as_ref().map(|c| c.harness),
             model: config.as_ref().and_then(|c| c.model.clone()),
+            agent: config.as_ref().and_then(|c| c.agent.clone()),
             reasoning: config.as_ref().and_then(|c| c.reasoning),
             model_options: config
                 .as_ref()

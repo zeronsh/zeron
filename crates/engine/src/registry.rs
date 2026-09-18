@@ -14,7 +14,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use serde::{Deserialize, Serialize};
 
 use zeron_harness::{Harness, HarnessError, mock::MockHarness};
-use zeron_proto::{AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
+use zeron_proto::{
+    AgentEvent, DoneStatus, HarnessId, OpencodeConnectionSettings, OpencodeConnectionUpdate,
+    ReasoningLevel, SteeringMode,
+};
 
 /// What `ListHarnesses` reports per harness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +107,26 @@ struct HarnessPrefsFile {
     enabled: Option<Vec<HarnessId>>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredOpencodeConnection {
+    base_url: Option<String>,
+    username: String,
+    password: Option<String>,
+}
+
+impl StoredOpencodeConnection {
+    fn from_connection(connection: Option<&zeron_harness::OpencodeConnection>) -> Self {
+        Self {
+            base_url: connection.map(|c| c.base_url.clone()),
+            username: connection
+                .map(|c| c.username.clone())
+                .unwrap_or_else(|| "opencode".into()),
+            password: connection.and_then(|c| c.password.clone()),
+        }
+    }
+}
+
 /// Per-device automatic session title preferences.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -135,6 +158,8 @@ pub struct HarnessRegistry {
     prefs: Mutex<HarnessPrefsFile>,
     /// Where the prefs persist; `None` (tests, bare registries) skips writes.
     prefs_path: Mutex<Option<PathBuf>>,
+    opencode_path: Mutex<Option<PathBuf>>,
+    opencode_connection: Mutex<Option<zeron_harness::OpencodeConnection>>,
 }
 
 impl Default for HarnessRegistry {
@@ -150,6 +175,8 @@ impl HarnessRegistry {
             order: Mutex::new(Vec::new()),
             prefs: Mutex::new(HarnessPrefsFile::default()),
             prefs_path: Mutex::new(None),
+            opencode_path: Mutex::new(None),
+            opencode_connection: Mutex::new(None),
         }
     }
 
@@ -320,6 +347,186 @@ impl HarnessRegistry {
         if self.slots().insert(id, Slot::Ready(harness)).is_none() {
             self.order().push(id);
         }
+    }
+
+    /// Load the execution device's private OpenCode settings before any slot resolves.
+    pub fn load_opencode_connection(&self, data_dir: &Path) -> Result<(), crate::EngineError> {
+        let path = data_dir.join("opencode-connection.json");
+        let previously_loaded = self
+            .opencode_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some();
+        *self
+            .opencode_connection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        let mut saved = true;
+        let connection = match std::fs::read(&path) {
+            Ok(bytes) => {
+                let stored =
+                    serde_json::from_slice::<StoredOpencodeConnection>(&bytes).map_err(|e| {
+                        crate::EngineError::Other(format!("invalid OpenCode settings: {e}"))
+                    })?;
+                // Older builds allowed LAN servers. Load those settings so the
+                // app can start and the user can replace them; the harness
+                // itself returns the actionable loopback-only error on use.
+                self.prepare_opencode_connection_inner(
+                    OpencodeConnectionUpdate {
+                        base_url: stored.base_url,
+                        username: stored.username,
+                        password: stored.password,
+                        clear_password: false,
+                    },
+                    false,
+                )?
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                saved = false;
+                None
+            }
+            Err(err) => return Err(err.into()),
+        };
+        *self
+            .opencode_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(path);
+        *self
+            .opencode_connection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = connection.clone();
+        if saved || previously_loaded {
+            self.install_opencode_slot(connection);
+        }
+        Ok(())
+    }
+
+    pub fn opencode_connection(&self) -> Option<zeron_harness::OpencodeConnection> {
+        self.opencode_connection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn opencode_connection_view(&self) -> OpencodeConnectionSettings {
+        let connection = self.opencode_connection();
+        OpencodeConnectionSettings {
+            base_url: connection.as_ref().map(|c| c.base_url.clone()),
+            username: connection
+                .as_ref()
+                .map(|c| c.username.clone())
+                .unwrap_or_else(|| "opencode".into()),
+            has_password: connection.as_ref().is_some_and(|c| c.password.is_some()),
+        }
+    }
+
+    pub fn prepare_opencode_connection(
+        &self,
+        update: OpencodeConnectionUpdate,
+    ) -> Result<Option<zeron_harness::OpencodeConnection>, crate::EngineError> {
+        self.prepare_opencode_connection_inner(update, true)
+    }
+
+    fn prepare_opencode_connection_inner(
+        &self,
+        update: OpencodeConnectionUpdate,
+        require_loopback: bool,
+    ) -> Result<Option<zeron_harness::OpencodeConnection>, crate::EngineError> {
+        let Some(base_url) = update.base_url else {
+            return Ok(None);
+        };
+        let url = zeron_harness::opencode::parse_opencode_url(&base_url)
+            .map_err(crate::EngineError::Other)?;
+        if require_loopback && !zeron_harness::opencode::opencode_url_is_loopback(&url) {
+            return Err(crate::EngineError::Other(
+                zeron_harness::opencode::OPENCODE_LOOPBACK_ONLY.into(),
+            ));
+        }
+        // Url validates the explicit port's range; normalize path/trailing slash without discarding a proxy prefix.
+        let password = if update.clear_password {
+            None
+        } else {
+            update
+                .password
+                .or_else(|| self.opencode_connection().and_then(|c| c.password))
+        };
+        if update.username.is_empty() && password.is_some() {
+            return Err(crate::EngineError::Other(
+                "OpenCode username is required when a password is set".into(),
+            ));
+        }
+        Ok(Some(zeron_harness::OpencodeConnection {
+            base_url: url.to_string().trim_end_matches('/').to_string(),
+            username: update.username,
+            password,
+        }))
+    }
+
+    pub fn save_opencode_connection(
+        &self,
+        connection: Option<zeron_harness::OpencodeConnection>,
+    ) -> Result<(), crate::EngineError> {
+        let path = self
+            .opencode_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| {
+                crate::EngineError::Other("OpenCode settings path is unavailable".into())
+            })?;
+        // A managed-local selection also persists, so an old saved connection cannot reappear on restart.
+        let bytes = serde_json::to_vec(&StoredOpencodeConnection::from_connection(
+            connection.as_ref(),
+        ))
+        .map_err(|e| crate::EngineError::Other(e.to_string()))?;
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".opencode-connection-")
+            .tempfile_in(path.parent().expect("settings path has parent"))?;
+        {
+            use std::io::Write;
+            tmp.write_all(&bytes)?;
+            tmp.as_file().sync_all()?;
+        }
+        tmp.persist(&path).map_err(|e| e.error)?;
+        *self
+            .opencode_connection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = connection.clone();
+        self.install_opencode_slot(connection);
+        Ok(())
+    }
+
+    fn install_opencode_slot(&self, connection: Option<zeron_harness::OpencodeConnection>) {
+        let descriptor = HarnessDescriptor {
+            id: HarnessId::Opencode,
+            name: "OpenCode".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::TurnBoundary,
+            reasoning_levels: vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+                ReasoningLevel::Max,
+            ],
+            installed: true,
+            enabled: None,
+        };
+        let installed_connection = connection.clone();
+        self.register_lazy(
+            descriptor,
+            Box::new(move || {
+                installed_connection.is_some() || zeron_harness::OpencodeHarness::new().installed()
+            }),
+            Box::new(move || {
+                Ok(Arc::new(match connection.clone() {
+                    Some(connection) => {
+                        zeron_harness::OpencodeHarness::new().with_connection(connection)
+                    }
+                    None => zeron_harness::OpencodeHarness::new(),
+                }) as Arc<dyn Harness>)
+            }),
+        );
     }
 
     /// Register a slot resolved on first `resolve` (the factory result is
@@ -586,25 +793,7 @@ pub fn default_registry() -> HarnessRegistry {
     // lazy pattern: the static descriptor mirrors OpencodeHarness exactly.
     // Turn-boundary steering; the effort ladder rides model VARIANTS (the
     // run sends the first advertised variant id for the picked level).
-    registry.register_lazy(
-        HarnessDescriptor {
-            id: HarnessId::Opencode,
-            name: "OpenCode".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: vec![
-                ReasoningLevel::Low,
-                ReasoningLevel::Medium,
-                ReasoningLevel::High,
-                ReasoningLevel::XHigh,
-                ReasoningLevel::Max,
-            ],
-            installed: true,
-            enabled: None,
-        },
-        Box::new(|| zeron_harness::OpencodeHarness::new().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::OpencodeHarness::new()) as Arc<dyn Harness>)),
-    );
+    registry.install_opencode_slot(None);
     // antigravity over acp (google's agy_acp_server), same lazy pattern: the
     // static descriptor mirrors AcpHarness::antigravity() exactly. No steering
     // extension (turn boundaries), and effort is baked into the model ids, so
@@ -1094,5 +1283,95 @@ mod title_tests {
         let prefs: HarnessPrefsFile = serde_json::from_str(r#"{"disabled":["codex"]}"#).unwrap();
         assert_eq!(prefs.titles, TitleSettings::default());
         assert_eq!(prefs.disabled, vec![HarnessId::Codex]);
+    }
+}
+
+#[cfg(test)]
+mod opencode_settings_tests {
+    use super::*;
+
+    #[test]
+    fn connection_is_private_redacted_and_reloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_opencode_connection(dir.path()).unwrap();
+        let connection = registry
+            .prepare_opencode_connection(OpencodeConnectionUpdate {
+                base_url: Some("https://[::1]:49374/proxy".into()),
+                username: "user".into(),
+                password: Some("test-secret".into()),
+                clear_password: false,
+            })
+            .unwrap();
+        registry.save_opencode_connection(connection).unwrap();
+        let view = registry.opencode_connection_view();
+        assert_eq!(view.base_url.as_deref(), Some("https://[::1]:49374/proxy"));
+        assert!(view.has_password);
+        assert!(
+            !serde_json::to_string(&view)
+                .unwrap()
+                .contains("test-secret")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let file = dir.path().join("opencode-connection.json");
+            assert_eq!(
+                std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_opencode_connection(dir.path()).unwrap();
+        assert_eq!(
+            reloaded.opencode_connection().unwrap().password.as_deref(),
+            Some("test-secret")
+        );
+        let kept = reloaded
+            .prepare_opencode_connection(OpencodeConnectionUpdate {
+                base_url: view.base_url.clone(),
+                username: "other".into(),
+                password: None,
+                clear_password: false,
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.password.as_deref(), Some("test-secret"));
+        let cleared = reloaded
+            .prepare_opencode_connection(OpencodeConnectionUpdate {
+                base_url: view.base_url.clone(),
+                username: "user".into(),
+                password: None,
+                clear_password: true,
+            })
+            .unwrap()
+            .unwrap();
+        assert!(cleared.password.is_none());
+        assert!(
+            reloaded
+                .prepare_opencode_connection(OpencodeConnectionUpdate {
+                    base_url: Some("https://user:pass@example.com".into()),
+                    username: "user".into(),
+                    password: None,
+                    clear_password: false,
+                })
+                .is_err()
+        );
+        assert!(
+            reloaded
+                .prepare_opencode_connection(OpencodeConnectionUpdate {
+                    base_url: Some("http://192.168.1.42:4096".into()),
+                    username: "opencode".into(),
+                    password: None,
+                    clear_password: false,
+                })
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("localhost")
+        );
+        reloaded.save_opencode_connection(None).unwrap();
+        reloaded.load_opencode_connection(dir.path()).unwrap();
+        assert!(reloaded.opencode_connection().is_none());
     }
 }

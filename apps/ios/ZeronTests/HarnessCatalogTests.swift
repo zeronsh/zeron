@@ -16,7 +16,7 @@ final class HarnessCatalogTests: XCTestCase {
 
     func testDefaultReasoningMatchesDesktopPreference() {
         let astra = HarnessCatalog.defaultModel(for: "codex")
-        XCTAssertEqual(HarnessCatalog.defaultReasoning(for: astra), "high")
+        XCTAssertEqual(astra.flatMap(HarnessCatalog.defaultReasoning), "high")
 
         let short = ModelInfo(id: "short", label: "Short", description: nil,
                               reasoningLevels: ["low", "medium"])
@@ -24,7 +24,7 @@ final class HarnessCatalogTests: XCTestCase {
     }
 
     func testChoiceFallsBackToAdvertisedDefault() {
-        let option = HarnessCatalog.defaultModel(for: "codex").options[0]
+        let option = HarnessCatalog.defaultModel(for: "codex")!.options[0]
         XCTAssertEqual(HarnessCatalog.selectedChoice(for: option, selectedId: "fast").label, "Fast")
         XCTAssertEqual(HarnessCatalog.selectedChoice(for: option, selectedId: "stale").id, "default")
     }
@@ -68,15 +68,53 @@ final class HarnessCatalogTests: XCTestCase {
     func testResolvePreservesUnknownConfiguredModel() {
         let catalog = HarnessCatalog.models(for: "claude-code")
         XCTAssertEqual(HarnessCatalog.resolve(modelId: "claude-opus-5[1m]", in: catalog,
-                                              harness: "claude-code").id, "claude-opus-5")
+                                              harness: "claude-code")?.id, "claude-opus-5")
         let unknown = HarnessCatalog.resolve(modelId: "foo-9", in: catalog, harness: "claude-code")
-        XCTAssertEqual(unknown.id, "foo-9")
-        XCTAssertEqual(unknown.label, "foo-9")
+        XCTAssertEqual(unknown?.id, "foo-9")
+        XCTAssertEqual(unknown?.label, "foo-9")
     }
 
     func testClaudeCatalogStartsWithFable51AndContextWindow() {
         let first = HarnessCatalog.models(for: "claude-code").first
         XCTAssertEqual(first?.id, "claude-fable-5-1")
         XCTAssertEqual(first?.options.first?.id, "contextWindow")
+    }
+
+    func testOpenCodeHasNoInventedFallbackModels() {
+        XCTAssertTrue(HarnessCatalog.models(for: "opencode").isEmpty)
+        XCTAssertNil(HarnessCatalog.defaultModel(for: "opencode"))
+        XCTAssertEqual(ModelCatalog.loaded([]).models.count, 0)
+        XCTAssertEqual(ModelCatalog.failed("offline").models.count, 0)
+    }
+
+    func testCustomAgentAndModelIdsArePreserved() throws {
+        let agent = try JSONDecoder().decode(AgentInfo.self,
+            from: Data(#"{"id":"team/reviewer","label":"Reviewer","description":"Checks changes"}"#.utf8))
+        XCTAssertEqual(agent.id, "team/reviewer")
+        XCTAssertEqual(agent.description, "Checks changes")
+        let live = ModelCatalog.loaded([
+            ModelInfo(id: "custom/provider/model", label: "Custom model", description: nil,
+                      reasoningLevels: [])
+        ])
+        XCTAssertEqual(live.models.map(\.id), ["custom/provider/model"])
+    }
+
+    func testOpenCodeSelectionKeepsExactIdOnlyInItsScope() {
+        let early = [ModelInfo(id: "provider/early", label: "Early", description: nil,
+                               reasoningLevels: [])]
+        let selected = "custom/provider/model"
+        XCTAssertEqual(HarnessCatalog.selectedOpenCodeModelId(
+            models: early, storedId: selected, storedScope: "device/a/0", currentScope: "device/a/0"),
+            selected)
+        XCTAssertEqual(HarnessCatalog.selectedOpenCodeModelId(
+            models: early, storedId: selected, storedScope: "device/a/0", currentScope: "device/b/0"),
+            "provider/early")
+        XCTAssertNil(HarnessCatalog.selectedOpenCodeModelId(
+            models: [], storedId: selected, storedScope: "device/a/0", currentScope: "device/a/1"))
+    }
+
+    func testOldHostDoesNotAdvertiseAgentSelection() {
+        let old = DeviceRow(id: "old", name: "Old", platform: "linux", capabilities: [])
+        XCTAssertFalse(old.supports(EngineCapability.opencodeAgentSelectionV1))
     }
 }

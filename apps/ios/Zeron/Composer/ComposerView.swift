@@ -257,10 +257,14 @@ struct ComposerView: View {
     @State private var uploadProgress: Double?
     @State private var uploadError: String?
     @State private var showModelPicker = false
+    @State private var showAgentPicker = false
     @State private var showTraitPicker = false
     @State private var showOptionPicker: ModelOptionInfo?
     /// Live catalog for the chat's harness from its space's device.
-    @State private var catalogs: [String: [ModelInfo]] = [:]
+    @State private var catalogs: [String: ModelCatalog] = [:]
+    @State private var agents: [AgentInfo] = []
+    @State private var agentsLoaded = false
+    @State private var agentError: String?
     @State private var queueEdit: QueueComposerEdit?
     private var editingQueuedId: String? { queueEdit?.lease.rowId }
     private var queueEditLease: QueueEditLease? { queueEdit?.lease }
@@ -271,17 +275,24 @@ struct ComposerView: View {
     @State private var queueEditorVisible = false
 
     private var harness: String { chat.config?.harness ?? "claude-code" }
+    private var catalogCwd: String? { chat.cwd == "~" ? nil : chat.cwd }
 
     private var models: [ModelInfo] {
-        catalogs[harness] ?? HarnessCatalog.models(for: harness)
+        catalogs[harness]?.models ?? HarnessCatalog.models(for: harness)
     }
 
-    private var currentModel: ModelInfo {
-        HarnessCatalog.resolve(modelId: chat.config?.model, in: models, harness: harness)
+    private var currentModel: ModelInfo? {
+        if harness == "opencode", let stored = chat.config?.model {
+            return models.first { $0.id == stored }
+        }
+        return HarnessCatalog.resolve(modelId: chat.config?.model, in: models, harness: harness)
     }
 
     private var currentReasoning: String? {
-        guard !currentModel.reasoningLevels.isEmpty else { return nil }
+        // Live OpenCode selections are authoritative, including a cleared
+        // variant or a level missing from a partially loaded catalog.
+        if harness == "opencode" { return chat.config?.reasoning }
+        guard let currentModel, !currentModel.reasoningLevels.isEmpty else { return nil }
         if let r = chat.config?.reasoning, currentModel.reasoningLevels.contains(r) { return r }
         return HarnessCatalog.defaultReasoning(for: currentModel)
     }
@@ -298,6 +309,10 @@ struct ComposerView: View {
         // the graced stream (1Hz only while something is degraded/pending).
         let _ = model.connectivity.pulse
         return VStack(spacing: 6) {
+            if harness == "opencode", case .some(.failed(let error)) = catalogs[harness] {
+                Text(error).font(Theme.sans(12)).foregroundStyle(Theme.danger)
+                    .padding(.horizontal, 24)
+            }
             if let error = uploadError ?? store.queueActionError {
                 Text(error)
                     .font(Theme.sans(12))
@@ -361,7 +376,7 @@ struct ComposerView: View {
                 allowEmptySend: editingQueuedId != nil,
                 showStop: runLive,
                 busy: uploading || queueEditBusy,
-                keepExpanded: showModelPicker || showTraitPicker || showOptionPicker != nil,
+                keepExpanded: showModelPicker || showAgentPicker || showTraitPicker || showOptionPicker != nil,
                 onSend: send,
                 onStop: { store.sendInterrupt() },
                 onAdvanceQueue: advanceQueue,
@@ -377,15 +392,20 @@ struct ComposerView: View {
                    !branch.isEmpty {
                     BranchContextChip(branch: branch)
                 }
-                ComposerChip(label: currentModel.label, badgeHarness: harness) {
+                ComposerChip(label: currentModel?.label ?? chat.config?.model ?? "Select model", badgeHarness: harness) {
                     showModelPicker = true
+                }
+                if harness == "opencode", model.workspace?.deviceSupports(chat.deviceId, EngineCapability.opencodeAgentSelectionV1) == true {
+                    ComposerChip(label: agents.first(where: { $0.id == chat.config?.agent })?.label ?? chat.config?.agent ?? "Server default / current") {
+                        showAgentPicker = true
+                    }
                 }
                 if let currentReasoning {
                     ComposerChip(label: HarnessCatalog.reasoningLabel(currentReasoning)) {
                         showTraitPicker = true
                     }
                 }
-                ForEach(currentModel.options) { option in
+                ForEach(currentModel?.options ?? []) { option in
                     ComposerChip(label: currentChoice(for: option).label) {
                         showOptionPicker = option
                     }
@@ -402,7 +422,7 @@ struct ComposerView: View {
             ModelPickerSheet(
                 harness: .constant(harness),
                 modelId: Binding(
-                    get: { currentModel.id },
+                    get: { currentModel?.id ?? chat.config?.model ?? "" },
                     set: { writeConfig(model: $0, reasoning: chat.config?.reasoning) }
                 ),
                 reasoning: Binding(
@@ -410,8 +430,21 @@ struct ComposerView: View {
                     set: { writeConfig(model: chat.config?.model, reasoning: $0) }
                 ),
                 lockedHarness: true,
-                catalogs: catalogs
+                catalogs: catalogs,
+                refreshKey: "\(chat.id)/\(chat.deviceId)/\(catalogCwd ?? "")/\(model.opencodeConnectionGeneration[chat.deviceId, default: 0])",
+                onRefresh: { _ in await refreshModels() }
             )
+        }
+        .sheet(isPresented: $showAgentPicker) {
+            AgentPickerSheet(selected: Binding(
+                get: { chat.config?.agent },
+                set: { agent in
+                    var config = chat.config ?? ChatConfig(harness: harness, model: nil,
+                                                           reasoning: nil, sandbox: "workspace-write")
+                    config.agent = agent
+                    model.setChatConfig(chatId: chat.id, config: config)
+                }
+            ), agents: agents, error: agentError, onRefresh: { await refreshAgents() })
         }
         .sheet(isPresented: $showTraitPicker) {
             TraitPickerSheet(
@@ -419,7 +452,7 @@ struct ComposerView: View {
                     get: { currentReasoning },
                     set: { writeConfig(model: chat.config?.model, reasoning: $0) }
                 ),
-                levels: currentModel.reasoningLevels
+                levels: currentModel?.reasoningLevels ?? []
             )
         }
         .sheet(item: $showOptionPicker) { option in
@@ -428,10 +461,14 @@ struct ComposerView: View {
                 set: { writeOption(option: option, choiceId: $0) }
             ))
         }
-        .task(id: "\(chat.id)/\(chat.deviceId)/\(harness)") {
-            let catalog = await model.listModels(deviceId: chat.deviceId, harness: harness)
-            guard !Task.isCancelled else { return }
-            catalogs[harness] = catalog
+        .task(id: "\(chat.id)/\(chat.deviceId)/\(catalogCwd ?? "")/\(harness)/\(model.opencodeConnectionGeneration[chat.deviceId, default: 0])") {
+            catalogs = [:]
+            agents = []
+            agentsLoaded = false
+            await refreshModels()
+            if harness == "opencode", model.workspace?.deviceSupports(chat.deviceId, EngineCapability.opencodeAgentSelectionV1) == true {
+                await refreshAgents()
+            }
         }
         .task(id: queueEdit?.terminal == true ? nil : queueEditLease?.leaseId) {
             guard let lease = queueEditLease, queueEdit?.terminal != true else { return }
@@ -460,6 +497,29 @@ struct ComposerView: View {
         }
     }
 
+    @MainActor private func refreshModels() async {
+        let context = "\(chat.id)/\(chat.deviceId)/\(catalogCwd ?? "")/\(harness)/\(model.opencodeConnectionGeneration[chat.deviceId, default: 0])"
+        let catalog = await model.listModels(deviceId: chat.deviceId, harness: harness, cwd: catalogCwd)
+        guard !Task.isCancelled,
+              context == "\(chat.id)/\(chat.deviceId)/\(catalogCwd ?? "")/\(harness)/\(model.opencodeConnectionGeneration[chat.deviceId, default: 0])" else { return }
+        catalogs[harness] = catalog
+    }
+
+    @MainActor private func refreshAgents() async {
+        let context = "\(chat.id)/\(chat.deviceId)/\(catalogCwd ?? "")/\(model.opencodeConnectionGeneration[chat.deviceId, default: 0])"
+        switch await model.listAgents(deviceId: chat.deviceId, cwd: catalogCwd) {
+        case .success(let list):
+            guard !Task.isCancelled, context == "\(chat.id)/\(chat.deviceId)/\(catalogCwd ?? "")/\(model.opencodeConnectionGeneration[chat.deviceId, default: 0])" else { return }
+            agents = list
+            agentsLoaded = true
+            agentError = nil
+        case .failure(let error):
+            guard !Task.isCancelled, context == "\(chat.id)/\(chat.deviceId)/\(catalogCwd ?? "")/\(model.opencodeConnectionGeneration[chat.deviceId, default: 0])" else { return }
+            agentError = error.localizedDescription
+            agentsLoaded = false
+        }
+    }
+
     /// Merge a model/effort change into the chat's config row (LWW; the host
     /// picks it up on the next run dispatch). Compatible model options survive
     /// edits; changing model prunes traits the destination does not advertise.
@@ -484,7 +544,7 @@ struct ComposerView: View {
     }
 
     private func writeOption(option: ModelOptionInfo, choiceId: String) {
-        var config = chat.config ?? ChatConfig(harness: harness, model: currentModel.id,
+        var config = chat.config ?? ChatConfig(harness: harness, model: currentModel?.id,
                                                reasoning: currentReasoning,
                                                sandbox: "workspace-write")
         if choiceId == option.defaultChoice {
@@ -605,6 +665,17 @@ struct ComposerView: View {
         let submittedText = text
         let prompt = submittedText.trimmingCharacters(in: .whitespacesAndNewlines)
         let staged = attachments
+        let submittedChat = chat
+        if harness == "opencode", submittedChat.config?.agent != nil,
+           model.workspace?.deviceSupports(chat.deviceId, EngineCapability.opencodeAgentSelectionV1) != true {
+            uploadError = "Update this device's engine to use a selected OpenCode agent."
+            return
+        }
+        if harness == "opencode", agentsLoaded, let agent = submittedChat.config?.agent,
+           !agents.contains(where: { $0.id == agent }) {
+            uploadError = "This agent is no longer available. Refresh the agent list."
+            return
+        }
         guard !runLive || model.hostSupportsMessageQueue(chat, attachments: !staged.isEmpty) else {
             uploadError = "Update the chat's engine to queue messages during a response."
             return
@@ -612,7 +683,7 @@ struct ComposerView: View {
         guard !prompt.isEmpty || !staged.isEmpty else { return }
 
         if staged.isEmpty {
-            deliver(content: prompt, paths: [])
+            deliver(content: prompt, paths: [], submittedChat: submittedChat)
             clearDraft(matching: submittedText)
             return
         }
@@ -634,7 +705,7 @@ struct ComposerView: View {
                     path: UploadStash.pendingRef(uploadId: transfer.uploadId, name: transfer.name),
                     name: att.name, data: att.data)
             }
-            store.sendWithTransfers(prompt: prompt, chat: chat, live: runLive,
+            store.sendWithTransfers(prompt: prompt, chat: submittedChat, live: runLive,
                                     transfers: transfers)
             attachments = []
             clearDraft(matching: submittedText)
@@ -666,7 +737,8 @@ struct ComposerView: View {
                                                      name: att.name, data: att.data)
                     paths.append(path)
                 }
-                deliver(content: withAttachments(text: prompt, paths: paths), paths: paths)
+                deliver(content: withAttachments(text: prompt, paths: paths), paths: paths,
+                        submittedChat: submittedChat)
                 attachments = []
                 clearDraft(matching: submittedText)
             } catch {
@@ -675,15 +747,17 @@ struct ComposerView: View {
         }
     }
 
-    private func deliver(content: String, paths: [String]) {
+    private func deliver(content: String, paths: [String], submittedChat: Chat) {
         // All active-turn messages wait in the shared queue.
         if runLive {
             let queueText = model.hostSupportsCleanQueueAttachmentText(chat)
                 ? MessageQueue.visibleText(content, attachments: paths)
                 : content
-            store.enqueueMessage(text: queueText, attachments: paths, holdForTurnEnd: true)
+            store.enqueueMessage(text: queueText, attachments: paths,
+                                 agent: harness == "opencode" ? submittedChat.config?.agent : nil,
+                                 agentSnapshot: harness == "opencode", holdForTurnEnd: true)
         } else {
-            store.sendRun(prompt: content, chat: chat, attachments: paths)
+            store.sendRun(prompt: content, chat: submittedChat, attachments: paths)
         }
     }
 

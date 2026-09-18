@@ -45,6 +45,7 @@ async fn silent_npm_enoent_death_surfaces_decoded_error() {
     let request = RunRequest {
         prompt: "hi".into(),
         harness: None,
+        agent: None,
         model: None,
         reasoning: None,
         model_options: serde_json::Map::new(),

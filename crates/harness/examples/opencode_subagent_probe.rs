@@ -51,6 +51,7 @@ async fn main() {
     let request = RunRequest {
         prompt,
         harness: None,
+        agent: None,
         model: None,
         reasoning: None,
         model_options: serde_json::Map::new(),
