@@ -16,12 +16,14 @@ struct NewSessionView: View {
     // Sticky run config (the old app persisted these to prefs.db).
     @AppStorage("newSessionHarness") private var harness = "claude-code"
     @AppStorage("newSessionModel") private var storedModel = ""
+    @AppStorage("newSessionModelScope") private var storedModelScope = ""
     @AppStorage("newSessionReasoning") private var storedReasoning = ""
 
     @State private var draft = ""
     @State private var selectedHostId: String?
     @State private var showHostPicker = false
     @State private var showPicker = false
+    @State private var showAgentPicker = false
     @State private var showTraitPicker = false
     @State private var showOptionPicker: ModelOptionInfo?
     @State private var showRefPicker = false
@@ -34,7 +36,10 @@ struct NewSessionView: View {
     /// static pair until it loads.
     @State private var liveHarnesses: [HarnessInfo]?
     /// Live per-harness catalogs from the selected device (static fallback).
-    @State private var catalogs: [String: [ModelInfo]] = [:]
+    @State private var catalogs: [String: ModelCatalog] = [:]
+    @State private var agents: [AgentInfo] = []
+    @State private var agentError: String?
+    @State private var selectedAgent: String?
     @State private var optionSelections: [String: String] = [:]
     @State private var refs: [RepoRef] = []
     @State private var selectedRef: String?
@@ -54,6 +59,10 @@ struct NewSessionView: View {
 
     private var space: Space? { effectiveDestination.space(in: model.spaces) }
 
+    private var catalogCwd: String? {
+        checkoutKind == .local ? (selectedRefRow?.worktreePath ?? space?.path) : space?.path
+    }
+
     private var deviceId: String? {
         effectiveDestination.deviceId(spaces: model.spaces, devices: model.devices)
     }
@@ -70,14 +79,26 @@ struct NewSessionView: View {
     }
 
     private var models: [ModelInfo] {
-        catalogs[harness] ?? HarnessCatalog.models(for: harness)
+        catalogs[harness]?.models ?? HarnessCatalog.models(for: harness)
     }
 
-    private var selectedModel: ModelInfo {
-        models.first { $0.id == storedModel } ?? models[0]
+    private var modelScope: String {
+        "\(deviceId ?? "")/\(catalogCwd ?? "")/\(harness)/\(model.opencodeConnectionGeneration[deviceId ?? "", default: 0])"
+    }
+
+    private var requestedModelId: String? {
+        guard harness == "opencode" else { return models.first { $0.id == storedModel }?.id ?? models.first?.id }
+        return HarnessCatalog.selectedOpenCodeModelId(
+            models: models, storedId: storedModel, storedScope: storedModelScope,
+            currentScope: modelScope)
+    }
+
+    private var selectedModel: ModelInfo? {
+        models.first { $0.id == requestedModelId }
     }
 
     private var reasoning: String? {
+        guard let selectedModel else { return nil }
         if selectedModel.reasoningLevels.isEmpty { return nil }
         if selectedModel.reasoningLevels.contains(storedReasoning) { return storedReasoning }
         return HarnessCatalog.defaultReasoning(for: selectedModel)
@@ -90,13 +111,34 @@ struct NewSessionView: View {
     /// Only non-default picks ride the run, matching the desktop picker.
     private var resolvedModelOptions: [String: JSONValue] {
         var result: [String: JSONValue] = [:]
-        for option in selectedModel.options {
+        for option in selectedModel?.options ?? [] {
             let choice = selectedChoice(for: option)
             if choice.id != option.defaultChoice {
                 result[option.id] = .string(choice.id)
             }
         }
         return result
+    }
+
+    @MainActor private func refreshModels(harness target: String) async {
+        guard let deviceId else { return }
+        let context = "\(deviceId)/\(catalogCwd ?? "")/\(model.opencodeConnectionGeneration[deviceId, default: 0])"
+        let result = await model.listModels(deviceId: deviceId, harness: target, cwd: catalogCwd)
+        guard !Task.isCancelled, context == "\(self.deviceId ?? "")/\(catalogCwd ?? "")/\(model.opencodeConnectionGeneration[deviceId, default: 0])" else { return }
+        catalogs[target] = result
+    }
+
+    @MainActor private func refreshAgents(deviceId: String) async {
+        let context = "\(deviceId)/\(catalogCwd ?? "")/\(model.opencodeConnectionGeneration[deviceId, default: 0])"
+        switch await model.listAgents(deviceId: deviceId, cwd: catalogCwd) {
+        case .success(let list):
+            guard !Task.isCancelled, context == "\(self.deviceId ?? "")/\(catalogCwd ?? "")/\(model.opencodeConnectionGeneration[deviceId, default: 0])" else { return }
+            agents = list
+            agentError = nil
+        case .failure(let error):
+            guard !Task.isCancelled, context == "\(self.deviceId ?? "")/\(catalogCwd ?? "")/\(model.opencodeConnectionGeneration[deviceId, default: 0])" else { return }
+            agentError = error.localizedDescription
+        }
     }
 
     var body: some View {
@@ -211,44 +253,58 @@ struct NewSessionView: View {
                 }
             }
         }
-        .task(id: deviceId) {
+        .task(id: "\(deviceId ?? "")/\(catalogCwd ?? "")/\(model.opencodeConnectionGeneration[deviceId ?? "", default: 0])") {
             // Live harness list + a model catalog per harness, all from the
             // device that will run the session (the picker shows one sectioned
             // list across harnesses, so it needs every catalog up front).
             liveHarnesses = nil
             catalogs = [:]
+            agents = []
+            agentError = nil
+            selectedAgent = nil
             optionSelections = [:]
             guard let deviceId else { return }
             let list = await model.listHarnesses(deviceId: deviceId)
             guard !Task.isCancelled else { return }
             liveHarnesses = list
-            if !list.contains(where: { $0.id == harness }), let first = list.first {
+            if harness != "opencode", !list.contains(where: { $0.id == harness }), let first = list.first {
                 harness = first.id
             }
-            await withTaskGroup(of: (String, [ModelInfo]).self) { group in
+            await withTaskGroup(of: (String, ModelCatalog).self) { group in
                 for h in list {
-                    group.addTask { (h.id, await model.listModels(deviceId: deviceId, harness: h.id)) }
+                    group.addTask { (h.id, await model.listModels(deviceId: deviceId, harness: h.id, cwd: catalogCwd)) }
                 }
                 for await (id, catalog) in group {
                     guard !Task.isCancelled else { return }
+                    guard deviceId == self.deviceId else { return }
                     catalogs[id] = catalog
                 }
+            }
+            if model.workspace?.deviceSupports(deviceId, EngineCapability.opencodeAgentSelectionV1) == true {
+                await refreshAgents(deviceId: deviceId)
             }
         }
         .sheet(isPresented: $showPicker) {
             ModelPickerSheet(harness: $harness, modelId: Binding(
-                get: { selectedModel.id },
-                set: { storedModel = $0 }
+                get: { requestedModelId ?? "" },
+                set: { storedModel = $0; storedModelScope = modelScope }
             ), reasoning: Binding(
                 get: { reasoning },
                 set: { storedReasoning = $0 ?? "" }
-            ), harnesses: harnesses, catalogs: catalogs)
+            ), harnesses: harnesses, catalogs: catalogs,
+            refreshKey: modelScope,
+            onRefresh: { target in await refreshModels(harness: target) })
+        }
+        .sheet(isPresented: $showAgentPicker) {
+            AgentPickerSheet(selected: $selectedAgent, agents: agents, error: agentError) {
+                if let deviceId { await refreshAgents(deviceId: deviceId) }
+            }
         }
         .sheet(isPresented: $showTraitPicker) {
             TraitPickerSheet(reasoning: Binding(
                 get: { reasoning },
                 set: { storedReasoning = $0 ?? "" }
-            ), levels: selectedModel.reasoningLevels)
+            ), levels: selectedModel?.reasoningLevels ?? [])
         }
         .sheet(item: $showOptionPicker) { option in
             ModelOptionPickerSheet(option: option, choiceId: Binding(
@@ -279,6 +335,16 @@ struct NewSessionView: View {
 
     private var composer: some View {
         VStack(spacing: 6) {
+            if harness == "opencode" {
+                if case .some(.failed(let error)) = catalogs[harness] {
+                    Text(error).font(Theme.sans(12)).foregroundStyle(Theme.danger)
+                        .padding(.horizontal, 24)
+                } else if case .some(.loaded(let available)) = catalogs[harness], available.isEmpty {
+                    Text("No enabled OpenCode models found for this project.")
+                        .font(Theme.sans(12)).foregroundStyle(Theme.textMuted)
+                        .padding(.horizontal, 24)
+                }
+            }
             if let attachError {
                 Text(attachError)
                     .font(Theme.sans(12))
@@ -290,7 +356,7 @@ struct NewSessionView: View {
             ComposerShell(
                 draft: $draft,
                 placeholder: "Do anything…",
-                sendEnabled: deviceId != nil,
+                sendEnabled: deviceId != nil && requestedModelId != nil,
                 showStop: false,
                 busy: busy,
                 alwaysExpanded: true,
@@ -301,9 +367,15 @@ struct NewSessionView: View {
             ) {
                 // Model + trait chips, split like the desktop's footer pickers
                 // (they ride right of the shell's attach button).
-                ComposerChip(label: selectedModel.label, badgeHarness: harness) {
+                ComposerChip(label: selectedModel?.label ?? requestedModelId ?? "Select model", badgeHarness: harness) {
                     focused = false
                     showPicker = true
+                }
+                if harness == "opencode", model.workspace?.deviceSupports(deviceId ?? "", EngineCapability.opencodeAgentSelectionV1) == true {
+                    ComposerChip(label: agents.first(where: { $0.id == selectedAgent })?.label ?? "Server default / current") {
+                        focused = false
+                        showAgentPicker = true
+                    }
                 }
                 if let reasoning {
                     ComposerChip(label: HarnessCatalog.reasoningLabel(reasoning)) {
@@ -311,7 +383,7 @@ struct NewSessionView: View {
                         showTraitPicker = true
                     }
                 }
-                ForEach(selectedModel.options) { option in
+                ForEach(selectedModel?.options ?? []) { option in
                     ComposerChip(label: selectedChoice(for: option).label) {
                         focused = false
                         showOptionPicker = option
@@ -444,11 +516,22 @@ struct NewSessionView: View {
     /// CreateWorktree-before-send was the one new-chat path that could hang
     /// forever on a zombie link (the 2026-08-18 "Sending…" incident).
     private func send() {
-        guard let deviceId, canSend else { return }
+        guard let deviceId, canSend, let requestedModelId else { return }
+        if harness == "opencode", selectedAgent != nil,
+           model.workspace?.deviceSupports(deviceId, EngineCapability.opencodeAgentSelectionV1) != true {
+            attachError = "Update this device's engine to use a selected OpenCode agent."
+            return
+        }
+        if harness == "opencode", let selectedAgent,
+           !agents.contains(where: { $0.id == selectedAgent }) {
+            attachError = "This agent is no longer available. Refresh the agent list."
+            return
+        }
         let space = space
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         busy = true
-        let config = ChatConfig(harness: harness, model: selectedModel.id,
+        let config = ChatConfig(harness: harness, model: requestedModelId,
+                                agent: harness == "opencode" ? selectedAgent : nil,
                                 reasoning: reasoning, modelOptions: resolvedModelOptions,
                                 sandbox: "workspace-write")
         Task { @MainActor in
@@ -595,23 +678,34 @@ struct ModelPickerSheet: View {
     /// Harness sections to offer (the device's live list; static fallback).
     var harnesses: [HarnessInfo] = []
     /// Live per-harness catalogs from the device (static fallback when absent).
-    var catalogs: [String: [ModelInfo]] = [:]
+    var catalogs: [String: ModelCatalog] = [:]
+    var refreshKey = ""
+    var onRefresh: ((String) async -> Void)? = nil
 
     private func models(for harness: String) -> [ModelInfo] {
-        catalogs[harness] ?? HarnessCatalog.models(for: harness)
+        catalogs[harness]?.models ?? HarnessCatalog.models(for: harness)
     }
 
     private var sections: [HarnessInfo] {
         if lockedHarness {
             return [HarnessInfo(id: harness, label: HarnessCatalog.label(for: harness))]
         }
-        return harnesses.isEmpty ? HarnessCatalog.harnesses : harnesses
+        let available = harnesses.isEmpty ? HarnessCatalog.harnesses : harnesses
+        if harness == "opencode", !available.contains(where: { $0.id == harness }) {
+            return [HarnessInfo(id: harness, label: HarnessCatalog.label(for: harness))] + available
+        }
+        return available
     }
 
     /// Accordion state: which harness sections show their models. Seeded with
     /// the current harness — with several agents enabled a flat list of every
     /// catalog is unmanageable (t3's collapsible provider folds).
     @State private var openSections: Set<String> = []
+
+    private var openCodeVisible: Bool {
+        sections.contains(where: { $0.id == "opencode" })
+            && (sections.count == 1 || openSections.contains("opencode"))
+    }
 
     var body: some View {
         NavigationStack {
@@ -631,6 +725,9 @@ struct ModelPickerSheet: View {
                                         select(harness: h.id, model: m)
                                     }
                                 }
+                                if h.id == "opencode" {
+                                    catalogStatus(h.id)
+                                }
                             }
                         }
                     }
@@ -642,6 +739,15 @@ struct ModelPickerSheet: View {
             .background(SheetStyle.panel)
             .navigationTitle("Select model")
             .navigationBarTitleDisplayMode(.inline)
+            .task(id: "\(openCodeVisible)/\(refreshKey)") {
+                guard openCodeVisible, onRefresh != nil else { return }
+                await onRefresh?("opencode")
+                for delay in [2.0, 3.0] {
+                    try? await Task.sleep(for: .seconds(delay))
+                    guard !Task.isCancelled else { return }
+                    await onRefresh?("opencode")
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button {
@@ -662,6 +768,23 @@ struct ModelPickerSheet: View {
 
     private var selectedModel: ModelInfo? {
         models(for: harness).first { $0.id == modelId }
+    }
+
+    @ViewBuilder private func catalogStatus(_ harness: String) -> some View {
+        switch catalogs[harness] ?? .loading {
+        case .loading:
+            ProgressView("Loading models…")
+        case .loaded(let models) where models.isEmpty:
+            Text("No enabled models found for this project.")
+                .foregroundStyle(Theme.textMuted)
+        case .failed(let error):
+            Text(error).foregroundStyle(Theme.danger)
+        case .loaded:
+            EmptyView()
+        }
+        Button("Refresh models") { Task { await onRefresh?(harness) } }
+            .font(Theme.sans(13))
+            .accessibilityIdentifier("opencode-model-refresh")
     }
 
     /// t3's collapsible ProviderHeader: brand mark + tracked-out uppercase

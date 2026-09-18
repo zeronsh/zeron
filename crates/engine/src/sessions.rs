@@ -75,6 +75,7 @@ struct HarnessSessionRef {
 struct RuntimeConfig {
     harness_id: HarnessId,
     model: Option<String>,
+    agent: Option<String>,
     reasoning: Option<zeron_proto::ReasoningLevel>,
     model_options: serde_json::Map<String, serde_json::Value>,
     cwd: String,
@@ -88,6 +89,7 @@ impl RuntimeConfig {
         Self {
             harness_id,
             model: request.model.clone(),
+            agent: request.agent.clone(),
             reasoning: request.reasoning,
             model_options: request.model_options.clone(),
             cwd: request.cwd.clone(),
@@ -288,6 +290,25 @@ impl SessionsEngine {
         lock(&self.inner.statuses).values().any(is_active)
     }
 
+    /// Hold the run map across the save and slot swap so a dispatch cannot bind
+    /// the old OpenCode harness after the active-runtime check.
+    pub fn replace_opencode_connection(
+        &self,
+        update: zeron_proto::OpencodeConnectionUpdate,
+    ) -> Result<(), EngineError> {
+        let runs = lock(&self.inner.runs);
+        if runs
+            .values()
+            .any(|run| run.runtime_config.harness_id == HarnessId::Opencode)
+        {
+            return Err(EngineError::Other(
+                "Stop active OpenCode sessions before changing the connection. If sessions are idle, restart this execution engine to release them.".into(),
+            ));
+        }
+        let connection = self.inner.registry.prepare_opencode_connection(update)?;
+        self.inner.registry.save_opencode_connection(connection)
+    }
+
     /// The last request dispatched for a chat (steer→new-turn fallback).
     pub fn last_request(&self, chat_id: &str) -> Option<RunRequest> {
         lock(&self.inner.last_requests).get(chat_id).cloned()
@@ -395,6 +416,15 @@ impl SessionsEngine {
                 false
             };
             if accepted {
+                if harness_id == HarnessId::Opencode
+                    && let Err(err) = self.inner.journal.save_request_agent(
+                        chat_id,
+                        &user_id,
+                        request.agent.as_deref(),
+                    )
+                {
+                    tracing::warn!(chat = %chat_id, error = %err, "OpenCode agent recovery snapshot failed");
+                }
                 let handle = self.doc_handle(chat_id)?;
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
                 if self.is_live(chat_id, &run_id) {
@@ -436,9 +466,15 @@ impl SessionsEngine {
             self.interrupt(chat_id).await?;
         }
 
-        let harness = self.inner.registry.resolve(harness_id)?;
-        let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
+        if harness_id == HarnessId::Opencode {
+            self.inner
+                .journal
+                .save_request_agent(chat_id, &user_id, request.agent.as_deref())?;
+        } else {
+            self.inner.journal.clear_request_agent(chat_id)?;
+        }
+        let handle = self.doc_handle(chat_id)?;
         handle.write_user_message(&user_id, &request.prompt, now_ms())?;
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
@@ -484,20 +520,25 @@ impl SessionsEngine {
             interrupt: interrupt_token.clone(),
         };
 
-        lock(&self.inner.runs).insert(
-            chat_id.to_string(),
-            RunHandle {
-                run_id: run_id.clone(),
-                steerable: harness.supports_steering(),
-                runtime_config: RuntimeConfig::from_request(harness_id, &request),
-                steer_tx,
-                interrupt_token,
-                cancel: cancel_tx,
-                engine_tx,
-                pending_inputs,
-                routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
-            },
-        );
+        let harness = {
+            let mut runs = lock(&self.inner.runs);
+            let harness = self.inner.registry.resolve(harness_id)?;
+            runs.insert(
+                chat_id.to_string(),
+                RunHandle {
+                    run_id: run_id.clone(),
+                    steerable: harness.supports_steering(),
+                    runtime_config: RuntimeConfig::from_request(harness_id, &request),
+                    steer_tx,
+                    interrupt_token,
+                    cancel: cancel_tx,
+                    engine_tx,
+                    pending_inputs,
+                    routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+                },
+            );
+            harness
+        };
         self.set_status(chat_id, SessionStatus::Working, true);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
@@ -547,9 +588,11 @@ impl SessionsEngine {
                     h.run_id.clone(),
                     h.steer_tx.clone(),
                     h.routed_steers.clone(),
+                    h.runtime_config.agent.clone(),
+                    h.runtime_config.harness_id,
                 )
             });
-        let Some((run_id, steer_tx, ledger)) = target else {
+        let Some((run_id, steer_tx, ledger, agent, harness_id)) = target else {
             return Ok(SteerOutcome::NotSteerable);
         };
         let user_id = message_id.unwrap_or_else(new_id);
@@ -568,6 +611,14 @@ impl SessionsEngine {
                 prompt: prompt.to_string(),
                 message_id: user_id.clone(),
             });
+        }
+        if harness_id == HarnessId::Opencode
+            && let Err(err) =
+                self.inner
+                    .journal
+                    .save_request_agent(chat_id, &user_id, agent.as_deref())
+        {
+            tracing::warn!(chat = %chat_id, error = %err, "OpenCode agent recovery snapshot failed");
         }
         let handle = self.doc_handle(chat_id)?;
         handle.write_user_message(&user_id, prompt, now_ms())?;
@@ -712,9 +763,18 @@ impl SessionsEngine {
                         .map(|e| now_ms() - e.created_at < RESUME_FRESH_MS)
                 })
                 .unwrap_or(false);
-            let will_resume = fresh && prompt.is_some() && attempts < MAX_AUTO_RESUME;
+            let agent_snapshot = self.inner.journal.request_agent(&chat_id);
+            let snapshot_matches = match (&agent_snapshot, &prompt) {
+                (Ok(Some(snapshot)), Some((user_id, _))) => snapshot.message_id == *user_id,
+                (Ok(None), _) => true,
+                _ => false,
+            };
+            let will_resume =
+                fresh && prompt.is_some() && attempts < MAX_AUTO_RESUME && snapshot_matches;
 
-            let note = if will_resume {
+            let note = if !snapshot_matches {
+                "Run interrupted by engine restart — agent selection could not be recovered; send a new message"
+            } else if will_resume {
                 "Run interrupted by engine restart — resuming"
             } else {
                 "Run interrupted by engine restart"
@@ -736,6 +796,7 @@ impl SessionsEngine {
             }
             let attempt = self.inner.journal.note_resume_attempt(&chat_id);
             let (user_id, prompt_text) = prompt.expect("gated by will_resume");
+            let agent_snapshot = agent_snapshot.expect("gated by will_resume");
             let sessions = self.clone();
             tokio::spawn(async move {
                 let Some(host) = sessions.inner.doc_host() else {
@@ -749,6 +810,7 @@ impl SessionsEngine {
                     .or_else(|| {
                         let (_, cwd) = sessions.inner.journal_harness_session(&chat_id)?;
                         Some(RunRequest {
+                            agent: None,
                             prompt: String::new(),
                             harness: None,
                             model: None,
@@ -767,6 +829,9 @@ impl SessionsEngine {
                     return;
                 };
                 request.prompt = prompt_text;
+                if let Some(snapshot) = agent_snapshot {
+                    request.agent = snapshot.agent;
+                }
                 request.resume = None; // dispatch re-injects the remembered session
                 request.attachments = Vec::new();
                 let harness_id = host.harness_for_request(&chat_id, &request);
@@ -1052,6 +1117,55 @@ impl Inner {
         );
         if let Some(ws) = self.workspace() {
             ws.set_chat_harness_session(chat_id, session_id, cwd);
+        }
+    }
+
+    /// Accept an effective-agent update only from the run that still owns the
+    /// chat, then keep warm routing, crash recovery, and the synced picker row
+    /// aligned with the harness session.
+    fn update_run_agent(&self, chat_id: &str, run_id: &str, agent: &str) {
+        {
+            let mut runs = lock(&self.runs);
+            let Some(run) = runs.get_mut(chat_id).filter(|run| run.run_id == run_id) else {
+                return;
+            };
+            run.runtime_config.agent = Some(agent.to_owned());
+        }
+        if let Some(request) = lock(&self.last_requests).get_mut(chat_id) {
+            request.agent = Some(agent.to_owned());
+        }
+        if let Some(workspace) = self.workspace()
+            && let Err(error) = workspace.set_chat_agent(chat_id, agent)
+        {
+            tracing::warn!(chat = %chat_id, %agent, %error, "agent config update failed");
+        }
+    }
+
+    /// Keep model and thinking-level changes made by a server command in the
+    /// live routing config, recovery request, and client-visible chat row.
+    fn update_run_model(
+        &self,
+        chat_id: &str,
+        run_id: &str,
+        model: &str,
+        reasoning: Option<zeron_proto::ReasoningLevel>,
+    ) {
+        {
+            let mut runs = lock(&self.runs);
+            let Some(run) = runs.get_mut(chat_id).filter(|run| run.run_id == run_id) else {
+                return;
+            };
+            run.runtime_config.model = Some(model.to_owned());
+            run.runtime_config.reasoning = reasoning;
+        }
+        if let Some(request) = lock(&self.last_requests).get_mut(chat_id) {
+            request.model = Some(model.to_owned());
+            request.reasoning = reasoning;
+        }
+        if let Some(workspace) = self.workspace()
+            && let Err(error) = workspace.set_chat_model(chat_id, model, reasoning)
+        {
+            tracing::warn!(chat = %chat_id, %model, %error, "model config update failed");
         }
     }
 
@@ -1394,7 +1508,7 @@ fn finish_segment<'a>(
 }
 
 /// `~` / `~/…` → this host's home directory. Anything else passes through.
-fn expand_home(cwd: &str) -> String {
+pub(crate) fn expand_home(cwd: &str) -> String {
     match cwd.strip_prefix("~") {
         Some("") => crate::repos::home_dir().to_string_lossy().into_owned(),
         Some(rest) if rest.starts_with('/') => crate::repos::home_dir()
@@ -2262,6 +2376,12 @@ async fn drive_run(
             AgentEvent::InputResolved { .. } => {
                 inner.set_status(&chat_id, SessionStatus::Working, false);
             }
+            AgentEvent::AgentChanged { agent } => {
+                inner.update_run_agent(&chat_id, &run_id, agent);
+            }
+            AgentEvent::ModelChanged { model, reasoning } => {
+                inner.update_run_model(&chat_id, &run_id, model, *reasoning);
+            }
             _ => {}
         }
 
@@ -2578,6 +2698,7 @@ mod tests {
 
     fn request() -> RunRequest {
         RunRequest {
+            agent: None,
             prompt: "first".into(),
             harness: None,
             model: Some("grok-4.6".into()),
@@ -2590,6 +2711,53 @@ mod tests {
             attachments: Vec::new(),
             worktree: None,
         }
+    }
+
+    #[test]
+    fn opencode_connection_change_respects_retained_runtime_ownership() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.load_opencode_connection(dir.path()).unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            registry.clone(),
+        );
+        let fake_run = |harness_id| {
+            let (steer_tx, _) = mpsc::channel(1);
+            let (cancel, _) = watch::channel(false);
+            let (engine_tx, _) = mpsc::unbounded_channel();
+            RunHandle {
+                run_id: "run".into(),
+                steerable: true,
+                runtime_config: RuntimeConfig::from_request(harness_id, &request()),
+                steer_tx,
+                interrupt_token: CancellationToken::new(),
+                cancel,
+                engine_tx,
+                pending_inputs: Default::default(),
+                routed_steers: Default::default(),
+            }
+        };
+        let update = || zeron_proto::OpencodeConnectionUpdate {
+            base_url: Some("http://127.0.0.1:4096".into()),
+            username: "opencode".into(),
+            password: Some("test-secret".into()),
+            clear_password: false,
+        };
+        lock(&sessions.inner.runs).insert("chat".into(), fake_run(HarnessId::Opencode));
+        sessions.set_status("chat", SessionStatus::Working, true);
+        assert!(sessions.replace_opencode_connection(update()).is_err());
+        sessions.set_status("chat", SessionStatus::Idle, false);
+        assert!(sessions.replace_opencode_connection(update()).is_err());
+        assert!(registry.opencode_connection().is_none());
+        lock(&sessions.inner.runs).insert("chat".into(), fake_run(HarnessId::Mock));
+        sessions.replace_opencode_connection(update()).unwrap();
+        assert_eq!(
+            registry.opencode_connection().unwrap().password.as_deref(),
+            Some("test-secret")
+        );
     }
 
     #[test]
@@ -2606,12 +2774,160 @@ mod tests {
         assert!(!config.can_route(HarnessId::Grok, &follow_up));
         follow_up.model = initial.model.clone();
 
+        follow_up.agent = Some("plan".into());
+        assert!(!config.can_route(HarnessId::Grok, &follow_up));
+        follow_up.agent = initial.agent.clone();
+
         follow_up.reasoning = Some(zeron_proto::ReasoningLevel::Medium);
         assert!(!config.can_route(HarnessId::Grok, &follow_up));
         follow_up.reasoning = initial.reasoning;
 
         follow_up.attachments.push("/tmp/image.png".into());
         assert!(!config.can_route(HarnessId::Grok, &follow_up));
+    }
+
+    #[tokio::test]
+    async fn server_selection_changes_update_live_recovery_and_client_configuration() {
+        use super::*;
+        use crate::doc_host::DocHostConfig;
+        use crate::workspace_host::{WorkspaceHost, WorkspaceHostConfig};
+        use zeron_proto::{ChatConfig, ReasoningLevel};
+        use zeron_sync::DocsStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let initial = request();
+        let store = Arc::new(DocsStore::open(dir.path().join("docs")).unwrap());
+        let workspace = WorkspaceHost::open(
+            store.clone(),
+            WorkspaceHostConfig {
+                device_id: "host".into(),
+                device_name: "Host".into(),
+                platform: "linux".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+        let config = ChatConfig {
+            harness: HarnessId::Opencode,
+            model: initial.model.clone(),
+            agent: initial.agent.clone(),
+            reasoning: initial.reasoning,
+            model_options: initial.model_options.clone(),
+            sandbox: initial.sandbox,
+        };
+        workspace
+            .create_chat("chat", None, Some("host"), Some(config.clone()), None)
+            .unwrap();
+        let mut chats = workspace.watch_chats();
+        let docs = DocHost::new(
+            store,
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Opencode,
+                edge: None,
+            },
+        );
+        docs.set_workspace(workspace.clone());
+        sessions.set_doc_host(docs);
+        let (steer_tx, _) = mpsc::channel(1);
+        let (cancel, _) = watch::channel(false);
+        let (engine_tx, _) = mpsc::unbounded_channel();
+        lock(&sessions.inner.runs).insert(
+            "chat".into(),
+            RunHandle {
+                run_id: "current".into(),
+                steerable: true,
+                runtime_config: RuntimeConfig::from_request(HarnessId::Opencode, &initial),
+                steer_tx,
+                interrupt_token: CancellationToken::new(),
+                cancel,
+                engine_tx,
+                pending_inputs: Default::default(),
+                routed_steers: Default::default(),
+            },
+        );
+        lock(&sessions.inner.last_requests).insert("chat".into(), initial);
+
+        sessions.inner.update_run_agent("chat", "current", "plan");
+        assert_eq!(
+            lock(&sessions.inner.runs)["chat"]
+                .runtime_config
+                .agent
+                .as_deref(),
+            Some("plan")
+        );
+        assert_eq!(
+            lock(&sessions.inner.last_requests)["chat"].agent.as_deref(),
+            Some("plan")
+        );
+
+        sessions.inner.update_run_agent("chat", "stale", "build");
+        assert_eq!(
+            lock(&sessions.inner.runs)["chat"]
+                .runtime_config
+                .agent
+                .as_deref(),
+            Some("plan")
+        );
+
+        sessions.inner.update_run_model(
+            "chat",
+            "current",
+            "custom/review",
+            Some(ReasoningLevel::XHigh),
+        );
+        let mut expected = config;
+        expected.agent = Some("plan".into());
+        expected.model = Some("custom/review".into());
+        expected.reasoning = Some(ReasoningLevel::XHigh);
+        assert_eq!(workspace.chat_config("chat"), Some(expected.clone()));
+        tokio::time::timeout(std::time::Duration::from_secs(2), chats.changed())
+            .await
+            .expect("config change must wake client watchers")
+            .unwrap();
+        assert_eq!(chats.borrow_and_update()[0].config, Some(expected.clone()));
+
+        let follow_up = lock(&sessions.inner.last_requests)["chat"].clone();
+        assert_eq!(follow_up.model, expected.model);
+        assert_eq!(follow_up.reasoning, expected.reasoning);
+        assert!(
+            lock(&sessions.inner.runs)["chat"]
+                .runtime_config
+                .can_route(HarnessId::Opencode, &follow_up)
+        );
+
+        sessions
+            .inner
+            .update_run_model("chat", "stale", "wrong/model", Some(ReasoningLevel::Low));
+        assert_eq!(workspace.chat_config("chat"), Some(expected.clone()));
+        assert_eq!(
+            lock(&sessions.inner.last_requests)["chat"].model,
+            expected.model
+        );
+        assert_eq!(
+            lock(&sessions.inner.runs)["chat"].runtime_config.model,
+            expected.model
+        );
+
+        // The same model can change only its thinking level, including back
+        // to the server default. That must clear, not retain, the old level.
+        sessions
+            .inner
+            .update_run_model("chat", "current", "custom/review", None);
+        expected.reasoning = None;
+        assert_eq!(workspace.chat_config("chat"), Some(expected));
+        assert_eq!(lock(&sessions.inner.last_requests)["chat"].reasoning, None);
+        assert_eq!(
+            lock(&sessions.inner.runs)["chat"].runtime_config.reasoning,
+            None
+        );
     }
 
     #[test]

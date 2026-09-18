@@ -61,7 +61,7 @@ enum E2ERunner {
         }
 
         // 2b. Live model catalog over the relay.
-        let models = await workspace.listModels(deviceId: device.id, harness: "mock")
+        let models = try? await workspace.listModels(deviceId: device.id, harness: "mock", cwd: nil)
         log(models != nil ? "OK relay ListModels: \(models!.map(\.id))" : "FAIL relay ListModels nil")
 
         // 3. Space + chat + first run through the command plane (mock harness).

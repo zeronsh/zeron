@@ -131,6 +131,7 @@ mod tests {
             config: Some(zeron_proto::ChatConfig {
                 harness,
                 model: None,
+                agent: None,
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,

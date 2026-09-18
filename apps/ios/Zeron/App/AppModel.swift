@@ -21,6 +21,7 @@ final class AppModel {
     var workspace: WorkspaceStore?
     var demo: DemoDataset?
     var demoPinnedSessionIds: [String] = []
+    var opencodeConnectionGeneration: [String: Int] = [:]
     /// Graced connectivity truth — one stream every consumer inherits calm
     /// from (home pill, composer notice, Queued/Failed badges).
     let connectivity = ConnectivityCenter()
@@ -379,16 +380,29 @@ final class AppModel {
     /// Live model catalog from the selected execution device (the desktop's
     /// "catalog source = the device that runs the session" rule); static
     /// fallback when the device is unreachable.
-    func listModels(deviceId: String, harness: String) async -> [ModelInfo] {
+    func listModels(deviceId: String, harness: String, cwd: String? = nil) async -> ModelCatalog {
         if demo != nil {
             try? await Task.sleep(nanoseconds: 100_000_000)
-            return HarnessCatalog.models(for: harness)
+            return .loaded(HarnessCatalog.models(for: harness))
         }
-        if let live = await workspace?.listModels(deviceId: deviceId, harness: harness),
-           !live.isEmpty {
-            return live
+        do {
+            guard let workspace else { throw RelayError.notConnected }
+            let live = try await workspace.listModels(deviceId: deviceId, harness: harness, cwd: cwd)
+            return .loaded(live.isEmpty && harness != "opencode"
+                           ? HarnessCatalog.models(for: harness) : live)
+        } catch {
+            if harness == "opencode" { return .failed(error.localizedDescription) }
+            return .loaded(HarnessCatalog.models(for: harness))
         }
-        return HarnessCatalog.models(for: harness)
+    }
+
+    func listAgents(deviceId: String, cwd: String?) async -> Result<[AgentInfo], RelayError> {
+        do {
+            guard let workspace else { throw RelayError.notConnected }
+            return .success(try await workspace.listAgents(deviceId: deviceId, cwd: cwd))
+        } catch {
+            return .failure((error as? RelayError) ?? .rpc(error.localizedDescription))
+        }
     }
 
     /// Refs of the space's repo (git spaces only).

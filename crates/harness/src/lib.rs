@@ -86,6 +86,15 @@ pub trait Harness: Send + Sync {
         self.deterministic_turn_end()
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError>;
+    async fn models_for_directory(&self, _cwd: Option<&str>) -> Result<Vec<Model>, HarnessError> {
+        self.models().await
+    }
+    async fn agents(
+        &self,
+        _cwd: Option<&str>,
+    ) -> Result<Vec<zeron_proto::HarnessAgent>, HarnessError> {
+        Ok(Vec::new())
+    }
     /// Slash commands the agent advertises (ACP `availableCommands`); empty
     /// for harnesses without them. May spawn a short-lived discovery process.
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
@@ -243,7 +252,7 @@ pub use acp::AcpHarness;
 pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
 pub use cursor::CursorHarness;
-pub use opencode::OpencodeHarness;
+pub use opencode::{OpencodeConnection, OpencodeHarness};
 
 // ---------------------------------------------------------------------------
 // Child lifecycle (shared by the codex and ACP harnesses)

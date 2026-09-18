@@ -36,6 +36,7 @@ async fn managed_install_reaches_session_started() {
     let request = RunRequest {
         prompt: "say the word ok and stop".into(),
         harness: None,
+        agent: None,
         model: None,
         reasoning: None,
         model_options: serde_json::Map::new(),

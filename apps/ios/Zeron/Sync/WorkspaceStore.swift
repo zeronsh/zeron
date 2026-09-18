@@ -364,6 +364,7 @@ final class WorkspaceStore {
             if let c = f["config"]?.objectValue {
                 chatConfig = ChatConfig(harness: c["harness"]?.stringValue ?? "claude-code",
                                         model: c["model"]?.stringValue,
+                                        agent: c["agent"]?.stringValue,
                                         reasoning: c["reasoning"]?.stringValue,
                                         modelOptions: c["modelOptions"]?.objectValue ?? [:],
                                         sandbox: c["sandbox"]?.stringValue)
@@ -608,7 +609,7 @@ final class WorkspaceStore {
         }
     }
 
-    func listModels(deviceId: String, harness: String) async -> [ModelInfo]? {
+    func listModels(deviceId: String, harness: String, cwd: String?) async throws -> [ModelInfo] {
         struct WireChoice: Decodable {
             var id: String
             var label: String
@@ -626,24 +627,45 @@ final class WorkspaceStore {
             var reasoningLevels: [String]?
             var options: [WireOption]?
         }
-        let wire: [WireModel]? = try? await relay(for: deviceId)
-            .call(method: "ListModels", params: ["harness": harness])
-        return wire.map { models in
-            models.map {
-                ModelInfo(id: $0.id, label: $0.label, description: $0.description,
-                          reasoningLevels: $0.reasoningLevels ?? [],
-                          options: ($0.options ?? []).map { option in
-                              ModelOptionInfo(
-                                  id: option.id,
-                                  label: option.label,
-                                  choices: option.choices.map {
-                                      ModelOptionChoiceInfo(id: $0.id, label: $0.label)
-                                  },
-                                  defaultChoice: option.defaultChoice
-                              )
-                          })
-            }
+        var params: [String: Any] = ["harness": harness]
+        if let cwd { params["cwd"] = cwd }
+        let wire: [WireModel] = try await relay(for: deviceId)
+            .call(method: "ListModels", params: params,
+                  timeoutSeconds: harness == "opencode" ? 30 : 10)
+        return wire.map {
+            ModelInfo(id: $0.id, label: $0.label, description: $0.description,
+                      reasoningLevels: $0.reasoningLevels ?? [],
+                      options: ($0.options ?? []).map { option in
+                          ModelOptionInfo(
+                              id: option.id,
+                              label: option.label,
+                              choices: option.choices.map {
+                                  ModelOptionChoiceInfo(id: $0.id, label: $0.label)
+                              },
+                              defaultChoice: option.defaultChoice
+                          )
+                      })
         }
+    }
+
+    func listAgents(deviceId: String, cwd: String?) async throws -> [AgentInfo] {
+        var params: [String: Any] = ["harness": "opencode"]
+        if let cwd { params["cwd"] = cwd }
+        return try await relay(for: deviceId).call(method: "ListAgents", params: params,
+                                                   timeoutSeconds: 30)
+    }
+
+    func getOpencodeConnection(deviceId: String) async throws -> OpencodeConnectionSettings {
+        try await relay(for: deviceId).call(method: "GetOpencodeConnection", params: [:])
+    }
+
+    func setOpencodeConnection(deviceId: String, update: OpencodeConnectionUpdate) async throws -> OpencodeConnectionSettings {
+        try await relay(for: deviceId).call(method: "SetOpencodeConnection", params: update.params)
+    }
+
+    func testOpencodeConnection(deviceId: String, update: OpencodeConnectionUpdate) async throws -> OpencodeConnectionTestResult {
+        try await relay(for: deviceId).call(method: "TestOpencodeConnection", params: update.params,
+                                            timeoutSeconds: 30)
     }
 
     /// SwitchRef — `git checkout` in the given folder on the target device.

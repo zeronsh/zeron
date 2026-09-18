@@ -557,6 +557,7 @@ final class SessionStore {
         let request = RunRequest(prompt: prompt,
                                  harness: chat.config?.harness,
                                  model: chat.config?.model,
+                                 agent: chat.config?.agent,
                                  reasoning: chat.config?.reasoning,
                                  modelOptions: chat.config?.modelOptions ?? [:],
                                  cwd: chat.cwd ?? "",
@@ -608,7 +609,10 @@ final class SessionStore {
         }
         let refs = transfers.map { UploadStash.pendingRef(uploadId: $0.uploadId, name: $0.name) }
         let content = withAttachments(text: prompt, paths: refs)
-        if live {
+        if live, chat.config?.harness == "opencode" {
+            enqueueMessage(text: content, attachments: refs, agent: chat.config?.agent,
+                           agentSnapshot: true, holdForTurnEnd: true)
+        } else if live {
             sendSteer(prompt: content)
         } else {
             sendRun(prompt: content, chat: chat, attachments: refs, worktree: worktree)

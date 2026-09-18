@@ -33,6 +33,7 @@ const CHAT: &str = "chat-queue";
 /// A turn that does not end until the test says so, so "the agent is busy" is
 /// a state the test controls rather than races.
 struct HeldHarness {
+    harness_id: HarnessId,
     steering: SteeringMode,
     finish: tokio::sync::broadcast::Sender<()>,
     prompts: Arc<Mutex<Vec<String>>>,
@@ -47,6 +48,12 @@ impl HeldHarness {
         Self::build(steering, false)
     }
 
+    fn opencode(steering: SteeringMode) -> (Arc<Self>, Arc<Mutex<Vec<String>>>) {
+        let (mut harness, prompts) = Self::build(steering, false);
+        Arc::get_mut(&mut harness).unwrap().harness_id = HarnessId::Opencode;
+        (harness, prompts)
+    }
+
     fn asking(steering: SteeringMode) -> (Arc<Self>, Arc<Mutex<Vec<String>>>) {
         Self::build(steering, true)
     }
@@ -56,6 +63,7 @@ impl HeldHarness {
         let prompts = Arc::new(Mutex::new(Vec::new()));
         (
             Arc::new(Self {
+                harness_id: HarnessId::Mock,
                 steering,
                 finish,
                 prompts: prompts.clone(),
@@ -70,7 +78,7 @@ impl HeldHarness {
 #[async_trait]
 impl Harness for HeldHarness {
     fn id(&self) -> HarnessId {
-        HarnessId::Mock
+        self.harness_id
     }
     fn display_name(&self) -> &str {
         "Held"
@@ -108,7 +116,7 @@ impl Harness for HeldHarness {
         let mut finish = self.finish.subscribe();
         let mut steering = controls.steering;
         let started = futures::stream::iter(vec![Ok(AgentEvent::SessionStarted {
-            harness: HarnessId::Mock,
+            harness: self.harness_id,
             model: "mock-1".into(),
             tools: vec![],
             cwd: request.cwd.clone(),
@@ -256,6 +264,102 @@ async fn create_chat(core: &EngineCore) {
     core.workspace
         .rename_chat(CHAT, "Pre-titled")
         .expect("rename chat");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_rpc_distinguishes_old_omission_from_explicit_default_agent() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "opening turn").await;
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    for (text, agent) in [("legacy", None), ("default", Some(serde_json::Value::Null))] {
+        let mut params = serde_json::json!({"chatId": CHAT, "text": text});
+        if let Some(agent) = agent {
+            params["agent"] = agent;
+        }
+        client
+            .call(zeron_rpc::methods::QUEUE_MESSAGE, params)
+            .await
+            .unwrap();
+    }
+    let queue = core
+        .doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .read_queue()
+        .unwrap();
+    assert!(!queue[0].agent_snapshot);
+    assert!(queue[1].agent_snapshot);
+    assert!(queue[1].agent.is_none());
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_opencode_agents_survive_chat_config_changes_at_promotion() {
+    let (core, harness, _) = setup_with(HeldHarness::opencode(SteeringMode::TurnBoundary)).await;
+    let mut config = zeron_proto::ChatConfig {
+        harness: HarnessId::Opencode,
+        model: None,
+        agent: Some("plan".into()),
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+    };
+    core.workspace.set_chat_config(CHAT, &config).unwrap();
+    core.doc_host
+        .queue_message_with_agent(
+            CHAT,
+            "opening",
+            Vec::new(),
+            false,
+            Some("plan".into()),
+            true,
+        )
+        .unwrap();
+    wait_for(
+        || harness.requests.lock().unwrap().len() == 1,
+        "opening OpenCode turn",
+    )
+    .await;
+    core.doc_host
+        .queue_message_with_agent(
+            CHAT,
+            "selected",
+            Vec::new(),
+            false,
+            Some("custom/build".into()),
+            true,
+        )
+        .unwrap();
+    core.doc_host
+        .queue_message_with_agent(CHAT, "default", Vec::new(), false, None, true)
+        .unwrap();
+    config.agent = Some("changed/after-submit".into());
+    core.workspace.set_chat_config(CHAT, &config).unwrap();
+
+    let _ = harness.finish.send(());
+    wait_for(
+        || harness.requests.lock().unwrap().len() == 2,
+        "selected queued turn",
+    )
+    .await;
+    assert_eq!(
+        harness.requests.lock().unwrap()[1].agent.as_deref(),
+        Some("custom/build")
+    );
+    let _ = harness.finish.send(());
+    wait_for(
+        || harness.requests.lock().unwrap().len() == 3,
+        "default queued turn",
+    )
+    .await;
+    assert_eq!(harness.requests.lock().unwrap()[2].agent, None);
+    let _ = harness.finish.send(());
+    core.shutdown().await;
 }
 
 /// Nothing is running, so a queued message is just a message: it goes out at
@@ -1537,6 +1641,7 @@ async fn queued_turn_uses_current_config_at_turn_end_and_send_now() {
     for send_now in [false, true] {
         let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
         let mut config = zeron_proto::ChatConfig {
+            agent: None,
             harness: HarnessId::Mock,
             model: Some("old-model".into()),
             reasoning: Some(ReasoningLevel::Medium),

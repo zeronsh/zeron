@@ -18,6 +18,41 @@ final class ProjectlessSessionTests: XCTestCase {
     private let host = DeviceRow(id: "host", name: "Host", platform: "linux", lastSeenAt: 0)
     private let phone = DeviceRow(id: "ios-test", name: "Phone", platform: "ios")
 
+    func testAgentRoundTripsThroughChatAndRunWithoutBreakingOldJSON() throws {
+        let old = Data(#"{"harness":"opencode","model":null,"reasoning":null,"modelOptions":{},"sandbox":"workspace-write"}"#.utf8)
+        XCTAssertNil(try JSONDecoder().decode(ChatConfig.self, from: old).agent)
+        var config = try JSONDecoder().decode(ChatConfig.self, from: old)
+        config.agent = "team/custom"
+        let encoded = try JSONEncoder().encode(config)
+        XCTAssertEqual(try JSONDecoder().decode(ChatConfig.self, from: encoded).agent, "team/custom")
+
+        let doc = RegistryDoc(deviceId: appConfig.deviceId)
+        let workspace = WorkspaceStore(config: appConfig, doc: doc)
+        let chatId = workspace.createProjectlessChat(deviceId: host.id, config: config)
+        XCTAssertEqual(workspace.chats.first { $0.id == chatId }?.config?.agent, "team/custom")
+        let restored = try RegistryDoc.from(data: doc.toData(), deviceId: appConfig.deviceId)
+        XCTAssertEqual(WorkspaceStore(config: appConfig, doc: restored).chats.first?.config?.agent,
+                       "team/custom")
+
+        let request = RunRequest(prompt: "hello", harness: "opencode", model: nil,
+                                 agent: "team/custom", reasoning: nil, cwd: "/repo", resume: nil,
+                                 worktree: nil)
+        XCTAssertEqual(try JSONDecoder().decode(RunRequest.self, from: JSONEncoder().encode(request)).agent,
+                       "team/custom")
+    }
+
+    func testConnectionUpdateKeepsSavedPasswordWhenOmitted() {
+        let keep = OpencodeConnectionUpdate(baseUrl: "http://127.0.0.1:49374",
+                                            username: "opencode", password: nil,
+                                            clearPassword: false).params
+        XCTAssertNil(keep["password"])
+        XCTAssertEqual(keep["clearPassword"] as? Bool, false)
+        let clear = OpencodeConnectionUpdate(baseUrl: nil, username: "opencode",
+                                             password: nil, clearPassword: true).params
+        XCTAssertTrue(clear["baseUrl"] is NSNull)
+        XCTAssertEqual(clear["clearPassword"] as? Bool, true)
+    }
+
     private func row(_ kind: String, _ id: String, _ fields: [String: JSONValue],
                      deleted: Bool = false) -> RegistryRow {
         RegistryRow(kind: kind, id: id, seq: 1, deleted: deleted, delHlc: nil,

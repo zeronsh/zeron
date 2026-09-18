@@ -60,7 +60,9 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 use zeron_doc::{MessagePart, SessionCommandPayload};
-use zeron_proto::{ChatConfig, EngineInfo, HarnessId, ToolCall, WorkspaceScope};
+use zeron_proto::{
+    ChatConfig, EngineInfo, HarnessId, OpencodeConnectionUpdate, ToolCall, WorkspaceScope,
+};
 use zeron_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
 use crate::agent_accounts::AgentAccounts;
@@ -88,6 +90,8 @@ struct ChatParams {
 #[serde(rename_all = "camelCase")]
 struct ListModelsParams {
     harness: HarnessId,
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,6 +157,8 @@ struct QueueMessageParams {
     text: String,
     #[serde(default)]
     attachments: Vec<String>,
+    #[serde(default)]
+    agent: Option<String>,
     /// Keep this row visible during the current turn even when the harness
     /// supports mid-turn steering.
     #[serde(default)]
@@ -954,6 +960,10 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_TITLE_SETTINGS
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
+            | methods::LIST_AGENTS
+            | methods::GET_OPENCODE_CONNECTION
+            | methods::SET_OPENCODE_CONNECTION
+            | methods::TEST_OPENCODE_CONNECTION
             | methods::LIST_COMMANDS
             | methods::QUEUE_COMMAND
             | methods::WATCH_DOC_MESSAGES
@@ -1316,15 +1326,65 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_MODELS => {
                 let p: ListModelsParams = parse_params(params)?;
+                let cwd = p
+                    .cwd
+                    .as_deref()
+                    .filter(|cwd| !cwd.is_empty())
+                    .unwrap_or("~");
+                let cwd = crate::sessions::expand_home(cwd);
                 let harness = self
                     .registry
                     .resolve(p.harness)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let models = harness
-                    .models()
+                    .models_for_directory(Some(&cwd))
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&models)
+            }
+            methods::LIST_AGENTS => {
+                let p: ListModelsParams = parse_params(params)?;
+                let cwd = p
+                    .cwd
+                    .as_deref()
+                    .filter(|cwd| !cwd.is_empty())
+                    .unwrap_or("~");
+                let cwd = crate::sessions::expand_home(cwd);
+                let harness = self
+                    .registry
+                    .resolve(p.harness)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let agents = harness
+                    .agents(Some(&cwd))
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&agents)
+            }
+            methods::GET_OPENCODE_CONNECTION => {
+                RpcReply::value(&self.registry.opencode_connection_view())
+            }
+            methods::SET_OPENCODE_CONNECTION => {
+                let update: OpencodeConnectionUpdate = parse_params(params)?;
+                self.sessions
+                    .replace_opencode_connection(update)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&self.registry.opencode_connection_view())
+            }
+            methods::TEST_OPENCODE_CONNECTION => {
+                let update: OpencodeConnectionUpdate = parse_params(params)?;
+                let connection = self
+                    .registry
+                    .prepare_opencode_connection(update)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .ok_or_else(|| {
+                        RpcError::BadParams("Enter an OpenCode server address to test".into())
+                    })?;
+                let result = zeron_harness::OpencodeHarness::new()
+                    .with_connection(connection)
+                    .test_connection()
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&result)
             }
             methods::LIST_COMMANDS => {
                 // Same shape as ListModels: forces a lazy resolve, then the
@@ -1409,14 +1469,17 @@ impl RpcService for EngineRpc {
                 ))
             }
             methods::QUEUE_MESSAGE => {
+                let agent_snapshot = params.get("agent").is_some();
                 let p: QueueMessageParams = parse_params(params)?;
                 let id = self
                     .doc_host
-                    .queue_message_with_behavior(
+                    .queue_message_with_agent(
                         &p.chat_id,
                         &p.text,
                         p.attachments,
                         p.hold_for_turn_end,
+                        p.agent,
+                        agent_snapshot,
                     )
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "id": id }))
@@ -2586,6 +2649,10 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::QUEUE_COMMAND));
+        assert!(forwardable(methods::LIST_AGENTS));
+        assert!(forwardable(methods::GET_OPENCODE_CONNECTION));
+        assert!(forwardable(methods::SET_OPENCODE_CONNECTION));
+        assert!(forwardable(methods::TEST_OPENCODE_CONNECTION));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));
         assert!(forwardable(methods::FETCH_ALL));
