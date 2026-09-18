@@ -7,6 +7,9 @@ struct TurnWire {
     posts: Arc<std::sync::Mutex<Vec<(String, Value)>>>,
     requests: mpsc::UnboundedReceiver<String>,
     events: mpsc::Receiver<Result<AgentEvent, HarnessError>>,
+    /// Held open for the run's life so tests can steer mid-turn; the
+    /// initial `queued` message (if any) is sent before it is parked here.
+    steer: mpsc::Sender<crate::SteerMessage>,
     interrupt: tokio_util::sync::CancellationToken,
     server: tokio::task::JoinHandle<()>,
     run: tokio::task::JoinHandle<()>,
@@ -21,22 +24,37 @@ impl Drop for TurnWire {
 }
 
 impl TurnWire {
+    /// The 1.18 wire.
     async fn start(queued: bool) -> Self {
-        Self::start_proto(queued, false).await
+        Self::start_proto(queued, Protocol::V1).await
     }
 
-    /// `v2` serves the 2.x wire (`/api/*` routes, `{data}` wrappers,
-    /// version-bearing `/api/health`); otherwise the 1.18 one.
-    async fn start_proto(queued: bool, v2: bool) -> Self {
-        Self::start_policy(queued, v2, true, None).await
+    /// The current 2.x wire (2.0.4+: `/api/info`, no `/api/health`).
+    async fn start_v2(queued: bool) -> Self {
+        Self::start_proto(queued, Protocol::V2).await
+    }
+
+    /// The first 2.x wire (2.0.0–2.0.3: version-bearing `/api/health`).
+    async fn start_v2_early(queued: bool) -> Self {
+        Self::start_proto(queued, Protocol::V2Early).await
+    }
+
+    /// `protocol` picks the served wire: 1.x (`/global/*`, `/session/*`),
+    /// 2.0.0–2.0.3 (`/api/*` + version-bearing `/api/health`), or 2.0.4+
+    /// (`/api/*` + `/api/info`, `/api/health` gone). The wrong dialects'
+    /// detection probes answer 404 so [`Protocol::detect`] resolves the
+    /// right wire through the real ladder.
+    async fn start_proto(queued: bool, protocol: Protocol) -> Self {
+        Self::start_policy(queued, protocol, true, None).await
     }
 
     async fn start_policy(
         queued: bool,
-        v2: bool,
+        protocol: Protocol,
         auto_approve: bool,
         answer: Option<bool>,
     ) -> Self {
+        let v2 = protocol.is_v2();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -84,9 +102,27 @@ impl TurnWire {
                         }
                         return;
                     }
+                    // Detection probes of the OTHER dialects must 404 (or
+                    // answer without a version) so the ladder resolves this
+                    // dialect: `/api/info` (2.0.4+), `/global/health` (1.x),
+                    // `/api/health` (2.0.0–2.0.3).
+                    let wrong_probe = match protocol {
+                        Protocol::V1 => path == "/api/info" || path == "/api/health",
+                        Protocol::V2Early => path == "/api/info" || path == "/global/health",
+                        Protocol::V2 => path == "/api/health" || path == "/global/health",
+                    };
+                    if wrong_probe {
+                        socket.write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        )
+                        .await
+                        .unwrap();
+                        return;
+                    }
                     let body = if v2 {
                         match path.as_str() {
                             "/api/health" => r#"{"healthy":true,"version":"2.0.3"}"#,
+                            "/api/info" => r#"{"version":"2.0.8","pid":123,"urls":["http://127.0.0.1"],"paths":{"tmp":"/tmp"}}"#,
                             "/api/session" => r#"{"data":{"id":"fixture"}}"#,
                             "/api/command" => r#"{"data":[]}"#,
                             // Non-empty: the catalog-sync retry loop must not stall tests.
@@ -124,7 +160,8 @@ impl TurnWire {
                 .await
                 .unwrap();
         }
-        drop(steer_tx);
+        // The steer sender stays alive in the struct (mid-turn steer tests
+        // need it); the run ends via Done or Drop::abort either way.
         let interrupt = tokio_util::sync::CancellationToken::new();
         let run = tokio::spawn(run_session(Session {
             server: Server::attached(base),
@@ -154,6 +191,7 @@ impl TurnWire {
             posts,
             requests,
             events,
+            steer: steer_tx,
             interrupt,
             server,
             run,
@@ -233,7 +271,7 @@ async fn queued_turn_ignores_previous_turn_duplicate_idle() {
 
 #[tokio::test]
 async fn v2_wire_streams_text_and_settles_on_execution_success() {
-    let mut wire = TurnWire::start_proto(false, true).await;
+    let mut wire = TurnWire::start_v2_early(false).await;
     wire.request("/api/model").await;
     wire.request("/prompt").await;
     wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
@@ -302,9 +340,413 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
     assert_eq!(usage, Some((10, 2)));
 }
 
+/// The 2.0.4+ wire: no `/api/health` at all — detection resolves through
+/// `GET /api/info`, and the same turn shape settles. This is the regression
+/// guard for the detection ladder (a 2.0.4+ server previously timed out at
+/// boot: `/api/health` 404s and `/global/health` serves the web app).
+#[tokio::test]
+async fn v2_current_wire_detects_via_api_info_and_settles() {
+    let mut wire = TurnWire::start_v2(false).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
+    wire.v2(
+        "session.step.started",
+        json!({
+            "sessionID": "fixture",
+            "assistantMessageID": "msg_a",
+            "model": {"id": "muse", "providerID": "opencode", "variant": "low"},
+        }),
+    );
+    wire.v2(
+        "session.text.delta",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a", "ordinal": 0,
+            "delta": "PONG"
+        }),
+    );
+    wire.v2(
+        "session.usage.updated",
+        json!({
+            "sessionID": "fixture", "cost": 0,
+            "tokens": {"input": 7, "output": 1, "reasoning": 0,
+                       "cache": {"read": 0, "write": 0}}
+        }),
+    );
+    wire.v2(
+        "session.execution.succeeded",
+        json!({"sessionID": "fixture"}),
+    );
+    let (status, text) = wire.done().await;
+    assert_eq!(status, DoneStatus::Completed);
+    assert_eq!(text, "PONG");
+}
+
+/// The 2.x usage frame carries no provider/model; the run's picked model
+/// rides the synthetic message info so the context-window join resolves the
+/// catalog's `limit.context` (the rig's fixture model advertises 1000).
+#[tokio::test]
+async fn v2_usage_frame_joins_the_catalog_context_window() {
+    let mut wire = TurnWire::start_v2(false).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
+    wire.v2(
+        "session.usage.updated",
+        json!({
+            "sessionID": "fixture", "cost": 0,
+            "tokens": {"input": 10, "output": 2, "reasoning": 0,
+                       "cache": {"read": 0, "write": 0}}
+        }),
+    );
+    wire.v2(
+        "session.execution.succeeded",
+        json!({"sessionID": "fixture"}),
+    );
+    let (status, usage, window) = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut usage = None;
+        let mut window = None;
+        loop {
+            match wire.events.recv().await.unwrap().unwrap() {
+                AgentEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                } => usage = Some((input_tokens, output_tokens)),
+                AgentEvent::ContextUsage { tokens, window: w } => window = Some((tokens, w)),
+                AgentEvent::Done { status, .. } => return (status, usage, window),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(status, DoneStatus::Completed);
+    assert_eq!(usage, Some((10, 2)));
+    assert_eq!(
+        window,
+        Some((Some(12), Some(1000))),
+        "usage tokens and the fixture catalog's limit.context must both ride ContextUsage"
+    );
+}
+
+/// A steer consumed while a 2.x turn is LIVE is injected into the running
+/// turn: the prompt POST carries `delivery:"steer"`, a mid-turn `Steered`
+/// event splits the segment, and the turn stays active (no Done between
+/// the steer and the turn's own terminal frame).
+#[tokio::test]
+async fn v2_live_steer_injects_into_the_running_turn() {
+    let mut wire = TurnWire::start_v2(false).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
+    wire.v2(
+        "session.step.started",
+        json!({
+            "sessionID": "fixture",
+            "assistantMessageID": "msg_a",
+            "model": {"id": "muse", "providerID": "opencode", "variant": "low"},
+        }),
+    );
+    wire.v2(
+        "session.text.delta",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a", "ordinal": 0,
+            "delta": "before-steer "
+        }),
+    );
+    wire.steer
+        .send(crate::SteerMessage {
+            prompt: "and check X".into(),
+            message_id: Some("steer-1".into()),
+        })
+        .await
+        .unwrap();
+    // The steer POST rides the same prompt route; its body is the recorded
+    // one carrying delivery=steer.
+    let steer_body = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some((_, body)) = wire
+                .posts
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(p, b)| p.ends_with("/prompt") && b.get("delivery").is_some())
+            {
+                break body.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(steer_body["delivery"], "steer");
+    assert_eq!(steer_body["text"], "and check X");
+    assert!(
+        steer_body.get("files").is_some_and(Value::is_array),
+        "steer body keeps the prompt shape"
+    );
+    // The Steered split arrives while the turn is still running…
+    let steered = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match wire.events.recv().await.unwrap().unwrap() {
+                AgentEvent::Steered { .. } => return,
+                AgentEvent::Done { .. } => panic!("turn settled before the steer split"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(steered);
+    // …and the turn continues under the new segment, settling only on its
+    // own terminal frame.
+    wire.v2(
+        "session.step.started",
+        json!({
+            "sessionID": "fixture",
+            "assistantMessageID": "msg_b",
+            "model": {"id": "muse", "providerID": "opencode", "variant": "low"},
+        }),
+    );
+    wire.v2(
+        "session.text.delta",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_b", "ordinal": 0,
+            "delta": "after"
+        }),
+    );
+    wire.v2(
+        "session.execution.succeeded",
+        json!({"sessionID": "fixture"}),
+    );
+    let (status, text) = wire.done().await;
+    assert_eq!(status, DoneStatus::Completed);
+    assert_eq!(text, "before-steer after");
+}
+
+/// 1.x keeps the queue-at-boundary contract: a steer received mid-turn is
+/// NOT posted immediately (no delivery-bearing prompt POST); it delivers as
+/// the next prompt after idle.
+#[tokio::test]
+async fn v1_live_steer_still_queues_at_the_turn_boundary() {
+    let mut wire = TurnWire::start(false).await;
+    wire.request("/prompt_async").await;
+    wire.status("busy");
+    wire.steer
+        .send(crate::SteerMessage {
+            prompt: "second".into(),
+            message_id: None,
+        })
+        .await
+        .unwrap();
+    // Give the mailbox consumer a window to (wrongly) POST the steer.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        wire.posts
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, body)| body.get("delivery").is_none()),
+        "1.x must not send delivery-bearing prompts"
+    );
+    wire.idle();
+    wire.request("/prompt_async").await;
+    // The delivered steer starts a fresh turn: busy before its content and
+    // the settling idle (idle_ready resets per turn).
+    wire.status("busy");
+    wire.bus.send(json!({"type":"message.updated", "properties":{"info":{"id":"m2", "sessionID":"fixture", "role":"assistant"}}})).unwrap();
+    wire.bus.send(json!({"type":"message.part.updated", "properties":{"part":{"id":"text", "messageID":"m2", "sessionID":"fixture", "type":"text", "text":"SECOND_OK"}}})).unwrap();
+    wire.idle();
+    let (status, text) = wire.done().await;
+    assert_eq!(status, DoneStatus::Completed);
+    assert_eq!(text, "SECOND_OK");
+}
+
+/// The live 2.0.6 subagent sequence (captured 2026-09-18): the parent's
+/// spawn tool is named `subagent` (not 1.x's `task`), the child session
+/// announces itself via `session.created{parentID, title}` mid-turn, its
+/// traffic interleaves under its own sessionID, and the parent's tool
+/// result embeds the child's reply. The child's stream must render as
+/// Subagent-tagged events bound to the spawn chip.
+#[tokio::test]
+async fn v2_subagent_tool_binds_child_traffic_to_the_spawn_chip() {
+    let mut wire = TurnWire::start_v2(false).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
+    // Parent streams a line, then spawns.
+    wire.v2(
+        "session.step.started",
+        json!({"sessionID": "fixture", "assistantMessageID": "msg_a",
+               "model": {"id": "muse", "providerID": "opencode", "variant": "low"}}),
+    );
+    wire.v2(
+        "session.tool.input.started",
+        json!({"sessionID": "fixture", "assistantMessageID": "msg_a",
+               "id": "call_1", "name": "subagent"}),
+    );
+    wire.v2(
+        "session.tool.called",
+        json!({"sessionID": "fixture", "assistantMessageID": "msg_a", "id": "call_1",
+               "input": {"agent": "general", "description": "spawn pong agent",
+                          "prompt": "Reply with exactly SUB-PONG"}}),
+    );
+    // The child session announces itself (title mirrors the description).
+    wire.v2(
+        "session.created",
+        json!({"sessionID": "child_1", "parentID": "fixture",
+               "slug": "stellar-cactus", "title": "spawn pong agent"}),
+    );
+    wire.v2(
+        "session.step.started",
+        json!({"sessionID": "child_1", "assistantMessageID": "msg_c",
+               "model": {"id": "muse", "providerID": "opencode", "variant": "low"}}),
+    );
+    wire.v2(
+        "session.text.delta",
+        json!({"sessionID": "child_1", "assistantMessageID": "msg_c",
+               "ordinal": 0, "delta": "SUB-PONG"}),
+    );
+    wire.v2(
+        "session.usage.updated",
+        json!({"sessionID": "child_1", "cost": 0,
+               "tokens": {"input": 1, "output": 1, "reasoning": 0,
+                          "cache": {"read": 0, "write": 0}}}),
+    );
+    wire.v2(
+        "session.execution.succeeded",
+        json!({"sessionID": "child_1"}),
+    );
+    // The parent's spawn resolves with the child's reply folded in.
+    wire.v2(
+        "session.tool.success",
+        json!({"sessionID": "fixture", "assistantMessageID": "msg_a", "id": "call_1",
+               "content": [{"text": "<subagent sessionID=\"child_1\" state=\"completed\">\nSUB-PONG\n</subagent>"}],
+               "metadata": {"sessionID": "child_1", "status": "completed"}}),
+    );
+    wire.v2(
+        "session.execution.succeeded",
+        json!({"sessionID": "fixture"}),
+    );
+    let mut parent_text = String::new();
+    let mut child_text = String::new();
+    let mut saw_tagged = false;
+    let status = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match wire.events.recv().await.unwrap().unwrap() {
+                AgentEvent::TextDelta { text } => parent_text.push_str(&text),
+                AgentEvent::Subagent {
+                    parent_tool_use_id,
+                    event,
+                } => {
+                    saw_tagged = true;
+                    assert!(
+                        parent_tool_use_id.ends_with("call_1"),
+                        "child traffic must bind to the spawn call, got {parent_tool_use_id}"
+                    );
+                    if let AgentEvent::TextDelta { text } = *event {
+                        child_text.push_str(&text);
+                    }
+                }
+                AgentEvent::ToolCall { id, call } => {
+                    assert!(
+                        id.ends_with("call_1"),
+                        "the spawn chip decodes to the Agent genus ({call:?})"
+                    );
+                }
+                AgentEvent::Done { status, .. } => return status,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(status, DoneStatus::Completed);
+    assert!(
+        saw_tagged,
+        "the child session's traffic must arrive as Subagent-tagged events"
+    );
+    assert_eq!(child_text, "SUB-PONG");
+    assert_eq!(parent_text, "");
+}
+
+#[test]
+fn command_turn_bodies_match_the_dialect() {
+    // 1.x `{command, arguments}`; 2.0.0–2.0.3 `{command, text}`; 2.0.4+
+    // `{name, text}` (field renamed in opencode's 2026-09-13 API audit).
+    assert_eq!(
+        command_body(Protocol::V1, "init", "here"),
+        json!({"command": "init", "arguments": "here"})
+    );
+    assert_eq!(
+        command_body(Protocol::V2Early, "init", "here"),
+        json!({"command": "init", "text": "here"})
+    );
+    assert_eq!(
+        command_body(Protocol::V2, "init", "here"),
+        json!({"name": "init", "text": "here"})
+    );
+}
+
+/// `session.retry.scheduled` is the 2.x retry surface (`session.status{retry}`
+/// has no 2.x publisher); it must reach the report/abort ladder so a dying
+/// provider is visible instead of walking into the stall bound.
+#[tokio::test]
+async fn v2_retry_scheduled_feeds_the_retry_ladder() {
+    let mut wire = TurnWire::start_v2(false).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
+    let retry = |wire: &TurnWire, attempt: u64| {
+        wire.v2(
+            "session.retry.scheduled",
+            json!({
+                "sessionID": "fixture", "assistantMessageID": "msg_a",
+                "attempt": attempt, "at": 0,
+                "error": {"type": "provider.auth", "message": "boom"}
+            }),
+        )
+    };
+    for attempt in 1..=3 {
+        retry(&wire, attempt);
+    }
+    let report = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let AgentEvent::Error { message } = wire.events.recv().await.unwrap().unwrap() {
+                return message;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(report.contains("attempt 3"), "chip text: {report}");
+    assert!(report.contains("boom"), "chip text: {report}");
+    retry(&wire, RETRY_ABORT_ATTEMPT);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let AgentEvent::Error { message } = wire.events.recv().await.unwrap().unwrap() {
+                assert!(message.contains("Giving up"), "abort text: {message}");
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    // The ladder aborts the session over the dialect's interrupt route…
+    wire.request("/interrupt").await;
+    // …and the terminal interrupted frame settles the turn.
+    wire.v2(
+        "session.execution.interrupted",
+        json!({"sessionID": "fixture", "reason": "user"}),
+    );
+    let (status, _) = wire.done().await;
+    assert_eq!(status, DoneStatus::Interrupted);
+}
+
 #[tokio::test]
 async fn v2_wire_tool_frames_open_and_resolve_chips() {
-    let mut wire = TurnWire::start_proto(false, true).await;
+    let mut wire = TurnWire::start_v2_early(false).await;
     wire.request("/api/model").await;
     wire.request("/prompt").await;
     wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
@@ -376,7 +818,7 @@ async fn v2_wire_tool_frames_open_and_resolve_chips() {
 
 #[tokio::test]
 async fn v2_execution_failure_and_interrupt_settle_the_turn() {
-    let mut wire = TurnWire::start_proto(false, true).await;
+    let mut wire = TurnWire::start_v2_early(false).await;
     wire.request("/api/model").await;
     wire.request("/prompt").await;
     wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
@@ -401,7 +843,7 @@ async fn v2_execution_failure_and_interrupt_settle_the_turn() {
     assert_eq!(status, DoneStatus::Errored);
     assert!(error.unwrap().contains("provider.auth"));
 
-    let mut wire = TurnWire::start_proto(false, true).await;
+    let mut wire = TurnWire::start_v2_early(false).await;
     wire.request("/api/model").await;
     wire.request("/prompt").await;
     wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
@@ -426,7 +868,7 @@ async fn catalog_decodes_fragmented_http_without_retaining_unused_fields() {
     let expected: ProviderCatalog = serde_json::from_str(&body).unwrap();
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
-        socket.read(&mut [0; 4096]).await.unwrap();
+        assert!(socket.read(&mut [0; 4096]).await.unwrap() > 0);
         socket
             .write_all(
                 format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
@@ -455,7 +897,7 @@ async fn cancelled_catalog_decode_releases_a_stalled_http_body() {
     let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
-        socket.read(&mut [0; 4096]).await.unwrap();
+        assert!(socket.read(&mut [0; 4096]).await.unwrap() > 0);
         socket
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n{")
             .await
@@ -1106,8 +1548,9 @@ fn prompt_body_v2_carries_text_and_files_only() {
 
 #[tokio::test]
 async fn permissions_stay_session_scoped_and_never_persist_grants() {
-    for v2 in [false, true] {
-        let mut wire = TurnWire::start_proto(false, v2).await;
+    for protocol in [Protocol::V1, Protocol::V2Early, Protocol::V2] {
+        let v2 = protocol.is_v2();
+        let mut wire = TurnWire::start_proto(false, protocol).await;
         if v2 {
             wire.request("/api/model").await;
         }
@@ -1165,7 +1608,14 @@ async fn permissions_stay_session_scoped_and_never_persist_grants() {
             "foreign or ownerless permission was answered"
         );
         for (path, body) in approvals {
-            assert_eq!(body["reply"], "once");
+            // 2.0.4+ renamed the field `reply` → `decision` (values
+            // unchanged); 1.x and 2.0.0–2.0.3 keep `reply`.
+            let field = if protocol == Protocol::V2 {
+                "decision"
+            } else {
+                "reply"
+            };
+            assert_eq!(body[field], "once");
             assert!(!path.contains("foreign") && !path.contains("missing"));
         }
     }
@@ -1173,31 +1623,38 @@ async fn permissions_stay_session_scoped_and_never_persist_grants() {
 
 #[tokio::test]
 async fn permissions_without_auto_approve_require_an_explicit_answer() {
-    for accept in [false, true] {
-        let mut wire = TurnWire::start_policy(false, true, false, Some(accept)).await;
-        wire.request("/api/model").await;
-        wire.request("/prompt").await;
-        wire.v2(
-            "permission.asked",
-            json!({"id":"approval", "sessionID":"fixture"}),
-        );
-        let body = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let Some((_, body)) = wire
-                    .posts
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|(p, _)| p.contains("permission"))
-                {
-                    break body.clone();
+    for protocol in [Protocol::V2Early, Protocol::V2] {
+        for accept in [false, true] {
+            let mut wire = TurnWire::start_policy(false, protocol, false, Some(accept)).await;
+            wire.request("/api/model").await;
+            wire.request("/prompt").await;
+            wire.v2(
+                "permission.asked",
+                json!({"id":"approval", "sessionID":"fixture"}),
+            );
+            let body = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some((_, body)) = wire
+                        .posts
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|(p, _)| p.contains("permission"))
+                    {
+                        break body.clone();
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(body["reply"], if accept { "once" } else { "reject" });
+            })
+            .await
+            .unwrap();
+            let field = if protocol == Protocol::V2 {
+                "decision"
+            } else {
+                "reply"
+            };
+            assert_eq!(body[field], if accept { "once" } else { "reject" });
+        }
     }
 }
 
@@ -1253,7 +1710,7 @@ fn v2_tools_are_scoped_and_retired_and_real_failures_are_visible() {
 
 #[tokio::test]
 async fn v2_reasoning_deltas_and_failed_tools_reach_the_feed() {
-    let mut wire = TurnWire::start_proto(false, true).await;
+    let mut wire = TurnWire::start_v2_early(false).await;
     wire.request("/api/model").await;
     wire.request("/prompt").await;
     wire.v2("session.execution.started", json!({"sessionID":"fixture"}));
@@ -1315,7 +1772,7 @@ async fn prompt_error_and_interrupt_before_busy_still_settle() {
 
 #[tokio::test]
 async fn v2_model_selection_and_prompt_use_the_documented_bodies() {
-    let mut wire = TurnWire::start_proto(false, true).await;
+    let mut wire = TurnWire::start_v2_early(false).await;
     wire.request("/api/model").await;
     wire.request("/prompt").await;
     let posts = wire.posts.lock().unwrap();
@@ -1339,7 +1796,7 @@ async fn v2_model_selection_and_prompt_use_the_documented_bodies() {
 
 #[tokio::test]
 async fn v2_pending_tool_overflow_fails_the_run_instead_of_growing_forever() {
-    let mut wire = TurnWire::start_proto(false, true).await;
+    let mut wire = TurnWire::start_v2_early(false).await;
     wire.request("/api/model").await;
     wire.request("/prompt").await;
     for i in 0..=MAX_PENDING_V2_TOOLS {
@@ -1350,7 +1807,7 @@ async fn v2_pending_tool_overflow_fails_the_run_instead_of_growing_forever() {
 
 #[tokio::test]
 async fn v2_external_interrupt_is_not_reported_as_success() {
-    let mut wire = TurnWire::start_proto(false, true).await;
+    let mut wire = TurnWire::start_v2_early(false).await;
     wire.request("/api/model").await;
     wire.request("/prompt").await;
     wire.v2(
@@ -1362,7 +1819,7 @@ async fn v2_external_interrupt_is_not_reported_as_success() {
 
 #[tokio::test]
 async fn v2_recovered_step_failure_does_not_poison_successful_execution() {
-    let mut wire = TurnWire::start_proto(false, true).await;
+    let mut wire = TurnWire::start_v2_early(false).await;
     wire.request("/api/model").await;
     wire.request("/prompt").await;
     wire.v2("session.execution.started", json!({"sessionID":"fixture"}));

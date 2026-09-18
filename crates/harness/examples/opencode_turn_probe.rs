@@ -74,9 +74,12 @@ async fn main() {
                 eprintln!("TXT {delta}");
             }
             Ok(AgentEvent::ReasoningDelta { text }) => eprintln!("THK {}", text.trim_end()),
-            Ok(AgentEvent::ToolCall { .. }) => {
+            Ok(AgentEvent::ToolCall { call, .. }) => {
                 tools += 1;
-                eprintln!("TOOL");
+                eprintln!("TOOL {call:?}");
+            }
+            Ok(AgentEvent::Steered { .. }) => {
+                eprintln!("STEERED (mid-run segment split)");
             }
             Ok(AgentEvent::Usage {
                 input_tokens,

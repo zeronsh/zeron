@@ -9,9 +9,12 @@
 //! subagent traffic and thinking never reaches the ACP wire usefully. The
 //! desktop app doesn't use ACP; neither do we.
 //!
-//! Two server generations are spoken, detected at boot from the health
-//! endpoints ([`Protocol`]): the 1.18 "v1" wire (verified against 1.18.31)
-//! and the 2.x `/api/*` wire (verified against 2.0.3):
+//! Two-and-a-half server generations are spoken, detected at boot from the
+//! health/info endpoints ([`Protocol`]): the 1.18 "v1" wire (verified
+//! against 1.18.31), the first 2.x `/api/*` wire (verified against 2.0.3),
+//! and the current 2.x wire (verified against 2.0.4+ source; `/api/info`
+//! replaces `/api/health`, permission `decision`, command `name`) — see
+//! docs/research/opencode-v2.md:
 //! - spawn `opencode serve --port <free> --hostname 127.0.0.1` with
 //!   `OPENCODE_SERVER_PASSWORD=<uuid>` (HTTP Basic, username `opencode`);
 //!   readiness + protocol = `GET /api/health` vs `GET /global/health`.
@@ -325,10 +328,11 @@ impl Harness for OpencodeHarness {
     fn supports_steering(&self) -> bool {
         true
     }
-    /// Steers queue and deliver as the next prompt when the live turn goes
-    /// idle — opencode has no mid-turn injection on this wire.
+    /// 2.x turns accept mid-turn injection (`delivery:"steer"` on prompt
+    /// admission); 1.x servers degrade to the same mailbox delivering at
+    /// the turn boundary.
     fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::TurnBoundary
+        SteeringMode::StepBoundary
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         REASONING_LEVELS
@@ -409,26 +413,47 @@ struct Server {
     protocol: tokio::sync::OnceCell<Protocol>,
 }
 
-/// The attached server's wire generation: the 1.x "v1" global namespace
-/// (`/global/*`, `/session/*`, prompt_async) and the 2.x `/api/*` surface
-/// (session-scoped model, prompt with delivery, interrupt).
+/// The attached server's wire generation, resolved once via the health/info
+/// endpoints. Three dialects are in the wild:
+///
+/// - `V1` — the 1.x unprefixed surface (`/global/*`, `/session/*`,
+///   `prompt_async`, `abort`), still the npm `opencode-ai@latest` line.
+/// - `V2Early` — the first `/api/*` wire (2.0.0–2.0.3): `/api/health`
+///   `{healthy, version}`, permission reply field `reply`, command body
+///   `{command, text}`.
+/// - `V2` — the current 2.0.4+ wire: `/api/health` merged into
+///   `GET /api/info` `{version, pid, urls, paths}` (readiness = HTTP
+///   status; 503 + `retry-after` while booting), permission reply field
+///   `decision`, command body `{name, text}`.
+///
+/// The 1.18.x hybrid also serves an early `/api/health` — `{healthy:true}`
+/// with NO version (`packages/protocol/src/groups/health.ts` on the 1.x
+/// line) — so it still resolves `V1` through `/global/health`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Protocol {
     V1,
+    V2Early,
     V2,
 }
 
 impl Protocol {
-    /// One readiness poll across both generations. 2.x answers
-    /// `GET /api/health` with `{healthy, version}` and serves its web UI on
-    /// `/global/health`; 1.x answers `GET /global/health` with
-    /// `{healthy, version}` AND also serves `/api/health` — with
-    /// `{"healthy":true}`, no version (both observed live). The version
-    /// field is the only unambiguous discriminator. `None` = still booting.
+    /// Any `/api/*` generation (shared routes, `{data}` wrappers,
+    /// `/api/event` bus, header-only directory scoping).
+    fn is_v2(self) -> bool {
+        matches!(self, Protocol::V2Early | Protocol::V2)
+    }
+
+    /// One readiness poll across the dialects. Probe order matters:
+    /// `/api/info` exists only on 2.0.4+ (and answers 503 + `retry-after`
+    /// until booted — `is_success` skips that); `/global/health` answers a
+    /// version-bearing JSON object only on 1.x (2.x serves its web UI there);
+    /// `/api/health` carries `version` only on 2.0.0–2.0.3. `None` = still
+    /// booting (or an unknown dialect).
     async fn detect(server: &Server) -> Option<Self> {
         for (path, protocol) in [
-            ("/api/health", Protocol::V2),
+            ("/api/info", Protocol::V2),
             ("/global/health", Protocol::V1),
+            ("/api/health", Protocol::V2Early),
         ] {
             if let Ok(resp) = server.get_raw(path).await
                 && resp.status().is_success()
@@ -693,7 +718,7 @@ impl Server {
     ) -> Result<Value, HarnessError> {
         let path = match self.protocol().await {
             Protocol::V1 => format!("/session/{session_id}"),
-            Protocol::V2 => format!("/api/session/{session_id}"),
+            Protocol::V2Early | Protocol::V2 => format!("/api/session/{session_id}"),
         };
         let info = self.get_json(&path, directory).await?;
         Ok(unwrap_data(info))
@@ -708,7 +733,7 @@ impl Server {
     ) -> Result<ProviderCatalog, HarnessError> {
         match self.protocol().await {
             Protocol::V1 => self.get("/provider", directory).await,
-            Protocol::V2 => {
+            Protocol::V2Early | Protocol::V2 => {
                 // The 2.x catalog syncs from models.dev shortly after the
                 // health endpoint opens: an empty list right then is a race,
                 // not a fact — poll briefly before believing it.
@@ -729,7 +754,7 @@ impl Server {
     async fn commands_wire(&self, directory: Option<&str>) -> Result<Value, HarnessError> {
         let path = match self.protocol().await {
             Protocol::V1 => "/command",
-            Protocol::V2 => "/api/command",
+            Protocol::V2Early | Protocol::V2 => "/api/command",
         };
         let raw = self.get_json(path, directory).await?;
         Ok(unwrap_data(raw))
@@ -745,7 +770,7 @@ impl Server {
     ) -> Result<bool, HarnessError> {
         let path = match self.protocol().await {
             Protocol::V1 => "/session/status",
-            Protocol::V2 => "/api/session/active",
+            Protocol::V2Early | Protocol::V2 => "/api/session/active",
         };
         let map = unwrap_data(self.get_json(path, directory).await?);
         Ok(map.get(session_id).is_some())
@@ -759,7 +784,7 @@ impl Server {
     ) -> Result<Value, HarnessError> {
         let path = match self.protocol().await {
             Protocol::V1 => format!("/session/{session_id}/abort"),
-            Protocol::V2 => format!("/api/session/{session_id}/interrupt"),
+            Protocol::V2Early | Protocol::V2 => format!("/api/session/{session_id}/interrupt"),
         };
         self.post_json(&path, directory, &Value::Null).await
     }
@@ -1227,7 +1252,7 @@ async fn run_session(session: Session) {
 
         // 2.x: the requested model (+ variant) is set on the session once;
         // prompts carry only text and files.
-        if server.protocol().await == Protocol::V2
+        if server.protocol().await.is_v2()
             && let Some((provider, model_id)) = request
                 .model
                 .as_deref()
@@ -1340,6 +1365,7 @@ async fn run_session(session: Session) {
         server.base.clone(),
         server.auth.clone(),
         server.protocol().await,
+        model.clone(),
         bus_tx,
     ));
 
@@ -1563,7 +1589,32 @@ async fn run_session(session: Session) {
             steer = steering.recv(), if steering_open => {
                 match steer {
                     Some(steer) => {
-                        if turn.active {
+                        // 2.x can inject the steer into the RUNNING turn
+                        // (delivery:"steer"); the split event lands before
+                        // the turn's continued traffic, and the turn stays
+                        // active. 1.x (and any 2.x POST failure) keeps the
+                        // queue-at-boundary contract.
+                        if turn.active && server.protocol().await.is_v2() {
+                            match post_steer(&server, &session_id, dir, &steer.prompt).await {
+                                Ok(()) => {
+                                    let (prev, next) = rotate(&mut assistant_message_id);
+                                    if !send(&event_tx, AgentEvent::Steered {
+                                        assistant_message_id: Some(prev),
+                                        next_assistant_message_id: Some(next),
+                                    }).await {
+                                        break 'main;
+                                    }
+                                    turn.note_activity();
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "zeron_harness::opencode",
+                                        "mid-turn steer fell back to turn boundary: {e}"
+                                    );
+                                    queued_steers.push_back(steer.prompt);
+                                }
+                            }
+                        } else if turn.active {
                             queued_steers.push_back(steer.prompt);
                         } else {
                             // Between turns (shouldn't happen — the engine
@@ -1712,7 +1763,7 @@ async fn run_session(session: Session) {
 }
 
 async fn create_session(server: &Server, dir: Option<&str>) -> Result<String, HarnessError> {
-    if server.protocol().await == Protocol::V2 {
+    if server.protocol().await.is_v2() {
         // 2.x takes the run directory in the BODY (`location.directory`) —
         // the header is ignored on this route (observed live, 2.0.3) — and
         // wraps the answer in `{data}`. Its schema is stable; the 1.x-only
@@ -1892,12 +1943,42 @@ fn mime_for(path: &str) -> &'static str {
     }
 }
 
+/// Deliver a steer INTO the running turn (2.x only): prompt admission with
+/// `delivery:"steer"` wakes the live execution instead of queueing behind
+/// it (both 2.x dialects declare `Delivery = ["steer","queue"]` — the
+/// current branch at `packages/schema/src/session-inbox.ts` and the
+/// 2.0.x-era fork at `packages/schema/src/session-delivery.ts`). Any
+/// failure falls back to the caller's boundary queue — the steer is never
+/// lost, it just rides the next turn like on 1.x.
+async fn post_steer(
+    server: &Server,
+    session_id: &str,
+    dir: Option<&str>,
+    prompt: &str,
+) -> Result<(), HarnessError> {
+    let mut body = prompt_body_v2(prompt, &[]);
+    body["delivery"] = json!("steer");
+    let path = format!("/api/session/{session_id}/prompt");
+    server.post_json(&path, dir, &body).await.map(|_| ())
+}
+
 /// What a posted turn carries besides its text (1.x folds model/variant
 /// into the prompt body; 2.x ignores them there — set on the session).
 struct TurnSpec<'a> {
     model: Option<&'a (String, String)>,
     variant: Option<&'a str>,
     attachments: &'a [String],
+}
+
+/// The slash-command turn body per dialect: 1.x `{command, arguments}`,
+/// 2.0.0–2.0.3 `{command, text}`, 2.0.4+ `{name, text}` (the field was
+/// renamed in opencode's 2026-09-13 API audit).
+fn command_body(protocol: Protocol, name: &str, arguments: &str) -> Value {
+    match protocol {
+        Protocol::V1 => json!({ "command": name, "arguments": arguments }),
+        Protocol::V2Early => json!({ "command": name, "text": arguments }),
+        Protocol::V2 => json!({ "name": name, "text": arguments }),
+    }
 }
 
 /// Send a turn: a leading `/command` known to the agent routes through the
@@ -1925,15 +2006,14 @@ async fn post_prompt(
         let name = split.next().unwrap_or_default();
         let arguments = split.next().unwrap_or_default().trim().to_owned();
         if !name.is_empty() && commands.iter().any(|c| c.name == name) {
-            // 1.x names the args `arguments`; 2.x `text`.
             let (path, cmd_body) = match protocol {
                 Protocol::V1 => (
                     format!("/session/{session_id}/command"),
-                    json!({ "command": name, "arguments": arguments }),
+                    command_body(protocol, name, &arguments),
                 ),
-                Protocol::V2 => (
+                Protocol::V2Early | Protocol::V2 => (
                     format!("/api/session/{session_id}/command"),
-                    json!({ "command": name, "text": arguments }),
+                    command_body(protocol, name, &arguments),
                 ),
             };
             let server_base = server.base.clone();
@@ -1952,16 +2032,29 @@ async fn post_prompt(
                 };
                 // The command endpoint blocks for the whole turn; the bus
                 // carries the real events, so this response is ignored —
-                // but it must not be cut off mid-turn by CALL_TIMEOUT.
+                // but it must not be cut off mid-turn by CALL_TIMEOUT. A
+                // non-2xx answer means the turn never started (the bus
+                // stays quiet and the stall bound errors later) — surface
+                // it now so the cause is diagnosable.
                 let mut req = server
                     .request(reqwest::Method::POST, &path_owned)
                     .json(&cmd_body);
                 req = server.scoped(req, dir_owned.as_deref()).await;
-                if let Err(e) = req.send().await {
-                    tracing::debug!(
+                match req.send().await {
+                    Ok(resp) if !resp.status().is_success() => {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        tracing::warn!(
+                            target: "zeron_harness::opencode",
+                            "command turn rejected: {status} {}",
+                            truncate_body(&body)
+                        );
+                    }
+                    Err(e) => tracing::debug!(
                         target: "zeron_harness::opencode",
                         "command turn failed: {e}"
-                    );
+                    ),
+                    Ok(_) => {}
                 }
             });
             return Ok(());
@@ -1978,7 +2071,7 @@ async fn post_prompt(
             let path = format!("/session/{session_id}/prompt_async");
             server.post_json(&path, dir, &body).await.map(|_| ())
         }
-        Protocol::V2 => {
+        Protocol::V2Early | Protocol::V2 => {
             // 2.x prompts carry text + `{uri, name}` files; model/variant
             // were set on the session at run start.
             let body = prompt_body_v2(prompt, attachments);
@@ -2384,17 +2477,26 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             };
             let session = session.to_owned();
             let protocol = server.protocol().await;
-            // 1.x: global permission endpoint + a session-scoped fallback;
-            // 2.x: the reply rides the session's permission route
-            // (`{"reply": "once" | "always" | "reject"}`).
-            let (reply_path, fallback_path) = match protocol {
+            // 1.x: global permission endpoint + a session-scoped fallback
+            // (`{response}`); 2.0.0–2.0.3: the session's permission route
+            // with `{reply}`; 2.0.4+: the same route with `{decision}`
+            // (field renamed in opencode's 2026-09-13 API audit; values
+            // unchanged).
+            let (reply_path, fallback_path, reply_field) = match protocol {
                 Protocol::V1 => (
                     format!("/permission/{id}/reply"),
                     Some(format!("/session/{session}/permissions/{id}")),
+                    "reply",
+                ),
+                Protocol::V2Early => (
+                    format!("/api/session/{session}/permission/{id}/reply"),
+                    None,
+                    "reply",
                 ),
                 Protocol::V2 => (
                     format!("/api/session/{session}/permission/{id}/reply"),
                     None,
+                    "decision",
                 ),
             };
             let base = server.base.clone();
@@ -2433,12 +2535,9 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 // V2 "always" writes durable project-wide permission rules.
                 // Approval of this request must not grant future runs access.
                 let reply = if allowed { "once" } else { "reject" };
+                let body = json!({ reply_field: reply });
                 if server
-                    .post_json(
-                        &reply_path,
-                        dir_owned.as_deref(),
-                        &json!({ "reply": reply }),
-                    )
+                    .post_json(&reply_path, dir_owned.as_deref(), &body)
                     .await
                     .is_err()
                     && let Some(fallback_path) = fallback_path
@@ -2781,9 +2880,11 @@ fn part_snapshot_events(
                     id: call_id.clone(),
                     call: oc_tool_call(tool, &input),
                 });
-                // A task spawn on the MAIN feed registers a pending chip so
+                // A spawn tool on the MAIN feed registers a pending chip so
                 // the child's session.created (or its metadata) can bind.
-                if tool == "task"
+                // 1.x called the tool `task`; the 2.x wire renamed it
+                // `subagent` (both decode to the Agent genus above).
+                if matches!(tool, "task" | "subagent")
                     && is_main
                     && let Some((children, pending, unbound)) = spawn_ctx
                 {
@@ -3033,8 +3134,10 @@ fn oc_tool_call(name: &str, input: &Value) -> ToolCall {
                 })
                 .collect(),
         },
-        // The genus-gated spawn naming every driver shares.
-        "task" => ToolCall::Unknown {
+        // The genus-gated spawn naming every driver shares. opencode
+        // called it `task` through 1.x and renamed it `subagent` on the
+        // 2.x wire (`packages/core/src/tool/plugin/subagent.ts`).
+        "task" | "subagent" => ToolCall::Unknown {
             name: s(&["description"])
                 .map(|d| format!("Agent: {d}"))
                 .unwrap_or_else(|| "Agent".into()),
@@ -3066,14 +3169,33 @@ fn oc_tool_call(name: &str, input: &Value) -> ToolCall {
 ///   the step — the synthetic part id.
 /// - tools: `session.tool.input.started` (carries the NAME),
 ///   `.input.ended` (args as text), `.called` (args as object),
-///   `.success` (content array) / `.error`.
+///   `.success` (content array) / `.failed` (never `.error` — the arm
+///   accepts both spellings for capture-history reasons).
 /// - usage: `session.usage.updated` with the cumulative token totals.
+/// - retries: `session.retry.scheduled` {attempt, at, error} — the 2.x
+///   equivalent of v1's `session.status{type:"retry"}`, remapped onto it
+///   so the report/abort ladder is wire-agnostic.
 ///
 /// `tool_names` tracks pending calls by session, message, and provider call id.
 type V2ToolKey = (String, String, String);
 const MAX_PENDING_V2_TOOLS: usize = 4096;
 
+/// Test-only convenience: the production bus always carries the run's
+/// picked model; pure normalizer tests without one call through here.
+#[cfg(test)]
 fn normalize_v2_frame(event: Value, tool_names: &mut HashMap<V2ToolKey, String>) -> Vec<Value> {
+    normalize_v2_frame_with_model(event, tool_names, None)
+}
+
+/// [`normalize_v2_frame`] plus the run's picked `(provider, model)` — used
+/// only by the usage arm to synthesize providerID/modelID so
+/// `context_usage_event` can join the catalog's context window (the 2.x
+/// usage frame carries no model of its own).
+fn normalize_v2_frame_with_model(
+    event: Value,
+    tool_names: &mut HashMap<V2ToolKey, String>,
+    model: Option<(&str, &str)>,
+) -> Vec<Value> {
     let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
     let data = event.get("data").cloned().unwrap_or(Value::Null);
     if data
@@ -3148,6 +3270,32 @@ fn normalize_v2_frame(event: Value, tool_names: &mut HashMap<V2ToolKey, String>)
             let mut warning = v2_error_payload(&data);
             warning["type"] = json!("session.warning");
             vec![warning]
+        }
+        "session.retry.scheduled" => {
+            // The 2.x retry surface: `session.status{type:"retry"}` has no
+            // 2.x publisher (the official client derives retry state from
+            // this event). Remapped so the report/abort ladder fires
+            // unchanged across wires.
+            let error = data.get("error").cloned().unwrap_or(Value::Null);
+            let message = match error.get("message").and_then(Value::as_str) {
+                Some(message) if !message.is_empty() => message.to_owned(),
+                _ => error
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("provider error")
+                    .to_owned(),
+            };
+            vec![json!({
+                "type": "session.status",
+                "properties": {
+                    "sessionID": session(),
+                    "status": {
+                        "type": "retry",
+                        "attempt": data.get("attempt").cloned().unwrap_or(json!(0)),
+                        "message": message,
+                    }
+                }
+            })]
         }
         "session.step.started" => vec![json!({
             "type": "message.updated",
@@ -3245,18 +3393,24 @@ fn normalize_v2_frame(event: Value, tool_names: &mut HashMap<V2ToolKey, String>)
             }
             // Cumulative totals keyed to a synthetic message: registers
             // Usage + ContextUsage exactly like the 1.x assistant
-            // message.updated did. (No providerID/modelID on this frame —
-            // the context window is dropped.)
+            // message.updated did. The frame itself carries no
+            // provider/model, so the run's PICKED model rides the synthetic
+            // info — that lets the context-window join (already keyed by
+            // `provider/model` off the catalog's `limit.context`) resolve
+            // the window the 1.x wire got for free.
+            let mut info = json!({
+                "sessionID": session(),
+                "id": "usage",
+                "role": "assistant",
+                "tokens": tokens,
+            });
+            if let Some((provider, model_id)) = model {
+                info["providerID"] = json!(provider);
+                info["modelID"] = json!(model_id);
+            }
             vec![json!({
                 "type": "message.updated",
-                "properties": {
-                    "info": {
-                        "sessionID": session(),
-                        "id": "usage",
-                        "role": "assistant",
-                        "tokens": tokens,
-                    }
-                }
+                "properties": { "info": info }
             })]
         }
         "session.created" => {
@@ -3380,12 +3534,13 @@ async fn bus_task(
     base: String,
     auth: Option<String>,
     protocol: Protocol,
+    model: Option<(String, String)>,
     tx: mpsc::Sender<BusMsg>,
 ) {
     let client = http_client();
     let url = match protocol {
         Protocol::V1 => format!("{base}/global/event"),
-        Protocol::V2 => format!("{base}/api/event"),
+        Protocol::V2Early | Protocol::V2 => format!("{base}/api/event"),
     };
     let mut failures: u32 = 0;
     loop {
@@ -3401,7 +3556,7 @@ async fn bus_task(
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
                 failures = 0;
-                stream_bus(&tx, resp, protocol).await;
+                stream_bus(&tx, resp, protocol, model.as_ref()).await;
                 if tx.is_closed() {
                     return;
                 }
@@ -3419,7 +3574,12 @@ async fn bus_task(
     }
 }
 
-async fn stream_bus(tx: &mpsc::Sender<BusMsg>, resp: reqwest::Response, protocol: Protocol) {
+async fn stream_bus(
+    tx: &mpsc::Sender<BusMsg>,
+    resp: reqwest::Response,
+    protocol: Protocol,
+    model: Option<&(String, String)>,
+) {
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     let mut announced = false;
@@ -3453,8 +3613,9 @@ async fn stream_bus(tx: &mpsc::Sender<BusMsg>, resp: reqwest::Response, protocol
                 let Ok(event) = serde_json::from_str::<Value>(data) else {
                     continue;
                 };
-                if protocol == Protocol::V2 {
-                    let payloads = normalize_v2_frame(event, &mut v2_tool_names);
+                if protocol.is_v2() {
+                    let model = model.map(|(provider, id)| (provider.as_str(), id.as_str()));
+                    let payloads = normalize_v2_frame_with_model(event, &mut v2_tool_names, model);
                     if v2_tool_names.len() > MAX_PENDING_V2_TOOLS {
                         let _ = tx.send(BusMsg::Disconnected).await;
                         return;
