@@ -5006,6 +5006,13 @@ impl Composer {
         });
     }
 
+    /// Replace the prompt text — the rewind list restoring an earlier send.
+    /// Goes through the same path as typing, so the draft cache, mention
+    /// scanning, and height measurement all stay consistent.
+    pub fn set_prompt(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+    }
+
     /// Tear down the entire completion lifecycle. Advancing the generation is
     /// important even when the spawned task is dropped: an RPC response may
     /// already be queued for delivery on the UI executor.
