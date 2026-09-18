@@ -1193,6 +1193,31 @@ impl Harness for AcpHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let mut request = request;
+        // The picker shows folded catalog ids (a family uid, or `fusion`):
+        // resolve the run's model + reasoning + option picks back to the
+        // exact variant uid the session advertises. Legacy variant uids pass
+        // through; a combination Devin doesn't offer fails before spawn.
+        if self.spec.id == HarnessId::Devin
+            && let Some(model) = request.model.clone()
+            && let Ok((exe, _)) = self.resolve_program(false).await
+        {
+            match self
+                .devin_models
+                .resolve(
+                    &exe,
+                    self.model_discovery_timeout,
+                    &model,
+                    request.reasoning,
+                    &request.model_options,
+                )
+                .await
+            {
+                Ok(devin_models::Resolution::Variant(uid)) => request.model = Some(uid),
+                Ok(devin_models::Resolution::PassThrough) => {}
+                Err(error) => return Err(error),
+            }
+        }
         let (mut child, stderr_tail) = self.spawn_agent(Some(&request.cwd), true, &[]).await?;
         let stdin = child
             .stdin
