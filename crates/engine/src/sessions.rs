@@ -360,7 +360,7 @@ impl SessionsEngine {
     ) -> Result<String, EngineError> {
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
-        request.cwd = expand_home(&request.cwd);
+        request.cwd = crate::repos::expand_home(&request.cwd);
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
@@ -1390,18 +1390,6 @@ fn finish_segment<'a>(
             SegmentWriter::begin(doc, entry_id, device_id, started_at)?.finish(&rendered, status)
         }
         None => Ok(()),
-    }
-}
-
-/// `~` / `~/…` → this host's home directory. Anything else passes through.
-fn expand_home(cwd: &str) -> String {
-    match cwd.strip_prefix("~") {
-        Some("") => crate::repos::home_dir().to_string_lossy().into_owned(),
-        Some(rest) if rest.starts_with('/') => crate::repos::home_dir()
-            .join(&rest[1..])
-            .to_string_lossy()
-            .into_owned(),
-        _ => cwd.to_string(),
     }
 }
 

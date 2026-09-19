@@ -73,7 +73,7 @@ use crate::diff_sync::CheckoutDiffSync;
 use crate::doc_host::DocHost;
 use crate::project_actions::ProjectActionsStore;
 use crate::registry::HarnessRegistry;
-use crate::repos::{Repos, home_dir};
+use crate::repos::{Repos, expand_home, home_dir};
 use crate::sessions::SessionsEngine;
 use crate::terminals::Terminals;
 use crate::uploads::Uploads;
@@ -2517,6 +2517,9 @@ impl RpcService for EngineRpc {
                     .flatten()
                     .and_then(|chat| chat.cwd)
                     .unwrap_or_else(|| home_dir().to_string_lossy().to_string());
+                // Projectless chats store `~`. Expand on the owning device,
+                // after targetDeviceId forwarding, without changing the row.
+                let cwd = expand_home(&cwd);
                 let session = self
                     .terminals
                     .open(&cwd, p.cols, p.rows)

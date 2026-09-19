@@ -81,6 +81,18 @@ pub(crate) fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// `~` / `~/…` → this host's home directory. Anything else passes through.
+/// Resolve only on the device that will launch the process, after RPC routing.
+pub(crate) fn expand_home(cwd: &str) -> String {
+    match cwd.strip_prefix("~") {
+        Some("") => home_dir().to_string_lossy().into_owned(),
+        Some(rest) if rest.starts_with('/') => {
+            home_dir().join(&rest[1..]).to_string_lossy().into_owned()
+        }
+        _ => cwd.to_string(),
+    }
+}
+
 /// Where new worktrees live. Deliberately NOT under the backend data dir —
 /// worktrees are user-facing working checkouts. `ZERON_WORKTREES_DIR` overrides
 /// (test isolation); empty reads as unset.
@@ -2148,6 +2160,26 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_home_preserves_explicit_paths() {
+        for cwd in [
+            "/repo/worktree",
+            "relative/path",
+            ".",
+            "",
+            "~other/repo",
+            "C:\\repo\\worktree",
+        ] {
+            assert_eq!(expand_home(cwd), cwd);
+        }
+        assert_eq!(expand_home("~"), home_dir().to_string_lossy());
+        assert_eq!(Path::new(&expand_home("~/")), home_dir().as_path());
+        assert_eq!(
+            Path::new(&expand_home("~/project/worktree")),
+            home_dir().join("project/worktree").as_path()
+        );
+    }
 
     fn history_commit(sha: String, parent_sha: Option<String>) -> GitHistoryCommit {
         GitHistoryCommit {
