@@ -7,7 +7,7 @@
 import SwiftUI
 
 enum BrandMark {
-    case claude, openai, cursor, devin, grok, hermes, pi, opencode, antigravity
+    case claude, openai, cursor, devin, grok, hermes, pi, opencode, antigravity, omp
 
     var viewBox: CGSize {
         switch self {
@@ -18,6 +18,7 @@ enum BrandMark {
         case .grok: return CGSize(width: 16, height: 16)
         case .hermes: return CGSize(width: 24, height: 24)
         case .pi: return CGSize(width: 800, height: 800)
+        case .omp: return CGSize(width: 120, height: 90)
         case .opencode: return CGSize(width: 24, height: 30)
         case .antigravity: return CGSize(width: 24, height: 24)
         }
@@ -27,7 +28,7 @@ enum BrandMark {
     /// asset says so or the mark's holes fill in solid.
     var evenOddFill: Bool {
         switch self {
-        case .hermes, .pi, .opencode, .antigravity: return true
+        case .hermes, .pi, .opencode, .antigravity, .omp: return true
         default: return false
         }
     }
@@ -48,6 +49,10 @@ enum BrandMark {
             return HermesMarkData.pathData
         case .pi:
             return "M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29ZM282.65 282.65V400H400V282.65ZM517.36 400H634.72V634.72H517.36Z"
+        case .omp:
+            // omp-mark.svg's pi-form glyph, merged monochrome (the upstream
+            // icon's orange connector reads identically at glyph sizes).
+            return "M10 8H110V20H10Z M25 20H37V82H25Z M75 20H87V65H75Z M71 55H91V71H71Z"
         case .opencode:
             // opencode-mark.svg's frame (the desktop asset's second path is a
             // 45%-opacity inner fill this single-path renderer skips — the
@@ -66,6 +71,7 @@ enum BrandMark {
         case "grok": return .grok
         case "hermes": return .hermes
         case "pi": return .pi
+        case "omp": return .omp
         case "opencode": return .opencode
         case "antigravity": return .antigravity
         default: return .claude  // claude-code + mock share the mark, like the desktop
@@ -84,7 +90,7 @@ enum BrandMark {
     static func brandTint(for harness: String) -> Color? {
         switch harness {
         case "claude-code", "mock": return Theme.claudeBrand
-        default: return nil  // codex/cursor/devin/grok/hermes/pi are monochrome marks
+        default: return nil  // codex/cursor/devin/grok/hermes/pi/omp are monochrome marks
         }
     }
 }
