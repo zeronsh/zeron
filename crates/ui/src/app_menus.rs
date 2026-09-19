@@ -29,6 +29,7 @@ actions!(
         Minimize,
         Zoom,
         CloseWindow,
+        NewWindow,
         AppearanceSystem,
         AppearanceLight,
         AppearanceDark,
@@ -49,17 +50,22 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-    // Window verbs route to the active window. zeron is single-window, so a
-    // global handler suffices where zed registers these per-workspace
-    // (crates/zed/src/zed.rs `register_action(Minimize/Zoom)`).
+    // Window verbs route to the active native window.
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |window| window.minimize_window()));
     cx.on_action(|_: &Zoom, cx| with_active_window(cx, |window| window.zoom_window()));
     cx.on_action(close_window);
+    cx.on_action(|_: &NewWindow, cx| new_window(cx));
     // Appearance. Each verb persists and repaints every window; see
     // `appearance::set_mode`.
     cx.on_action(|_: &AppearanceSystem, cx| appearance::set_mode(AppearanceMode::System, cx));
     cx.on_action(|_: &AppearanceLight, cx| appearance::set_mode(AppearanceMode::Light, cx));
     cx.on_action(|_: &AppearanceDark, cx| appearance::set_mode(AppearanceMode::Dark, cx));
+}
+
+pub(crate) fn new_window(cx: &mut App) {
+    cx.defer(|cx| {
+        crate::window_manager::open(crate::window_manager::Open::Blank, cx);
+    });
 }
 
 fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window)) {
@@ -76,7 +82,11 @@ fn quit(_: &Quit, cx: &mut App) {
 pub(crate) fn request_quit(cx: &mut App) {
     // Actions may arrive while GPUI has the active window borrowed. Inspect
     // roots only after that dispatch completes.
-    cx.defer(prepare_quit);
+    if crate::lifecycle::installed(cx) {
+        crate::lifecycle::request(crate::lifecycle::Action::Quit, None, cx);
+    } else {
+        cx.defer(prepare_quit);
+    }
 }
 
 fn prepare_quit(cx: &mut App) {
@@ -89,11 +99,15 @@ fn prepare_quit(cx: &mut App) {
         }
     }
     if ready {
-        quit_after_save(cx);
+        finish_quit(cx);
     }
 }
 
 pub(crate) fn quit_after_save(cx: &mut App) {
+    request_quit(cx);
+}
+
+pub(crate) fn finish_quit(cx: &mut App) {
     #[cfg(target_os = "macos")]
     native_quit::allow();
     cx.quit();
@@ -184,6 +198,11 @@ pub fn app_menus() -> Vec<Menu> {
 
     let mut menus = vec![
         Menu::new("Zeron").items(app_items),
+        Menu::new("File").items([
+            MenuItem::action("New Window", NewWindow),
+            MenuItem::action("New Chat", shell::NewSession),
+            MenuItem::action("New Project", shell::AddSpacePalette),
+        ]),
         // Standard clipboard verbs tied to the composer's existing actions via
         // their native selectors (`OsAction` → cut:/copy:/paste:/selectAll:),
         // so the OS Edit menu routes through the responder chain to the focused

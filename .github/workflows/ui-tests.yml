@@ -7,6 +7,8 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'apps/zeron/**'
+      - 'scripts/test-multi-window-linux.sh'
       - 'scripts/test-linux-browser.sh'
       - 'scripts/run-macos-browser-fixture.sh'
       - 'dist/macos/Info.plist'
@@ -19,6 +21,8 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'apps/zeron/**'
+      - 'scripts/test-multi-window-linux.sh'
       - 'scripts/test-linux-browser.sh'
       - 'scripts/run-macos-browser-fixture.sh'
       - 'dist/macos/Info.plist'
@@ -65,12 +69,18 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libx11-dev libxcb1-dev libx11-xcb-dev \
             libfontconfig1-dev libfreetype-dev libasound2-dev \
-            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
+            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev \
+            xvfb xauth xdotool openbox mesa-vulkan-drivers ripgrep
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: UI and headless layout regressions
         run: cargo test --release --locked -p zeron-ui --lib -- --test-threads=1
+      - name: Native multiple-window lifecycle
+        timeout-minutes: 8
+        run: |
+          cargo build --release --locked -p zeron
+          bash scripts/test-multi-window-linux.sh target/release/zeron
 
   macos-frame-recovery:
     runs-on: macos-latest
@@ -100,6 +110,14 @@ jobs:
       - name: Native notification click regressions
         run: |
           cargo test --release --locked -p zeron-ui --lib notify::tests:: -- --test-threads=1
+          cargo test --release --locked -p zeron-ui --lib multi_window -- --test-threads=1
+          cargo test --release --locked -p zeron-ui --lib gui_instance -- --test-threads=1
+      - name: Native multiple-window lifecycle
+        timeout-minutes: 8
+        run: |
+          cargo build --release --locked -p zeron-ui --example multi-window-fixture --features multi-window-fixture
+          target/release/examples/multi-window-fixture "$RUNNER_TEMP/multi-window"
+          test -f "$RUNNER_TEMP/multi-window/result.txt"
       - name: Build native browser fixture
         run: cargo build --release --locked -p zeron-ui --example browser-fixture --example preview-fixture --features browser-fixture
       - name: Native browser regression and screenshots

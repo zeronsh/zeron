@@ -15,7 +15,8 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "zeron",
     version,
-    about = "Multi-device controller for coding agents"
+    about = "Multi-device controller for coding agents",
+    args_conflicts_with_subcommands = true
 )]
 struct Cli {
     #[command(subcommand)]
@@ -23,6 +24,9 @@ struct Cli {
     /// Open a Zeron conversation URL.
     #[arg(value_name = "URL")]
     open_url: Option<String>,
+    /// Open a new window in the running graphical application.
+    #[arg(long, conflicts_with = "open_url")]
+    new_window: bool,
     #[cfg(windows)]
     #[arg(long, hide = true)]
     wait_for_exit: Option<u32>,
@@ -121,6 +125,21 @@ fn main() -> anyhow::Result<()> {
     if let Some(pid) = cli.wait_for_exit {
         zeron_update::windows::wait_for_exit(pid)?;
     }
+    let gui = if cli.command.is_none() {
+        let request = if cli.new_window {
+            zeron_ui::gui_instance::LaunchRequest::NewWindow
+        } else if let Some(url) = &cli.open_url {
+            zeron_ui::gui_instance::LaunchRequest::OpenUrl(url.clone())
+        } else {
+            zeron_ui::gui_instance::LaunchRequest::Activate
+        };
+        match zeron_ui::gui_instance::GuiInstance::acquire(&paths::data_dir(), request)? {
+            zeron_ui::gui_instance::Launch::Primary(instance) => Some(instance),
+            zeron_ui::gui_instance::Launch::Forwarded => return Ok(()),
+        }
+    } else {
+        None
+    };
     // Long-running modes log at info, one-shot CLI commands at warn (RUST_LOG
     // overrides either).
     // loro's internal block-encode diagnostics log at info and flood
@@ -225,19 +244,23 @@ fn main() -> anyhow::Result<()> {
             let edge_token = std::env::var("ZERON_EDGE_TOKEN").ok();
             // Headed: the UI probes ZERON_IPC_PORT and connects to a running
             // daemon, or embeds the engine in-process (ARCHITECTURE §1).
-            zeron_ui::run_app(zeron_ui::UiConfig {
-                data_dir: paths::data_dir(),
-                ipc_port: std::env::var("ZERON_IPC_PORT")
-                    .ok()
-                    .and_then(|p| p.parse().ok())
-                    .unwrap_or(27654),
-                edge_url: edge_url_from_env(),
-                workos_client_id: workos_client_id_from_env(&edge_token),
-                edge_token,
-                org_id: std::env::var("ZERON_ORG_ID").ok(),
-                default_harness: zeron_ui::HarnessId::ClaudeCode,
-                initial_url: cli.open_url,
-            });
+            zeron_ui::run_app(
+                zeron_ui::UiConfig {
+                    data_dir: paths::data_dir(),
+                    ipc_port: std::env::var("ZERON_IPC_PORT")
+                        .ok()
+                        .and_then(|p| p.parse().ok())
+                        .unwrap_or(27654),
+                    edge_url: edge_url_from_env(),
+                    workos_client_id: workos_client_id_from_env(&edge_token),
+                    edge_token,
+                    org_id: std::env::var("ZERON_ORG_ID").ok(),
+                    default_harness: zeron_ui::HarnessId::ClaudeCode,
+                    initial_url: cli.open_url,
+                    initial_new_window: cli.new_window,
+                },
+                gui.expect("headed launch owns the GUI lock"),
+            );
             Ok(())
         }
     }
@@ -554,5 +577,34 @@ fn sweep_stale_pid_logs(dir: &std::path::Path, mode: &str) {
         if stale {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+#[cfg(test)]
+mod window_cli_tests {
+    use super::*;
+
+    #[test]
+    fn new_window_is_a_headed_launch_and_preserves_subcommands() {
+        assert!(
+            Cli::try_parse_from(["zeron", "--new-window"])
+                .unwrap()
+                .new_window
+        );
+        assert!(matches!(
+            Cli::try_parse_from(["zeron", "headless"]).unwrap().command,
+            Some(Command::Headless)
+        ));
+        assert!(Cli::try_parse_from(["zeron", "--new-window", "headless"]).is_err());
+        assert!(
+            Cli::try_parse_from(["zeron", "--new-window", "zeron://open/chat/x?workspace=y"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["zeron", "zeron://open/chat/x?workspace=y"])
+                .unwrap()
+                .open_url
+                .is_some()
+        );
     }
 }

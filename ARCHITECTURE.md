@@ -15,6 +15,14 @@ A ground-up native rewrite of [zeron](../zeron) — a multi-device controller fo
 
 ## 1. Topology (unchanged shape, new materials)
 
+Desktop windows share one graphical runtime per data directory. `AppRuntime`
+owns the engine and global subscriptions; `ChatStore` shares conversation feeds
+while each `Shell` retains independent navigation, drafts and panels. Notifications
+and application lifecycle decisions are coordinated once per process. The GUI's
+`ui.lock` and launch forwarding are independent of the engine's `engine.lock`.
+See [desktop windows](docs/multi-window.md) for shortcuts, persistence, platform
+lifetime rules and regression probes.
+
 ```
 gpui UI ─ in-proc/localhost RPC ─ engine A ══ DeviceRoom DO relay ══ engine B ─ RPC ─ gpui UI
                     │       optional edge Worker: auth, rooms, R2        │

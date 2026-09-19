@@ -2964,6 +2964,12 @@ impl EventEmitter<AppearanceSettingsEvent> for AppearancePage {}
 
 impl Render for AppearancePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.selected_font = typography::effective(cx);
+        self.selected_terminal_font = typography::terminal_effective(cx);
+        self.selected_code_font = typography::code_effective(cx);
+        self.selected_size = typography::font_size(cx);
+        self.selected_terminal_size = typography::terminal_font_size(cx);
+        self.selected_code_size = typography::code_font_size(cx);
         let theme = Theme::of(cx).clone();
         let availability = typography::availability(cx);
         let fixed = theme.font_sans_fixed.clone();

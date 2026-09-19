@@ -78,6 +78,13 @@ impl popover::ScrollRailHost for FilesSettingsPage {
 
 impl Render for FilesSettingsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if cx.has_global::<crate::app_runtime::AppRuntime>() {
+            let settings = crate::settings::current(cx);
+            self.autosave_enabled = settings.files_autosave_enabled;
+            self.autosave_delay_ms = settings.files_autosave_delay_ms;
+            self.word_wrap = settings.files_word_wrap;
+            self.show_all_files = settings.files_show_all;
+        }
         let theme = Theme::of(cx).clone();
         let autosave_enabled = self.autosave_enabled;
         let selected = self.autosave_delay_ms;

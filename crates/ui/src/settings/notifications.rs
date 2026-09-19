@@ -1,5 +1,5 @@
 //! Settings → Notifications: independently configurable session chimes plus
-//! desktop banners on the same status transitions (`shell::on_state_changed`).
+//! desktop banners on the same status transitions (`notification_service`).
 //!
 //! The ShortcutsPage arrangement: the page holds a working copy, every flip
 //! emits [`NotificationsEvent::Changed`], and the shell persists it. Nothing
@@ -73,6 +73,18 @@ fn interactive_switch(
 }
 
 impl NotificationsPage {
+    fn sync_preferences(&mut self, cx: &gpui::App) {
+        if cx.has_global::<crate::app_runtime::AppRuntime>() {
+            let settings = crate::settings::current(cx);
+            self.sound = settings.sound_enabled;
+            self.completion_sound = settings.sound_completion_enabled;
+            self.input_sound = settings.sound_input_enabled;
+            self.attention_sound = settings.sound_attention_enabled;
+            self.desktop = settings.notifications_enabled;
+            self.background_only = settings.notifications_background_only;
+        }
+    }
+
     pub fn new(
         sound: bool,
         completion_sound: bool,
@@ -105,6 +117,7 @@ impl NotificationsPage {
     }
 
     fn toggle(&mut self, preference: NotificationPreference, cx: &mut Context<Self>) {
+        self.sync_preferences(cx);
         let value = match preference {
             NotificationPreference::Sound => &mut self.sound,
             NotificationPreference::CompletionSound => &mut self.completion_sound,
@@ -137,6 +150,7 @@ impl popover::ScrollRailHost for NotificationsPage {
 
 impl Render for NotificationsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_preferences(cx);
         let theme = Theme::of(cx).clone();
         let accent = theme.accent;
         let sound = self.sound;

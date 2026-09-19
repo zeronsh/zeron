@@ -4622,6 +4622,22 @@ impl Composer {
         });
     }
 
+    pub(crate) fn reset_for_runtime(&mut self, cx: &mut Context<Self>) {
+        self.clear_queue_edit(cx);
+        self.drafts.clear();
+        self.attachments.clear();
+        self.appshots.clear();
+        self.queue_previews.clear();
+        self.answered_requests.clear();
+        self.wizard = None;
+        self.failure = None;
+        self.failure_key = None;
+        self.current_key.clear();
+        self.input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        cx.notify();
+    }
+
     /// Staged in `AppState` because the changes pane writes them.
     fn staged_comments(&self, cx: &App) -> Vec<crate::comments::ReviewComment> {
         self.state
@@ -5877,6 +5893,9 @@ impl Composer {
     /// New chats need a runnable agent, but may target the device's home
     /// directory without a project. Existing chats carry their own run config.
     fn send_blocked(&self, cx: &App) -> bool {
+        if crate::lifecycle::blocks_commands(cx) {
+            return true;
+        }
         if self.queue_edit_finishing {
             return true;
         }
@@ -5907,6 +5926,9 @@ impl Composer {
     }
 
     fn on_submit(&mut self, cx: &mut Context<Self>) {
+        if crate::lifecycle::blocks_commands(cx) {
+            return;
+        }
         if self.commit_queue_edit(cx) {
             return;
         }
@@ -5944,6 +5966,9 @@ impl Composer {
     /// content. With a truly empty composer it instead activates the most
     /// recently queued row, and never turns an empty chord into Stop.
     fn on_modified_submit(&mut self, cx: &mut Context<Self>) {
+        if crate::lifecycle::blocks_commands(cx) {
+            return;
+        }
         if self.commit_queue_edit(cx) {
             return;
         }
@@ -5964,6 +5989,9 @@ impl Composer {
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
     /// reasoning / options on the Run request itself (§1.7).
     fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
+        if crate::lifecycle::blocks_commands(cx) {
+            return;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.failure = Some("Engine not connected".into());
             self.failure_key = None; // global — meaningful on every chat
@@ -6227,7 +6255,11 @@ impl Composer {
         let restore_text = typed;
         let err_chat_id = chat_id.clone();
         let err_message_id = message_id.clone();
+        // Keep a submitted send alive through upload and command adoption,
+        // even when its native window closes. Completion releases the lease.
+        let send_owner = cx.entity();
         self.send_task = Some(cx.spawn(async move |this, cx| {
+            let _send_owner = send_owner;
             let result: Result<Option<String>, String> = async {
                 // Attachments stage FIRST — before the chat row or anything
                 // else exists. Staging is chat-independent (keyed by
