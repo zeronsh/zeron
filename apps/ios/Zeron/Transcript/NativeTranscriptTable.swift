@@ -22,11 +22,37 @@ struct NativeTranscriptTable: UIViewRepresentable {
     }
 }
 
+/// Keep mirrored transcript motion in sync even when a keyboard animation is
+/// replaced or removed without changing the viewport's destination geometry.
+private final class TranscriptViewportLayer: CALayer {
+    override func add(_ animation: CAAnimation, forKey key: String?) {
+        super.add(animation, forKey: key)
+        if (animation as? CABasicAnimation)?.keyPath == "bounds.size" {
+            // A replacement keyboard spring can have the same destination
+            // bounds, so UIKit does not otherwise ask the view to lay out again.
+            (delegate as? UIView)?.setNeedsLayout()
+        }
+    }
+
+    override func removeAnimation(forKey key: String) {
+        let resizesViewport = (animation(forKey: key) as? CABasicAnimation)?.keyPath == "bounds.size"
+        super.removeAnimation(forKey: key)
+        if resizesViewport { (delegate as? UIView)?.setNeedsLayout() }
+    }
+
+    override func removeAllAnimations() {
+        super.removeAllAnimations()
+        (delegate as? UIView)?.setNeedsLayout()
+    }
+}
+
 /// Expose realized content directly. UITableView's accessibility row proxies
 /// otherwise instantiate thousands of UIHostingConfigurations just to inspect
 /// their traits, defeating virtualization for assistive technology clients.
 @MainActor
 final class TranscriptViewport: UIView {
+    override class var layerClass: AnyClass { TranscriptViewportLayer.self }
+
     let table: TranscriptTableView
     private var offsetFraction: CGFloat = 0
     private var mirroredKeys: Set<String> = []

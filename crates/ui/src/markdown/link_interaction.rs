@@ -6,8 +6,8 @@ use super::{
 use crate::{icons, popover, theme::Theme};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ClickEvent, DispatchPhase, Element, ElementId,
-    FocusHandle, GlobalElementId, InspectorElementId, LayoutId, MouseButton, Pixels, Point, Role,
-    ScrollWheelEvent, SharedString, TextLayout, Window, div, prelude::*, px,
+    FocusHandle, GlobalElementId, InspectorElementId, LayoutId, MouseButton, MouseMoveEvent,
+    Pixels, Point, Role, ScrollWheelEvent, SharedString, TextLayout, Window, div, prelude::*, px,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -103,9 +103,12 @@ impl Element for LinkRanges {
                     focused: None,
                 });
             if state.bounds != bounds {
-                state.menu.borrow_mut().take();
-                state.epoch.set(state.epoch.get().wrapping_add(1));
-                state.dismissed.set(true);
+                dismiss_overlays(
+                    &state.menu,
+                    &state.epoch,
+                    &state.dismissed,
+                    &state.tooltip_bounds,
+                );
             }
             let focused = state
                 .focus
@@ -152,14 +155,17 @@ impl Element for LinkRanges {
                         .id(format!("link-{index}-{part}-{}", state.epoch.get()))
                         // Removing the builder cancels both visible tooltips
                         // and GPUI's delayed show task while the menu owns input.
-                        .when(state.menu.borrow().is_none(), |hit| {
-                            hit.hoverable_tooltip(move |_, cx| {
-                                let url = destination.clone();
-                                let bounds = tooltip_bounds.clone();
-                                cx.new(|_| super::link_destination::Destination(url, bounds))
-                                    .into()
-                            })
-                        })
+                        .when(
+                            state.menu.borrow().is_none() && !state.dismissed.get(),
+                            |hit| {
+                                hit.hoverable_tooltip(move |_, cx| {
+                                    let url = destination.clone();
+                                    let bounds = tooltip_bounds.clone();
+                                    cx.new(|_| super::link_destination::Destination(url, bounds))
+                                        .into()
+                                })
+                            },
+                        )
                         .w(rect.size.width)
                         .h(rect.size.height)
                         .cursor_pointer()
@@ -435,7 +441,7 @@ impl Element for LinkRanges {
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _: &mut (),
         paint: &mut Self::PrepaintState,
         window: &mut Window,
@@ -451,9 +457,19 @@ impl Element for LinkRanges {
                     .get()
                     .is_some_and(|rect| rect.contains(&event.position))
             {
-                menu.borrow_mut().take();
-                epoch.set(epoch.get().wrapping_add(1));
-                dismissed.set(true);
+                if dismiss_overlays(&menu, &epoch, &dismissed, &tooltip_bounds) {
+                    window.refresh();
+                }
+            }
+        });
+        let dismissed = paint.3.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, _| {
+            // Re-arm hover only on pointer input. Scrolling content beneath a
+            // stationary pointer must not create another delayed tooltip.
+            if phase == DispatchPhase::Capture
+                && bounds.contains(&event.position)
+                && dismissed.replace(false)
+            {
                 window.refresh();
             }
         });
@@ -463,6 +479,25 @@ impl Element for LinkRanges {
         }
     }
 }
+
+/// Invalidate the old hover target once, cancelling both visible and pending
+/// tooltips. Subsequent scroll samples need no window-wide refresh.
+fn dismiss_overlays(
+    menu: &RefCell<Option<(usize, Point<Pixels>)>>,
+    epoch: &Cell<u64>,
+    dismissed: &Cell<bool>,
+    tooltip_bounds: &Cell<Option<Bounds<Pixels>>>,
+) -> bool {
+    let had_menu = menu.borrow_mut().take().is_some();
+    let was_dismissed = dismissed.replace(true);
+    let had_tooltip = tooltip_bounds.take().is_some();
+    let changed = had_menu || !was_dismissed || had_tooltip;
+    if changed {
+        epoch.set(epoch.get().wrapping_add(1));
+    }
+    changed
+}
+
 fn click_is_activation(event: &ClickEvent) -> bool {
     match event {
         ClickEvent::Mouse(event) => {
@@ -478,6 +513,38 @@ fn click_is_activation(event: &ClickEvent) -> bool {
 mod tests {
     use super::*;
     use gpui::{MouseClickEvent, MouseDownEvent, MouseUpEvent, TestAppContext, point};
+    #[test]
+    fn scrolling_dismisses_overlays_once_until_pointer_or_menu_input() {
+        let menu = RefCell::new(None);
+        let epoch = Cell::new(0);
+        let dismissed = Cell::new(false);
+        let tooltip_bounds = Cell::new(None);
+        // Even an invisible, delayed tooltip is cancelled by the first event.
+        assert!(dismiss_overlays(&menu, &epoch, &dismissed, &tooltip_bounds));
+        for _ in 0..240 {
+            assert!(!dismiss_overlays(
+                &menu,
+                &epoch,
+                &dismissed,
+                &tooltip_bounds
+            ));
+        }
+        assert_eq!(epoch.get(), 1);
+        dismissed.set(false);
+        tooltip_bounds.set(Some(Bounds::default()));
+        assert!(dismiss_overlays(&menu, &epoch, &dismissed, &tooltip_bounds));
+        assert!(tooltip_bounds.get().is_none());
+        assert!(!dismiss_overlays(
+            &menu,
+            &epoch,
+            &dismissed,
+            &tooltip_bounds
+        ));
+        *menu.borrow_mut() = Some((0, Point::default()));
+        assert!(dismiss_overlays(&menu, &epoch, &dismissed, &tooltip_bounds));
+        assert!(menu.borrow().is_none());
+        assert_eq!(epoch.get(), 3);
+    }
     #[test]
     fn selection_drags_and_secondary_clicks_do_not_navigate() {
         let mut event = MouseClickEvent {
