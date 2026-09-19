@@ -218,6 +218,106 @@ fn assemble(dir: &std::path::Path, harness: Arc<dyn Harness>) -> EngineCore {
         .expect("engine core assembles")
 }
 
+#[tokio::test]
+async fn pending_update_does_not_block_dispatch_or_other_harnesses() {
+    struct RecordingHarness(HarnessId, Arc<std::sync::Mutex<Vec<String>>>);
+    #[async_trait]
+    impl Harness for RecordingHarness {
+        fn id(&self) -> HarnessId {
+            self.0
+        }
+        fn display_name(&self) -> &str {
+            "Recording"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> SteeringMode {
+            SteeringMode::TurnBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            request: RunRequest,
+            controls: RunControls,
+        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+            assert!(controls.execution_lease.is_some());
+            self.1.lock().unwrap().push(request.prompt.clone());
+            MockHarness {
+                script: mock_script(),
+            }
+            .run(request, controls)
+            .await
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let started = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let registry = Arc::new(HarnessRegistry::new());
+    for id in [HarnessId::ClaudeCode, HarnessId::Codex] {
+        registry.register(Arc::new(RecordingHarness(id, started.clone())));
+    }
+    let core =
+        EngineCore::assemble(dir.path(), registry.clone(), HarnessId::ClaudeCode, None).unwrap();
+    let active_turn = registry.execution_lease(HarnessId::ClaudeCode).await;
+    registry.begin_update(HarnessId::ClaudeCode);
+    // These awaits model the shared queue watcher's serial dispatch calls.
+    // Neither a waiting writer nor an active installation may block dispatch.
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        core.sessions.dispatch(
+            "waiting",
+            HarnessId::ClaudeCode,
+            run_request("waiting"),
+            None,
+        ),
+    )
+    .await
+    .expect("dispatch must not wait for the update")
+    .unwrap();
+    drop(active_turn);
+    let installing = registry.update_lease(HarnessId::ClaudeCode).await;
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        core.sessions.dispatch(
+            "cancelled",
+            HarnessId::ClaudeCode,
+            run_request("cancelled"),
+            None,
+        ),
+    )
+    .await
+    .expect("dispatch must not wait for installation")
+    .unwrap();
+    core.sessions
+        .dispatch("other", HarnessId::Codex, run_request("other"), None)
+        .await
+        .unwrap();
+    wait_for(
+        || started.lock().unwrap().contains(&"other".to_string()),
+        "unrelated harness starts",
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(1), core.sessions.interrupt("cancelled"))
+        .await
+        .expect("a run waiting for an update remains interruptible")
+        .unwrap();
+    assert_eq!(*started.lock().unwrap(), ["other"]);
+    drop(installing);
+    registry.end_update(HarnessId::ClaudeCode);
+    wait_for(
+        || started.lock().unwrap().contains(&"waiting".to_string()),
+        "deferred run starts after update",
+    )
+    .await;
+    assert!(!started.lock().unwrap().contains(&"cancelled".to_string()));
+    core.shutdown().await;
+}
+
 /// Queue a command into the chat doc the way a REMOTE viewer device would: an immutable
 /// pending entry appended under the viewer's device id (ledger rule 1).
 fn queue_as_viewer(doc: &SessionDoc, id: &str, payload: SessionCommandPayload) {
