@@ -34,6 +34,13 @@ fn main() -> anyhow::Result<()> {
             let mut s = state::AppState::new();
             s.connection = zeron_proto::view::ConnectionStatus::Ready;
             s.workspace_scope = Some(zeron_proto::WorkspaceScope::Local);
+            if std::env::var_os("ZERON_SIDEBAR_ACCOUNT").is_some() {
+                s.workspace_scope = Some(zeron_proto::WorkspaceScope::Synced);
+                s.auth = Some(zeron_proto::AuthState::SignedIn {
+                    user: zeron_proto::UserProfile { id: "fixture-user".into(), email: "alex@example.test".into(), name: Some("Alex".into()) },
+                    org_id: Some("fixture-org".into()),
+                });
+            }
             s.local_device_id = Some("local".into());
             s.devices = vec![serde_json::from_value(serde_json::json!({"id":"local","name":"This device","platform":std::env::consts::OS,"lastSeenAt":null})).unwrap()];
             s.selected_chat = Some("browser-fixture".into()); s.selected_space = Some("project".into());

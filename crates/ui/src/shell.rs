@@ -6776,38 +6776,31 @@ impl Shell {
         // t3code's archived accordion, below the active list.
         let archived_section = self.render_archived_section(theme, cx);
 
-        let (user_line, trigger_subline, menu_identity): (
-            SharedString,
-            Option<SharedString>,
-            SharedString,
-        ) = match workspace_scope {
+        let (user_line, menu_identity): (SharedString, SharedString) = match workspace_scope {
             Some(WorkspaceScope::Local) => {
                 let line = if matches!(self.sync_flow, SyncFlow::RestartPending { .. }) {
                     "Sync ready after restart"
                 } else {
                     "Local only"
                 };
-                (line.into(), None, "Stored on this device".into())
+                (line.into(), "Stored on this device".into())
             }
-            Some(WorkspaceScope::Development) => (
-                "Development".into(),
-                Some("Local development runtime".into()),
-                "Authentication disabled".into(),
-            ),
+            Some(WorkspaceScope::Development) => {
+                ("Development".into(), "Authentication disabled".into())
+            }
             Some(WorkspaceScope::Synced) | None => {
                 let line: SharedString = user
                     .as_ref()
                     .map(|u| u.name.clone().unwrap_or_else(|| u.email.clone()).into())
-                    .unwrap_or_else(|| SharedString::from("Not signed in"));
+                    .unwrap_or_else(|| "Not signed in".into());
                 let email = user
                     .as_ref()
                     .map(|u| SharedString::from(u.email.clone()))
                     .unwrap_or_else(|| line.clone());
-                (line, Some("Alpha".into()), email)
+                (line, email)
             }
         };
-        let user_menu =
-            self.render_user_menu(user_line.clone(), trigger_subline, menu_identity, theme, cx);
+        let user_menu = self.render_user_menu(user_line, menu_identity, theme, cx);
 
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
@@ -7157,7 +7150,6 @@ impl Shell {
     fn render_user_menu(
         &mut self,
         user_line: SharedString,
-        trigger_subline: Option<SharedString>,
         menu_identity: SharedString,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -7165,9 +7157,9 @@ impl Shell {
         let theme = &theme.for_popup();
         let open = self.user_menu.is_open();
         let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
-        // Bottom-of-sidebar identity: avatar circle + scope/account label and
-        // its secondary status line.
+        // Only the compact avatar button is interactive; footer whitespace is not.
         let initial: SharedString = user_line
+            .trim()
             .chars()
             .next()
             .map(|c| c.to_uppercase().to_string())
@@ -7175,14 +7167,18 @@ impl Shell {
             .into();
         let mut trigger = div()
             .id("user-menu")
+            .debug_selector(|| "user-menu".into())
+            .role(gpui::Role::Button)
+            .aria_label(format!("Account menu: {user_line}"))
+            .relative()
+            .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE + 8.0))
             .flex_none()
-            .rounded(px(8.0))
-            .px(px(Theme::SPACE_SM))
-            .py(px(Theme::SPACE_SM))
+            .rounded_full()
+            .p(px(4.0))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(10.0))
+            .justify_center()
             .cursor_pointer()
             // user-menu.tsx trigger: hover `bg-white/[0.04]`, open state
             // (`data-[state=open]`) the slightly stronger `bg-white/[0.06]`;
@@ -7214,51 +7210,22 @@ impl Shell {
             .child(
                 // Avatar: white circle, initial in near-black (zeron user-menu.tsx).
                 div()
-                    .size(px(28.0))
+                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
                     .flex_none()
                     .rounded_full()
                     .bg(theme.text)
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(crate::typography::ui_rems(12.0))
+                    .font_family(theme.font_mono.clone())
+                    .text_size(px(9.0))
+                    .line_height(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.bg)
-                    .child(initial),
-            )
-            .child(
-                // Name with an optional status line underneath — no chip on the right.
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .line_height(px(17.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .truncate()
-                            .child(user_line.clone()),
-                    )
-                    .when_some(trigger_subline, |identity, subline| {
-                        identity.child(
-                            div()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .line_height(px(15.0))
-                                .text_color(theme.text_muted)
-                                .child(subline),
-                        )
-                    }),
+                    .child(div().w_full().text_center().child(initial)),
             );
         if self.user_menu.get().is_some() {
             let closing = self.user_menu.closing_since();
-            // user-menu.tsx content: `w-[--radix-dropdown-menu-trigger-width]`
-            // (exactly as wide as the trigger row — sidebar minus its p-2
-            // gutters), `flex-col gap-0.5`, then: one small muted email line
-            // (`px-2 pb-1 pt-1.5 text-[11px] text-muted-foreground/70`),
-            // the action selected by the runtime scope, then "Settings".
             let menu = popover::popover_card(theme)
                 .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -7344,7 +7311,7 @@ impl Shell {
                         .child(SharedString::from("Settings")),
                 )
                 .into_any_element();
-            trigger = trigger.child(popover::anchored_menu_above(
+            trigger = trigger.child(popover::anchored_menu_right(
                 "user-menu-popover",
                 menu,
                 closing,
