@@ -721,7 +721,8 @@ pub struct UiSettings {
     /// Agent-sent Markdown fences: wrap long lines to the chat width instead
     /// of exposing their horizontal scroll plane.
     pub code_fences_fit_content: bool,
-    /// Maximum conversation width in logical pixels; composer width is independent.
+    /// Maximum message and docked composer surface width in logical pixels.
+    /// The centered new-chat composer keeps its own width.
     pub transcript_width: f32,
     /// Open a normal web-link activation in the session Browser. Explicit
     /// context-menu actions remain available regardless of this preference.

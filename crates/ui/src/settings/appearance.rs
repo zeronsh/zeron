@@ -393,7 +393,7 @@ impl AppearancePage {
                             .text_size(typography::ui_rems(12.0))
                             .line_height(px(18.0))
                             .text_color(theme.text_muted)
-                            .child("Maximum width of messages. Adapts to smaller windows."),
+                            .child("Maximum width of messages and the composer in conversations. Adapts to smaller windows."),
                     ),
             )
             .child(
