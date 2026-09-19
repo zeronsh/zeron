@@ -19,12 +19,12 @@ use gpui::{
     Action, AnyElement, App, ClipboardItem, Context, Empty, Entity, FocusHandle, Focusable as _,
     IntoElement, KeyBinding, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseUpEvent, Pixels, Point, Render, SharedString, Subscription, Task, Window,
-    WindowControlArea, actions, div, prelude::*, px,
+    WindowControlArea, actions, div, img, prelude::*, px,
 };
 
 use gpui_tokio::Tokio;
 use zeron_engine::InstanceLock;
-use zeron_proto::{AuthState, WorkspaceScope};
+use zeron_proto::{AuthState, HarnessId, WorkspaceScope};
 use zeron_rpc::methods;
 
 use crate::changes::{Changes, ChangesEvent};
@@ -33,6 +33,9 @@ use crate::files::{FilesCloseDisposition, FilesEvent, FilesSurface, WorkspacePat
 use crate::icons::{self, icon};
 use crate::loaders;
 use crate::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT, TAB_SLIDE};
+use crate::onboarding::{
+    OnboardingDisposition, OnboardingFixture, OnboardingStep, OnboardingUi, WorkspaceMode,
+};
 use crate::popover::{self, Loadable};
 use crate::rail;
 use crate::settings::accounts::AccountsPage;
@@ -461,6 +464,10 @@ pub enum Route {
 /// yields the scarce space.
 fn right_pane_max_width(viewport: f32, sidebar: f32) -> f32 {
     (viewport - sidebar - CHAT_PANEL_MIN).max(0.0)
+}
+
+fn new_session_can_compose(has_spaces: bool, no_project: bool) -> bool {
+    has_spaces || no_project
 }
 
 /// Width used by right-pane takeover. Unlike manual resizing, takeover is
@@ -1442,6 +1449,12 @@ pub struct Shell {
     sidebar_pane: Entity<SidebarPane>,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
+    /// Full-window first-run flow. Its durable navigation snapshot mirrors the
+    /// `UiSettings` field; authoritative choices stay in their normal stores.
+    onboarding: OnboardingUi,
+    /// External image or workspace-path drag hovering the conversation
+    /// column; a drop stages an image or inserts a file-mention chip.
+    file_drag_active: bool,
     /// Measured height of the bottom chrome stack (status strip + composer +
     /// terminal dock) the full-height transcript scrolls under. Paint-time
     /// measurement schedules another frame whenever this value changes.
@@ -1804,7 +1817,9 @@ impl Shell {
         // Dev/testing knob: `ZERON_OPEN_ROUTE=settings[/<section>]` boots
         // straight into a settings section — these pages have no deep link and
         // synthetic input can't reach them on headless compositors.
-        let route = match std::env::var("ZERON_OPEN_ROUTE").ok().as_deref() {
+        let open_route = std::env::var("ZERON_OPEN_ROUTE").ok();
+        let onboarding_fixture = OnboardingFixture::from_route(open_route.as_deref());
+        let route = match open_route.as_deref() {
             Some("settings") | Some("settings/devices") => {
                 Route::Settings(SettingsSection::Devices)
             }
@@ -1854,11 +1869,22 @@ impl Shell {
             shell: shell.downgrade(),
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
         });
+        let composer_defaults = crate::settings::composer::ComposerDefaults::load(&data_dir);
+        let mut onboarding_state = settings.onboarding.clone();
+        if open_route.is_some() && onboarding_fixture.is_none() {
+            // Explicit debug/deep-link routes win for this launch without
+            // destroying the user's saved onboarding progress.
+            onboarding_state.disposition = OnboardingDisposition::Completed;
+        }
+        let onboarding =
+            OnboardingUi::new(onboarding_state, composer_defaults, onboarding_fixture, cx);
         Self {
             state,
             sidebar_pane,
             transcript,
             composer,
+            onboarding,
+            file_drag_active: false,
             // Seed with the compact composer stack's rough height so the
             // first frame's clearance isn't zero (the measure corrects it).
             bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),
@@ -2076,6 +2102,9 @@ impl Shell {
             ) {
                 self.org = None;
             }
+        }
+        if matches!(state.read(cx).gate(), GatePhase::Ready) {
+            self.ensure_onboarding_data(cx);
         }
         // The in-place local→synced switch: once the replacement runtime is
         // attached and Ready, kick the import (or finish) from here.
@@ -3729,6 +3758,737 @@ impl Shell {
         self.settings.transcript_width = current.transcript_width;
     }
 
+    fn persist_onboarding(&mut self, cx: &mut Context<Self>) {
+        if self.onboarding.fixture.is_some() {
+            return;
+        }
+        // Appearance choices are applied by their global owner immediately.
+        // Refresh this view's settings mirror before replacing the full file so
+        // advancing a setup step cannot write an older palette back over them.
+        self.settings.appearance = crate::appearance::mode(cx);
+        self.settings.theme_selection = crate::appearance::themes(cx);
+        self.settings.accent = crate::appearance::accent(cx);
+        self.settings.surface = crate::appearance::surface(cx);
+        self.settings.onboarding = self.onboarding.state.clone();
+        settings::replace(self.settings.clone(), SavePolicy::Immediate, cx);
+    }
+
+    fn onboarding_target_params(
+        &self,
+        mut params: serde_json::Value,
+        cx: &App,
+    ) -> serde_json::Value {
+        let state = self.state.read(cx);
+        let target = state.effective_device_id();
+        if target.as_deref() != state.local_device_id.as_deref()
+            && let (Some(target), Some(object)) = (target, params.as_object_mut())
+        {
+            object.insert("targetDeviceId".into(), serde_json::Value::String(target));
+        }
+        params
+    }
+
+    fn ensure_onboarding_data(&mut self, cx: &mut Context<Self>) {
+        if !self.onboarding.active() || self.onboarding.fixture.is_some() {
+            return;
+        }
+        let step = self.onboarding.step();
+        if step.index() >= OnboardingStep::Harnesses.index()
+            && matches!(self.onboarding.harnesses, Loadable::Idle)
+        {
+            self.onboarding_load_harnesses(cx);
+        }
+        if step.index() >= OnboardingStep::Harnesses.index()
+            && matches!(self.onboarding.accounts, Loadable::Idle)
+        {
+            self.onboarding_load_accounts(cx);
+        }
+        if step.index() >= OnboardingStep::Titles.index()
+            && matches!(self.onboarding.title_settings, Loadable::Idle)
+        {
+            self.onboarding_load_titles(cx);
+        }
+        if let Some(harness) = self.onboarding.models_to_load() {
+            self.onboarding_load_models(harness, cx);
+        }
+    }
+
+    pub(crate) fn onboarding_pick_workspace(
+        &mut self,
+        mode: WorkspaceMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.onboarding.state.workspace_mode = Some(mode);
+        self.onboarding.error = None;
+        self.persist_onboarding(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn onboarding_pick_appearance(
+        &mut self,
+        mode: crate::appearance::AppearanceMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.onboarding_close_theme_menu(cx);
+        if self.onboarding.fixture.is_none() {
+            crate::appearance::set_mode(mode, cx);
+            self.settings.appearance = mode;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn onboarding_note_theme_trigger_press(&mut self) {
+        self.onboarding.theme_menu.note_trigger_press();
+    }
+
+    pub(crate) fn onboarding_close_theme_menu(&mut self, cx: &mut Context<Self>) {
+        if self.onboarding.theme_menu.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.onboarding.theme_menu);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn onboarding_toggle_theme_menu(&mut self, cx: &mut Context<Self>) {
+        if self.onboarding.theme_menu.take_press_was_open() {
+            self.onboarding_close_theme_menu(cx);
+            return;
+        }
+        let appearance = Theme::of(cx).appearance;
+        let variants = crate::onboarding::theme_variants(appearance);
+        let selected = variants
+            .iter()
+            .position(|variant| variant.id == Theme::of(cx).variant_id.as_ref())
+            .unwrap_or(0);
+        self.onboarding.theme_menu.open(selected);
+        let scroll = self.onboarding.theme_scroll.clone();
+        cx.defer(move |_| scroll.scroll_to_item(selected + 1));
+        cx.notify();
+    }
+
+    pub(crate) fn onboarding_pick_accent(
+        &mut self,
+        accent: zeron_theme::AccentSelection,
+        cx: &mut Context<Self>,
+    ) {
+        if self.onboarding.fixture.is_none() {
+            crate::appearance::set_accent(accent, cx);
+            self.settings.accent = accent;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn onboarding_pick_theme(
+        &mut self,
+        appearance: crate::theme::Appearance,
+        variant_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.onboarding_close_theme_menu(cx);
+        if self.onboarding.fixture.is_none() {
+            crate::appearance::set_theme(appearance, variant_id, cx);
+            self.settings.theme_selection = crate::appearance::themes(cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn onboarding_pick_surface(
+        &mut self,
+        surface: zeron_theme::SurfacePreference,
+        cx: &mut Context<Self>,
+    ) {
+        if self.onboarding.fixture.is_none() {
+            crate::appearance::set_surface(surface, cx);
+            self.settings.surface = surface;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn onboarding_continue(&mut self, cx: &mut Context<Self>) {
+        let step = self.onboarding.step();
+        if step == OnboardingStep::Appearance {
+            self.onboarding_close_theme_menu(cx);
+        }
+        match step {
+            OnboardingStep::Workspace => {
+                let mode = self
+                    .onboarding
+                    .state
+                    .workspace_mode
+                    .unwrap_or(WorkspaceMode::Local);
+                self.onboarding.state.workspace_mode = Some(mode);
+                if mode == WorkspaceMode::Local
+                    && self.state.read(cx).workspace_scope == Some(WorkspaceScope::Synced)
+                {
+                    // A manual onboarding rerun is also allowed to change the
+                    // workspace boundary. Keep this step mounted while the
+                    // existing sign-out confirmation performs that transition;
+                    // once the local runtime is ready, Continue advances.
+                    self.persist_onboarding(cx);
+                    self.request_sign_out(cx);
+                    return;
+                }
+                self.onboarding.state.step = OnboardingStep::Appearance;
+                self.persist_onboarding(cx);
+                if self.onboarding.fixture.is_none()
+                    && mode == WorkspaceMode::Synced
+                    && self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local)
+                {
+                    self.start_sign_in(cx);
+                }
+            }
+            OnboardingStep::Appearance => {
+                self.onboarding.state.step = OnboardingStep::Harnesses;
+                self.persist_onboarding(cx);
+                self.onboarding_load_harnesses(cx);
+                self.onboarding_load_accounts(cx);
+            }
+            OnboardingStep::Harnesses => {
+                let ready_harnesses: Vec<_> = self
+                    .onboarding
+                    .harnesses
+                    .ready()
+                    .map(|rows| {
+                        rows.iter()
+                            .filter(|row| {
+                                row.id != zeron_proto::HarnessId::Mock
+                                    && crate::onboarding::harness_is_usable(
+                                        row,
+                                        &self.onboarding.accounts,
+                                    )
+                            })
+                            .map(|row| row.id)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let Some(harness) = self
+                    .onboarding
+                    .selected_harness
+                    .filter(|selected| ready_harnesses.contains(selected))
+                    .or_else(|| ready_harnesses.first().copied())
+                else {
+                    self.onboarding.error =
+                        Some("Turn on at least one installed agent to continue.".into());
+                    cx.notify();
+                    return;
+                };
+                self.onboarding.selected_harness = Some(harness);
+                self.persist_onboarding_defaults(cx);
+                self.onboarding.state.step = OnboardingStep::Defaults;
+                self.persist_onboarding(cx);
+                self.onboarding_load_models(harness, cx);
+            }
+            OnboardingStep::Defaults => {
+                if let Some(harness) = self.onboarding.selected_harness {
+                    let model = self.onboarding.selected_model.clone();
+                    let reasoning = self.onboarding.selected_reasoning;
+                    let pickers = self.composer.read(cx).pickers().clone();
+                    pickers.update(cx, |pickers, cx| {
+                        pickers.apply_onboarding_defaults(harness, model, reasoning, cx)
+                    });
+                }
+                self.onboarding.state.step = OnboardingStep::Titles;
+                self.persist_onboarding(cx);
+                self.onboarding_load_titles(cx);
+            }
+            OnboardingStep::Titles => {
+                self.onboarding.state.step = OnboardingStep::Project;
+                self.persist_onboarding(cx);
+            }
+            OnboardingStep::Project => {
+                let target_is_chosen = {
+                    let state = self.state.read(cx);
+                    crate::onboarding::project_target_is_chosen(
+                        state.selected_space.is_some(),
+                        state.no_project,
+                    )
+                };
+                if !target_is_chosen {
+                    self.onboarding.error =
+                        Some("Choose a project or continue without one.".into());
+                    cx.notify();
+                    return;
+                }
+                self.onboarding.state.disposition = OnboardingDisposition::Completed;
+                self.persist_onboarding(cx);
+                self.route = Route::Chat;
+                self.state.update(cx, |state, cx| {
+                    state.auto_selected = true;
+                    state.select_chat(None, cx);
+                });
+                self.focus_composer(cx);
+            }
+            OnboardingStep::FirstSession => unreachable!("legacy onboarding step is normalized"),
+        }
+        self.onboarding
+            .step_scroll
+            .set_offset(gpui::Point::default());
+        self.onboarding
+            .harness_scroll
+            .set_offset(gpui::Point::default());
+        self.ensure_onboarding_data(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn onboarding_back(&mut self, cx: &mut Context<Self>) {
+        self.onboarding_close_theme_menu(cx);
+        self.onboarding.close_confirm = false;
+        self.onboarding.agent_settings_open = false;
+        self.onboarding.state.step = self.onboarding.step().previous();
+        self.onboarding
+            .step_scroll
+            .set_offset(gpui::Point::default());
+        self.onboarding
+            .harness_scroll
+            .set_offset(gpui::Point::default());
+        self.persist_onboarding(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn onboarding_skip(&mut self, cx: &mut Context<Self>) {
+        self.onboarding_close_theme_menu(cx);
+        self.onboarding.state.disposition = OnboardingDisposition::Skipped;
+        self.persist_onboarding(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn onboarding_request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.onboarding_close_theme_menu(cx);
+        self.onboarding.close_return_focus = self
+            .onboarding
+            .controls
+            .iter()
+            .position(|handle| handle.is_focused(window))
+            .filter(|index| !matches!(index, 26 | 27))
+            .or(Some(0));
+        self.onboarding.close_confirm = true;
+        cx.notify();
+    }
+
+    pub(crate) fn onboarding_cancel_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.onboarding.close_confirm = false;
+        let target = self.onboarding.close_return_focus.take().unwrap_or(0);
+        window.focus(self.onboarding.control(target), cx);
+        cx.notify();
+    }
+
+    pub(crate) fn onboarding_focus_control(
+        &self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(self.onboarding.control(index), cx);
+    }
+
+    pub(crate) fn onboarding_defer(&mut self, cx: &mut Context<Self>) {
+        self.onboarding.close_confirm = false;
+        self.onboarding.close_return_focus = None;
+        self.onboarding.state.disposition = OnboardingDisposition::Deferred;
+        self.persist_onboarding(cx);
+        cx.notify();
+    }
+
+    fn restart_onboarding(&mut self, cx: &mut Context<Self>) {
+        self.close_user_menu(cx);
+        let defaults = crate::settings::composer::ComposerDefaults::load(&self.data_dir);
+        let mut state = crate::onboarding::OnboardingState::fresh();
+        state.workspace_mode = Some(
+            if self.state.read(cx).workspace_scope == Some(WorkspaceScope::Synced) {
+                WorkspaceMode::Synced
+            } else {
+                WorkspaceMode::Local
+            },
+        );
+        self.onboarding = OnboardingUi::new(state, defaults, None, cx);
+        self.persist_onboarding(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn onboarding_load_harnesses(&mut self, cx: &mut Context<Self>) {
+        if self.onboarding.fixture.is_some() {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = self.onboarding_target_params(serde_json::json!({}), cx);
+        self.onboarding.harnesses = Loadable::Loading;
+        self.onboarding.error = None;
+        self.onboarding.harness_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::LIST_HARNESSES, params).await;
+            this.update(cx, |shell, cx| {
+                shell.onboarding.harnesses = match result {
+                    Ok(value) => serde_json::from_value(value)
+                        .map(Loadable::Ready)
+                        .unwrap_or_else(|error| Loadable::Error(error.to_string())),
+                    Err(error) => Loadable::Error(error.to_string()),
+                };
+                shell.onboarding.resolve_default_harness();
+                shell.ensure_onboarding_data(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    pub(crate) fn onboarding_load_accounts(&mut self, cx: &mut Context<Self>) {
+        if self.onboarding.fixture.is_some() {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = self.onboarding_target_params(serde_json::json!({ "forceUsage": false }), cx);
+        self.onboarding.accounts = Loadable::Loading;
+        self.onboarding.accounts_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::LIST_AGENT_ACCOUNTS, params)
+                .await;
+            this.update(cx, |shell, cx| {
+                shell.onboarding.accounts = match result {
+                    Ok(value) => serde_json::from_value(value)
+                        .map(Loadable::Ready)
+                        .unwrap_or_else(|error| Loadable::Error(error.to_string())),
+                    Err(error) => Loadable::Error(error.to_string()),
+                };
+                shell.onboarding.resolve_default_harness();
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub(crate) fn onboarding_open_agent_settings(&mut self, cx: &mut Context<Self>) {
+        self.onboarding.agent_settings_open = true;
+        let target = {
+            let state = self.state.read(cx);
+            state
+                .effective_device_id()
+                .filter(|target| Some(target.as_str()) != state.local_device_id.as_deref())
+        };
+        if self.accounts_page.is_none() {
+            let state = self.state.clone();
+            self.accounts_page = Some(cx.new(|cx| AccountsPage::new(state, cx)));
+        }
+        if let Some(page) = &self.accounts_page {
+            page.update(cx, |page, cx| page.set_target_device(target, cx));
+        }
+        self.open_settings(SettingsSection::Agents, cx);
+    }
+
+    pub(crate) fn onboarding_pick_device(&mut self, device_id: String, cx: &mut Context<Self>) {
+        self.state
+            .update(cx, |state, cx| state.select_device(device_id, cx));
+        self.onboarding.harnesses = Loadable::Idle;
+        self.onboarding.models = Loadable::Idle;
+        self.onboarding.accounts = Loadable::Idle;
+        self.onboarding.title_settings = Loadable::Idle;
+        self.onboarding.title_models = Loadable::Idle;
+        self.onboarding.selected_harness = None;
+        self.onboarding.selected_model = None;
+        self.onboarding.selected_reasoning = None;
+        self.onboarding_remember_target(cx);
+        self.onboarding_load_harnesses(cx);
+        self.onboarding_load_accounts(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn onboarding_toggle_harness(
+        &mut self,
+        harness: zeron_proto::HarnessId,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.onboarding.fixture.is_some() {
+            if let Some(rows) = match &mut self.onboarding.harnesses {
+                Loadable::Ready(rows) => Some(rows),
+                _ => None,
+            } && let Some(row) = rows.iter_mut().find(|row| row.id == harness)
+            {
+                row.enabled = Some(enabled);
+            }
+            self.onboarding.resolve_default_harness();
+            cx.notify();
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = self.onboarding_target_params(
+            serde_json::json!({ "harness": harness, "enabled": enabled }),
+            cx,
+        );
+        self.onboarding.error = None;
+        self.onboarding.harness_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::SET_HARNESS_ENABLED, params)
+                .await;
+            this.update(cx, |shell, cx| {
+                match result {
+                    Ok(value) => match serde_json::from_value(value) {
+                        Ok(rows) => {
+                            shell.onboarding.harnesses = Loadable::Ready(rows);
+                            shell.onboarding.resolve_default_harness();
+                            crate::pickers::bump_harness_catalog(cx);
+                        }
+                        Err(error) => shell.onboarding.error = Some(error.to_string().into()),
+                    },
+                    Err(error) => shell.onboarding.error = Some(error.to_string().into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    pub(crate) fn onboarding_pick_default_harness(
+        &mut self,
+        harness: zeron_proto::HarnessId,
+        cx: &mut Context<Self>,
+    ) {
+        self.onboarding.selected_harness = Some(harness);
+        self.onboarding.selected_model = None;
+        self.onboarding.selected_reasoning = None;
+        self.persist_onboarding_defaults(cx);
+        self.onboarding_load_models(harness, cx);
+        cx.notify();
+    }
+
+    fn onboarding_load_models(&mut self, harness: zeron_proto::HarnessId, cx: &mut Context<Self>) {
+        if self.onboarding.fixture.is_some() {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = self.onboarding_target_params(serde_json::json!({ "harness": harness }), cx);
+        self.onboarding.models = Loadable::Loading;
+        self.onboarding.model_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::LIST_MODELS, params).await;
+            this.update(cx, |shell, cx| {
+                shell.onboarding.models = match result {
+                    Ok(value) => serde_json::from_value(value)
+                        .map(Loadable::Ready)
+                        .unwrap_or_else(|error| Loadable::Error(error.to_string())),
+                    Err(error) => Loadable::Error(error.to_string()),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub(crate) fn onboarding_pick_default_model(
+        &mut self,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.onboarding.selected_model = model;
+        self.onboarding.selected_reasoning = None;
+        self.persist_onboarding_defaults(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn onboarding_pick_reasoning(
+        &mut self,
+        reasoning: Option<zeron_proto::ReasoningLevel>,
+        cx: &mut Context<Self>,
+    ) {
+        self.onboarding.selected_reasoning = reasoning;
+        self.persist_onboarding_defaults(cx);
+        cx.notify();
+    }
+
+    fn persist_onboarding_defaults(&mut self, cx: &mut Context<Self>) {
+        if self.onboarding.fixture.is_some() {
+            return;
+        }
+        let Some(harness) = self.onboarding.selected_harness else {
+            return;
+        };
+        let model = self.onboarding.selected_model.clone();
+        let reasoning = self.onboarding.selected_reasoning;
+        let pickers = self.composer.read(cx).pickers().clone();
+        pickers.update(cx, |pickers, cx| {
+            pickers.apply_onboarding_defaults(harness, model, reasoning, cx)
+        });
+    }
+
+    pub(crate) fn onboarding_load_titles(&mut self, cx: &mut Context<Self>) {
+        if self.onboarding.fixture.is_some() {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = self.onboarding_target_params(serde_json::json!({}), cx);
+        self.onboarding.title_settings = Loadable::Loading;
+        self.onboarding.title_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::GET_TITLE_SETTINGS, params)
+                .await;
+            this.update(cx, |shell, cx| {
+                shell.onboarding.title_settings = match result {
+                    Ok(value) => serde_json::from_value(value)
+                        .map(Loadable::Ready)
+                        .unwrap_or_else(|error| Loadable::Error(error.to_string())),
+                    Err(error) => Loadable::Error(error.to_string()),
+                };
+                if let Some(harness) = shell
+                    .onboarding
+                    .title_settings
+                    .ready()
+                    .and_then(|settings| settings.harness)
+                {
+                    shell.onboarding_load_title_models(harness, cx);
+                } else {
+                    shell.onboarding.title_models = Loadable::Idle;
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub(crate) fn onboarding_pick_title_harness(
+        &mut self,
+        harness: Option<zeron_proto::HarnessId>,
+        cx: &mut Context<Self>,
+    ) {
+        let choice = zeron_engine::registry::TitleSettings {
+            harness,
+            model: None,
+        };
+        self.onboarding.title_models = if harness.is_some() {
+            Loadable::Loading
+        } else {
+            Loadable::Idle
+        };
+        self.onboarding_save_title_settings(choice, cx);
+        if let Some(harness) = harness {
+            self.onboarding_load_title_models(harness, cx);
+        }
+    }
+
+    pub(crate) fn onboarding_pick_title_model(
+        &mut self,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(harness) = self
+            .onboarding
+            .title_settings
+            .ready()
+            .and_then(|settings| settings.harness)
+        else {
+            return;
+        };
+        self.onboarding_save_title_settings(
+            zeron_engine::registry::TitleSettings {
+                harness: Some(harness),
+                model,
+            },
+            cx,
+        );
+    }
+
+    fn onboarding_save_title_settings(
+        &mut self,
+        choice: zeron_engine::registry::TitleSettings,
+        cx: &mut Context<Self>,
+    ) {
+        if self.onboarding.fixture.is_some() {
+            self.onboarding.title_settings = Loadable::Ready(choice);
+            cx.notify();
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = self.onboarding_target_params(
+            serde_json::to_value(&choice).unwrap_or_else(|_| serde_json::json!({})),
+            cx,
+        );
+        self.onboarding.error = None;
+        self.onboarding.title_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::SET_TITLE_SETTINGS, params)
+                .await;
+            this.update(cx, |shell, cx| {
+                match result {
+                    Ok(value) => match serde_json::from_value(value) {
+                        Ok(settings) => shell.onboarding.title_settings = Loadable::Ready(settings),
+                        Err(error) => shell.onboarding.error = Some(error.to_string().into()),
+                    },
+                    Err(error) => shell.onboarding.error = Some(error.to_string().into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn onboarding_load_title_models(
+        &mut self,
+        harness: zeron_proto::HarnessId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.onboarding.fixture.is_some() {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = self.onboarding_target_params(serde_json::json!({ "harness": harness }), cx);
+        self.onboarding.title_models = Loadable::Loading;
+        self.onboarding.title_model_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::LIST_MODELS, params).await;
+            this.update(cx, |shell, cx| {
+                shell.onboarding.title_models = match result {
+                    Ok(value) => serde_json::from_value(value)
+                        .map(Loadable::Ready)
+                        .unwrap_or_else(|error| Loadable::Error(error.to_string())),
+                    Err(error) => Loadable::Error(error.to_string()),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub(crate) fn onboarding_open_project(&mut self, cx: &mut Context<Self>) {
+        self.onboarding.error = None;
+        self.open_add_space(cx);
+    }
+
+    pub(crate) fn onboarding_pick_no_project(&mut self, cx: &mut Context<Self>) {
+        self.onboarding.error = None;
+        self.state.update(cx, |state, cx| {
+            state.auto_selected = true;
+            state.select_space(None, cx);
+            state.select_chat(None, cx);
+        });
+        self.onboarding_remember_target(cx);
+        cx.notify();
+    }
+
+    pub(super) fn onboarding_remember_target(&mut self, cx: &mut Context<Self>) {
+        if self.onboarding.fixture.is_some() {
+            return;
+        }
+        let pickers = self.composer.read(cx).pickers().clone();
+        if let Err(error) = pickers.update(cx, |pickers, cx| pickers.remember_target(cx)) {
+            self.onboarding.error = Some(format!("Unable to remember this choice: {error}").into());
+        }
+    }
+
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
         AppState::bootstrap(self.state.clone(), self.boot.clone(), cx);
     }
@@ -3826,6 +4586,11 @@ impl Shell {
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.route = Route::Chat;
+        if self.onboarding.agent_settings_open {
+            self.onboarding.agent_settings_open = false;
+            self.onboarding.accounts = Loadable::Idle;
+            self.onboarding_load_accounts(cx);
+        }
         self.focus_composer(cx);
         self.nav.push(NavEntry::Chat(self.active_chat.clone()));
         cx.notify();
@@ -5140,9 +5905,45 @@ impl Shell {
         cluster + CLUSTER_BUTTONS_WIDTH + TITLEBAR_IDENTITY_GAP
     }
 
-    /// The unified window titlebar: chat → the session tab strip; settings →
-    /// the section label. Full-width on the glass shell; the traffic lights
-    /// and control cluster overlay its left end.
+    /// Compact onboarding titlebar: preserve the native traffic-light safe
+    /// area and window drag/double-click behavior while keeping a centered app
+    /// identity. Journey navigation lives with the onboarding content.
+    fn render_onboarding_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let identity = div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(Theme::TITLEBAR_HEIGHT))
+            .pt(px(Theme::TITLEBAR_TOP_PAD))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(7.0))
+            .text_size(crate::typography::ui_rems(12.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(theme.text_muted)
+            .child(
+                img(self.onboarding.brand_mark.clone())
+                    .size(px(18.0))
+                    .rounded(px(4.0)),
+            )
+            .child("Zeron");
+        self.titlebar_drag_region(
+            "onboarding-titlebar-drag",
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(Theme::TITLEBAR_HEIGHT))
+                .child(identity),
+            cx,
+        )
+        .into_any_element()
+    }
+
     fn render_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         match self.route {
             Route::Chat => self.render_session_title_bar(cx),
@@ -7242,7 +8043,8 @@ impl Shell {
             // (exactly as wide as the trigger row — sidebar minus its p-2
             // gutters), `flex-col gap-0.5`, then: one small muted email line
             // (`px-2 pb-1 pt-1.5 text-[11px] text-muted-foreground/70`),
-            // the action selected by the runtime scope, then "Settings".
+            // the action selected by the runtime scope, "Show onboarding",
+            // then "Settings".
             let menu = popover::popover_card(theme)
                 .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -7314,6 +8116,17 @@ impl Shell {
                     };
                     menu.child(row).child(popover::menu_separator())
                 })
+                .child(
+                    popover::menu_row(theme, false, "user-menu-onboarding")
+                        .id("user-menu-onboarding")
+                        .on_click(cx.listener(|this, _, _, cx| this.restart_onboarding(cx)))
+                        .child(
+                            icon(icons::CHECKLIST)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from("Show onboarding")),
+                )
                 .child(
                     popover::menu_row(theme, false, "user-menu-settings")
                         .id("user-menu-settings")
@@ -7727,7 +8540,7 @@ impl Shell {
 
     /// Resolve shell-owned Escape surfaces in capture phase, before focused
     /// descendants such as an integrated terminal can consume the key.
-    fn capture_escape_surface(&mut self, cx: &mut Context<Self>) -> bool {
+    fn capture_escape_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // Modals and context menus sit above the rest of the shell. Preserve
         // their existing behavior: only surfaces that already have a Cancel
         // path close here; the others remain explicit blockers.
@@ -7753,6 +8566,19 @@ impl Shell {
         if self.add_space.is_some() {
             self.add_space = None;
             cx.notify();
+            return true;
+        }
+        if self.onboarding.active() {
+            if self.onboarding.theme_menu.is_open() {
+                self.onboarding_close_theme_menu(cx);
+                return true;
+            }
+            if self.onboarding.close_confirm {
+                self.onboarding_cancel_close(window, cx);
+            } else {
+                self.onboarding_request_close(window, cx);
+                self.onboarding_focus_control(26, window, cx);
+            }
             return true;
         }
         if self.spaces_menu.is_open() {
@@ -7791,8 +8617,412 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
-        if event.keystroke.key == "escape" && self.capture_escape_surface(cx) {
+        if event.keystroke.key == "escape" && self.capture_escape_surface(window, cx) {
             cx.stop_propagation();
+        } else if self.onboarding.close_confirm
+            && crate::onboarding::activates(event)
+            && self.onboarding_key_down(event, window, cx)
+        {
+            // Consume before the focused div can arm a synthesized click on
+            // key-up, including when focus still belongs to the journey.
+            cx.stop_propagation();
+        }
+    }
+
+    fn onboarding_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.onboarding.active()
+            || (!self.onboarding.close_confirm
+                && (self.overlay_owns_keyboard(cx)
+                    || self.onboarding.agent_settings_open
+                    || self.sync_flow.has_visible_overlay()))
+        {
+            return false;
+        }
+        if self.onboarding.step() == OnboardingStep::Appearance
+            && self.onboarding.theme_menu.is_open()
+        {
+            let key = popover::classify_key(
+                event.keystroke.key.as_str(),
+                event.keystroke.modifiers.platform,
+                event.keystroke.modifiers.control,
+            );
+            match key {
+                popover::MenuKey::Escape => {
+                    self.onboarding_close_theme_menu(cx);
+                    return true;
+                }
+                popover::MenuKey::Up | popover::MenuKey::Down => {
+                    let count = crate::onboarding::theme_variants(Theme::of(cx).appearance).len();
+                    let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
+                    let current = self.onboarding.theme_menu.as_open().copied();
+                    if let Some(next) = popover::menu_step(current, count, delta) {
+                        if let Some(active) = self.onboarding.theme_menu.open_mut() {
+                            *active = next;
+                        }
+                        self.onboarding.theme_scroll.scroll_to_item(next + 1);
+                        cx.notify();
+                    }
+                    return true;
+                }
+                popover::MenuKey::Enter | popover::MenuKey::ModEnter => {
+                    let appearance = Theme::of(cx).appearance;
+                    let active = self.onboarding.theme_menu.as_open().copied().unwrap_or(0);
+                    if let Some(variant) = crate::onboarding::theme_variants(appearance).get(active)
+                    {
+                        self.onboarding_pick_theme(appearance, variant.id.clone(), cx);
+                    }
+                    return true;
+                }
+                popover::MenuKey::Backspace | popover::MenuKey::Other => {
+                    if event.keystroke.key == "tab" {
+                        self.onboarding_close_theme_menu(cx);
+                    }
+                }
+            }
+        }
+        if event.keystroke.key == "tab"
+            && !event.keystroke.modifiers.control
+            && !event.keystroke.modifiers.alt
+            && !event.keystroke.modifiers.platform
+        {
+            if self.onboarding.close_confirm {
+                let focused = self
+                    .onboarding
+                    .controls
+                    .iter()
+                    .position(|handle| handle.is_focused(window));
+                let target = crate::onboarding::close_dialog_tab_target(
+                    focused,
+                    event.keystroke.modifiers.shift,
+                );
+                window.focus(self.onboarding.control(target), cx);
+            } else if event.keystroke.modifiers.shift {
+                window.focus_prev(cx);
+            } else {
+                window.focus_next(cx);
+            }
+            if !self.onboarding.close_confirm {
+                self.onboarding_reveal_model_focus(window);
+            }
+            return true;
+        }
+        let focused = self
+            .onboarding
+            .controls
+            .iter()
+            .position(|handle| handle.is_focused(window));
+        if self.onboarding.close_confirm {
+            if crate::onboarding::activates(event) {
+                match focused {
+                    Some(26) => self.onboarding_cancel_close(window, cx),
+                    Some(27) => self.onboarding_defer(cx),
+                    _ => {}
+                }
+            }
+            // The modal owns keyboard input even if focus was lost or a
+            // background control retained it while the dialog was mounting.
+            return true;
+        }
+        let Some(focused) = focused else {
+            return false;
+        };
+        let starting_step = self.onboarding.step();
+
+        if !self.onboarding.close_confirm
+            && matches!(
+                starting_step,
+                OnboardingStep::Defaults | OnboardingStep::Titles
+            )
+            && let Some(index) = crate::onboarding::model_choice(focused)
+        {
+            let models = if starting_step == OnboardingStep::Titles {
+                self.onboarding.title_models.ready()
+            } else {
+                self.onboarding.models.ready()
+            };
+            let Some(models) = models else { return false };
+            if index > models.len() {
+                return false;
+            }
+            if matches!(
+                event.keystroke.key.as_str(),
+                "left" | "right" | "up" | "down"
+            ) && !event.keystroke.modifiers.modified()
+            {
+                let count = models.len() + 1;
+                let next = if matches!(event.keystroke.key.as_str(), "right" | "down") {
+                    (index + 1) % count
+                } else {
+                    (index + count - 1) % count
+                };
+                window.focus(
+                    self.onboarding
+                        .control(crate::onboarding::model_control(next)),
+                    cx,
+                );
+                self.onboarding_reveal_model_focus(window);
+                return true;
+            }
+            if crate::onboarding::activates(event) {
+                let model = index.checked_sub(1).map(|index| models[index].id.clone());
+                if starting_step == OnboardingStep::Titles {
+                    self.onboarding_pick_title_model(model, cx);
+                } else {
+                    self.onboarding_pick_default_model(model, cx);
+                }
+                return true;
+            }
+        }
+
+        if matches!(
+            event.keystroke.key.as_str(),
+            "left" | "right" | "up" | "down"
+        ) && !event.keystroke.modifiers.modified()
+        {
+            let step = self.onboarding.step();
+            let group = match step {
+                OnboardingStep::Workspace if focused <= 1 => Some((0, 1)),
+                OnboardingStep::Appearance if focused <= 2 => Some((0, 2)),
+                OnboardingStep::Appearance if (8..15).contains(&focused) => Some((8, 14)),
+                OnboardingStep::Appearance if (16..19).contains(&focused) => Some((16, 18)),
+                OnboardingStep::Harnesses if focused < 8 => {
+                    self.onboarding.harnesses.ready().map(|rows| {
+                        (
+                            0,
+                            rows.iter()
+                                .filter(|row| {
+                                    row.id != HarnessId::Mock
+                                        && crate::onboarding::harness_is_interactive(row)
+                                })
+                                .count()
+                                .saturating_sub(1),
+                        )
+                    })
+                }
+                OnboardingStep::Harnesses if (20..25).contains(&focused) => {
+                    let count = self.state.read(cx).devices.len().min(5);
+                    (count > 1).then_some((20, 20 + count - 1))
+                }
+                OnboardingStep::Defaults if focused < 8 => {
+                    self.onboarding.harnesses.ready().map(|rows| {
+                        let count = rows
+                            .iter()
+                            .filter(|row| {
+                                row.id != HarnessId::Mock
+                                    && crate::onboarding::harness_is_usable(
+                                        row,
+                                        &self.onboarding.accounts,
+                                    )
+                            })
+                            .count();
+                        (0, count.saturating_sub(1))
+                    })
+                }
+                OnboardingStep::Defaults if (16..26).contains(&focused) => {
+                    let count = self.onboarding.reasoning_levels().len();
+                    Some((16, 16 + count.min(9)))
+                }
+                OnboardingStep::Titles if focused < 8 => {
+                    let count = self
+                        .onboarding
+                        .harnesses
+                        .ready()
+                        .map(|rows| {
+                            rows.iter()
+                                .filter(|row| crate::onboarding::title_harness_is_available(row))
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    Some((0, count.min(7)))
+                }
+                _ => None,
+            };
+            if let Some((start, end)) = group
+                && end >= start
+            {
+                let forward = matches!(event.keystroke.key.as_str(), "right" | "down");
+                let next = if forward {
+                    if focused >= end { start } else { focused + 1 }
+                } else if focused <= start {
+                    end
+                } else {
+                    focused - 1
+                };
+                window.focus(self.onboarding.control(next), cx);
+                return true;
+            }
+        }
+
+        if !crate::onboarding::activates(event) {
+            return false;
+        }
+        match focused {
+            28 if self.onboarding.step() != OnboardingStep::Workspace => self.onboarding_back(cx),
+            29 => self.onboarding_skip(cx),
+            30 => {
+                self.onboarding_request_close(window, cx);
+                self.onboarding_focus_control(26, window, cx);
+            }
+            _ => match self.onboarding.step() {
+                OnboardingStep::Workspace => match focused {
+                    0 => self.onboarding_pick_workspace(WorkspaceMode::Local, cx),
+                    1 => self.onboarding_pick_workspace(WorkspaceMode::Synced, cx),
+                    2 => self.onboarding_continue(cx),
+                    _ => return false,
+                },
+                OnboardingStep::Appearance => {
+                    if focused == 25 {
+                        self.onboarding_continue(cx);
+                    } else if focused == 3 {
+                        self.onboarding_toggle_theme_menu(cx);
+                    } else if focused <= 2 {
+                        let Some(mode) =
+                            crate::appearance::AppearanceMode::ALL.get(focused).copied()
+                        else {
+                            return false;
+                        };
+                        self.onboarding_pick_appearance(mode, cx);
+                    } else if (8..15).contains(&focused) {
+                        let Some(accent) = zeron_theme::AccentPreset::ALL.get(focused - 8).copied()
+                        else {
+                            return false;
+                        };
+                        self.onboarding_pick_accent(
+                            zeron_theme::AccentSelection::Preset(accent),
+                            cx,
+                        );
+                    } else if (16..19).contains(&focused) {
+                        let Some(surface) = zeron_theme::SurfacePreference::ALL
+                            .get(focused - 16)
+                            .copied()
+                        else {
+                            return false;
+                        };
+                        self.onboarding_pick_surface(surface, cx);
+                    } else {
+                        return false;
+                    }
+                }
+                OnboardingStep::Harnesses => {
+                    if focused == 10 {
+                        self.onboarding_continue(cx);
+                    } else if focused == 11 {
+                        self.onboarding_load_harnesses(cx);
+                    } else if focused == 12 {
+                        self.onboarding_open_agent_settings(cx);
+                    } else if (20..25).contains(&focused) {
+                        let device = self
+                            .state
+                            .read(cx)
+                            .devices
+                            .iter()
+                            .take(5)
+                            .nth(focused - 20)
+                            .map(|device| device.id.clone());
+                        let Some(device) = device else { return false };
+                        self.onboarding_pick_device(device, cx);
+                    } else {
+                        let descriptor = self.onboarding.harnesses.ready().and_then(|rows| {
+                            rows.iter()
+                                .filter(|row| {
+                                    row.id != HarnessId::Mock
+                                        && crate::onboarding::harness_is_interactive(row)
+                                })
+                                .nth(focused)
+                                .cloned()
+                        });
+                        let Some(descriptor) = descriptor else {
+                            return false;
+                        };
+                        self.onboarding_toggle_harness(
+                            descriptor.id,
+                            !zeron_engine::registry::descriptor_enabled(&descriptor),
+                            cx,
+                        );
+                    }
+                }
+                OnboardingStep::Defaults => {
+                    if focused == 31 {
+                        self.onboarding_continue(cx);
+                    } else if focused == 16 {
+                        self.onboarding_pick_reasoning(None, cx);
+                    } else if (17..26).contains(&focused) {
+                        let levels = self.onboarding.reasoning_levels();
+                        let Some(level) = levels.get(focused - 17).copied() else {
+                            return false;
+                        };
+                        self.onboarding_pick_reasoning(Some(level), cx);
+                    } else {
+                        let harness = self.onboarding.harnesses.ready().and_then(|rows| {
+                            rows.iter()
+                                .filter(|row| {
+                                    row.id != HarnessId::Mock
+                                        && crate::onboarding::harness_is_usable(
+                                            row,
+                                            &self.onboarding.accounts,
+                                        )
+                                })
+                                .nth(focused)
+                                .map(|row| row.id)
+                        });
+                        let Some(harness) = harness else { return false };
+                        self.onboarding_pick_default_harness(harness, cx);
+                    }
+                }
+                OnboardingStep::Titles => {
+                    if focused == 25 {
+                        self.onboarding_continue(cx);
+                    } else if focused == 24 {
+                        self.onboarding_load_titles(cx);
+                    } else if focused == 0 {
+                        self.onboarding_pick_title_harness(None, cx);
+                    } else if (1..8).contains(&focused) {
+                        let harness = self.onboarding.harnesses.ready().and_then(|rows| {
+                            rows.iter()
+                                .filter(|row| crate::onboarding::title_harness_is_available(row))
+                                .nth(focused - 1)
+                                .map(|row| row.id)
+                        });
+                        let Some(harness) = harness else { return false };
+                        self.onboarding_pick_title_harness(Some(harness), cx);
+                    } else {
+                        return false;
+                    }
+                }
+                OnboardingStep::Project => match focused {
+                    0 => self.onboarding_open_project(cx),
+                    1 => self.onboarding_pick_no_project(cx),
+                    2 => self.onboarding_continue(cx),
+                    _ => return false,
+                },
+                OnboardingStep::FirstSession => return false,
+            },
+        }
+        if self.onboarding.step() != starting_step
+            && self.onboarding.step() != OnboardingStep::FirstSession
+        {
+            window.focus(self.onboarding.control(0), cx);
+        }
+        true
+    }
+
+    fn onboarding_reveal_model_focus(&self, window: &Window) {
+        if matches!(
+            self.onboarding.step(),
+            OnboardingStep::Defaults | OnboardingStep::Titles
+        ) && let Some(index) = self
+            .onboarding
+            .controls
+            .iter()
+            .position(|handle| handle.is_focused(window))
+            .and_then(crate::onboarding::model_choice)
+        {
+            self.onboarding.model_scroll.scroll_to_item(index);
         }
     }
 
@@ -7802,6 +9032,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.onboarding_key_down(event, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+
         // Inputs and completion menus consume Tab first. Unhandled Tab walks
         // accessible controls, including individual transcript link ranges.
         let modifiers = event.keystroke.modifiers;
@@ -8533,7 +9768,7 @@ impl Shell {
                         .inset_0(),
                     )
                     .child(status)
-                    .when(has_spaces || no_project || has_appshots, |el| {
+                    .when(new_session_can_compose(has_spaces, no_project) || has_appshots, |el| {
                         let composer_opacity = self.composer_dock.borrow().opacity();
                         el.child(crate::composer_dock::docked_composer(
                             div()
@@ -10449,8 +11684,11 @@ impl Render for Shell {
         self.settings.surface = crate::appearance::surface(cx);
         self.sync_independent_settings(cx);
         let theme = Theme::of(cx);
-        // The shell frost sits over native desktop blur on macOS and Windows.
-        // Content surfaces add their own backgrounds over this shared tint.
+        // The shell tone (zeron `.frost`): the shared surface beneath regular
+        // inset app panels and the directly composited onboarding journey. On
+        // macOS the window background is the blurred desktop (lib.rs
+        // `Blurred`), so this single translucent paint reads as real shell
+        // glass instead of stacked opaque-looking overlays.
         let (frost, text, font) = (theme.glass(), theme.text, theme.font_sans.clone());
         let (workspace_scope, auth) = {
             let state = self.state.read(cx);
@@ -10484,6 +11722,7 @@ impl Render for Shell {
         }
         let browser_active = matches!(gate, GatePhase::Ready)
             && !restart_required
+            && !self.onboarding.active()
             && matches!(self.route, Route::Chat)
             && (self.right_pane_open(cx) || self.tween_active(self.right_tween));
         // Native clipping follows the animated GPUI mask. Drags only transfer
@@ -10568,9 +11807,42 @@ impl Render for Shell {
         }
         let shortcut_focus = self.shortcut_focus.clone();
         let unfocused = self.unfocused.clone();
-        let preferred_focus = self.composer.focus_handle(cx);
-        window.defer(cx, move |window, cx| {
-            restore_mounted_focus(&shortcut_focus, &preferred_focus, &unfocused, window, cx);
+        let onboarding_needs_initial_focus = matches!(gate, GatePhase::Ready)
+            && !restart_required
+            && self.onboarding.active()
+            && self.onboarding.step() != OnboardingStep::FirstSession
+            && !self.onboarding.focus_initialized;
+        cx.defer_in(window, move |this, window, cx| {
+            if this.onboarding.active() && this.onboarding.close_confirm {
+                // Reconcile against the completed frame. Keep Tab's second
+                // action focused, but never restore a control behind the scrim.
+                let cancel = this.onboarding.control(26);
+                let confirm = this.onboarding.control(27);
+                if shortcut_focus.contains(cancel, window) {
+                    if !cancel.is_focused(window) && !confirm.is_focused(window) {
+                        window.focus(cancel, cx);
+                    }
+                    this.onboarding.focus_initialized = true;
+                }
+                return;
+            }
+            let preferred_focus = if this.onboarding.active()
+                && this.onboarding.step() != OnboardingStep::FirstSession
+            {
+                this.onboarding.control(0).clone()
+            } else {
+                this.composer.focus_handle(cx)
+            };
+            if onboarding_needs_initial_focus && !this.onboarding.focus_initialized {
+                // Root/gate focus does not initialize the onboarding scope.
+                // Retry on later frames if its first control is not mounted yet.
+                if shortcut_focus.contains(&preferred_focus, window) {
+                    window.focus(&preferred_focus, cx);
+                    this.onboarding.focus_initialized = true;
+                }
+            } else {
+                restore_mounted_focus(&shortcut_focus, &preferred_focus, &unfocused, window, cx);
+            }
         });
 
         // Modifier events follow focus too. Reconcile from the window's input
@@ -10720,6 +11992,20 @@ impl Render for Shell {
             gate.clone()
         };
         let root = match &render_gate {
+            GatePhase::Ready if self.onboarding.active() => {
+                self.onboarding.prepare_model_controls(cx);
+                let viewport = window.viewport_size();
+                let title_bar = self.render_onboarding_title_bar(cx);
+                let page = crate::onboarding::render(
+                    &self.onboarding,
+                    &self.state,
+                    title_bar,
+                    viewport,
+                    cx,
+                );
+                let overlays = self.render_overlays(viewport, window, cx);
+                root.child(page).children(overlays)
+            }
             GatePhase::Ready => {
                 // Focus is a sync signal: on the rising edge of window
                 // activation, nudge every open room to verify liveness — a
@@ -11148,6 +12434,13 @@ mod tests {
             motion::resize_bounce_offset(motion::ResizeEdge::Min, 0.2),
             -outbound
         );
+    }
+
+    #[test]
+    fn projectless_new_sessions_keep_the_composer_available() {
+        assert!(new_session_can_compose(false, true));
+        assert!(new_session_can_compose(true, false));
+        assert!(!new_session_can_compose(false, false));
     }
 
     #[test]
@@ -12135,6 +13428,401 @@ mod exit_regressions {
                 assert!(shell.state.read(cx).selected_chat.is_none());
                 assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("b"));
                 assert_eq!(shell.composer.read(cx).appshots[""].len(), 1);
+            })
+            .unwrap();
+    }
+
+    fn onboarding_test_window(
+        cx: &mut TestAppContext,
+        dir: &std::path::Path,
+        fixture: OnboardingFixture,
+    ) -> gpui::WindowHandle<Shell> {
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir, cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let handle = cx.add_window(|window, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut shell = Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            );
+            shell.debug_gate = Some(GatePhase::Loading);
+            shell.splash = SplashPhase::Gone;
+            shell.onboarding = OnboardingUi::new(
+                crate::onboarding::OnboardingState::fresh(),
+                Default::default(),
+                Some(fixture),
+                cx,
+            );
+            shell.onboarding.state.step = shell.onboarding.step();
+            shell.onboarding.fixture = None;
+            window.focus(&shell.shortcut_focus, cx);
+            shell
+        });
+        handle
+            .update(cx, |shell, window, cx| {
+                shell.debug_gate = Some(GatePhase::Ready);
+                // The gate has focus before the first onboarding frame mounts.
+                assert!(!shell.onboarding.focus_initialized);
+                window.focus(&shell.onboarding.focus, cx);
+                assert!(shell.onboarding.focus.is_focused(window));
+                assert!(window.focused(cx).is_some());
+                cx.notify();
+            })
+            .unwrap();
+        handle
+    }
+
+    fn onboarding_frame(cx: &mut TestAppContext, window: gpui::WindowHandle<Shell>) {
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    fn onboarding_dispatch_key(window: &mut Window, cx: &mut App, key: &str) {
+        let keystroke = gpui::Keystroke::parse(key).unwrap();
+        window.dispatch_event(
+            gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            }),
+            cx,
+        );
+        // GPUI synthesizes button clicks on release, not key-down.
+        window.dispatch_event(
+            gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }),
+            cx,
+        );
+    }
+
+    fn onboarding_press(cx: &mut TestAppContext, handle: gpui::WindowHandle<Shell>, keys: &str) {
+        for key in keys.split(' ') {
+            cx.update_window(handle.into(), |_, window, cx| {
+                onboarding_dispatch_key(window, cx, key)
+            })
+            .unwrap();
+            onboarding_frame(cx, handle);
+        }
+    }
+
+    #[gpui::test]
+    fn onboarding_boot_focus_and_immediate_arrow_space(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = onboarding_test_window(cx, dir.path(), OnboardingFixture::Welcome);
+        onboarding_frame(cx, window);
+        window
+            .update(cx, |shell, window, _| {
+                assert!(shell.onboarding.control(0).is_focused(window))
+            })
+            .unwrap();
+        onboarding_press(cx, window, "right space");
+        onboarding_frame(cx, window);
+        window
+            .update(cx, |shell, window, _| {
+                assert!(shell.onboarding.control(1).is_focused(window));
+                assert_eq!(
+                    shell.onboarding.state.workspace_mode,
+                    Some(WorkspaceMode::Synced)
+                );
+            })
+            .unwrap();
+        onboarding_frame(cx, window);
+        window
+            .update(cx, |shell, window, _| {
+                assert!(shell.onboarding.control(1).is_focused(window))
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn onboarding_modal_mount_tab_trap_and_exact_cancel_focus(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = onboarding_test_window(cx, dir.path(), OnboardingFixture::Appearance);
+        for (step, control) in [
+            (OnboardingStep::Appearance, 1),
+            (OnboardingStep::Appearance, 25),
+            (OnboardingStep::Defaults, 31),
+            (OnboardingStep::Project, 2),
+        ] {
+            window
+                .update(cx, |shell, _, cx| {
+                    shell.onboarding.state.step = step;
+                    cx.notify();
+                })
+                .unwrap();
+            onboarding_frame(cx, window);
+            window
+                .update(cx, |shell, window, cx| {
+                    window.focus(shell.onboarding.control(control), cx)
+                })
+                .unwrap();
+            onboarding_press(cx, window, "escape");
+            onboarding_frame(cx, window);
+            window
+                .update(cx, |shell, window, _| {
+                    assert!(shell.onboarding.close_confirm);
+                    assert!(shell.onboarding.control(26).is_focused(window));
+                })
+                .unwrap();
+            for (key, target) in [
+                ("tab", 27),
+                ("tab", 26),
+                ("shift-tab", 27),
+                ("shift-tab", 26),
+            ] {
+                onboarding_press(cx, window, key);
+                onboarding_frame(cx, window);
+                window
+                    .update(cx, |shell, window, _| {
+                        assert!(shell.onboarding.control(target).is_focused(window))
+                    })
+                    .unwrap();
+            }
+            onboarding_press(cx, window, "space");
+            onboarding_frame(cx, window);
+            window
+                .update(cx, |shell, window, _| {
+                    assert!(!shell.onboarding.close_confirm);
+                    assert_eq!(shell.onboarding.step(), step);
+                    assert!(shell.onboarding.control(control).is_focused(window));
+                })
+                .unwrap();
+            onboarding_press(cx, window, "escape");
+            onboarding_frame(cx, window);
+            onboarding_press(cx, window, "escape");
+            onboarding_frame(cx, window);
+            window
+                .update(cx, |shell, window, _| {
+                    assert!(!shell.onboarding.close_confirm);
+                    assert!(shell.onboarding.control(control).is_focused(window));
+                })
+                .unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn onboarding_modal_consumes_activation_with_stale_background_focus(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = onboarding_test_window(cx, dir.path(), OnboardingFixture::Appearance);
+        for (step, control) in [
+            (OnboardingStep::Appearance, 1),
+            (OnboardingStep::Appearance, 25),
+            (OnboardingStep::Defaults, 31),
+            (OnboardingStep::Project, 2),
+        ] {
+            window
+                .update(cx, |shell, _, cx| {
+                    shell.onboarding.state.step = step;
+                    cx.notify();
+                })
+                .unwrap();
+            onboarding_frame(cx, window);
+            window
+                .update(cx, |shell, window, cx| {
+                    shell.onboarding_request_close(window, cx)
+                })
+                .unwrap();
+            onboarding_frame(cx, window);
+            for key in ["space", "enter"] {
+                cx.update_window(window.into(), |_, window, cx| {
+                    let shell = window.root::<Shell>().flatten().unwrap();
+                    shell.update(cx, |shell, cx| {
+                        window.focus(shell.onboarding.control(control), cx);
+                        cx.notify();
+                    });
+                    // Render the retained background focus, then dispatch before
+                    // the deferred reconciliation can move it into the dialog.
+                    window.draw(cx).clear();
+                    shell.update(cx, |shell, cx| {
+                        assert!(shell.onboarding.control(control).is_focused(window));
+                        let event = gpui::KeyDownEvent {
+                            keystroke: gpui::Keystroke::parse(key).unwrap(),
+                            is_held: false,
+                            prefer_character_input: false,
+                        };
+                        assert!(
+                            shell.onboarding_key_down(&event, window, cx),
+                            "modal must consume {key} on {control}"
+                        );
+                    });
+                    onboarding_dispatch_key(window, cx, key);
+                })
+                .unwrap();
+                onboarding_frame(cx, window);
+                window
+                    .update(cx, |shell, window, _| {
+                        assert!(shell.onboarding.close_confirm);
+                        assert!(shell.onboarding.control(26).is_focused(window));
+                        assert_eq!(shell.onboarding.step(), step);
+                        assert_eq!(
+                            shell.onboarding.state.disposition,
+                            OnboardingDisposition::InProgress
+                        );
+                        assert!(shell.onboarding.error.is_none());
+                        assert_eq!(
+                            shell.settings.appearance,
+                            crate::appearance::AppearanceMode::System
+                        );
+                    })
+                    .unwrap();
+            }
+            window
+                .update(cx, |shell, window, cx| {
+                    shell.onboarding_cancel_close(window, cx)
+                })
+                .unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn onboarding_modal_continue_later_persists(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = onboarding_test_window(cx, dir.path(), OnboardingFixture::Appearance);
+        onboarding_frame(cx, window);
+        onboarding_press(cx, window, "escape");
+        onboarding_frame(cx, window);
+        onboarding_press(cx, window, "tab");
+        onboarding_frame(cx, window);
+        onboarding_press(cx, window, "space");
+        onboarding_frame(cx, window);
+        window
+            .update(cx, |shell, _, _| {
+                assert!(!shell.onboarding.close_confirm);
+                assert_eq!(
+                    shell.onboarding.state.disposition,
+                    OnboardingDisposition::Deferred
+                );
+                assert_eq!(
+                    settings::UiSettings::load(dir.path())
+                        .onboarding
+                        .disposition,
+                    OnboardingDisposition::Deferred
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn onboarding_keyboard_yields_to_project_palette_and_reaches_full_model_catalog(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell.onboarding = OnboardingUi::new(
+                    crate::onboarding::OnboardingState::fresh(),
+                    Default::default(),
+                    Some(crate::onboarding::OnboardingFixture::Defaults),
+                    cx,
+                );
+                let key = |value: &str| gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse(value).unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                };
+                shell.onboarding.state.step = OnboardingStep::Project;
+                shell.onboarding.fixture = Some(crate::onboarding::OnboardingFixture::Project);
+                window.focus(shell.onboarding.control(2), cx);
+                shell.open_add_space(cx);
+                for value in ["tab", "shift-tab", "enter", "space", "down"] {
+                    assert!(!shell.onboarding_key_down(&key(value), window, cx));
+                    assert_eq!(shell.onboarding.step(), OnboardingStep::Project);
+                    assert!(shell.add_space.is_some());
+                }
+                assert!(shell.capture_escape_surface(window, cx));
+                assert!(shell.add_space.is_none());
+                assert!(!shell.onboarding.close_confirm);
+
+                let template = shell.onboarding.models.ready().unwrap()[0].clone();
+                let models: Vec<_> = (0..12)
+                    .map(|index| {
+                        let mut model = template.clone();
+                        model.id = format!("catalog-{index}");
+                        model
+                    })
+                    .collect();
+                shell.onboarding.models = Loadable::Ready(models.clone());
+                shell.onboarding.title_models = Loadable::Ready(models);
+                shell.onboarding.title_settings =
+                    Loadable::Ready(zeron_engine::registry::TitleSettings {
+                        harness: Some(zeron_proto::HarnessId::Codex),
+                        model: None,
+                    });
+                shell.onboarding.prepare_model_controls(cx);
+                for step in [OnboardingStep::Defaults, OnboardingStep::Titles] {
+                    shell.onboarding.state.step = step;
+                    shell.onboarding.fixture = Some(if step == OnboardingStep::Defaults {
+                        crate::onboarding::OnboardingFixture::Defaults
+                    } else {
+                        crate::onboarding::OnboardingFixture::Titles
+                    });
+                    window.focus(shell.onboarding.control(8), cx);
+                    for _ in 0..12 {
+                        assert!(shell.onboarding_key_down(&key("down"), window, cx));
+                    }
+                    assert!(
+                        shell
+                            .onboarding
+                            .control(crate::onboarding::model_control(12))
+                            .is_focused(window)
+                    );
+                    assert!(shell.onboarding_key_down(&key("enter"), window, cx));
+                    let selected = if step == OnboardingStep::Defaults {
+                        shell.onboarding.selected_model.as_deref()
+                    } else {
+                        shell
+                            .onboarding
+                            .title_settings
+                            .ready()
+                            .unwrap()
+                            .model
+                            .as_deref()
+                    };
+                    assert_eq!(selected, Some("catalog-11"));
+                    assert!(shell.onboarding_key_down(&key("down"), window, cx));
+                    assert!(shell.onboarding.control(8).is_focused(window));
+                }
             })
             .unwrap();
     }
