@@ -1390,19 +1390,28 @@ pub fn selection_surface_reset(prefix: String) -> impl IntoElement {
     .h(px(0.0))
 }
 
-/// `(element index, byte offset)` for a window position: the registered
-/// element whose vertical band contains it, else the nearest by vertical
-/// distance (a drag past the gutter or between blocks clamps sensibly).
+/// `(element index, byte offset)` for a window position: prefer the registered
+/// element whose bounds contain it, else the nearest horizontal candidate in
+/// the closest vertical band. Vertical distance stays primary so a drag past a
+/// short line's right edge remains on that line; horizontal distance breaks
+/// ties between side-by-side elements such as table cells.
 fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)> {
     REGISTRY.with(|r| {
         let reg = r.borrow();
         let anchor = super::selection::anchor_key().unwrap_or_default();
-        let mut best: Option<(usize, f32)> = None;
+        let mut best: Option<(usize, f32, f32)> = None;
         for (ei, entry) in reg.iter().enumerate() {
             if selection_scope(&entry.key) != selection_scope(&anchor) {
                 continue;
             }
             let b = entry.layout.bounds();
+            let dx = if position.x < b.left() {
+                f32::from(b.left() - position.x)
+            } else if position.x > b.right() {
+                f32::from(position.x - b.right())
+            } else {
+                0.0
+            };
             let dy = if position.y < b.top() {
                 f32::from(b.top() - position.y)
             } else if position.y > b.bottom() {
@@ -1410,14 +1419,16 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
             } else {
                 0.0
             };
-            if best.is_none_or(|(_, d)| dy < d) {
-                best = Some((ei, dy));
+            if best
+                .is_none_or(|(_, best_dy, best_dx)| dy < best_dy || (dy == best_dy && dx < best_dx))
+            {
+                best = Some((ei, dy, dx));
             }
-            if dy == 0.0 {
+            if dy == 0.0 && dx == 0.0 {
                 break;
             }
         }
-        let (ei, _) = best?;
+        let (ei, _, _) = best?;
         let ix = match reg[ei].layout.index_for_position(position) {
             Ok(ix) | Err(ix) => ix,
         };
@@ -2429,6 +2440,30 @@ mod tests {
         }
     }
 
+    struct TableSelectionHarness;
+
+    impl Render for TableSelectionHarness {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let opts = RenderOptions::settled("table-selection-test".into());
+            let tree = parse_full(
+                "| First column | Second column |\n| --- | --- |\n| left cell | target text |\n",
+            );
+            div()
+                .size_full()
+                .child(selection_frame_reset())
+                .child(render_block(
+                    &tree.blocks[0].block,
+                    0,
+                    0,
+                    &opts,
+                    &theme,
+                    window,
+                    None,
+                ))
+        }
+    }
+
     #[gpui::test]
     fn code_block_lines_participate_in_text_selection(cx: &mut TestAppContext) {
         let _selection = super::super::selection::test_state_lock();
@@ -2499,6 +2534,48 @@ mod tests {
         super::super::selection::clear_if_owner(before_key);
         assert!(before_bounds.top() < first_bounds.top());
         assert!(second_bounds.bottom() < after_bounds.bottom());
+    }
+
+    #[gpui::test]
+    fn table_drag_selects_the_cell_under_the_pointer(cx: &mut TestAppContext) {
+        let _selection = super::super::selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (_, cx) = cx.add_window_view(|_, _| TableSelectionHarness);
+        cx.simulate_resize(size(px(640.0), px(240.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+
+        let left_key = format!("table-selection-test:{}", table_cell_ix(0, 1, 0));
+        let target_key = format!("table-selection-test:{}", table_cell_ix(0, 1, 1));
+        let left_bounds = selection_test_bounds(&left_key);
+        let target_bounds = selection_test_bounds(&target_key);
+        assert_eq!(left_bounds.top(), target_bounds.top());
+        assert!(left_bounds.right() < target_bounds.left());
+
+        let y = target_bounds.top() + px(9.0);
+        cx.simulate_event(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position: point(target_bounds.left(), y),
+            click_count: 1,
+            ..Default::default()
+        });
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: point(target_bounds.right(), y),
+            pressed_button: Some(gpui::MouseButton::Left),
+            ..Default::default()
+        });
+        assert_eq!(
+            super::super::selection::selected_text().as_deref(),
+            Some("target text")
+        );
+        cx.simulate_event(gpui::MouseUpEvent {
+            button: gpui::MouseButton::Left,
+            position: point(target_bounds.right(), y),
+            ..Default::default()
+        });
+        super::super::selection::clear_if_owner(&target_key);
     }
 
     /// Markdown code blocks are the surface the shared setting's default was
