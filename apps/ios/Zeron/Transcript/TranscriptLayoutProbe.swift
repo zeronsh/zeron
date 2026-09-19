@@ -15,14 +15,38 @@ enum TranscriptLayoutProbe {
     private static var markers: [String: [WeakView]] = [:]
     static func register(_ view: UIView, key: String, viewport: Bool) {
         if !(markers[key] ?? []).contains(where: { $0.view === view }) {
+            view.layer.name = "transcript-probe-" + UUID().uuidString
             markers[key, default: []].append(WeakView(view, viewport: viewport))
         }
     }
     static func presentedFrame(for key: String) -> CGRect? {
-        guard let view = markers[key]?.last(where: { $0.view?.window != nil })?.view,
-              let window = view.window else { return nil }
-        let layer = view.layer.presentation() ?? view.layer
-        return layer.convert(layer.bounds, to: window.layer.presentation() ?? window.layer)
+        presentedFrames(for: [key])[key]
+    }
+
+    /// Compare moving markers from one presentation-tree snapshot. Separate
+    /// presentation() calls can straddle a compositor frame; converting each
+    /// against another independently sampled root can invent an attachment gap.
+    static func presentedFrames(for keys: [String]) -> [String: CGRect] {
+        var windows: [ObjectIdentifier: UIWindow] = [:]
+        var names: [String: String] = [:]
+        for key in keys {
+            guard let view = markers[key]?.last(where: { $0.view?.window != nil })?.view,
+                  let window = view.window, let name = view.layer.name else { continue }
+            windows[ObjectIdentifier(window)] = window
+            names[name] = key
+        }
+        var frames: [String: CGRect] = [:]
+        for window in windows.values {
+            let root = window.layer.presentation() ?? window.layer
+            func visit(_ layer: CALayer) {
+                if let name = layer.name, let key = names[name] {
+                    frames[key] = layer.convert(layer.bounds, to: root)
+                }
+                for child in layer.sublayers ?? [] { visit(child) }
+            }
+            visit(root)
+        }
+        return frames
     }
 
     static func sample() {

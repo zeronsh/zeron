@@ -321,8 +321,9 @@ final class TranscriptLayoutTests: XCTestCase {
         let editor = findNativeEditor(window)!
         let tailKey = key + "|a599#t1.0"
         for showing in [true, false, true, false] {
-            let startPosition = TranscriptLayoutProbe.presentedFrame(for: key)!.maxY
-            let baseline = startPosition - TranscriptLayoutProbe.presentedFrame(for: tailKey)!.maxY
+            let initial = TranscriptLayoutProbe.presentedFrames(for: [key, tailKey])
+            let startPosition = initial[key]!.maxY
+            let baseline = startPosition - initial[tailKey]!.maxY
             if showing { editor.becomeFirstResponder() } else { editor.resignFirstResponder() }
             var errors: [CGFloat] = []
             // Include the pre-animation position: the first async sample can
@@ -330,8 +331,8 @@ final class TranscriptLayoutTests: XCTestCase {
             var positions: [CGFloat] = [startPosition]
             for _ in 0..<100 {
                 try? await Task.sleep(for: .milliseconds(16))
-                if let viewport = TranscriptLayoutProbe.presentedFrame(for: key),
-                   let tail = TranscriptLayoutProbe.presentedFrame(for: tailKey) {
+                let frames = TranscriptLayoutProbe.presentedFrames(for: [key, tailKey])
+                if let viewport = frames[key], let tail = frames[tailKey] {
                     positions.append(viewport.maxY)
                     errors.append(abs(viewport.maxY - tail.maxY - baseline))
                 }
@@ -347,20 +348,48 @@ final class TranscriptLayoutTests: XCTestCase {
         }
     }
 
+    func testKeyboardMotionSurvivesRepeatedViewportLayout() async {
+        await mount(turns: 600, useEditor: true)
+        let editor = findNativeEditor(window)!
+        let table = harness.scroll.nativeScrollView as! TranscriptTableView
+        let viewport = table.superview as! TranscriptViewport
+        let tailKey = key + "|a599#t1.0"
+        let initial = TranscriptLayoutProbe.presentedFrames(for: [key, tailKey])
+        let baseline = initial[key]!.maxY - initial[tailKey]!.maxY
+        var errors: [CGFloat] = []
+        for showing in [true, false] {
+            if showing { editor.becomeFirstResponder() } else { editor.resignFirstResponder() }
+            for _ in 0..<60 {
+                try? await Task.sleep(for: .milliseconds(16))
+                let frames = TranscriptLayoutProbe.presentedFrames(for: [key, tailKey])
+                if let frame = frames[key], let tail = frames[tailKey] {
+                    errors.append(abs(frame.maxY - tail.maxY - baseline))
+                }
+                // Streaming/self-sizing content can request layout while the
+                // keyboard's existing spring is still running.
+                viewport.setNeedsLayout()
+                viewport.layoutIfNeeded()
+            }
+        }
+        XCTAssertEqual(errors.count, 120)
+        XCTAssertLessThan(errors.max() ?? .infinity, 4)
+        assertTailVisible()
+    }
+
     func testInterruptedKeyboardMotionKeepsTranscriptAttached() async {
         await mount(turns: 600, useEditor: true)
         let editor = findNativeEditor(window)!
         let tailKey = key + "|a599#t1.0"
-        let baseline = TranscriptLayoutProbe.presentedFrame(for: key)!.maxY
-            - TranscriptLayoutProbe.presentedFrame(for: tailKey)!.maxY
+        let initial = TranscriptLayoutProbe.presentedFrames(for: [key, tailKey])
+        let baseline = initial[key]!.maxY - initial[tailKey]!.maxY
         var errors: [CGFloat] = []
         var samples: [String] = []
         for showing in [true, false, true, false, true, false] {
             if showing { editor.becomeFirstResponder() } else { editor.resignFirstResponder() }
             for _ in 0..<8 {
                 try? await Task.sleep(for: .milliseconds(16))
-                if let viewport = TranscriptLayoutProbe.presentedFrame(for: key),
-                   let tail = TranscriptLayoutProbe.presentedFrame(for: tailKey) {
+                let frames = TranscriptLayoutProbe.presentedFrames(for: [key, tailKey])
+                if let viewport = frames[key], let tail = frames[tailKey] {
                     errors.append(abs(viewport.maxY - tail.maxY - baseline))
                     samples.append("show=\(showing) viewport=\(viewport.maxY) tail=\(tail.maxY) gap=\(viewport.maxY - tail.maxY)")
                 }
