@@ -38,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
     let request = RunRequest {
         prompt: "Reply with exactly: Devin model discovery verified. Do not use tools.".into(),
         harness: None,
+        agent: None,
         model: Some(model.clone()),
         reasoning: None,
         model_options: Default::default(),

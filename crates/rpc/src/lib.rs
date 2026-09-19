@@ -41,6 +41,10 @@ pub mod methods {
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
+    pub const LIST_AGENTS: &str = "ListAgents";
+    pub const GET_OPENCODE_CONNECTION: &str = "GetOpencodeConnection";
+    pub const SET_OPENCODE_CONNECTION: &str = "SetOpencodeConnection";
+    pub const TEST_OPENCODE_CONNECTION: &str = "TestOpencodeConnection";
     pub const LIST_COMMANDS: &str = "ListCommands";
     pub const QUEUE_COMMAND: &str = "QueueCommand";
     /// Peer-to-peer delivery fallback: the SENDER's engine forwards a queued

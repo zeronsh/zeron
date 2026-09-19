@@ -18,19 +18,19 @@ struct HarnessInfo: Identifiable, Hashable {
     }
 }
 
-struct ModelOptionChoiceInfo: Identifiable, Hashable {
+struct ModelOptionChoiceInfo: Identifiable, Hashable, Sendable {
     let id: String
     let label: String
 }
 
-struct ModelOptionInfo: Identifiable, Hashable {
+struct ModelOptionInfo: Identifiable, Hashable, Sendable {
     let id: String
     let label: String
     let choices: [ModelOptionChoiceInfo]
     let defaultChoice: String
 }
 
-struct ModelInfo: Identifiable, Hashable {
+struct ModelInfo: Identifiable, Hashable, Sendable {
     let id: String
     let label: String
     let description: String?
@@ -49,7 +49,29 @@ struct ModelInfo: Identifiable, Hashable {
     }
 }
 
+enum ModelCatalog: Sendable {
+    case loading
+    case loaded([ModelInfo])
+    case failed(String)
+
+    var models: [ModelInfo] {
+        if case .loaded(let models) = self { return models }
+        return []
+    }
+}
+
+struct AgentInfo: Identifiable, Decodable, Hashable, Sendable {
+    let id: String
+    let label: String
+    let description: String?
+}
+
 enum HarnessCatalog {
+    static func selectedOpenCodeModelId(models: [ModelInfo], storedId: String,
+                                        storedScope: String, currentScope: String) -> String? {
+        if !storedId.isEmpty, storedScope == currentScope { return storedId }
+        return models.first?.id
+    }
     /// Static fallback = the engine's `default_enabled()` pair. The ACP
     /// agents (grok/hermes/pi) appear only through a device's live
     /// `ListHarnesses` catalog — they're opt-in per device via
@@ -121,18 +143,7 @@ enum HarnessCatalog {
                           reasoningLevels: ["minimal", "low", "medium", "high", "xhigh", "max"]),
             ]
         case "opencode":
-            // Static fallback only — a reachable host answers `listModels`
-            // with its live discovery (connected providers). The anonymous
-            // OpenCode Zen tier is always available, so these always run.
-            return [
-                ModelInfo(id: "opencode/big-pickle", label: "Big Pickle",
-                          description: "OpenCode Zen's flagship coding model", reasoningLevels: []),
-                ModelInfo(id: "opencode/mimo-v2.5-free", label: "MiMo V2.5 Free",
-                          description: "Free tier on OpenCode Zen", reasoningLevels: []),
-                ModelInfo(id: "opencode/hy3-free", label: "Hy3 Free",
-                          description: "Free tier on OpenCode Zen",
-                          reasoningLevels: ["low", "medium", "high"]),
-            ]
+            return []
         case "antigravity":
             // static fallback only; a reachable host answers with the models its acp server advertises
             return [
@@ -191,8 +202,8 @@ enum HarnessCatalog {
         }
     }
 
-    static func defaultModel(for harness: String) -> ModelInfo {
-        models(for: harness)[0]
+    static func defaultModel(for harness: String) -> ModelInfo? {
+        models(for: harness).first
     }
 
     /// pickers.rs — High when available, then Medium, then the first level.
@@ -227,7 +238,7 @@ enum HarnessCatalog {
     }
 
     static func modelLabel(harness: String, modelId: String?) -> String {
-        guard let modelId else { return defaultModel(for: harness).label }
+        guard let modelId else { return models(for: harness).first?.label ?? "Default model" }
         return models(for: harness).first { $0.id == modelId }?.label ?? modelId
     }
 }

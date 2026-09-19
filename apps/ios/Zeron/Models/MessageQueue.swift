@@ -13,6 +13,9 @@ struct QueuedMessage: Identifiable, Equatable, Sendable {
     var text: String
     /// Committed upload paths, staged when the row was queued.
     var attachments: [String] = []
+    /// Selection captured when this message was queued.
+    var agent: String? = nil
+    var agentSnapshot: Bool = false
     /// Device that queued it.
     var issuedBy: String = ""
     /// Epoch millis.

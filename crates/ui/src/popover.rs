@@ -1122,6 +1122,7 @@ pub fn dialog_field(input: AnyElement) -> gpui::Div {
         .border_1()
         .border_color(hairline(0.08))
         .bg(ink(0.04))
+        .cursor_text()
         .text_size(crate::typography::ui_rems(14.0))
         .child(input)
 }

@@ -72,6 +72,30 @@ final class MessageQueueTests: XCTestCase {
         XCTAssertEqual(store.queue.count, 1)
     }
 
+    func testQueueCapturesSelectedAndDefaultOpenCodeAgent() {
+        let store = store()
+        _ = store.enqueueMessage(text: "plan", agent: "plan", agentSnapshot: true)
+        _ = store.enqueueMessage(text: "default", agentSnapshot: true)
+        XCTAssertEqual(store.queue[0].agent, "plan")
+        XCTAssertTrue(store.queue[0].agentSnapshot)
+        XCTAssertNil(store.queue[1].agent)
+        XCTAssertTrue(store.queue[1].agentSnapshot)
+    }
+
+    func testLiveOpenCodeTransferSendQueuesCapturedAgent() {
+        let store = store()
+        let config = ChatConfig(harness: "opencode", model: "custom/model", agent: "team/plan",
+                                reasoning: nil, sandbox: "workspace-write")
+        let chat = Chat(id: "chat-1", deviceId: "host", title: nil, archived: false,
+                        cwd: "/repo", branch: nil, checkoutId: nil, config: config,
+                        lastMessagePreview: nil, lastMessageAt: nil, createdAt: 0,
+                        spaceId: nil, lastSeenAt: nil)
+        store.sendWithTransfers(prompt: "review", chat: chat, live: true, transfers: [])
+        XCTAssertEqual(store.queue.map(\.text), ["review"])
+        XCTAssertEqual(store.queue.first?.agent, "team/plan")
+        XCTAssertEqual(store.queue.first?.agentSnapshot, true)
+    }
+
     func testMovingByArrowsAndToAnIndex() {
         let store = store()
         let ids = ["a", "b", "c"].compactMap { store.enqueueMessage(text: $0) }

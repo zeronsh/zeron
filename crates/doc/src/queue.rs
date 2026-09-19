@@ -33,6 +33,10 @@ pub struct QueuedMessage {
     /// files that only exist on the device that typed it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub agent_snapshot: bool,
     /// Do not automatically steer this row into a live turn. The row remains
     /// visible until turn end or an explicit Steer now / Send now action.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -91,6 +95,8 @@ impl QueuedMessage {
             id: id.into(),
             text: text.into(),
             attachments: Vec::new(),
+            agent: None,
+            agent_snapshot: false,
             hold_for_turn_end: false,
             issued_by: issued_by.into(),
             issued_at: 0,
@@ -347,6 +353,12 @@ fn write_queued_map(map: &loro::LoroMap, item: &QueuedMessage) -> Result<(), Doc
             crate::schema::loro_value_from_json(&serde_json::to_value(&item.attachments)?),
         )?;
     }
+    if let Some(agent) = &item.agent {
+        map.insert("agent", agent.as_str())?;
+    }
+    if item.agent_snapshot {
+        map.insert("agentSnapshot", true)?;
+    }
     if item.hold_for_turn_end {
         map.insert("holdForTurnEnd", true)?;
     }
@@ -378,6 +390,11 @@ fn queued_from_json(v: serde_json::Value) -> Option<QueuedMessage> {
             .get("attachments")
             .and_then(|a| serde_json::from_value(a.clone()).ok())
             .unwrap_or_default(),
+        agent: v.get("agent").and_then(|a| a.as_str()).map(str::to_string),
+        agent_snapshot: v
+            .get("agentSnapshot")
+            .and_then(|a| a.as_bool())
+            .unwrap_or(false),
         hold_for_turn_end: v
             .get("holdForTurnEnd")
             .and_then(|value| value.as_bool())
@@ -418,6 +435,8 @@ mod tests {
             id: id.into(),
             text: text.into(),
             attachments: Vec::new(),
+            agent: None,
+            agent_snapshot: false,
             hold_for_turn_end: false,
             issued_by: "device-a".into(),
             issued_at: 1_000,
@@ -466,6 +485,23 @@ mod tests {
         doc.push_queued(&first).unwrap();
         doc.push_queued(&item("q2", "second")).unwrap();
         assert_eq!(doc.read_queue().unwrap(), vec![first, item("q2", "second")]);
+    }
+
+    #[test]
+    fn agent_snapshot_round_trips_and_old_rows_keep_legacy_semantics() {
+        let doc = doc();
+        let mut selected = item("q1", "selected");
+        selected.agent = Some("custom/agent".into());
+        selected.agent_snapshot = true;
+        let mut default = item("q2", "default");
+        default.agent_snapshot = true;
+        doc.push_queued(&selected).unwrap();
+        doc.push_queued(&default).unwrap();
+        doc.push_queued(&item("q3", "legacy")).unwrap();
+        assert_eq!(
+            doc.read_queue().unwrap(),
+            vec![selected, default, item("q3", "legacy")]
+        );
     }
 
     #[test]

@@ -34,6 +34,12 @@ struct JournalLine {
     event: AgentEvent,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct RunAgentSnapshot {
+    pub message_id: String,
+    pub agent: Option<String>,
+}
+
 struct ChatJournal {
     file: File,
     next_seq: u64,
@@ -70,6 +76,48 @@ impl RunJournal {
 
     fn attempts_path(&self, chat_id: &str) -> PathBuf {
         self.dir.join(format!("{}.resume", sanitize_id(chat_id)))
+    }
+
+    fn agent_path(&self, chat_id: &str) -> PathBuf {
+        self.dir.join(format!("{}.agent", sanitize_id(chat_id)))
+    }
+
+    /// Last fresh run's agent choice, including an explicit server-default `None`.
+    /// Written before its user entry so crash recovery never borrows a later
+    /// mutable chat setting for a queued send.
+    pub fn save_request_agent(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        agent: Option<&str>,
+    ) -> Result<(), JournalError> {
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".run-agent-")
+            .tempfile_in(&self.dir)?;
+        tmp.write_all(&serde_json::to_vec(&RunAgentSnapshot {
+            message_id: message_id.to_string(),
+            agent: agent.map(str::to_string),
+        })?)?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(self.agent_path(chat_id)).map_err(|e| e.error)?;
+        Ok(())
+    }
+
+    /// `None` denotes a run from before agent snapshots existed.
+    pub fn request_agent(&self, chat_id: &str) -> Result<Option<RunAgentSnapshot>, JournalError> {
+        match std::fs::read(self.agent_path(chat_id)) {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn clear_request_agent(&self, chat_id: &str) -> Result<(), JournalError> {
+        match std::fs::remove_file(self.agent_path(chat_id)) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
     }
 
     /// Auto-resume revival budget (zeron `resumeAttempt`/`MAX_AUTO_RESUME`):
@@ -200,6 +248,7 @@ impl RunJournal {
         if path.exists() {
             std::fs::remove_file(path)?;
         }
+        let _ = std::fs::remove_file(self.agent_path(chat_id));
         Ok(())
     }
 }

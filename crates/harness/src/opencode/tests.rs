@@ -1,8 +1,45 @@
 use super::*;
 
+#[test]
+fn attached_servers_are_limited_to_loopback() {
+    for address in [
+        "http://localhost:4096",
+        "http://127.0.0.1:4096",
+        "http://127.42.0.8:4096",
+        "http://[::1]:4096",
+    ] {
+        assert!(opencode_url_is_loopback(
+            &reqwest::Url::parse(address).unwrap()
+        ));
+    }
+    for address in ["http://192.168.1.42:4096", "https://opencode.example.com"] {
+        assert!(!opencode_url_is_loopback(
+            &reqwest::Url::parse(address).unwrap()
+        ));
+    }
+}
+
+#[test]
+fn connection_url_validation_preserves_proxy_paths_and_rejects_invalid_addresses() {
+    let url = parse_opencode_url(" https://LOCALHOST:49374/opencode/ ").unwrap();
+    assert_eq!(url.as_str(), "https://localhost:49374/opencode/");
+    assert!(parse_opencode_url("http://[::1]").is_ok());
+    for address in [
+        "file:///opencode",
+        "http://localhost:0",
+        "http://localhost:65536",
+        "http://user:secret@localhost",
+        "http://localhost?directory=/project",
+        "http://localhost#fragment",
+    ] {
+        assert!(parse_opencode_url(address).is_err(), "{address}");
+    }
+}
+
 /// Real HTTP/SSE transport with explicitly ordered turn events. No provider or
 /// installed CLI is involved, so duplicate completion frames are reproducible.
 struct TurnWire {
+    base: String,
     bus: mpsc::UnboundedSender<Value>,
     posts: Arc<std::sync::Mutex<Vec<(String, Value)>>>,
     requests: mpsc::UnboundedReceiver<String>,
@@ -10,6 +47,21 @@ struct TurnWire {
     interrupt: tokio_util::sync::CancellationToken,
     server: tokio::task::JoinHandle<()>,
     run: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct WireCase<'a> {
+    queued: bool,
+    v2: bool,
+    modern: bool,
+    auto_approve: bool,
+    answer: Option<bool>,
+    agent: Option<&'a str>,
+    cwd: &'a str,
+    resume: bool,
+    fail_agent: bool,
+    command: bool,
+    fail_command: bool,
 }
 
 impl Drop for TurnWire {
@@ -37,6 +89,41 @@ impl TurnWire {
         auto_approve: bool,
         answer: Option<bool>,
     ) -> Self {
+        Self::start_agent(queued, v2, auto_approve, answer, None).await
+    }
+
+    async fn start_agent(
+        queued: bool,
+        v2: bool,
+        auto_approve: bool,
+        answer: Option<bool>,
+        selected_agent: Option<&str>,
+    ) -> Self {
+        Self::start_case(WireCase {
+            queued,
+            v2,
+            auto_approve,
+            answer,
+            agent: selected_agent,
+            ..Default::default()
+        })
+        .await
+    }
+
+    async fn start_case(case: WireCase<'_>) -> Self {
+        let WireCase {
+            queued,
+            v2,
+            modern,
+            auto_approve,
+            answer,
+            agent: selected_agent,
+            cwd,
+            resume,
+            fail_agent,
+            command,
+            fail_command,
+        } = case;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -66,6 +153,7 @@ impl TurnWire {
                     let header = String::from_utf8_lossy(&request[..header_end]);
                     let is_post = header.starts_with("POST ");
                     let path = header.lines().next().unwrap().split_whitespace().nth(1).unwrap().to_owned();
+                    let route_path = path.split('?').next().unwrap_or(&path);
                     let length = header.lines().find_map(|line| {
                         let (name, value) = line.split_once(':')?;
                         name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
@@ -84,29 +172,61 @@ impl TurnWire {
                         }
                         return;
                     }
-                    let body = if v2 {
-                        match path.as_str() {
+                    let command_body = (is_post && v2 && route_path.ends_with("/command"))
+                        .then(|| serde_json::from_slice::<Value>(&request[header_end..header_end+length]).unwrap_or(Value::Null));
+                    // Match OpenCode 2.0.7's actual SessionCommandInput. Keep
+                    // this validation in the fake server so a wrong client
+                    // schema receives the same immediate 400 as the real one.
+                    let command_schema_rejected = command_body.as_ref().is_some_and(|body| {
+                        body.get("name").and_then(Value::as_str).is_none()
+                            || body.get("text").and_then(Value::as_str).is_none()
+                            || !body.get("files").is_some_and(Value::is_array)
+                            || body.get("command").is_some()
+                            || body.get("arguments").is_some()
+                    });
+                    let command_failed = is_post && route_path.ends_with("/command")
+                        && (fail_command || command_schema_rejected);
+                    let status = if fail_agent && route_path == "/api/session/fixture/agent" { "500 Internal Server Error" } else if command_failed { "400 Bad Request" } else { "200 OK" };
+                    let body = if command_failed {
+                        r#"{"message":"invalid command payload"}"#.to_owned()
+                    } else if v2 && modern && route_path == "/api/model" {
+                        let directory = reqwest::Url::parse(&format!("http://local{path}")).unwrap()
+                            .query_pairs().find(|(key, _)| key == "directory")
+                            .map(|(_, value)| value.into_owned()).unwrap_or_default();
+                        let project = if directory == "/one" { "one" } else if directory == "/two" { "two" } else { "default" };
+                        json!({"data":[
+                            {"providerID":"opencode","id":"muse","name":"Muse","enabled":true},
+                            {"providerID":"custom","id":format!("{project}/model"),"name":project,"enabled":true}
+                        ]}).to_string()
+                    } else if v2 {
+                        match route_path {
+                            "/api/info" if modern => r#"{"version":"2.0.7"}"#,
                             "/api/health" => r#"{"healthy":true,"version":"2.0.3"}"#,
                             "/api/session" => r#"{"data":{"id":"fixture"}}"#,
+                            "/api/session/fixture" => r#"{"data":{"id":"fixture"}}"#,
+                            "/api/command" if command => r#"{"data":[{"name":"next-task","description":"Start the next task"}]}"#,
                             "/api/command" => r#"{"data":[]}"#,
+                            "/api/agent" => r#"{"data":[{"id":"build","mode":"primary","hidden":false},{"id":"team/review","name":"Review","mode":"all","hidden":false},{"id":"explore","mode":"subagent"},{"id":"title","mode":"primary","hidden":true}]}"#,
                             // Non-empty: the catalog-sync retry loop must not stall tests.
                             "/api/model" => r#"{"data":[{"providerID":"opencode","id":"muse","name":"Muse","limit":{"context":1000},"variants":[{"id":"low"}],"enabled":true}]}"#,
                             _ => "{}",
-                        }
+                        }.to_owned()
                     } else {
-                        match path.as_str() {
+                        match route_path {
                             "/global/health" => r#"{"healthy":true,"version":"1.18.31"}"#,
                             "/session" => r#"{"id":"fixture"}"#,
+                            "/command" if command => r#"[{"name":"next-task","description":"Start the next task"}]"#,
                             "/command" => "[]",
                             _ => "{}",
-                        }
+                        }.to_owned()
                     };
-                    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                    socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
                     if path.ends_with("/prompt_async")
                         || path.ends_with("/prompt")
                         || path.ends_with("/abort")
                         || path.ends_with("/interrupt")
-                        || path == "/api/model"
+                        || (is_post && path.ends_with("/command"))
+                        || route_path == "/api/model"
                     {
                         let _ = request_tx.send(path);
                     }
@@ -126,8 +246,15 @@ impl TurnWire {
         }
         drop(steer_tx);
         let interrupt = tokio_util::sync::CancellationToken::new();
+        let attached = Server::attached(&OpencodeConnection {
+            base_url: base.clone(),
+            username: String::new(),
+            password: None,
+        })
+        .unwrap();
+        let resume_token = resume.then(|| attached.public_session_id("fixture"));
         let run = tokio::spawn(run_session(Session {
-            server: Server::attached(base),
+            server: attached,
             event_tx,
             controls: RunControls {
                 request_input: Box::new(move |questions| {
@@ -142,14 +269,14 @@ impl TurnWire {
                 interrupt: interrupt.clone(),
             },
             request: serde_json::from_value(
-                json!({"prompt":"first", "cwd":"", "sandbox":"workspace-write", "autoApprove": auto_approve, "model": if v2 { Some("opencode/muse") } else { None }, "reasoning": "low"}),
+                json!({"prompt":if command { "/next-task focus" } else { "first" }, "cwd":cwd, "sandbox":"workspace-write", "autoApprove": auto_approve, "model": if v2 { Some("opencode/muse") } else { None }, "reasoning": "low", "agent": selected_agent, "resume": resume_token}),
             )
             .unwrap(),
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_millis(50),
-            known_commands: Some(vec![]),
         }));
         Self {
+            base,
             bus,
             posts,
             requests,
@@ -183,6 +310,13 @@ impl TurnWire {
     fn v2(&self, kind: &str, data: Value) {
         self.bus
             .send(json!({"id": format!("evt_{kind}"), "type": kind, "data": data}))
+            .unwrap();
+    }
+
+    /// Push a current 2.x `/api/event` frame used by OpenCode 2.0.7+.
+    fn v2_current(&self, kind: &str, properties: Value) {
+        self.bus
+            .send(json!({"id": format!("evt_{kind}"), "type": kind, "data": properties}))
             .unwrap();
     }
 
@@ -300,6 +434,150 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
     assert_eq!(status, DoneStatus::Completed);
     assert_eq!(text, "PONG");
     assert_eq!(usage, Some((10, 2)));
+}
+
+#[tokio::test]
+async fn current_v2_wire_streams_text_and_settles_without_false_stall() {
+    let mut wire = TurnWire::start_proto(false, true).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2_current(
+        "session.status",
+        json!({"sessionID": "fixture", "status": {"type": "busy"}}),
+    );
+    wire.v2_current(
+        "session.next.step.started",
+        json!({
+            "timestamp": 1,
+            "sessionID": "fixture",
+            "assistantMessageID": "msg_current",
+            "agent": "plan",
+            "model": {"id": "muse", "providerID": "opencode"},
+        }),
+    );
+    wire.v2_current(
+        "session.next.text.delta",
+        json!({
+            "timestamp": 2,
+            "sessionID": "fixture",
+            "assistantMessageID": "msg_current",
+            "textID": "text_current",
+            "delta": "CURRENT_OK",
+        }),
+    );
+    wire.v2_current("session.idle", json!({"sessionID": "fixture"}));
+
+    let (status, text) = wire.done().await;
+    assert_eq!(status, DoneStatus::Completed);
+    assert_eq!(text, "CURRENT_OK");
+}
+
+#[tokio::test]
+async fn current_v2_provider_error_settles_immediately_instead_of_stalling() {
+    let mut wire = TurnWire::start_proto(false, true).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2_current(
+        "session.error",
+        json!({
+            "sessionID": "fixture",
+            "error": {
+                "name": "ProviderAuthError",
+                "data": {"providerID": "anthropic", "message": "unauthorized"},
+            },
+        }),
+    );
+    wire.v2_current("session.idle", json!({"sessionID": "fixture"}));
+
+    let (status, text) = wire.done().await;
+    assert_eq!(status, DoneStatus::Errored);
+    assert!(text.is_empty());
+}
+
+#[tokio::test]
+async fn current_v2_command_uses_exact_opencode_2_0_7_schema() {
+    let mut wire = TurnWire::start_case(WireCase {
+        v2: true,
+        command: true,
+        ..Default::default()
+    })
+    .await;
+    wire.request("/api/model").await;
+    wire.request("/api/session/fixture/command").await;
+
+    let body = wire
+        .posts
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(path, _)| path.ends_with("/command"))
+        .map(|(_, body)| body.clone())
+        .expect("command request was recorded");
+    assert_eq!(
+        body,
+        json!({"name":"next-task", "text":"focus", "files":[]})
+    );
+
+    wire.v2_current(
+        "session.status",
+        json!({"sessionID":"fixture", "status":{"type":"busy"}}),
+    );
+    wire.v2_current("session.idle", json!({"sessionID":"fixture"}));
+    assert_eq!(wire.done().await.0, DoneStatus::Completed);
+}
+
+#[tokio::test]
+async fn rejected_v2_command_reports_http_error_without_stalling() {
+    let mut wire = TurnWire::start_case(WireCase {
+        v2: true,
+        command: true,
+        fail_command: true,
+        ..Default::default()
+    })
+    .await;
+    wire.request("/api/model").await;
+    wire.request("/api/session/fixture/command").await;
+
+    let (status, text) = wire.done().await;
+    assert_eq!(status, DoneStatus::Errored);
+    assert!(text.is_empty());
+}
+
+#[tokio::test]
+async fn server_agent_changes_reach_the_run_on_both_protocols() {
+    for v2 in [false, true] {
+        let mut wire = TurnWire::start_proto(false, v2).await;
+        if v2 {
+            wire.request("/api/model").await;
+            wire.request("/prompt").await;
+            wire.v2_current(
+                "session.agent.selected",
+                json!({
+                    "sessionID": "fixture", "messageID": "switch",
+                    "timestamp": 1, "agent": "plan"
+                }),
+            );
+        } else {
+            wire.request("/prompt_async").await;
+            wire.bus
+                .send(json!({"type":"message.updated", "properties":{"info":{
+                    "id":"answer", "sessionID":"fixture", "role":"assistant", "agent":"plan"
+                }}}))
+                .unwrap();
+        }
+        let changed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let AgentEvent::AgentChanged { agent } =
+                    wire.events.recv().await.unwrap().unwrap()
+                {
+                    return agent;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(changed, "plan");
+    }
 }
 
 #[tokio::test]
@@ -984,6 +1262,16 @@ fn v2_frames_normalize_to_v1_payloads() {
             "info":{"sessionID":"ses_1","id":"msg_a","role":"assistant"}}})]
     );
     let out = normalize_v2_frame(
+        json!({"id":"evt_agent","type":"session.next.agent.switched","data":{
+            "sessionID":"ses_1","messageID":"msg_switch","timestamp":1,"agent":"plan"}}),
+        &mut tools,
+    );
+    assert_eq!(
+        out,
+        vec![json!({"type":"session.agent.changed","properties":{
+            "sessionID":"ses_1","agent":"plan"}})]
+    );
+    let out = normalize_v2_frame(
         json!({"id":"evt_6","type":"session.text.delta","data":{
             "sessionID":"ses_1","assistantMessageID":"msg_a","ordinal":0,"delta":"hi"}}),
         &mut tools,
@@ -993,6 +1281,63 @@ fn v2_frames_normalize_to_v1_payloads() {
         vec![json!({"type":"message.part.delta","properties":{
             "sessionID":"ses_1","messageID":"msg_a","partID":"msg_a:t0",
             "field":"text","delta":"hi"}})]
+    );
+    // OpenCode 2.0.7+ `/api/event` keeps `data` but prefixes streaming names
+    // with `session.next.` and uses explicit part ids.
+    let out = normalize_v2_frame(
+        json!({"id":"evt_current_step","type":"session.next.step.started","data":{
+                "sessionID":"ses_1","assistantMessageID":"msg_current",
+                "timestamp":1,"agent":"plan",
+                "model":{"id":"muse","providerID":"opencode"}}}),
+        &mut tools,
+    );
+    assert_eq!(
+        out,
+        vec![json!({"type":"message.updated","properties":{"info":{
+            "sessionID":"ses_1","id":"msg_current","role":"assistant","agent":"plan",
+            "model":{"id":"muse","providerID":"opencode"}}}})]
+    );
+    let out = normalize_v2_frame(
+        json!({"id":"evt_current_text","type":"session.next.text.delta","data":{
+                "sessionID":"ses_1","assistantMessageID":"msg_current",
+                "timestamp":2,"textID":"txt_exact","delta":"current"}}),
+        &mut tools,
+    );
+    assert_eq!(
+        out,
+        vec![json!({"type":"message.part.delta","properties":{
+            "sessionID":"ses_1","messageID":"msg_current","partID":"txt_exact",
+            "field":"text","delta":"current"}})]
+    );
+    let current_idle = json!({"type":"session.idle","properties":{"sessionID":"ses_1"}});
+    assert_eq!(
+        normalize_v2_frame(
+            json!({"id":"evt_idle","type":"session.idle","data":{"sessionID":"ses_1"}}),
+            &mut tools,
+        ),
+        vec![current_idle]
+    );
+    let current_error = json!({"type":"session.error","properties":{
+        "sessionID":"ses_1","error":{"name":"ProviderAuthError","data":{
+            "providerID":"anthropic","message":"unauthorized"}}}});
+    assert_eq!(
+        normalize_v2_frame(
+            json!({"id":"evt_error","type":"session.error","data":{
+                "sessionID":"ses_1","error":{"name":"ProviderAuthError","data":{
+                    "providerID":"anthropic","message":"unauthorized"}}}}),
+            &mut tools,
+        ),
+        vec![current_error]
+    );
+    // The global stream's wrapped form remains accepted too.
+    let global_status = json!({"id":"evt_status","type":"session.status","properties":{
+        "sessionID":"ses_1","status":{"type":"busy"}}});
+    assert_eq!(
+        normalize_v2_frame(
+            json!({"directory":"/w","payload":global_status.clone()}),
+            &mut tools,
+        ),
+        vec![global_status]
     );
     // A tool: the NAME rides input.started; later frames carry only ids.
     normalize_v2_frame(
@@ -1047,6 +1392,141 @@ fn v2_frames_normalize_to_v1_payloads() {
             &mut tools,
         )
         .is_empty()
+    );
+}
+
+#[test]
+fn effective_agent_changes_are_trimmed_and_deduplicated() {
+    let mut current = Some("build".to_owned());
+    assert!(agent_change(&mut current, Some("build")).is_none());
+    assert!(agent_change(&mut current, Some("  ")).is_none());
+    assert_eq!(
+        agent_change(&mut current, Some(" plan ")),
+        Some(AgentEvent::AgentChanged {
+            agent: "plan".to_owned()
+        })
+    );
+    assert_eq!(current.as_deref(), Some("plan"));
+}
+
+#[tokio::test]
+async fn v2_command_selections_update_agent_model_and_reasoning() {
+    let mut wire = TurnWire::start_case(WireCase {
+        v2: true,
+        modern: true,
+        command: true,
+        ..Default::default()
+    })
+    .await;
+    wire.request("/api/model").await;
+    wire.request("/command").await;
+
+    wire.v2_current(
+        "session.status",
+        json!({"sessionID":"fixture","status":{"type":"busy"}}),
+    );
+
+    // These are the durable selection events in OpenCode 2.0.9. A command
+    // can switch settings without starting a provider step at all.
+    for session in ["unrelated", "fixture"] {
+        let ours = session == "fixture";
+        wire.v2_current(
+            "session.agent.selected",
+            json!({"sessionID":session,"agent":if ours { "plan" } else { "other-agent" },"previous":"build"}),
+        );
+        wire.v2_current(
+            "session.model.selected",
+            json!({"sessionID":session,"model":{
+                "providerID":"custom","id":if ours { "review/model" } else { "other-model" },"variant":"xhigh"
+            }}),
+        );
+    }
+    // A repeated selection/step snapshot must not rewrite client settings.
+    wire.v2_current(
+        "session.step.started",
+        json!({"sessionID":"fixture","assistantMessageID":"msg_review","agent":"plan",
+            "model":{"providerID":"custom","id":"review/model","variant":"xhigh"}}),
+    );
+    // A variant-only change matters even when the model id stays the same.
+    wire.v2_current(
+        "session.model.selected",
+        json!({"sessionID":"fixture","model":{
+            "providerID":"custom","id":"review/model","variant":"low"
+        }}),
+    );
+    // A missing variant clears the previous thinking level.
+    wire.v2_current(
+        "session.model.selected",
+        json!({"sessionID":"fixture","model":{"providerID":"custom","id":"fast"}}),
+    );
+    wire.v2_current("session.idle", json!({"sessionID":"fixture"}));
+
+    let changes = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut changes = Vec::new();
+        while let Some(event) = wire.events.recv().await {
+            match event.unwrap() {
+                event @ (AgentEvent::AgentChanged { .. } | AgentEvent::ModelChanged { .. }) => {
+                    changes.push(event);
+                }
+                AgentEvent::Done { status, .. } => {
+                    assert_eq!(status, DoneStatus::Completed);
+                    return changes;
+                }
+                _ => {}
+            }
+        }
+        panic!("run ended without Done");
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        changes,
+        vec![
+            AgentEvent::AgentChanged {
+                agent: "plan".into()
+            },
+            AgentEvent::ModelChanged {
+                model: "custom/review/model".into(),
+                reasoning: Some(ReasoningLevel::XHigh),
+            },
+            AgentEvent::ModelChanged {
+                model: "custom/review/model".into(),
+                reasoning: Some(ReasoningLevel::Low),
+            },
+            AgentEvent::ModelChanged {
+                model: "custom/fast".into(),
+                reasoning: None
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn v2_step_snapshot_reports_effective_model_and_thinking_level() {
+    let mut wire = TurnWire::start_proto(false, true).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2_current(
+        "session.next.step.started",
+        json!({"sessionID":"fixture","assistantMessageID":"msg_review","agent":"plan",
+            "model":{"providerID":"custom","id":"review","variant":"high"}}),
+    );
+    let changed = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = wire.events.recv().await {
+            if let event @ AgentEvent::ModelChanged { .. } = event.unwrap() {
+                return event;
+            }
+        }
+        panic!("no model change");
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        changed,
+        AgentEvent::ModelChanged {
+            model: "custom/review".into(),
+            reasoning: Some(ReasoningLevel::High),
+        }
     );
 }
 
@@ -1335,6 +1815,148 @@ async fn v2_model_selection_and_prompt_use_the_documented_bodies() {
             .1,
         json!({"text":"first","files":[]})
     );
+}
+
+#[tokio::test]
+async fn v2_agent_selection_is_validated_and_sent_before_prompt() {
+    let mut wire = TurnWire::start_agent(false, true, true, None, Some("team/review")).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    let posts = wire.posts.lock().unwrap();
+    let create = posts
+        .iter()
+        .position(|(path, _)| path == "/api/session")
+        .unwrap();
+    let prompt = posts
+        .iter()
+        .position(|(path, _)| path == "/api/session/fixture/prompt")
+        .unwrap();
+    assert!(create < prompt);
+    assert_eq!(posts[create].1["agent"], "team/review");
+    assert!(posts[prompt].1.get("agents").is_none());
+}
+
+#[tokio::test]
+async fn v2_agents_filter_hidden_and_subagent_rows() {
+    let wire = TurnWire::start_proto(false, true).await;
+    let agents = OpencodeHarness::new()
+        .with_base_url(wire.base.clone())
+        .agents(None)
+        .await
+        .unwrap();
+    assert_eq!(
+        agents
+            .iter()
+            .map(|agent| agent.id.as_str())
+            .collect::<Vec<_>>(),
+        ["build", "team/review"]
+    );
+    drop(wire);
+    let mut wire = TurnWire::start_agent(false, true, true, None, Some("explore")).await;
+    assert!(matches!(wire.done().await.0, DoneStatus::Errored));
+    assert!(wire.posts.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn modern_catalog_uses_directory_query_and_keeps_projects_separate() {
+    let wire = TurnWire::start_case(WireCase {
+        v2: true,
+        modern: true,
+        auto_approve: true,
+        cwd: "/one",
+        ..Default::default()
+    })
+    .await;
+    let harness = OpencodeHarness::new().with_base_url(wire.base.clone());
+    assert_eq!(harness.test_connection().await.unwrap().version, "2.0.7");
+    let one = harness.models_for_directory(Some("/one")).await.unwrap();
+    let two = harness.models_for_directory(Some("/two")).await.unwrap();
+    assert!(one.iter().any(|model| model.id == "custom/one/model"));
+    assert!(two.iter().any(|model| model.id == "custom/two/model"));
+    assert!(!two.iter().any(|model| model.id == "custom/one/model"));
+    assert_eq!(
+        harness.models_for_directory(Some("/one")).await.unwrap(),
+        one
+    );
+}
+
+#[tokio::test]
+async fn resumed_agent_switch_precedes_prompt_and_failure_blocks_prompt() {
+    let mut wire = TurnWire::start_case(WireCase {
+        v2: true,
+        modern: true,
+        auto_approve: true,
+        agent: Some("team/review"),
+        resume: true,
+        ..Default::default()
+    })
+    .await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    let posts = wire.posts.lock().unwrap();
+    let switch = posts
+        .iter()
+        .position(|(path, _)| path == "/api/session/fixture/agent")
+        .unwrap();
+    let prompt = posts
+        .iter()
+        .position(|(path, _)| path == "/api/session/fixture/prompt")
+        .unwrap();
+    assert!(switch < prompt);
+    assert_eq!(posts[switch].1, json!({"agent":"team/review"}));
+    assert!(posts.iter().all(|(path, _)| path != "/api/session"));
+    drop(posts);
+    drop(wire);
+
+    let mut failed = TurnWire::start_case(WireCase {
+        v2: true,
+        modern: true,
+        auto_approve: true,
+        agent: Some("team/review"),
+        resume: true,
+        fail_agent: true,
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(failed.done().await.0, DoneStatus::Errored);
+    let posts = failed.posts.lock().unwrap();
+    assert!(
+        posts
+            .iter()
+            .any(|(path, _)| path == "/api/session/fixture/agent")
+    );
+    assert!(
+        posts
+            .iter()
+            .all(|(path, _)| path != "/api/session/fixture/prompt" && path != "/api/session")
+    );
+}
+
+#[test]
+fn attached_resume_tokens_are_server_bound_and_credential_free() {
+    let first = Server::attached(&OpencodeConnection {
+        base_url: "http://localhost:4096/opencode/".into(),
+        username: "alice".into(),
+        password: Some("secret".into()),
+    })
+    .unwrap();
+    let same = Server::attached(&OpencodeConnection {
+        base_url: "http://localhost:4096/opencode".into(),
+        username: "bob".into(),
+        password: Some("different".into()),
+    })
+    .unwrap();
+    let other = Server::attached(&OpencodeConnection {
+        base_url: "http://localhost:4096/other".into(),
+        username: "alice".into(),
+        password: None,
+    })
+    .unwrap();
+    let token = first.public_session_id("ses_1");
+    assert!(!token.contains("secret"));
+    assert_eq!(same.resume_id(&token).unwrap(), "ses_1");
+    assert!(other.resume_id(&token).is_err());
+    assert!(first.resume_id("ses_1").is_err());
 }
 
 #[tokio::test]

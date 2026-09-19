@@ -14,7 +14,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use zeron_harness::{
-    CancellationToken, Harness, HarnessError, OpencodeHarness, RunControls, SteerMessage,
+    CancellationToken, Harness, HarnessError, OpencodeConnection, OpencodeHarness, RunControls,
+    SteerMessage,
 };
 use zeron_proto::{
     AgentEvent, DoneStatus, ReasoningLevel, RunRequest, SandboxLevel, ToolCall, UserInputAnswer,
@@ -41,6 +42,10 @@ struct FakeOpencode {
     /// Leading 500s to answer `POST /session` with (the opencode
     /// lazy-migration crash class: first access 500s, retry succeeds).
     fail_session_creates: Arc<Mutex<u32>>,
+    expected_auth: Arc<Mutex<Option<String>>>,
+    seen_auth: Arc<Mutex<Vec<(String, String)>>>,
+    versionless_health: Arc<Mutex<bool>>,
+    resume_failure: Arc<Mutex<Option<&'static str>>>,
 }
 
 impl FakeOpencode {
@@ -56,6 +61,10 @@ impl FakeOpencode {
             providers: Arc::new(Mutex::new(json!({ "all": [], "default": {} }))),
             first_prompt_had_subscriber: Arc::new(Mutex::new(None)),
             fail_session_creates: Arc::new(Mutex::new(0)),
+            expected_auth: Arc::new(Mutex::new(None)),
+            seen_auth: Arc::new(Mutex::new(Vec::new())),
+            versionless_health: Arc::new(Mutex::new(false)),
+            resume_failure: Arc::new(Mutex::new(None)),
         };
         let accept = fake.clone();
         tokio::spawn(async move {
@@ -85,6 +94,14 @@ impl FakeOpencode {
 
     fn set_providers(&self, providers: Value) {
         *self.providers.lock().unwrap() = providers;
+    }
+
+    fn require_auth(&self, username: &str, password: &str) {
+        use base64::Engine as _;
+        *self.expected_auth.lock().unwrap() = Some(format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"))
+        ));
     }
 
     fn posts_to(&self, path: &str) -> Vec<Value> {
@@ -138,6 +155,38 @@ impl FakeOpencode {
             let method = parts.next().unwrap_or_default().to_owned();
             let target = parts.next().unwrap_or_default().to_owned();
             let path = target.split('?').next().unwrap_or_default().to_owned();
+            let auth = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("authorization")
+                        .then(|| value.trim().to_owned())
+                })
+                .unwrap_or_default();
+            self.seen_auth
+                .lock()
+                .unwrap()
+                .push((path.clone(), auth.clone()));
+            let rejected = self
+                .expected_auth
+                .lock()
+                .unwrap()
+                .as_deref()
+                .is_some_and(|expected| expected != auth);
+            if rejected {
+                let body = "{}";
+                let response = format!(
+                    "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                return;
+            }
+            if path == "/session/ses_resume"
+                && *self.resume_failure.lock().unwrap() == Some("disconnect")
+            {
+                return;
+            }
 
             if method == "GET" && path == "/global/event" {
                 // Subscribe FIRST, then snapshot the backlog: frames landing
@@ -197,7 +246,12 @@ impl FakeOpencode {
 
     fn route(&self, method: &str, path: &str) -> (&'static str, Value) {
         match (method, path) {
-            ("GET", "/global/health") => ("200 OK", json!({ "healthy": true })),
+            ("GET", "/global/health") if *self.versionless_health.lock().unwrap() => {
+                ("200 OK", json!({ "healthy": true }))
+            }
+            ("GET", "/global/health") => {
+                ("200 OK", json!({ "healthy": true, "version": "1.18.31" }))
+            }
             ("GET", "/provider") => ("200 OK", self.providers.lock().unwrap().clone()),
             ("GET", "/command") => (
                 "200 OK",
@@ -221,6 +275,11 @@ impl FakeOpencode {
                     ("200 OK", json!({ "id": "ses_test" }))
                 }
             }
+            ("GET", "/session/ses_resume")
+                if *self.resume_failure.lock().unwrap() == Some("auth") =>
+            {
+                ("401 Unauthorized", json!({ "error": "unauthorized" }))
+            }
             ("GET", "/session/ses_resume") => ("200 OK", json!({ "id": "ses_resume" })),
             ("GET", p) if p.starts_with("/session/") => ("404 Not Found", json!({})),
             ("POST", p) if p.ends_with("/prompt_async") => ("204 No Content", json!({})),
@@ -242,6 +301,7 @@ fn request(prompt: &str) -> RunRequest {
         prompt: prompt.into(),
         harness: None,
         model: None,
+        agent: None,
         reasoning: None,
         model_options: serde_json::Map::new(),
         cwd: "/tmp".into(),
@@ -278,6 +338,25 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
 
 fn harness(fake: &FakeOpencode) -> OpencodeHarness {
     OpencodeHarness::new().with_base_url(fake.base.clone())
+}
+
+fn authenticated_harness(fake: &FakeOpencode, password: &str) -> OpencodeHarness {
+    OpencodeHarness::new().with_connection(OpencodeConnection {
+        base_url: fake.base.clone(),
+        username: "custom-user".into(),
+        password: Some(password.into()),
+    })
+}
+
+fn attached_token(base: &str, native_id: &str) -> String {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    format!(
+        "oc2.{}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(sha2::Sha256::digest(base.as_bytes())),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(native_id)
+    )
 }
 
 /// Emit the standard opening frames of an assistant turn.
@@ -355,7 +434,7 @@ async fn thinking_streams_and_the_turn_settles_only_on_idle() {
     let started = next_event(&mut stream).await;
     assert!(matches!(
         &started,
-        AgentEvent::SessionStarted { session_id, .. } if session_id == "ses_test"
+        AgentEvent::SessionStarted { session_id, .. } if session_id.starts_with("oc2.")
     ));
     // AvailableCommands from /command.
     let commands = next_event(&mut stream).await;
@@ -420,7 +499,7 @@ async fn thinking_streams_and_the_turn_settles_only_on_idle() {
             status: DoneStatus::Completed,
             session_id: Some(sid),
             ..
-        }) if sid == "ses_test"
+        }) if sid.starts_with("oc2.")
     ));
 }
 
@@ -442,7 +521,7 @@ async fn session_create_retries_once_through_the_lazy_migration_500() {
     let started = next_event(&mut stream).await;
     assert!(matches!(
         &started,
-        AgentEvent::SessionStarted { session_id, .. } if session_id == "ses_test"
+        AgentEvent::SessionStarted { session_id, .. } if session_id.starts_with("oc2.")
     ));
     let commands = next_event(&mut stream).await;
     assert!(matches!(&commands, AgentEvent::AvailableCommands { .. }));
@@ -524,6 +603,19 @@ async fn model_and_advertised_variant_ride_the_prompt() {
     assistant_message(&fake, "ses_test", "msg_1");
     idle(&fake, "ses_test");
     drain_to_done(&mut stream).await;
+}
+
+#[tokio::test]
+async fn removed_model_errors_before_creating_a_session() {
+    let fake = FakeOpencode::start().await;
+    let mut req = request("hi");
+    req.model = Some("missing/model".into());
+    let (run_controls, _steer, _token) = controls();
+    let mut stream = harness(&fake).run(req, run_controls).await.unwrap();
+    assert!(matches!(next_event(&mut stream).await,
+        AgentEvent::Done { status: DoneStatus::Errored, error: Some(message), .. }
+        if message.contains("unavailable for this project")));
+    assert!(fake.posts.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -828,12 +920,12 @@ async fn resume_reuses_the_durable_session() {
     let fake = FakeOpencode::start().await;
     let (controls, _steer, _token) = controls();
     let mut req = request("continue");
-    req.resume = Some("ses_resume".into());
+    req.resume = Some(attached_token(&fake.base, "ses_resume"));
     let mut stream = harness(&fake).run(req, controls).await.expect("run starts");
     let started = next_event(&mut stream).await;
     assert!(matches!(
         &started,
-        AgentEvent::SessionStarted { session_id, .. } if session_id == "ses_resume"
+        AgentEvent::SessionStarted { session_id, .. } if session_id.starts_with("oc2.")
     ));
     let _ = next_event(&mut stream).await;
     wait_posts(&fake, "/session/ses_resume/prompt_async", 1).await;
@@ -841,6 +933,89 @@ async fn resume_reuses_the_durable_session() {
     assistant_message(&fake, "ses_resume", "msg_1");
     idle(&fake, "ses_resume");
     drain_to_done(&mut stream).await;
+}
+
+#[tokio::test]
+async fn attached_resume_failures_never_create_a_replacement_session() {
+    for failure in ["auth", "disconnect"] {
+        let fake = FakeOpencode::start().await;
+        *fake.resume_failure.lock().unwrap() = Some(failure);
+        let mut req = request("continue");
+        req.resume = Some(attached_token(&fake.base, "ses_resume"));
+        let (controls, _steer, _token) = controls();
+        let mut stream = harness(&fake).run(req, controls).await.unwrap();
+        assert!(
+            matches!(next_event(&mut stream).await, AgentEvent::Done { status: DoneStatus::Errored, error: Some(message), .. } if message.contains("could not be resumed"))
+        );
+        assert!(fake.posts.lock().unwrap().is_empty());
+    }
+
+    let fake = FakeOpencode::start().await;
+    let other = FakeOpencode::start().await;
+    let mut req = request("continue");
+    req.resume = Some(attached_token(&other.base, "ses_resume"));
+    let (run_controls, _steer, _token) = controls();
+    let mut stream = harness(&fake).run(req, run_controls).await.unwrap();
+    assert!(
+        matches!(next_event(&mut stream).await, AgentEvent::Done { status: DoneStatus::Errored, error: Some(message), .. } if message.contains("different server"))
+    );
+    assert!(fake.posts.lock().unwrap().is_empty());
+
+    let mut missing = request("continue");
+    missing.resume = Some(attached_token(&fake.base, "ses_missing"));
+    let (run_controls, _steer, _token) = controls();
+    let mut stream = harness(&fake).run(missing, run_controls).await.unwrap();
+    assert!(
+        matches!(next_event(&mut stream).await, AgentEvent::Done { status: DoneStatus::Errored, error: Some(message), .. } if message.contains("Start a new chat"))
+    );
+    assert!(fake.posts.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn attached_connection_authenticates_probe_and_event_bus() {
+    let fake = FakeOpencode::start().await;
+    fake.require_auth("custom-user", "synthetic-password");
+    let harness = authenticated_harness(&fake, "synthetic-password");
+    assert_eq!(harness.test_connection().await.unwrap().version, "1.18.31");
+    let (controls, _steer, _token) = controls();
+    let mut stream = harness.run(request("hi"), controls).await.unwrap();
+    let started = next_event(&mut stream).await;
+    assert!(matches!(started, AgentEvent::SessionStarted { .. }));
+    wait_posts(&fake, "/session/ses_test/prompt_async", 1).await;
+    assistant_message(&fake, "ses_test", "msg_auth");
+    idle(&fake, "ses_test");
+    drain_to_done(&mut stream).await;
+    let seen = fake.seen_auth.lock().unwrap().clone();
+    for path in [
+        "/global/health",
+        "/provider",
+        "/global/event",
+        "/session/ses_test/prompt_async",
+    ] {
+        assert!(
+            seen.iter()
+                .any(|(p, a)| p == path && a.starts_with("Basic ")),
+            "missing authorized {path}"
+        );
+    }
+    assert!(
+        authenticated_harness(&fake, "wrong")
+            .test_connection()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("authentication rejected")
+    );
+}
+
+#[tokio::test]
+async fn versionless_health_is_not_detected_as_v1() {
+    let fake = FakeOpencode::start().await;
+    *fake.versionless_health.lock().unwrap() = true;
+    let harness = harness(&fake).with_executable("/definitely/missing/opencode");
+    let error = harness.test_connection().await.unwrap_err().to_string();
+    assert!(error.contains("supported OpenCode protocol"), "{error}");
+    assert!(fake.posts.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -953,7 +1128,7 @@ async fn models_refresh_large_provider_catalogs_and_recover_after_disconnect() {
 
     fake.set_providers(json!({"all": [], "connected": []}));
     assert!(
-        harness.models().await.is_err(),
+        harness.models().await.unwrap().is_empty(),
         "must not return the old account's catalog"
     );
 

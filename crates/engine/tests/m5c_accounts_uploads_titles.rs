@@ -677,6 +677,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         .expect("set branch");
 
     let request = zeron_proto::RunRequest {
+        agent: None,
         prompt: "please fix the login flow".into(),
         harness: None,
         model: None,
@@ -722,6 +723,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         .rename_chat(chat_id, "My Custom Name")
         .expect("rename");
     let request = zeron_proto::RunRequest {
+        agent: None,
         prompt: "another request".into(),
         harness: None,
         model: None,
