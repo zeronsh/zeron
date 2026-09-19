@@ -3952,7 +3952,6 @@ struct SlashState {
     active: Option<usize>,
     /// Harness the popup is showing commands for (cache key).
     harness: Option<HarnessId>,
-    request: u64,
     loading: bool,
     error: Option<SharedString>,
     dismissed: Option<(Range<usize>, String)>,
@@ -4036,11 +4035,16 @@ pub struct Composer {
     picker_task: Option<Task<()>>,
     mention_task: Option<Task<()>>,
     mention: FileMentionState,
-    slash_task: Option<Task<()>>,
     slash: SlashState,
     /// Advertised commands per harness (one `ListCommands` per harness per
     /// composer lifetime; the engine caches discovery on its side too).
     slash_cache: HashMap<HarnessId, Vec<SlashCommand>>,
+    /// in-flight `ListCommands` per harness, owned apart from the popup so
+    /// closing it mid-load never throws away an agent's slow cold start.
+    slash_loads: HashMap<HarnessId, Task<()>>,
+    /// harnesses whose last load failed: only an explicit `/` retries them,
+    /// so background prefetch never respawns a broken agent on every repaint.
+    slash_failed: HashSet<HarnessId>,
     /// Slash-popup row scroll — the stack overflows into a wheel/keyboard-
     /// scrollable list once it outgrows the card.
     slash_scroll: gpui::ScrollHandle,
@@ -4224,7 +4228,10 @@ impl Composer {
         // The footer toolbar (checkout kind + ref picker) is rendered INLINE
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
-        let pickers_observe = cx.observe(&pickers, |_, _, cx| cx.notify());
+        let pickers_observe = cx.observe(&pickers, |this: &mut Self, _, cx| {
+            this.prefetch_slash_commands(cx);
+            cx.notify()
+        });
         let picker_focus = cx.subscribe(
             &pickers,
             |this: &mut Self, _, _: &crate::pickers::ReturnComposerFocus, cx| {
@@ -4289,9 +4296,10 @@ impl Composer {
             picker_task: None,
             mention_task: None,
             mention: FileMentionState::default(),
-            slash_task: None,
             slash: SlashState::default(),
             slash_cache: HashMap::new(),
+            slash_loads: HashMap::new(),
+            slash_failed: HashSet::new(),
             slash_scroll: gpui::ScrollHandle::new(),
             mention_scroll: gpui::ScrollHandle::new(),
             popup_bar: crate::popover::MenuScrollbarState::default(),
@@ -5034,7 +5042,7 @@ impl Composer {
             if self.mention.token.is_some() || self.mention_task.is_some() {
                 self.reset_mention(None, cx);
             }
-            if self.slash.token.is_some() || self.slash_task.is_some() {
+            if self.slash.token.is_some() {
                 self.reset_slash(None, cx);
             }
             return;
@@ -5402,14 +5410,32 @@ impl Composer {
             self.refilter_slash(cx);
             return;
         }
-        // First open for this harness: one ListCommands, targeted like file
-        // search (the chat/space host device owns the agent binary).
-        self.slash.request = self.slash.request.wrapping_add(1);
-        self.slash.loading = true;
+        self.slash_failed.remove(&harness);
+        self.slash.loading = self.load_slash_commands(harness, cx);
         self.refilter_slash(cx);
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.slash.loading = false;
+    }
+
+    /// agents spawn a process to list their commands (tens of seconds for
+    /// antigravity's cold start), so the list is fetched as soon as the
+    /// composer knows its harness instead of when `/` is typed.
+    fn prefetch_slash_commands(&mut self, cx: &mut Context<Self>) {
+        let Some(harness) = self.pickers.read(cx).effective_harness(cx) else {
             return;
+        };
+        if !self.slash_cache.contains_key(&harness) && !self.slash_failed.contains(&harness) {
+            self.load_slash_commands(harness, cx);
+        }
+    }
+
+    /// one `ListCommands` per harness at a time, targeted like file search (the
+    /// chat/space host device owns the agent binary). `false` when no engine
+    /// is connected to ask.
+    fn load_slash_commands(&mut self, harness: HarnessId, cx: &mut Context<Self>) -> bool {
+        if self.slash_loads.contains_key(&harness) {
+            return true;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return false;
         };
         let target = {
             let state = self.state.read(cx);
@@ -5418,35 +5444,42 @@ impl Composer {
                 .map(|chat| chat.device_id.clone())
                 .or_else(|| state.selected_space_row().map(|s| s.device_id.clone()))
         };
-        let request = self.slash.request;
-        self.slash_task = Some(cx.spawn(async move |this, cx| {
+        let load = cx.spawn(async move |this, cx| {
             let mut params = serde_json::json!({ "harness": harness });
             if let (Some(target), Some(object)) = (&target, params.as_object_mut()) {
                 object.insert("targetDeviceId".into(), target.clone().into());
             }
             let result = engine.client().call(methods::LIST_COMMANDS, params).await;
             this.update(cx, |composer, cx| {
-                if composer.slash.request != request {
-                    return;
-                }
-                composer.slash.loading = false;
-                match result {
+                composer.slash_loads.remove(&harness);
+                let error = match result {
                     Ok(value) => match serde_json::from_value::<Vec<SlashCommand>>(value) {
                         Ok(commands) => {
                             composer.slash_cache.insert(harness, commands);
+                            None
                         }
-                        Err(err) => tracing::warn!(%err, "slash command decode failed"),
+                        Err(err) => {
+                            tracing::warn!(%err, "slash command decode failed");
+                            composer.slash_failed.insert(harness);
+                            None
+                        }
                     },
                     Err(err) => {
                         tracing::debug!(%err, "slash command discovery failed");
-                        composer.slash.error = Some(slash_error_message(&err));
+                        composer.slash_failed.insert(harness);
+                        Some(slash_error_message(&err))
                     }
+                };
+                if composer.slash.token.is_some() && composer.slash.harness == Some(harness) {
+                    composer.slash.loading = false;
+                    composer.slash.error = error;
+                    composer.refilter_slash(cx);
                 }
-                composer.refilter_slash(cx);
             })
             .ok();
-        }));
-        cx.notify();
+        });
+        self.slash_loads.insert(harness, load);
+        true
     }
 
     /// Re-rank the cached list for the current query (pure local filter).
@@ -5522,10 +5555,7 @@ impl Composer {
 
     /// Tear down the slash completion (mirrors [`Self::reset_mention`]).
     fn reset_slash(&mut self, dismissed: Option<(Range<usize>, String)>, cx: &mut Context<Self>) {
-        let request = self.slash.request.wrapping_add(1);
-        self.slash_task = None;
         self.slash = SlashState {
-            request,
             dismissed,
             harness: self.slash.harness,
             ..SlashState::default()

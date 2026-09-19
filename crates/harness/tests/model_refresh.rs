@@ -49,10 +49,11 @@ async fn check_refresh(harness: &dyn Harness, dir: &Path) {
     );
 
     std::fs::write(&state, r#"{"id":"second-"}"#).unwrap();
-    assert_eq!(harness.models().await.unwrap()[255].id, "second-255");
+    let second = harness.models().await.unwrap();
+    assert_eq!(second[255].id, "second-255");
     std::fs::write(&state, r#"{"id":"broken-","broken":true}"#).unwrap();
     let fallback = harness.models().await.unwrap();
-    assert!(!fallback.iter().any(|m| m.id.starts_with("second-")));
+    assert_eq!(fallback, second);
     std::fs::write(&state, r#"{"id":"recovered-"}"#).unwrap();
     assert_eq!(harness.models().await.unwrap()[255].id, "recovered-255");
 }

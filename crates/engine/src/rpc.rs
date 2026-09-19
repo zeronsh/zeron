@@ -1001,6 +1001,8 @@ fn forward_deadline(method: &str) -> std::time::Duration {
             Duration::from_secs(15 * 60)
         }
         methods::CREATE_WORKTREE => Duration::from_secs(120),
+        // allows antigravity's 90s discovery budget plus shutdown and relay overhead
+        methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
         _ => Duration::from_secs(30),
     }
 }
@@ -2851,6 +2853,14 @@ mod tests {
         assert_eq!(
             forward_deadline(methods::CLONE_REPO),
             Duration::from_secs(15 * 60)
+        );
+        assert_eq!(
+            forward_deadline(methods::LIST_MODELS),
+            Duration::from_secs(100)
+        );
+        assert_eq!(
+            forward_deadline(methods::LIST_COMMANDS),
+            Duration::from_secs(100)
         );
         assert_eq!(
             forward_deadline(methods::LIST_BRANCHES),

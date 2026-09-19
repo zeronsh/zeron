@@ -568,6 +568,33 @@ async fn models_fall_back_to_the_static_catalog_when_the_probe_fails() {
 }
 
 #[tokio::test]
+async fn a_failed_reprobe_keeps_the_last_live_catalog_over_the_static_one() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let flaky = dir.path().join("flaky-hermes-acp");
+    let probed = dir.path().join("probed");
+    std::fs::write(
+        &flaky,
+        format!(
+            "#!/bin/sh\n[ -e '{probed}' ] && exit 1\ntouch '{probed}'\nexec '{fixture}' \"$@\"\n",
+            probed = probed.display(),
+            fixture = fixture_path().display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&flaky, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let harness = AcpHarness::hermes().with_executable(flaky);
+
+    let live = harness.models().await.expect("live discovery");
+    assert_eq!(
+        live.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        vec!["grok-4-fast", "grok-4.5"]
+    );
+    let after_failure = harness.models().await.expect("last live catalog");
+    assert_eq!(after_failure, live);
+}
+
+#[tokio::test]
 async fn missing_override_is_not_installed_and_fails_discovery() {
     // An override that points at nothing is not an installed agent: the
     // registry must not offer it, and discovery names the problem instead of
@@ -697,6 +724,28 @@ async fn antigravity_commands_hide_logout_but_keep_the_servers_own() {
 }
 
 #[tokio::test]
+async fn antigravity_commands_allow_a_slow_cold_start() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let slow = dir.path().join("slow-antigravity-acp");
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-antigravity-acp.sh");
+    std::fs::write(
+        &slow,
+        format!("#!/bin/sh\nsleep 11\nexec '{}' \"$@\"\n", fixture.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let harness = AcpHarness::antigravity().with_executable(slow);
+    let commands = tokio::time::timeout(Duration::from_secs(30), harness.commands())
+        .await
+        .expect("bounded cold start")
+        .expect("commands after cold start");
+    assert!(commands.iter().any(|command| command.name == "plan"));
+}
+
+#[tokio::test]
 async fn antigravity_sign_out_logs_the_server_out() {
     antigravity_harness().sign_out().await.expect("signed out");
 }
@@ -719,6 +768,57 @@ async fn antigravity_run_without_sign_in_points_to_settings_instead_of_a_browser
     assert!(error.contains("Settings → Agents"), "{error}");
 }
 
+#[tokio::test]
+async fn antigravity_run_with_a_stale_login_fails_fast_without_a_browser() {
+    let workspace = tempfile::Builder::new()
+        .prefix("stale-login")
+        .tempdir()
+        .unwrap();
+    let mut req = request("hi");
+    req.model = None;
+    req.cwd = workspace.path().display().to_string();
+    let (controls, _steer, _token) = controls();
+    let events = tokio::time::timeout(
+        Duration::from_secs(10),
+        run_to_end(&antigravity_harness(), req, controls),
+    )
+    .await
+    .expect("aborted on the sign-in prompt, not the handshake timeout");
+    let dones = dones(&events);
+    assert_eq!(dones.len(), 1, "{events:?}");
+    assert_eq!(dones[0].0, DoneStatus::Errored);
+    let error = dones[0].1.as_deref().unwrap_or_default();
+    assert!(error.contains("isn't signed in"), "{error}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_model_discovery_with_a_stale_login_fails_fast_without_a_browser() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let stale = dir.path().join("stale-antigravity-acp");
+    let prompted = dir.path().join("prompted");
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-antigravity-acp.sh");
+    std::fs::write(
+        &stale,
+        format!(
+            "#!/bin/sh\nFAKE_AGY_STALE_LOGIN='{}' exec '{}' \"$@\"\n",
+            prompted.display(),
+            fixture.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let harness = AcpHarness::antigravity().with_executable(stale);
+    tokio::time::timeout(Duration::from_secs(10), harness.models())
+        .await
+        .expect("aborted on the sign-in prompt, not the discovery timeout")
+        .expect("static catalog fallback");
+    assert!(prompted.exists(), "the server saw a real BROWSER");
+}
+
 #[test]
 fn antigravity_descriptor_surface_matches_registry_expectations() {
     let antigravity = AcpHarness::antigravity();
@@ -738,6 +838,26 @@ async fn antigravity_runs_the_picked_effort_variant_unattended() {
         }),
         "{events:?}"
     );
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn antigravity_strips_echoed_background_task_wakeups_from_the_reply() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut req = request("echo-wakeup");
+    req.model = None;
+    req.cwd = workspace.path().display().to_string();
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&antigravity_harness(), req, controls).await;
+
+    let reply: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reply, "Waiting for the build.\n\n\n\nThe build finished.");
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
 

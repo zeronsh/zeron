@@ -114,6 +114,9 @@ fn workos_client_id_from_env(edge_token: &Option<String>) -> Option<String> {
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> anyhow::Result<()> {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--noop-browser")) {
+        return Ok(());
+    }
     #[cfg(windows)]
     attach_parent_console();
     let cli = Cli::parse();
