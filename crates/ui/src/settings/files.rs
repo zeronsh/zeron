@@ -3,6 +3,7 @@
 use gpui::{Context, EventEmitter, SharedString, Window, div, prelude::*, px};
 
 use super::widgets;
+use crate::i18n::{self, MessageId};
 use crate::popover;
 use crate::{icons, theme::Theme};
 
@@ -79,6 +80,7 @@ impl popover::ScrollRailHost for FilesSettingsPage {
 impl Render for FilesSettingsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let autosave_enabled = self.autosave_enabled;
         let selected = self.autosave_delay_ms;
         let word_wrap = self.word_wrap;
@@ -128,12 +130,18 @@ impl Render for FilesSettingsPage {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Autosave"))
+                            .child(widgets::row_title(
+                                &theme,
+                                i18n::translate(MessageId::FilesSettingsAutosave, locale),
+                            ))
                             .child(widgets::meta_line(
                                 &theme,
                                 vec![
                                     div()
-                                        .child("Save edited workspace files to disk automatically.")
+                                        .child(i18n::translate(
+                                            MessageId::FilesSettingsAutosaveDescription,
+                                            locale,
+                                        ))
                                         .into_any_element(),
                                 ],
                             )),
@@ -160,14 +168,20 @@ impl Render for FilesSettingsPage {
                                 .min_w_0()
                                 .flex()
                                 .flex_col()
-                                .child(widgets::row_title(&theme, "Autosave delay"))
+                                .child(widgets::row_title(
+                                    &theme,
+                                    i18n::translate(MessageId::FilesSettingsAutosaveDelay, locale),
+                                ))
                                 .child(widgets::meta_line(
                                     &theme,
-                                    vec![div()
-                                        .child(
-                                            "Save files after editing has been idle for this long.",
-                                        )
-                                        .into_any_element()],
+                                    vec![
+                                        div()
+                                            .child(i18n::translate(
+                                                MessageId::FilesSettingsAutosaveDelayDescription,
+                                                locale,
+                                            ))
+                                            .into_any_element(),
+                                    ],
                                 ))
                                 .child(
                                     div()
@@ -189,12 +203,18 @@ impl Render for FilesSettingsPage {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Word wrap"))
+                            .child(widgets::row_title(
+                                &theme,
+                                i18n::translate(MessageId::FilesSettingsWordWrap, locale),
+                            ))
                             .child(widgets::meta_line(
                                 &theme,
                                 vec![
                                     div()
-                                        .child("Wrap long lines in every workspace file.")
+                                        .child(i18n::translate(
+                                            MessageId::FilesSettingsWordWrapDescription,
+                                            locale,
+                                        ))
                                         .into_any_element(),
                                 ],
                             )),
@@ -219,14 +239,18 @@ impl Render for FilesSettingsPage {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Show all files"))
+                            .child(widgets::row_title(
+                                &theme,
+                                i18n::translate(MessageId::FilesSettingsShowAllFiles, locale),
+                            ))
                             .child(widgets::meta_line(
                                 &theme,
                                 vec![
                                     div()
-                                        .child(
-                                            "Include hidden and ignored files in every file tree.",
-                                        )
+                                        .child(i18n::translate(
+                                            MessageId::FilesSettingsShowAllFilesDescription,
+                                            locale,
+                                        ))
                                         .into_any_element(),
                                 ],
                             )),
@@ -259,11 +283,15 @@ impl Render for FilesSettingsPage {
                     .track_scroll(&self.scroll.scroll)
                     .child(
                         widgets::page_column()
-                            .child(widgets::page_header(&theme, "Files", None))
+                            .child(widgets::page_header(
+                                &theme,
+                                i18n::translate(MessageId::SettingsSectionFiles, locale),
+                                None,
+                            ))
                             .child(
                                 widgets::page_subtitle(
                                     &theme,
-                                    "Control how workspace files are displayed and saved while you edit.",
+                                    i18n::translate(MessageId::FilesSettingsSubtitle, locale),
                                 )
                                 .max_w(px(512.0))
                                 .line_height(px(20.0)),

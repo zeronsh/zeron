@@ -23,6 +23,7 @@ use zeron_proto::{
 use zeron_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::i18n::{self, Locale, MessageId};
 use crate::popover::{self, Loadable};
 use crate::settings::widgets;
 use crate::state::AppState;
@@ -100,18 +101,20 @@ pub fn force_usage_for(trigger: LoadTrigger) -> bool {
 /// Compact absolute reset moment (zeron settings.agents.tsx `formatReset`):
 /// a local clock time ("3:45 PM") when it lands within ~22h, a short weekday
 /// ("Mon") within a week, else month + day ("Sep 14") — a weekday is noise
-/// when the window is a Codex free-tier MONTHLY reset weeks out. The caller
-/// prefixes "resets ". Pure given `now`.
+/// when the window is a Codex free-tier MONTHLY reset weeks out. Returns only
+/// the time part; the caller renders it through `AccountsResets`. The clock
+/// time and the English month/weekday abbreviations are intentional. Pure
+/// given `now`.
 pub fn format_reset(resets_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Option<String> {
     use chrono::Local;
     let at = resets_at?;
     let local = at.with_timezone(&Local);
     Some(if at.signed_duration_since(now).num_hours() < 22 {
-        format!("resets {}", local.format("%-I:%M %p"))
+        local.format("%-I:%M %p").to_string()
     } else if at.signed_duration_since(now).num_hours() < 24 * 7 {
-        format!("resets {}", local.format("%a"))
+        local.format("%a").to_string()
     } else {
-        format!("resets {}", local.format("%b %-d"))
+        local.format("%b %-d").to_string()
     })
 }
 
@@ -163,16 +166,35 @@ enum LoginFlow {
 
 impl LoginFlow {
     /// Dialog title (zeron: "Add Claude account" / "Add Codex account").
-    fn title(&self) -> &'static str {
+    /// `{provider}` stays untranslated.
+    fn title(&self, locale: Locale) -> String {
         let harness = match self {
             LoginFlow::Starting { harness }
             | LoginFlow::PasteCode { harness, .. }
             | LoginFlow::Browser { harness, .. } => *harness,
         };
-        match harness {
-            HarnessId::Codex => "Add Codex account",
-            HarnessId::Cursor => "Connect Cursor",
-            _ => "Add Claude account",
+        // The default arm says "Claude", not the Claude Code product name
+        // `PROVIDERS` carries, so the title names the family rather than reusing
+        // the card's display name.
+        let provider = match harness {
+            HarnessId::Codex => "Codex",
+            HarnessId::Cursor => "Cursor",
+            _ => "Claude",
+        };
+        if harness == HarnessId::Cursor {
+            i18n::fill(
+                MessageId::AccountsConnectProviderTitle,
+                "{provider}",
+                provider,
+                locale,
+            )
+        } else {
+            i18n::fill(
+                MessageId::AccountsAddProviderTitle,
+                "{provider}",
+                provider,
+                locale,
+            )
         }
     }
 }
@@ -201,7 +223,12 @@ pub struct AccountsPage {
 impl AccountsPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |_, _, cx| cx.notify());
-        let code_input = cx.new(|cx| ComposerInput::new("Paste the authorization code", cx));
+        let code_input = cx.new(|cx| {
+            ComposerInput::new(
+                i18n::translate(MessageId::AccountsAuthCodePlaceholder, i18n::locale(cx)),
+                cx,
+            )
+        });
         let code_events = cx.subscribe(&code_input, |this: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
                 this.submit_code(cx);
@@ -278,6 +305,7 @@ impl AccountsPage {
     /// dropdown of every registered device. Selecting one retargets the page.
     fn render_device_switcher(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         use crate::icons::{self, icon};
+        let locale = crate::i18n::locale(cx);
         let (mut devices, local_id) = {
             let s = self.state.read(cx);
             (s.devices.clone(), s.local_device_id.clone())
@@ -308,7 +336,9 @@ impl AccountsPage {
         let trigger_label: SharedString = selected
             .as_ref()
             .map(|d| d.name.clone().into())
-            .unwrap_or_else(|| SharedString::from("This device"));
+            .unwrap_or_else(|| {
+                SharedString::from(i18n::translate(MessageId::PickerThisDevice, locale))
+            });
         let emerald = theme.success;
         let open = self.device_menu.is_open();
 
@@ -383,7 +413,10 @@ impl AccountsPage {
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(popover::menu_heading(theme, "Devices"))
+                .child(popover::menu_heading(
+                    theme,
+                    i18n::translate(MessageId::CommonDevicesMenu, locale),
+                ))
                 .children(devices.into_iter().enumerate().map(|(ix, d)| {
                     let is_active = Some(d.id.as_str()) == effective.as_deref();
                     let is_local = local_id.as_deref() == Some(d.id.as_str());
@@ -411,7 +444,10 @@ impl AccountsPage {
                                     .flex_none()
                                     .text_size(crate::typography::ui_rems(10.5))
                                     .text_color(theme.text_muted.opacity(0.35))
-                                    .child(SharedString::from("You")),
+                                    .child(SharedString::from(i18n::translate(
+                                        MessageId::PickerDeviceYou,
+                                        locale,
+                                    ))),
                             )
                         })
                         .child(
@@ -438,7 +474,9 @@ impl AccountsPage {
 
     fn load(&mut self, force_usage: bool, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.snapshot = Loadable::Error("Engine not connected".into());
+            self.snapshot = Loadable::Error(
+                i18n::translate(MessageId::ErrorEngineNotConnected, i18n::locale(cx)).into(),
+            );
             return;
         };
         self.snapshot = Loadable::Loading;
@@ -541,7 +579,15 @@ impl AccountsPage {
                     }
                     Err(err) => {
                         page.login = None;
-                        page.error = Some(format!("Login failed to start: {err}").into());
+                        page.error = Some(
+                            i18n::fill(
+                                MessageId::AccountsLoginStartFailed,
+                                "{err}",
+                                &err.to_string(),
+                                i18n::locale(cx),
+                            )
+                            .into(),
+                        );
                     }
                 }
                 cx.notify();
@@ -635,7 +681,13 @@ impl AccountsPage {
                             AgentLoginStatus::Error => {
                                 *error = Some(
                                     poll.message
-                                        .unwrap_or_else(|| "Login failed".to_string())
+                                        .unwrap_or_else(|| {
+                                            i18n::translate(
+                                                MessageId::AccountsLoginFailed,
+                                                i18n::locale(cx),
+                                            )
+                                            .to_string()
+                                        })
                                         .into(),
                                 );
                                 cx.notify();
@@ -650,9 +702,16 @@ impl AccountsPage {
                             }
                         },
                         None => {
+                            let locale = i18n::locale(cx);
                             let text = match &result {
-                                Err(err) => format!("Poll failed: {err}"),
-                                Ok(_) => "Poll failed: malformed reply".to_string(),
+                                Err(err) => i18n::fill(
+                                    MessageId::AccountsPollFailed,
+                                    "{err}",
+                                    &err.to_string(),
+                                    locale,
+                                ),
+                                Ok(_) => i18n::translate(MessageId::AccountsPollMalformed, locale)
+                                    .to_string(),
                             };
                             *error = Some(text.into());
                             cx.notify();
@@ -702,6 +761,7 @@ impl AccountsPage {
         window: &zeron_proto::AgentUsageWindow,
         theme: &Theme,
         now: DateTime<Utc>,
+        locale: Locale,
     ) -> AnyElement {
         let fraction = window.used_fraction.clamp(0.0, 1.0);
         let level = usage_level(fraction);
@@ -709,7 +769,8 @@ impl AccountsPage {
             UsageLevel::Normal => 0.8,
             _ => 0.85,
         });
-        let reset = format_reset(window.resets_at, now);
+        let reset = format_reset(window.resets_at, now)
+            .map(|time| i18n::fill(MessageId::AccountsResets, "{time}", &time, locale));
         div()
             .flex()
             .flex_row()
@@ -750,9 +811,11 @@ impl AccountsPage {
                     .w(px(64.0))
                     .flex_none()
                     .text_right()
-                    .child(SharedString::from(format!(
-                        "{}% used",
-                        (fraction * 100.0).round() as u32
+                    .child(SharedString::from(i18n::fill(
+                        MessageId::AccountsUsagePercent,
+                        "{percent}",
+                        &((fraction * 100.0).round() as u32).to_string(),
+                        locale,
                     ))),
             )
             .when_some(reset, |el, reset| {
@@ -779,12 +842,15 @@ impl AccountsPage {
         now: DateTime<Utc>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let locale = crate::i18n::locale(cx);
         let is_busy = self.busy_account.as_deref() == Some(account.id.as_str());
         let email: SharedString = account
             .email
             .clone()
             .or_else(|| account.display_name.clone())
-            .unwrap_or_else(|| "Unknown account".into())
+            .unwrap_or_else(|| {
+                i18n::translate(MessageId::AccountsUnknownAccount, locale).to_string()
+            })
             .into();
         let initial: SharedString = email
             .chars()
@@ -801,7 +867,10 @@ impl AccountsPage {
             .items_center()
             .gap(px(6.0))
             .when(account.active, |el| {
-                el.child(widgets::badge_active(theme, "Active"))
+                el.child(widgets::badge_active(
+                    theme,
+                    i18n::translate(MessageId::AccountsBadgeActive, locale),
+                ))
             })
             .when_some(account.plan_label.clone(), |el, plan| {
                 el.child(widgets::badge(theme, plan))
@@ -839,7 +908,11 @@ impl AccountsPage {
                     el.child(
                         crate::popover::btn_primary(
                             theme,
-                            if is_busy { "Switching…" } else { "Switch" },
+                            if is_busy {
+                                i18n::translate(MessageId::AccountsSwitching, locale)
+                            } else {
+                                i18n::translate(MessageId::AccountsSwitch, locale)
+                            },
                         )
                         .id(("account-switch", ix))
                         .px(px(8.0))
@@ -901,11 +974,14 @@ impl AccountsPage {
                                     .truncate()
                                     .text_size(crate::typography::ui_rems(11.5))
                                     .text_color(theme.text_muted.opacity(0.6))
-                                    .child(SharedString::from(if account.switchable {
-                                        "Usage unavailable"
-                                    } else {
-                                        "Credentials unavailable"
-                                    })),
+                                    .child(SharedString::from(i18n::translate(
+                                        if account.switchable {
+                                            MessageId::AccountsUsageUnavailable
+                                        } else {
+                                            MessageId::AccountsCredentialsUnavailable
+                                        },
+                                        locale,
+                                    ))),
                             )
                         } else {
                             el.child(
@@ -913,7 +989,7 @@ impl AccountsPage {
                                     account
                                         .usage_windows
                                         .iter()
-                                        .map(|w| self.render_usage_meter(w, theme, now)),
+                                        .map(|w| self.render_usage_meter(w, theme, now, locale)),
                                 ),
                             )
                         }
@@ -940,8 +1016,9 @@ impl AccountsPage {
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).for_popup();
         let red_text = theme.danger_muted.opacity(0.9); // red-300
+        let locale = crate::i18n::locale(cx);
         let login = self.login.as_ref()?;
-        let title = login.title();
+        let title = login.title(locale);
         let url_link =
             |id: &'static str, label: &'static str, url: &str, cx: &mut Context<Self>| {
                 let open_url = url.to_string();
@@ -983,13 +1060,11 @@ impl AccountsPage {
                     .flex_col()
                     .child(div().mt(px(8.0)).child(popover::dialog_body(
                         &theme,
-                        "A browser window opened. Sign in to the account you want to add, \
-                         approve access, then paste the code Anthropic shows you below. Your \
-                         current login is untouched until you switch.",
+                        i18n::translate(MessageId::AccountsPasteCodeBody, locale),
                     )))
                     .child(url_link(
                         "login-open-url",
-                        "Reopen the authorization page",
+                        i18n::translate(MessageId::AccountsReopenAuthorization, locale),
                         &start.url,
                         cx,
                     ))
@@ -1017,17 +1092,21 @@ impl AccountsPage {
                             .justify_end()
                             .gap(px(8.0))
                             .child(
-                                popover::btn_ghost(&theme, "Cancel", "login-cancel")
-                                    .id("login-cancel")
-                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_login(cx))),
+                                popover::btn_ghost(
+                                    &theme,
+                                    i18n::translate(MessageId::CommonCancel, locale),
+                                    "login-cancel",
+                                )
+                                .id("login-cancel")
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel_login(cx))),
                             )
                             .child(
                                 popover::btn_primary(
                                     &theme,
                                     if submitting {
-                                        "Verifying…"
+                                        i18n::translate(MessageId::AccountsVerifying, locale)
                                     } else {
-                                        "Add account"
+                                        i18n::translate(MessageId::AccountsAddAccount, locale)
                                     },
                                 )
                                 .id("login-submit-code")
@@ -1046,15 +1125,9 @@ impl AccountsPage {
                 let has_error = error.is_some();
                 let body = match harness {
                     HarnessId::Cursor => {
-                        "Finish signing in to Cursor in your browser. This mints a \
-                         zeron-named API key you can revoke any time from Cursor's \
-                         dashboard — it is separate from `cursor-agent login`."
+                        i18n::translate(MessageId::AccountsBrowserBodyCursor, locale)
                     }
-                    _ => {
-                        "Finish signing in to OpenAI in your browser. The new login is \
-                         captured in an isolated profile — your current session is untouched \
-                         until you switch."
-                    }
+                    _ => i18n::translate(MessageId::AccountsBrowserBodyGeneric, locale),
                 };
                 div()
                     .flex()
@@ -1062,7 +1135,7 @@ impl AccountsPage {
                     .child(div().mt(px(8.0)).child(popover::dialog_body(&theme, body)))
                     .child(url_link(
                         "login-open-url-browser",
-                        "Reopen the sign-in page",
+                        i18n::translate(MessageId::AccountsReopenSignIn, locale),
                         &start.url,
                         cx,
                     ))
@@ -1086,7 +1159,10 @@ impl AccountsPage {
                                         .text_size(crate::typography::ui_rems(12.5))
                                         .text_color(theme.text_muted)
                                         .child(message.clone().unwrap_or_else(|| {
-                                            SharedString::from("Waiting for the browser…")
+                                            SharedString::from(i18n::translate(
+                                                MessageId::AccountsWaitingForBrowser,
+                                                locale,
+                                            ))
                                         })),
                                 ),
                         )
@@ -1104,7 +1180,11 @@ impl AccountsPage {
                         div().mt(px(16.0)).flex().flex_row().justify_end().child(
                             popover::btn_ghost(
                                 &theme,
-                                if has_error { "Close" } else { "Cancel" },
+                                if has_error {
+                                    i18n::translate(MessageId::CommonClose, locale)
+                                } else {
+                                    i18n::translate(MessageId::CommonCancel, locale)
+                                },
                                 "login-cancel",
                             )
                             .id("login-cancel")
@@ -1115,7 +1195,7 @@ impl AccountsPage {
             }
         };
         let card = popover::dialog_card(&theme)
-            .child(popover::dialog_title(&theme, title))
+            .child(popover::dialog_title(&theme, &title))
             .child(body)
             .into_any_element();
         Some(popover::modal("add-account-dialog", viewport, card))
@@ -1219,6 +1299,7 @@ impl popover::ScrollRailHost for AccountsPage {
 impl Render for AccountsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        let locale = crate::i18n::locale(cx);
         let now = Utc::now();
         let dialog = self.render_login_dialog(window.viewport_size(), cx);
         let refreshing = matches!(self.snapshot, Loadable::Loading);
@@ -1327,7 +1408,10 @@ impl Render for AccountsPage {
                                 .mt(px(4.0))
                                 .text_size(crate::typography::ui_rems(11.5))
                                 .text_color(theme.text_muted)
-                                .child(SharedString::from("Click to retry")),
+                                .child(SharedString::from(i18n::translate(
+                                    MessageId::AccountsClickToRetry,
+                                    locale,
+                                ))),
                         )
                         .into_any_element(),
                 ]
@@ -1354,17 +1438,19 @@ impl Render for AccountsPage {
                             .collect();
                         let add_id: SharedString = format!("add-account-{name}").into();
                         let card = widgets::section_card(&theme).mt(px(8.0));
+                        // `{name}` / `{cli}` take the provider name and CLI from
+                        // `PROVIDERS`; both stay untranslated.
                         let empty_copy = match harness {
                             // Cursor's app login is SEPARATE from `cursor-agent
                             // login` — pointing at the CLI would send users to a
                             // sign-in that does not light this up.
-                            HarnessId::Cursor => format!(
-                                "{name} isn't connected on this device — connect it to run \
-                                 Cursor sessions."
-                            ),
-                            _ => format!(
-                                "No {name} login detected on this device — sign in \
-                                 with \u{201C}{cli}\u{201D} or add an account."
+                            HarnessId::Cursor => {
+                                i18n::fill(MessageId::AccountsEmptyCursor, "{name}", name, locale)
+                            }
+                            _ => i18n::fill_many(
+                                MessageId::AccountsEmptyGeneric,
+                                &[("{name}", name), ("{cli}", cli)],
+                                locale,
                             ),
                         };
                         let card = if rows.is_empty() {
@@ -1411,7 +1497,10 @@ impl Render for AccountsPage {
                                                     .size(px(16.0))
                                                     .text_color(theme.text_muted),
                                             )
-                                            .child(SharedString::from("Add account")),
+                                            .child(SharedString::from(i18n::translate(
+                                                MessageId::AccountsAddAccount,
+                                                locale,
+                                            ))),
                                     ),
                             )
                             .children(
@@ -1446,7 +1535,11 @@ impl Render for AccountsPage {
                                     .flex_row()
                                     .items_center()
                                     .gap(px(10.0))
-                                    .child(widgets::page_header(&theme, "Accounts", account_count))
+                                    .child(widgets::page_header(
+                                        &theme,
+                                        i18n::translate(MessageId::SettingsSectionAgents, locale),
+                                        account_count,
+                                    ))
                                     .child(div().flex_1())
                                     .child(
                                         // `text-[12.5px]` + leading 16px Refresh icon,
@@ -1459,25 +1552,23 @@ impl Render for AccountsPage {
                                             .hover(|s| widgets::ghost_hover(&theme, s))
                                             .when(refreshing, |el| el.opacity(0.5))
                                             .on_click(cx.listener(|this, _, _, cx| {
-                                                this.load(
-                                                    force_usage_for(LoadTrigger::Refresh),
-                                                    cx,
-                                                )
+                                                this.load(force_usage_for(LoadTrigger::Refresh), cx)
                                             }))
                                             .child(
                                                 crate::icons::icon(crate::icons::REFRESH)
                                                     .size(px(16.0))
                                                     .text_color(theme.text_muted),
                                             )
-                                            .child(SharedString::from("Refresh")),
+                                            .child(SharedString::from(i18n::translate(
+                                                MessageId::CommonRefresh,
+                                                locale,
+                                            ))),
                                     )
                                     .child(self.render_device_switcher(&theme, cx)),
                             )
                             .child(widgets::page_subtitle(
                                 &theme,
-                                "The Claude Code, Codex, and Cursor logins on this device. Zeron \
-                                 detects the live session, keeps each account backed up, and can \
-                                 swap between them.",
+                                i18n::translate(MessageId::AccountsSubtitle, locale),
                             ))
                             .when_some(self.error.clone(), |el, message| {
                                 el.child(
@@ -1499,12 +1590,10 @@ impl Render for AccountsPage {
                                     .text_size(crate::typography::ui_rems(12.0))
                                     .line_height(px(19.0))
                                     .text_color(theme.text_muted.opacity(0.6))
-                                    .child(SharedString::from(
-                                        "Switching rewrites the CLI\u{2019}s stored login, so new \
-                                         agent sessions use the selected account immediately. On \
-                                         macOS, an already-running Claude Code can hold the previous \
-                                         login for up to ~30 seconds (Keychain cache).",
-                                    )),
+                                    .child(SharedString::from(i18n::translate(
+                                        MessageId::AccountsFooterNote,
+                                        locale,
+                                    ))),
                             ),
                     ),
             )
@@ -1556,33 +1645,25 @@ mod tests {
         use chrono::Local;
         let now = Utc::now();
         assert_eq!(format_reset(None, now), None);
-        // Within ~22h: a local clock time ("resets 3:45 PM").
+        // Within ~22h: a local clock time ("3:45 PM"); `AccountsResets` adds
+        // the "resets" prefix at render time.
         let soon = now + TimeDelta::minutes(125);
         assert_eq!(
             format_reset(Some(soon), now),
-            Some(format!(
-                "resets {}",
-                soon.with_timezone(&Local).format("%-I:%M %p")
-            ))
+            Some(soon.with_timezone(&Local).format("%-I:%M %p").to_string())
         );
-        // Within a week: a short weekday ("resets Mon").
+        // Within a week: a short weekday ("Mon").
         let later = now + TimeDelta::days(3);
         assert_eq!(
             format_reset(Some(later), now),
-            Some(format!(
-                "resets {}",
-                later.with_timezone(&Local).format("%a")
-            ))
+            Some(later.with_timezone(&Local).format("%a").to_string())
         );
         // Beyond a week (Codex free tier resets ~monthly): month + day
-        // ("resets Sep 14") — a weekday 4 weeks out carries no information.
+        // ("Sep 14") — a weekday 4 weeks out carries no information.
         let monthly = now + TimeDelta::days(26);
         assert_eq!(
             format_reset(Some(monthly), now),
-            Some(format!(
-                "resets {}",
-                monthly.with_timezone(&Local).format("%b %-d")
-            ))
+            Some(monthly.with_timezone(&Local).format("%b %-d").to_string())
         );
     }
 

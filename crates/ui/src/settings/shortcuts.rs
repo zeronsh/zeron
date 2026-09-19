@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::appshots::{AppshotCapabilities, AppshotDestination};
+use crate::i18n::{self, MessageId};
 use crate::popover::{self, ScrollRailHost};
 
 #[path = "appshots.rs"]
@@ -198,6 +199,7 @@ impl ShortcutsPage {
         let Some(recording) = self.recording else {
             return;
         };
+        let locale = crate::i18n::locale(cx);
         let mods = &keystroke.modifiers;
         match record_key(
             &keystroke.key,
@@ -215,14 +217,17 @@ impl ShortcutsPage {
                 if recording == ShortcutId::CaptureAppshot
                     && crate::appshots::validate_shortcut(&combo).is_err()
                 {
+                    let modifiers = if cfg!(target_os = "macos") {
+                        MessageId::ShortcutsModifierKeysMac
+                    } else {
+                        MessageId::ShortcutsModifierKeysOther
+                    };
                     self.conflict_notice = Some(
-                        format!(
-                            "Use {} with a letter, number, function key or navigation key.",
-                            if cfg!(target_os = "macos") {
-                                "Control, Option or Command"
-                            } else {
-                                "Control or Alt"
-                            }
+                        i18n::fill(
+                            MessageId::ShortcutsUseKeyWithModifier,
+                            "{modifiers}",
+                            i18n::translate(modifiers, locale),
+                            locale,
                         )
                         .into(),
                     );
@@ -232,8 +237,15 @@ impl ShortcutsPage {
                     return;
                 }
                 if send_combo_is_reserved(self.composer_send_behavior, &combo) {
+                    let display = display_combo(&combo);
                     self.conflict_notice = Some(
-                        format!("{} is reserved for the composer.", display_combo(&combo)).into(),
+                        i18n::fill(
+                            MessageId::ShortcutsComboReserved,
+                            "{combo}",
+                            &display,
+                            locale,
+                        )
+                        .into(),
                     );
                     self.stop_recording();
                     cx.notify();
@@ -243,11 +255,13 @@ impl ShortcutsPage {
                 // A combo already bound elsewhere is REFUSED, naming the owner
                 // (zeron settings.shortcuts.tsx: "… is already assigned to …").
                 if let Some(owner) = conflict_owner(&self.keymap, recording, &combo) {
+                    let display = display_combo(&combo);
+                    let owner = owner.label_text(locale);
                     self.conflict_notice = Some(
-                        format!(
-                            "{} is already assigned to {}.",
-                            display_combo(&combo),
-                            owner.label()
+                        i18n::fill_many(
+                            MessageId::ShortcutsComboAlreadyAssigned,
+                            &[("{combo}", &display), ("{owner}", &owner)],
+                            locale,
                         )
                         .into(),
                     );
@@ -278,6 +292,7 @@ impl ShortcutsPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        let locale = crate::i18n::locale(cx);
         // zeron settings.shortcuts.tsx row: min-h-[72px] px-5 gap-5.
         div()
             .min_h(px(72.0))
@@ -298,14 +313,14 @@ impl ShortcutsPage {
                             .text_size(crate::typography::ui_rems(13.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child(SharedString::from(id.label())),
+                            .child(id.label_text(locale)),
                     )
                     .child(
                         div()
                             .mt(px(2.0))
                             .text_size(crate::typography::ui_rems(12.0))
                             .text_color(theme.text_muted)
-                            .child(SharedString::from(description(id))),
+                            .child(i18n::translate(description_message(id), locale)),
                     ),
             )
             .child(self.render_binding_control(id, ix, recording, theme, cx))
@@ -319,12 +334,13 @@ impl ShortcutsPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        let locale = crate::i18n::locale(cx);
         let accent = theme.accent;
         let combo = self.keymap.get(id).to_string();
         let is_recording = recording == Some(id);
         let non_default = combo != id.default_combo();
         let chip_text: SharedString = if is_recording {
-            "Press keys…".into()
+            i18n::translate(MessageId::ShortcutsPressKeys, locale).into()
         } else {
             display_combo(&combo).into()
         };
@@ -338,7 +354,12 @@ impl ShortcutsPage {
                     div()
                         .id(("shortcut-reset", ix))
                         .role(gpui::Role::Button)
-                        .aria_label(format!("Reset {} shortcut", id.label()))
+                        .aria_label(i18n::fill(
+                            MessageId::ShortcutsResetAria,
+                            "{shortcut}",
+                            &id.label_text(locale),
+                            locale,
+                        ))
                         .min_h(px(24.0))
                         .tab_index(0)
                         .focus_visible(move |style| style.border_2().border_color(accent))
@@ -351,18 +372,22 @@ impl ShortcutsPage {
                             this.stop_recording();
                             this.commit(cx);
                         }))
-                        .child(SharedString::from("Reset")),
+                        .child(i18n::translate(MessageId::CommonReset, locale)),
                 )
             })
             .child(
                 div()
                     .id(("shortcut-combo", ix))
                     .role(gpui::Role::Button)
-                    .aria_label(format!(
-                        "Change {} shortcut: {}",
-                        id.label(),
-                        display_combo(&combo)
-                    ))
+                    .aria_label({
+                        let label = id.label_text(locale);
+                        let display = display_combo(&combo);
+                        i18n::fill_many(
+                            MessageId::ShortcutsChangeAria,
+                            &[("{shortcut}", &label), ("{combo}", &display)],
+                            locale,
+                        )
+                    })
                     .tab_index(0)
                     .focus_visible(move |style| style.border_2().border_color(accent))
                     .min_w(px(96.0))
@@ -493,29 +518,42 @@ fn group(id: ShortcutId) -> &'static str {
     }
 }
 
+/// Display copy for a [`GROUP_ORDER`] key. The keys stay English data — they are
+/// compared by [`group`] and `every_shortcut_lands_in_a_rendered_group` — so the
+/// page translates here instead. `None` (a key added without a row) renders the
+/// key itself rather than an empty heading.
+fn group_label(name: &str) -> Option<MessageId> {
+    Some(match name {
+        "Files" => MessageId::SettingsSectionFiles,
+        "Browser" => MessageId::SurfaceBrowser,
+        "Panels" => MessageId::ShortcutsGroupPanels,
+        "Sessions" => MessageId::ShortcutsGroupSessions,
+        "Projects" => MessageId::ShortcutsGroupProjects,
+        "Jump to session" => MessageId::ShortcutsGroupJumpToSession,
+        "Appshots" => MessageId::SettingsSectionAppshots,
+        _ => return None,
+    })
+}
+
 /// One-line purpose copy per shortcut (zeron lib/shortcuts.ts
 /// `SHORTCUT_DEFINITIONS` descriptions, verbatim).
-fn description(id: ShortcutId) -> &'static str {
+fn description_message(id: ShortcutId) -> MessageId {
     match id {
-        ShortcutId::CaptureAppshot => {
-            "Capture the focused application from anywhere on your desktop."
-        }
-        ShortcutId::SaveFile => "Save the active workspace file.",
-        ShortcutId::BrowserReload => "Reload the focused browser tab.",
-        ShortcutId::ToggleSidebar => "Show or hide sessions and settings navigation.",
-        ShortcutId::ToggleChanges => "Show or hide the right sidebar for the current session.",
-        ShortcutId::ToggleTerminal => "Show or hide the terminal for the current session.",
-        ShortcutId::NewSession => "Open a blank session canvas to start a new session.",
-        ShortcutId::NewProject => "Open the new project dialog.",
-        ShortcutId::OpenModelPicker => "Open the model picker for the current session.",
-        ShortcutId::NextSession => "Select the next session in the sidebar, wrapping at the end.",
-        ShortcutId::PrevSession => {
-            "Select the previous session in the sidebar, wrapping at the start."
-        }
-        ShortcutId::ArchiveSession => "Move the current session to the archived shelf.",
+        ShortcutId::CaptureAppshot => MessageId::ShortcutsCaptureAppshotDescription,
+        ShortcutId::SaveFile => MessageId::ShortcutsSaveFileDescription,
+        ShortcutId::BrowserReload => MessageId::ShortcutsBrowserReloadDescription,
+        ShortcutId::ToggleSidebar => MessageId::ShortcutsToggleSidebarDescription,
+        ShortcutId::ToggleChanges => MessageId::ShortcutsToggleChangesDescription,
+        ShortcutId::ToggleTerminal => MessageId::ShortcutsToggleTerminalDescription,
+        ShortcutId::NewSession => MessageId::ShortcutsNewSessionDescription,
+        ShortcutId::NewProject => MessageId::ShortcutsNewProjectDescription,
+        ShortcutId::OpenModelPicker => MessageId::ShortcutsOpenModelPickerDescription,
+        ShortcutId::NextSession => MessageId::ShortcutsNextSessionDescription,
+        ShortcutId::PrevSession => MessageId::ShortcutsPrevSessionDescription,
+        ShortcutId::ArchiveSession => MessageId::ShortcutsArchiveSessionDescription,
         // One line per slot would repeat itself nine times; the ordinal is
         // already in the row's label.
-        ShortcutId::JumpSession(_) => "Open the session at this place in the sidebar list.",
+        ShortcutId::JumpSession(_) => MessageId::ShortcutsJumpSessionDescription,
     }
 }
 
@@ -529,6 +567,7 @@ impl Render for ShortcutsPage {
             return self.render_appshots(cx);
         }
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let recording = self.recording;
         let escape_stops_active_agent = self.escape_stops_active_agent;
         let send_behavior = self.composer_send_behavior;
@@ -546,7 +585,10 @@ impl Render for ShortcutsPage {
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .child(widgets::row_title(&theme, "Stop active agent with Escape"))
+                        .child(widgets::row_title(
+                            &theme,
+                            i18n::translate(MessageId::ShortcutsEscapeStopsAgent, locale),
+                        ))
                         .child(
                             div()
                                 .mt(px(4.0))
@@ -554,8 +596,9 @@ impl Render for ShortcutsPage {
                                 .text_size(crate::typography::ui_rems(11.5))
                                 .line_height(px(17.0))
                                 .text_color(theme.text_muted.opacity(0.65))
-                                .child(SharedString::from(
-                                    "When no dialog, menu, picker, or terminal handles Escape, stop the agent in the active session.",
+                                .child(i18n::translate(
+                                    MessageId::ShortcutsEscapeStopsAgentDescription,
+                                    locale,
                                 )),
                         ),
                 )
@@ -647,31 +690,34 @@ impl Render for ShortcutsPage {
                     ),
             );
 
-        let send_behavior_row = widgets::section_card(&theme)
-            .child(
-                widgets::card_row(&theme, true)
-                    .min_h(px(84.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(widgets::row_title(&theme, "Send messages with"))
-                            .child(
-                                div()
-                                    .mt(px(4.0))
-                                    .max_w(px(430.0))
-                                    .text_size(px(11.5))
-                                    .line_height(px(17.0))
-                                    .text_color(theme.text_muted.opacity(0.65))
-                                    .child(SharedString::from(
-                                        "Choose whether Enter sends immediately or starts a new paragraph. Cmd/Ctrl+Enter always submits; with an empty composer it sends the most recently queued message. Shift+Enter always inserts a line break.",
-                                    )),
-                            ),
-                    )
-                    .child(send_behavior_control),
-            );
+        let send_behavior_row = widgets::section_card(&theme).child(
+            widgets::card_row(&theme, true)
+                .min_h(px(84.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(widgets::row_title(
+                            &theme,
+                            i18n::translate(MessageId::ShortcutsSendMessagesWith, locale),
+                        ))
+                        .child(
+                            div()
+                                .mt(px(4.0))
+                                .max_w(px(430.0))
+                                .text_size(px(11.5))
+                                .line_height(px(17.0))
+                                .text_color(theme.text_muted.opacity(0.65))
+                                .child(i18n::translate(
+                                    MessageId::ShortcutsSendBehaviorDescription,
+                                    locale,
+                                )),
+                        ),
+                )
+                .child(send_behavior_control),
+        );
         // One card per group, each under its small section label — the flat
         // 16-row table read as one undifferentiated wall. `ix` (the id's
         // position in ALL) keys the interactive elements, so ids stay unique
@@ -695,7 +741,10 @@ impl Render for ShortcutsPage {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .child(widgets::field_label(&theme, name))
+                    .child(widgets::field_label(
+                        &theme,
+                        group_label(name).map_or(name, |id| i18n::translate(id, locale)),
+                    ))
                     .child(card)
                     .into_any_element(),
             );
@@ -704,11 +753,11 @@ impl Render for ShortcutsPage {
         // Helper line stays in the muted tone even for a rejected conflict —
         // the message names the specific clash (zeron settings.shortcuts.tsx).
         let helper: SharedString = if recording.is_some() {
-            "Press Escape to cancel.".into()
+            i18n::translate(MessageId::CommonPressEscapeToCancel, locale).into()
         } else if let Some(notice) = self.conflict_notice.clone() {
             notice
         } else {
-            "Shortcuts must be unique.".into()
+            i18n::translate(MessageId::ShortcutsMustBeUnique, locale).into()
         };
 
         let scrollbar = self.render_scrollbar(&theme, cx);
@@ -739,15 +788,16 @@ impl Render for ShortcutsPage {
                                             .flex_col()
                                             .child(widgets::page_header(
                                                 &theme,
-                                                "Keyboard shortcuts",
+                                                i18n::translate(MessageId::ShortcutsTitle, locale),
                                                 None,
                                             ))
                                             .child(
                                                 widgets::page_subtitle(
                                                     &theme,
-                                                    "Click a binding, then press the key combination you \
-                                                     want to use. Changes apply immediately and stay on \
-                                                     this device.",
+                                                    i18n::translate(
+                                                        MessageId::ShortcutsSubtitle,
+                                                        locale,
+                                                    ),
                                                 )
                                                 .max_w(px(512.0))
                                                 .line_height(px(20.0)),
@@ -766,28 +816,27 @@ impl Render for ShortcutsPage {
                                                     s.bg(crate::theme::ink(0.04))
                                                         .text_color(theme.text)
                                                 })
-                                                .on_click(
-                                                    cx.listener(|this, _, _, cx| {
-                                                        this.keymap = KeymapConfig::default();
-                                                        this.stop_recording();
-                                                        this.conflict_notice = None;
-                                                        this.commit(cx);
-                                                        this.set_escape_stops_active_agent(
-                                                            false, cx,
-                                                        );
-                                                        this.set_composer_send_behavior(
-                                                            ComposerSendBehavior::Enter,
-                                                            cx,
-                                                        );
-                                                    }),
-                                                )
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.keymap = KeymapConfig::default();
+                                                    this.stop_recording();
+                                                    this.conflict_notice = None;
+                                                    this.commit(cx);
+                                                    this.set_escape_stops_active_agent(false, cx);
+                                                    this.set_composer_send_behavior(
+                                                        ComposerSendBehavior::Enter,
+                                                        cx,
+                                                    );
+                                                }))
                                             })
                                             .child(
                                                 crate::icons::icon(crate::icons::RESTART)
                                                     .size(px(14.0))
                                                     .text_color(theme.text_muted),
                                             )
-                                            .child(SharedString::from("Restore defaults"))
+                                            .child(i18n::translate(
+                                                MessageId::ShortcutsRestoreDefaults,
+                                                locale,
+                                            ))
                                     }),
                             )
                             .child(send_behavior_row.mt(px(32.0)))
@@ -1018,6 +1067,18 @@ mod tests {
                 ShortcutId::ALL.into_iter().any(|id| group(id) == name),
                 "group {:?} would render an empty card",
                 name
+            );
+        }
+    }
+
+    #[test]
+    fn every_group_key_has_a_translated_label() {
+        // `group_label` falls back to the English key, so a group added to
+        // GROUP_ORDER without a row would render English in a Chinese UI.
+        for name in GROUP_ORDER {
+            assert!(
+                group_label(name).is_some(),
+                "group {name:?} has no message row"
             );
         }
     }

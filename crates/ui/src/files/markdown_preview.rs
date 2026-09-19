@@ -1,6 +1,7 @@
 //! Native, virtualized preview of a file's current Markdown buffer.
 use crate::image_media::release_media;
 use crate::{
+    i18n::{self, Locale, MessageId},
     markdown::{
         parser::{self, Block, BlockTree},
         render::{self, LinkUi, RenderCache, RenderOptions},
@@ -133,14 +134,16 @@ pub(super) struct MarkdownPreview {
     loading: bool,
     truncated: bool,
     pub media_client: Option<(super::client::WorkspaceFilesClient, String)>,
-    images: HashMap<String, Result<crate::image_media::MediaImage, String>>,
+    images: HashMap<String, Result<crate::image_media::MediaImage, super::MediaFailure>>,
     image_task: Option<Task<()>>,
     image_generation: u64,
     media_dirty: bool,
     image_allowed: Rc<HashSet<String>>,
     diagram_allowed: Rc<HashSet<String>>,
-    image_snapshot: Rc<HashMap<String, Result<crate::image_media::MediaImage, String>>>,
-    diagram_snapshot: Rc<HashMap<String, Result<crate::image_media::MediaImage, String>>>,
+    image_snapshot:
+        Rc<HashMap<String, Result<crate::image_media::MediaImage, super::MediaFailure>>>,
+    diagram_snapshot:
+        Rc<HashMap<String, Result<crate::image_media::MediaImage, super::MediaFailure>>>,
     visible_rows: HashSet<gpui::SharedString>,
     code_fences: HashMap<SharedString, render::CodeFenceRuntime>,
     code_fences_generation: u64,
@@ -150,7 +153,7 @@ pub(super) struct MarkdownPreview {
     suspended: bool,
     selection_pointer: Option<gpui::Point<gpui::Pixels>>,
     selection_task: Option<Task<()>>,
-    diagrams: HashMap<String, Result<crate::image_media::MediaImage, String>>,
+    diagrams: HashMap<String, Result<crate::image_media::MediaImage, super::MediaFailure>>,
     diagram_task: Option<Task<()>>,
     diagram_style: u32,
     source_visible: HashSet<String>,
@@ -522,9 +525,11 @@ impl MarkdownPreview {
         );
         let Some((client, checkout)) = self.media_client.clone() else {
             for source in sources.into_iter().take(MAX_MEDIA_ENTRIES) {
-                self.images
-                    .entry(source)
-                    .or_insert_with(|| Err("Workspace image connection unavailable".into()));
+                self.images.entry(source).or_insert_with(|| {
+                    Err(super::MediaFailure::Copy(
+                        MessageId::FilesImageConnectionUnavailable,
+                    ))
+                });
             }
             return;
         };
@@ -541,8 +546,12 @@ impl MarkdownPreview {
                 match relative_target(&self.path, &source) {
                     Some((path, _)) => Some((source, path)),
                     None => {
-                        self.images
-                            .insert(source, Err("Image path is outside the workspace".into()));
+                        self.images.insert(
+                            source,
+                            Err(super::MediaFailure::Copy(
+                                MessageId::FilesImageOutsideWorkspace,
+                            )),
+                        );
                         None
                     }
                 }
@@ -560,11 +569,10 @@ impl MarkdownPreview {
                         let read = Box::pin(client.read_image(path, checkout));
                         let deadline = Box::pin(executor.timer(Duration::from_secs(30)));
                         let response = match futures::future::select(read, deadline).await {
-                            futures::future::Either::Left((result, _)) => result,
+                            futures::future::Either::Left((result, _)) => result
+                                .map_err(|error| super::MediaFailure::Detail(error.to_string())),
                             futures::future::Either::Right(_) => {
-                                Err(super::client::FilesClientError::Transport(
-                                    "Image preview timed out".into(),
-                                ))
+                                Err(super::MediaFailure::Copy(MessageId::FilesImageTimedOut))
                             }
                         };
                         let result = match response {
@@ -573,7 +581,7 @@ impl MarkdownPreview {
                                     async move { crate::image_media::decode_image(&mime, bytes) },
                                 )
                                 .await,
-                            Err(error) => Err(error.to_string()),
+                            Err(error) => Err(error),
                         };
                         (source, result)
                     }
@@ -638,7 +646,8 @@ impl MarkdownPreview {
                 let result = cx
                     .background_executor()
                     .spawn(async move {
-                        let svg = crate::markdown::mermaid::render(&source, &palette)?;
+                        let svg = crate::markdown::mermaid::render(&source, &palette)
+                            .map_err(|error| super::MediaFailure::Copy(error.message_id()))?;
                         crate::image_media::decode_image("image/svg+xml", svg.into_bytes())
                     })
                     .await;
@@ -663,8 +672,8 @@ impl MarkdownPreview {
 
     fn admit_media(
         &self,
-        result: Result<crate::image_media::MediaImage, String>,
-    ) -> Result<crate::image_media::MediaImage, String> {
+        result: Result<crate::image_media::MediaImage, super::MediaFailure>,
+    ) -> Result<crate::image_media::MediaImage, super::MediaFailure> {
         let used: usize = self
             .images
             .values()
@@ -674,7 +683,7 @@ impl MarkdownPreview {
             .sum();
         result.and_then(|media| {
             if used.saturating_add(media.bytes) > MAX_MEDIA_BYTES {
-                Err("Document media preview memory limit reached".into())
+                Err(super::MediaFailure::Copy(MessageId::FilesMediaPreviewLimit))
             } else {
                 Ok(media)
             }
@@ -912,6 +921,7 @@ impl MarkdownPreview {
         loaded: &crate::image_media::MediaImage,
         id: gpui::SharedString,
         name: String,
+        locale: Locale,
         weak: gpui::WeakEntity<Self>,
     ) -> AnyElement {
         use gpui::StyledImage as _;
@@ -926,7 +936,7 @@ impl MarkdownPreview {
             .aspect_ratio(loaded.width / loaded.height)
             .cursor_pointer()
             .role(gpui::Role::Button)
-            .aria_label("Enlarge image")
+            .aria_label(i18n::translate(MessageId::FilesEnlargeImage, locale))
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
                 let _ = weak.update(cx, |view, cx| {
@@ -1013,6 +1023,7 @@ impl MarkdownPreview {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let link = self.link_ui(cx);
         range
             .filter_map(|ix| {
@@ -1053,58 +1064,59 @@ impl MarkdownPreview {
                 let source_visible = self.source_visible.clone();
                 let image_allowed = self.image_allowed.clone();
                 let diagram_allowed = self.diagram_allowed.clone();
-                opts.media = Some(render::MediaUi {
-                    diagram: Some(Rc::new(move |code, id, theme| {
-                        let state = diagrams.get(code);
-                        let allowed = diagram_allowed.contains(code);
-                        let source_shown = source_visible.contains(id.as_ref()) || !allowed;
-                        let owner = diagram_owner.clone();
-                        let toggle_id = id.to_string();
-                        let body = match state {
-                            Some(Ok(loaded)) => Self::media_element(
-                                loaded,
-                                format!("{id}-image").into(),
-                                "Mermaid diagram".into(),
-                                diagram_owner.clone(),
-                            ),
-                            Some(Err(error)) => div()
-                                .p(px(12.0))
-                                .text_size(px(12.0))
-                                .text_color(theme.warning_muted)
-                                .child(error.clone())
-                                .into_any_element(),
-                            None => div()
-                                .p(px(12.0))
-                                .text_color(theme.text_muted)
-                                .child(if diagram_allowed.contains(code) {
-                                    "Rendering diagram…"
-                                } else {
-                                    "Document diagram preview limit reached"
-                                })
-                                .into_any_element(),
-                        };
-                        render::DiagramUi {
-                            body,
-                            show_source: source_shown,
-                            toggle_source: Rc::new(move |_, cx| {
-                                let _ = owner.update(cx, |view, cx| {
-                                    if !view.source_visible.remove(&toggle_id) {
-                                        view.source_visible.insert(toggle_id.clone());
-                                    }
-                                    view.list.remeasure_items(0..view.tree.len());
-                                    cx.notify();
-                                });
-                            }),
-                        }
-                    })),
-                    image: Rc::new(move |image, id, theme| match images.get(&image.source) {
-                        Some(Ok(loaded)) => {
-                            let mut el =
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(4.0))
-                                    .child(Self::media_element(
+                opts.media =
+                    Some(render::MediaUi {
+                        diagram: Some(Rc::new(move |code, id, theme| {
+                            let state = diagrams.get(code);
+                            let allowed = diagram_allowed.contains(code);
+                            let source_shown = source_visible.contains(id.as_ref()) || !allowed;
+                            let owner = diagram_owner.clone();
+                            let toggle_id = id.to_string();
+                            let body = match state {
+                                Some(Ok(loaded)) => Self::media_element(
+                                    loaded,
+                                    format!("{id}-image").into(),
+                                    i18n::translate(MessageId::FilesMermaidDiagram, locale).into(),
+                                    locale,
+                                    diagram_owner.clone(),
+                                ),
+                                Some(Err(error)) => div()
+                                    .p(px(12.0))
+                                    .text_size(px(12.0))
+                                    .text_color(theme.warning_muted)
+                                    .child(error.text(locale))
+                                    .into_any_element(),
+                                None => div()
+                                    .p(px(12.0))
+                                    .text_color(theme.text_muted)
+                                    .child(i18n::translate(
+                                        if diagram_allowed.contains(code) {
+                                            MessageId::FilesRenderingDiagram
+                                        } else {
+                                            MessageId::FilesDiagramPreviewLimit
+                                        },
+                                        locale,
+                                    ))
+                                    .into_any_element(),
+                            };
+                            render::DiagramUi {
+                                body,
+                                show_source: source_shown,
+                                toggle_source: Rc::new(move |_, cx| {
+                                    let _ = owner.update(cx, |view, cx| {
+                                        if !view.source_visible.remove(&toggle_id) {
+                                            view.source_visible.insert(toggle_id.clone());
+                                        }
+                                        view.list.remeasure_items(0..view.tree.len());
+                                        cx.notify();
+                                    });
+                                }),
+                            }
+                        })),
+                        image: Rc::new(move |image, id, theme| match images.get(&image.source) {
+                            Some(Ok(loaded)) => {
+                                let mut el = div().flex().flex_col().gap(px(4.0)).child(
+                                    Self::media_element(
                                         loaded,
                                         id,
                                         if image.alt.is_empty() {
@@ -1112,12 +1124,17 @@ impl MarkdownPreview {
                                         } else {
                                             image.alt.clone()
                                         },
+                                        locale,
                                         image_owner.clone(),
-                                    ));
-                            if let Some(target) = image.link.clone() {
-                                let link = image_link.clone();
-                                el = el.child(
-                                    super::toolbar_button("markdown-image-link", "Open image link")
+                                    ),
+                                );
+                                if let Some(target) = image.link.clone() {
+                                    let link = image_link.clone();
+                                    el = el.child(
+                                        super::toolbar_button(
+                                            "markdown-image-link",
+                                            i18n::translate(MessageId::FilesOpenImageLink, locale),
+                                        )
                                         .on_click(move |_, window, cx| {
                                             render::activate_link(
                                                 render::LinkTarget::new(&target, &target),
@@ -1132,52 +1149,55 @@ impl MarkdownPreview {
                                                 .size(px(crate::surface_chrome::ICON_SIZE))
                                                 .text_color(theme.text_muted),
                                         ),
-                                );
+                                    );
+                                }
+                                el.into_any_element()
                             }
-                            el.into_any_element()
-                        }
-                        state => {
-                            let text = if image.source.starts_with("https://")
-                                || image.source.starts_with("http://")
-                            {
-                                format!("{} — {}", image.alt, image.source)
-                            } else {
-                                format!(
-                                    "{} — {}",
-                                    image.alt,
-                                    state
-                                        .and_then(|s| s.as_ref().err())
-                                        .map(String::as_str)
-                                        .unwrap_or(if image_allowed.contains(&image.source) {
-                                            "Loading image…"
-                                        } else {
-                                            "Document image preview limit reached"
+                            state => {
+                                let detail = if image.source.starts_with("https://")
+                                    || image.source.starts_with("http://")
+                                {
+                                    image.source.clone()
+                                } else {
+                                    state.and_then(|s| s.as_ref().err()).map_or_else(
+                                        || {
+                                            i18n::translate(
+                                                if image_allowed.contains(&image.source) {
+                                                    MessageId::AttachmentLoadingImage
+                                                } else {
+                                                    MessageId::FilesImagePreviewLimit
+                                                },
+                                                locale,
+                                            )
+                                            .to_string()
+                                        },
+                                        |failure| failure.text(locale).to_string(),
+                                    )
+                                };
+                                let text = format!("{} — {}", image.alt, detail);
+                                let target = image.source.clone();
+                                let external =
+                                    target.starts_with("https://") || target.starts_with("http://");
+                                div()
+                                    .id(id)
+                                    .text_color(theme.text_muted)
+                                    .child(text)
+                                    .when(external, |el| {
+                                        let link = image_link.clone();
+                                        el.cursor_pointer().on_click(move |_, window, cx| {
+                                            render::activate_link(
+                                                render::LinkTarget::new(&target, &target),
+                                                render::LinkAction::Primary,
+                                                Some(&link),
+                                                window,
+                                                cx,
+                                            );
                                         })
-                                )
-                            };
-                            let target = image.source.clone();
-                            let external =
-                                target.starts_with("https://") || target.starts_with("http://");
-                            div()
-                                .id(id)
-                                .text_color(theme.text_muted)
-                                .child(text)
-                                .when(external, |el| {
-                                    let link = image_link.clone();
-                                    el.cursor_pointer().on_click(move |_, window, cx| {
-                                        render::activate_link(
-                                            render::LinkTarget::new(&target, &target),
-                                            render::LinkAction::Primary,
-                                            Some(&link),
-                                            window,
-                                            cx,
-                                        );
                                     })
-                                })
-                                .into_any_element()
-                        }
-                    }),
-                });
+                                    .into_any_element()
+                            }
+                        }),
+                    });
                 opts.link = Some(link.clone());
                 opts.copy = Some(self.copy_ui_for(&opts.row_key, cx));
                 let group: gpui::SharedString = format!("{}-comment-{ix}", self.scope).into();
@@ -1254,6 +1274,7 @@ impl MarkdownPreview {
 impl Render for MarkdownPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let code_fences_generation = crate::settings::code_fences_generation(cx);
         if self.code_fences_generation != code_fences_generation {
             self.code_fences_generation = code_fences_generation;
@@ -1321,7 +1342,7 @@ impl Render for MarkdownPreview {
                     div()
                         .px(px(24.0))
                         .text_color(theme.text_muted)
-                        .child("Loading preview…"),
+                        .child(i18n::translate(MessageId::FilesLoadingPreview, locale)),
                 )
             })
             .when(self.truncated, |el| {
@@ -1329,7 +1350,7 @@ impl Render for MarkdownPreview {
                     div()
                         .px(px(24.0))
                         .text_color(theme.warning_muted)
-                        .child("Large file preview is truncated and read-only."),
+                        .child(i18n::translate(MessageId::FilesPreviewTruncated, locale)),
                 )
             })
             .child(

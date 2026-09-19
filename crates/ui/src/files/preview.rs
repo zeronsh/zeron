@@ -26,6 +26,7 @@ use super::{
 use crate::{
     comments::{self, ReviewComment},
     composer::{ComposerInput, ComposerInputEvent},
+    i18n::{self, MessageId},
     icons::{self, icon},
     syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache},
     theme::Theme,
@@ -939,16 +940,19 @@ impl FilesSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let placeholder = if self
-            .preview
-            .documents
-            .get(&path)
-            .is_some_and(|d| d.show_markdown)
-        {
-            "Request a change…"
-        } else {
-            "Add a comment…"
-        };
+        let placeholder = i18n::translate(
+            if self
+                .preview
+                .documents
+                .get(&path)
+                .is_some_and(|d| d.show_markdown)
+            {
+                MessageId::DiffRequestChange
+            } else {
+                MessageId::FilesAddCommentPlaceholder
+            },
+            i18n::locale(cx),
+        );
         let input = cx.new(|cx| {
             ComposerInput::new(placeholder, cx)
                 .with_text_metrics(12.0, crate::composer::INPUT_LINE_HEIGHT)
@@ -1183,8 +1187,9 @@ impl FilesSurface {
         };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             if let Some(document) = self.preview.documents.get_mut(&path) {
-                document.phase =
-                    DocumentPhase::Error("Workspace service is still starting.".into());
+                document.phase = DocumentPhase::Error(
+                    i18n::translate(MessageId::FilesServiceStarting, i18n::locale(cx)).into(),
+                );
             }
             return;
         };
@@ -1235,7 +1240,7 @@ impl FilesSurface {
                     }
                     Err(error) => {
                         tracing::warn!(path = %task_path, error = %error, "workspace file load failed");
-                        document.set_error(error.to_string());
+                        document.set_error(error.text(i18n::locale(cx)));
                         surface.sync_preview_list();
                     }
                 }
@@ -1265,7 +1270,10 @@ impl FilesSurface {
         };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             if let Some(document) = self.preview.documents.get_mut(&path) {
-                document.set_error("Workspace service is still starting.");
+                document.set_error(i18n::translate(
+                    MessageId::FilesServiceStarting,
+                    i18n::locale(cx),
+                ));
             }
             return;
         };
@@ -1546,8 +1554,9 @@ impl FilesSurface {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             if let Some(document) = self.preview.documents.get_mut(&path) {
                 document.autosave_task = None;
-                document.phase =
-                    DocumentPhase::SaveFailed("Workspace service is unavailable.".into());
+                document.phase = DocumentPhase::SaveFailed(
+                    i18n::translate(MessageId::FilesServiceUnavailable, i18n::locale(cx)).into(),
+                );
             }
             cx.notify();
             return;
@@ -1617,7 +1626,7 @@ impl FilesSurface {
                     }
                     Err(error) => {
                         tracing::warn!(path = %task_path, error = %error, "workspace file save failed");
-                        document.fail_save(revision, error.to_string());
+                        document.fail_save(revision, error.text(i18n::locale(cx)));
                     }
                 }
                 let save_again = document.can_autosave();
@@ -2098,6 +2107,7 @@ impl FilesSurface {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let typography_generation = crate::typography::generation(cx);
         if self.preview.typography_generation != typography_generation {
             self.preview.typography_generation = typography_generation;
@@ -2146,13 +2156,16 @@ impl FilesSurface {
                         .text_size(px(11.0))
                         .text_color(theme.warning_muted)
                         .child(div().min_w_0().max_w_full().whitespace_normal().child(
-                            if self.target_change_pending {
-                                "Workspace changed. Switch back to save, or discard these edits."
-                            } else if lifecycle_blocked {
-                                "Changes could not be saved safely."
-                            } else {
-                                "Saving changes before closing…"
-                            },
+                            i18n::translate(
+                                if self.target_change_pending {
+                                    MessageId::FilesWorkspaceSwitchedSave
+                                } else if lifecycle_blocked {
+                                    MessageId::FilesChangesNotSaved
+                                } else {
+                                    MessageId::FilesSavingBeforeClose
+                                },
+                                locale,
+                            ),
                         ))
                         .when(lifecycle_blocked || self.target_change_pending, |banner| {
                             banner
@@ -2163,7 +2176,7 @@ impl FilesSurface {
                                         .ml_auto()
                                         .cursor_pointer()
                                         .text_color(theme.text)
-                                        .child("Retry")
+                                        .child(i18n::translate(MessageId::CommonRetry, locale))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.retry_pending_close(cx)
                                         })),
@@ -2174,7 +2187,10 @@ impl FilesSurface {
                                             .id("files-keep-open")
                                             .cursor_pointer()
                                             .text_color(theme.text_muted)
-                                            .child("Keep Open")
+                                            .child(i18n::translate(
+                                                MessageId::FilesKeepOpen,
+                                                locale,
+                                            ))
                                             .on_click(
                                                 cx.listener(|this, _, _, cx| this.keep_open(cx)),
                                             ),
@@ -2185,7 +2201,10 @@ impl FilesSurface {
                                         .id("files-discard-close-changes")
                                         .cursor_pointer()
                                         .text_color(theme.danger_muted)
-                                        .child("Discard Changes")
+                                        .child(i18n::translate(
+                                            MessageId::FilesDiscardChanges,
+                                            locale,
+                                        ))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.discard_changes_and_close(cx)
                                         })),
@@ -2212,11 +2231,14 @@ impl FilesSurface {
                             .text_size(px(11.0))
                             .text_color(theme.warning_muted)
                             .child(div().min_w_0().max_w_full().whitespace_normal().child(
-                                if confirming_reload {
-                                    "Discard unsaved changes?"
-                                } else {
-                                    "This file changed outside Zeron."
-                                },
+                                i18n::translate(
+                                    if confirming_reload {
+                                        MessageId::FilesDiscardUnsavedChanges
+                                    } else {
+                                        MessageId::FilesChangedOutside
+                                    },
+                                    locale,
+                                ),
                             ))
                             .child(
                                 div()
@@ -2232,7 +2254,10 @@ impl FilesSurface {
                                                     .id("files-keep-external-edits")
                                                     .cursor_pointer()
                                                     .text_color(theme.text_muted)
-                                                    .child("Keep Editing")
+                                                    .child(i18n::translate(
+                                                        MessageId::FilesKeepEditing,
+                                                        locale,
+                                                    ))
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.keep_external_edits(cx)
                                                     })),
@@ -2242,7 +2267,10 @@ impl FilesSurface {
                                                     .id("files-reload-external")
                                                     .cursor_pointer()
                                                     .text_color(theme.text)
-                                                    .child("Reload from Disk")
+                                                    .child(i18n::translate(
+                                                        MessageId::FilesReloadFromDisk,
+                                                        locale,
+                                                    ))
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.request_reload_active_document(cx)
                                                     })),
@@ -2255,7 +2283,10 @@ impl FilesSurface {
                                                     .id("files-cancel-reload")
                                                     .cursor_pointer()
                                                     .text_color(theme.text_muted)
-                                                    .child("Cancel")
+                                                    .child(i18n::translate(
+                                                        MessageId::CommonCancel,
+                                                        locale,
+                                                    ))
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.cancel_reload_confirmation(cx)
                                                     })),
@@ -2265,7 +2296,10 @@ impl FilesSurface {
                                                     .id("files-confirm-reload")
                                                     .cursor_pointer()
                                                     .text_color(theme.text)
-                                                    .child("Discard & Reload")
+                                                    .child(i18n::translate(
+                                                        MessageId::FilesDiscardAndReload,
+                                                        locale,
+                                                    ))
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.confirm_reload_active_document(cx)
                                                     })),
@@ -2292,11 +2326,14 @@ impl FilesSurface {
             .child(
                 toolbar_button(
                     "files-toggle-tree-sidebar",
-                    if self.preview.tree_sidebar_visible() {
-                        "Hide files sidebar"
-                    } else {
-                        "Show files sidebar"
-                    },
+                    i18n::translate(
+                        if self.preview.tree_sidebar_visible() {
+                            MessageId::FilesHideSidebar
+                        } else {
+                            MessageId::FilesShowSidebar
+                        },
+                        i18n::locale(cx),
+                    ),
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_tree_sidebar(window, cx)))
                 .child(
@@ -2324,6 +2361,7 @@ impl FilesSurface {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let markdown = super::markdown_preview::is_markdown(path);
+        let locale = i18n::locale(cx);
         let showing_markdown = self
             .preview
             .documents
@@ -2344,34 +2382,37 @@ impl FilesSurface {
                 .get(path)
                 .and_then(|document| match &document.phase {
                     DocumentPhase::SaveFailed(error) => Some((
-                        "Save failed",
+                        MessageId::FilesSaveFailed,
                         theme.danger_muted,
                         can_save,
                         Some(error.clone()),
                     )),
                     DocumentPhase::Conflict { .. } => Some((
-                        "Save conflict",
+                        MessageId::FilesSaveConflict,
                         theme.warning_muted,
                         false,
-                        Some(SharedString::from(
-                            "The file changed on disk. Your editor buffer was preserved.",
-                        )),
+                        Some(SharedString::from(i18n::translate(
+                            MessageId::FilesSaveConflictDetail,
+                            locale,
+                        ))),
                     )),
                     DocumentPhase::DeletedOnDisk => Some((
-                        "Deleted on disk",
+                        MessageId::FilesDeletedOnDisk,
                         theme.warning_muted,
                         false,
-                        Some(SharedString::from(
-                            "The file was removed on disk. Your editor buffer was preserved.",
-                        )),
+                        Some(SharedString::from(i18n::translate(
+                            MessageId::FilesDeletedOnDiskDetail,
+                            locale,
+                        ))),
                     )),
                     DocumentPhase::ExternallyModified { .. } => Some((
-                        "Changed on disk",
+                        MessageId::FilesChangedOnDisk,
                         theme.warning_muted,
                         false,
-                        Some(SharedString::from(
-                            "The file changed on disk. Review it before saving.",
-                        )),
+                        Some(SharedString::from(i18n::translate(
+                            MessageId::FilesChangedOnDiskDetail,
+                            locale,
+                        ))),
                     )),
                     _ => None,
                 });
@@ -2429,11 +2470,14 @@ impl FilesSurface {
                 element.child(
                     toolbar_button(
                         "files-toggle-markdown",
-                        if showing_markdown {
-                            "Show Markdown code"
-                        } else {
-                            "Preview Markdown"
-                        },
+                        i18n::translate(
+                            if showing_markdown {
+                                MessageId::FilesShowMarkdownCode
+                            } else {
+                                MessageId::FilesPreviewMarkdown
+                            },
+                            locale,
+                        ),
                     )
                     .when(showing_markdown, |el| el.bg(crate::theme::wash(0.1)))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -2486,7 +2530,7 @@ impl FilesSurface {
                             element
                                 .cursor_pointer()
                                 .role(gpui::Role::Button)
-                                .aria_label("Save file")
+                                .aria_label(i18n::translate(MessageId::FilesSaveFile, locale))
                                 .hover(|style| style.bg(crate::theme::wash(0.14)))
                                 .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
                                     window.prevent_default()
@@ -2505,41 +2549,47 @@ impl FilesSurface {
                                 })
                                 .tooltip_show_delay(Duration::from_millis(350))
                         })
-                        .child(label),
+                        .child(i18n::translate(label, locale)),
                 )
             })
             .child(
-                toolbar_button("files-reveal-active", "Reveal file in tree")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let name = reveal_path
-                            .rsplit('/')
-                            .next()
-                            .unwrap_or(&reveal_path)
-                            .to_string();
-                        this.reveal_search_result(
-                            WorkspaceFileSearchMatch {
-                                path: reveal_path.clone(),
-                                name,
-                                kind: zeron_proto::WorkspaceEntryKind::File,
-                                score: 0,
-                            },
-                            cx,
-                        );
-                    }))
-                    .child(
-                        icon(icons::FOLDER)
-                            .size(px(crate::surface_chrome::ICON_SIZE))
-                            .text_color(theme.text_muted),
-                    ),
+                toolbar_button(
+                    "files-reveal-active",
+                    i18n::translate(MessageId::FilesRevealInTree, locale),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let name = reveal_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&reveal_path)
+                        .to_string();
+                    this.reveal_search_result(
+                        WorkspaceFileSearchMatch {
+                            path: reveal_path.clone(),
+                            name,
+                            kind: zeron_proto::WorkspaceEntryKind::File,
+                            score: 0,
+                        },
+                        cx,
+                    );
+                }))
+                .child(
+                    icon(icons::FOLDER)
+                        .size(px(crate::surface_chrome::ICON_SIZE))
+                        .text_color(theme.text_muted),
+                ),
             )
             .child(
                 toolbar_button(
                     "files-toggle-word-wrap",
-                    if self.preview.word_wrap() {
-                        "Disable word wrap"
-                    } else {
-                        "Enable word wrap"
-                    },
+                    i18n::translate(
+                        if self.preview.word_wrap() {
+                            MessageId::FilesDisableWordWrap
+                        } else {
+                            MessageId::FilesEnableWordWrap
+                        },
+                        locale,
+                    ),
                 )
                 .when(self.preview.word_wrap(), |element| {
                     element.bg(crate::theme::wash(0.1))
@@ -2691,9 +2741,10 @@ impl FilesSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let locale = i18n::locale(cx);
         if self.target_change_pending && super::image_preview::is_image(path) {
             return centered_state(
-                "Workspace changed. Image preview suspended.",
+                i18n::translate(MessageId::FilesImagePreviewSuspended, locale),
                 theme.text_muted,
             );
         }
@@ -2720,7 +2771,10 @@ impl FilesSurface {
             return gpui::Empty.into_any_element();
         };
         if matches!(document.phase, DocumentPhase::Loading) {
-            return centered_state("Loading file…", theme.text_faint);
+            return centered_state(
+                i18n::translate(MessageId::FilesLoadingFile, locale),
+                theme.text_faint,
+            );
         }
         if let DocumentPhase::Error(error) = &document.phase {
             return centered_state(error.clone(), theme.danger_muted);
@@ -2747,10 +2801,16 @@ impl FilesSurface {
                 .into_any_element();
         }
         let Some(file) = document.file.as_ref() else {
-            return centered_state("This file cannot be previewed.", theme.text_muted);
+            return centered_state(
+                i18n::translate(MessageId::FilesCannotPreview, locale),
+                theme.text_muted,
+            );
         };
         if file.text.is_none() {
-            return centered_state(read_only_message(file.read_only_reason), theme.text_muted);
+            return centered_state(
+                i18n::translate(read_only_message_id(file.read_only_reason), locale),
+                theme.text_muted,
+            );
         }
         let truncated = file.truncated;
         let word_wrap = self.preview.word_wrap();
@@ -2813,7 +2873,7 @@ impl FilesSurface {
                         .items_center()
                         .text_size(px(10.0))
                         .text_color(theme.warning_muted)
-                        .child("Large file preview is truncated and read-only."),
+                        .child(i18n::translate(MessageId::FilesPreviewTruncated, locale)),
                 )
             })
             .child(code_scroll)
@@ -2830,6 +2890,7 @@ impl FilesSurface {
         let Some(layout) = editor.read_with(cx, |state, _| editor_overlay_layout(state)) else {
             return Vec::new();
         };
+        let locale = i18n::locale(cx);
         let comments = self.staged_file_comments(path, cx);
         let comments_by_line = comments
             .iter()
@@ -2855,7 +2916,12 @@ impl FilesSurface {
                     cell.bg(theme.surface_card)
                         .cursor_pointer()
                         .role(gpui::Role::Button)
-                        .aria_label(format!("Open comment on line {}", row.line))
+                        .aria_label(i18n::fill(
+                            MessageId::FilesCommentOpenLine,
+                            "{line}",
+                            &row.line.to_string(),
+                            locale,
+                        ))
                         .hover(|style| style.bg(crate::theme::wash(0.08)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.toggle_editor_comment(id.clone(), cx)
@@ -2874,7 +2940,12 @@ impl FilesSurface {
                     cell.group(group.clone())
                         .cursor_pointer()
                         .role(gpui::Role::Button)
-                        .aria_label(format!("Comment on line {line}"))
+                        .aria_label(i18n::fill(
+                            MessageId::FilesCommentOnLine,
+                            "{line}",
+                            &line.to_string(),
+                            locale,
+                        ))
                         .hover(|style| style.bg(theme.surface_card))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_editor_comment_draft(target.clone(), line, window, cx)
@@ -3074,22 +3145,30 @@ impl FilesSurface {
                     .justify_end()
                     .gap(px(6.0))
                     .child(
-                        editor_comment_action("file-comment-cancel", "Cancel", false, theme)
-                            .on_click(cx.listener(|this, _, _, cx| this.cancel_editor_comment(cx))),
+                        editor_comment_action(
+                            "file-comment-cancel",
+                            i18n::translate(MessageId::CommonCancel, i18n::locale(cx)),
+                            false,
+                            theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_editor_comment(cx))),
                     )
                     .child(
                         editor_comment_action(
                             "file-comment-commit",
-                            if self
-                                .preview
-                                .comment_draft
-                                .as_ref()
-                                .is_some_and(|draft| draft.editing_id.is_some())
-                            {
-                                "Save"
-                            } else {
-                                "Comment"
-                            },
+                            i18n::translate(
+                                if self
+                                    .preview
+                                    .comment_draft
+                                    .as_ref()
+                                    .is_some_and(|draft| draft.editing_id.is_some())
+                                {
+                                    MessageId::FilesCommentSave
+                                } else {
+                                    MessageId::FilesCommentCommit
+                                },
+                                i18n::locale(cx),
+                            ),
                             true,
                             theme,
                         )
@@ -3412,21 +3491,18 @@ fn centered_state(message: impl Into<SharedString>, color: gpui::Hsla) -> AnyEle
         .into_any_element()
 }
 
-fn read_only_message(reason: Option<WorkspaceReadOnlyReason>) -> SharedString {
+/// The copy for a read-only reason. The enum maps to a message id; no second
+/// English literal lives in code.
+fn read_only_message_id(reason: Option<WorkspaceReadOnlyReason>) -> MessageId {
     match reason {
-        Some(WorkspaceReadOnlyReason::Binary) => "Binary files cannot be previewed.",
-        Some(WorkspaceReadOnlyReason::UnsupportedEncoding) => {
-            "This file encoding is not supported."
-        }
-        Some(WorkspaceReadOnlyReason::Symlink) => "Symlink targets are read-only.",
-        Some(WorkspaceReadOnlyReason::PermissionDenied) => "Permission denied.",
-        Some(WorkspaceReadOnlyReason::TooLarge) => "This file is too large to preview.",
-        Some(WorkspaceReadOnlyReason::MixedLineEndings) => {
-            "Files with mixed line endings are read-only."
-        }
-        Some(WorkspaceReadOnlyReason::NotRegularFile) | None => "This file cannot be previewed.",
+        Some(WorkspaceReadOnlyReason::Binary) => MessageId::FilesReadOnlyBinary,
+        Some(WorkspaceReadOnlyReason::UnsupportedEncoding) => MessageId::FilesReadOnlyEncoding,
+        Some(WorkspaceReadOnlyReason::Symlink) => MessageId::FilesReadOnlySymlink,
+        Some(WorkspaceReadOnlyReason::PermissionDenied) => MessageId::FilesReadOnlyPermission,
+        Some(WorkspaceReadOnlyReason::TooLarge) => MessageId::FilesReadOnlyTooLarge,
+        Some(WorkspaceReadOnlyReason::MixedLineEndings) => MessageId::FilesReadOnlyMixedLineEndings,
+        Some(WorkspaceReadOnlyReason::NotRegularFile) | None => MessageId::FilesCannotPreview,
     }
-    .into()
 }
 
 #[cfg(test)]
@@ -3514,9 +3590,20 @@ mod tests {
 
     #[test]
     fn read_only_reasons_have_specific_messages() {
-        assert!(read_only_message(Some(WorkspaceReadOnlyReason::Binary)).contains("Binary"));
+        assert_eq!(
+            read_only_message_id(Some(WorkspaceReadOnlyReason::Binary)),
+            MessageId::FilesReadOnlyBinary
+        );
+        assert_eq!(
+            read_only_message_id(Some(WorkspaceReadOnlyReason::UnsupportedEncoding)),
+            MessageId::FilesReadOnlyEncoding
+        );
         assert!(
-            read_only_message(Some(WorkspaceReadOnlyReason::UnsupportedEncoding))
+            i18n::translate(MessageId::FilesReadOnlyBinary, crate::i18n::Locale::En)
+                .contains("Binary")
+        );
+        assert!(
+            i18n::translate(MessageId::FilesReadOnlyEncoding, crate::i18n::Locale::En)
                 .contains("encoding")
         );
     }

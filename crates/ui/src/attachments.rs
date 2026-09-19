@@ -23,6 +23,7 @@ use gpui::{
     AnyElement, BackgroundExecutor, Image, ImageFormat, SharedString, Size, div, prelude::*, px,
 };
 
+use crate::i18n::{self, Locale, MessageId};
 use crate::state::EngineHandle;
 use crate::theme::ink;
 use zeron_rpc::methods;
@@ -164,6 +165,10 @@ pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
 
 /// message-attachments.ts `userMessageRailText`: what the rail/sidebar shows
 /// for a user message ("Attached image" / "N attached images" when image-only).
+///
+/// English on purpose: nothing renders this today — `rail.rs`'s tick helpers
+/// are only exercised by their own tests — so there is no locale to resolve
+/// against. Translate it when a rendered surface starts showing it.
 pub fn user_message_rail_text(content: &str) -> String {
     let parsed = parse_user_message_images(content);
     if !parsed.text.trim().is_empty() {
@@ -232,20 +237,45 @@ pub fn ensure_extension(name: &str, format: ImageFormat) -> String {
 }
 
 /// Stage a file from disk (picker / drop / pasted path). `Err` carries the
-/// user-facing message (mirrors the old `onError` copy).
-pub fn stage_file(path: &Path) -> Result<StagedAttachment, String> {
+/// user-facing message (mirrors the old `onError` copy), resolved in `locale`
+/// because the caller renders it verbatim.
+pub fn stage_file(path: &Path, locale: Locale) -> Result<StagedAttachment, String> {
     let display_name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "image".to_string());
     let Some(format) = format_by_extension(path) else {
-        return Err(format!("{display_name} is not a supported image."));
+        return Err(i18n::fill(
+            MessageId::AttachmentUnsupportedImage,
+            "{name}",
+            &display_name,
+            locale,
+        ));
     };
-    let meta = std::fs::metadata(path).map_err(|_| format!("{display_name} could not be read."))?;
+    let meta = std::fs::metadata(path).map_err(|_| {
+        i18n::fill(
+            MessageId::AttachmentUnreadable,
+            "{name}",
+            &display_name,
+            locale,
+        )
+    })?;
     if meta.len() > MAX_ATTACHMENT_BYTES {
-        return Err(format!("{display_name} is too large (24 MB max)."));
+        return Err(i18n::fill(
+            MessageId::AttachmentTooLarge,
+            "{name}",
+            &display_name,
+            locale,
+        ));
     }
-    let bytes = std::fs::read(path).map_err(|_| format!("{display_name} could not be read."))?;
+    let bytes = std::fs::read(path).map_err(|_| {
+        i18n::fill(
+            MessageId::AttachmentUnreadable,
+            "{name}",
+            &display_name,
+            locale,
+        )
+    })?;
     Ok(StagedAttachment {
         id: uuid::Uuid::new_v4().to_string(),
         name: ensure_extension(&display_name, format),
@@ -974,7 +1004,10 @@ pub(crate) fn lightbox_with_size(
             .render(preview.image.clone(), natural, None, window, cx),
         None => div()
             .text_color(ink(0.6))
-            .child("Loading image…")
+            .child(crate::i18n::translate(
+                crate::i18n::MessageId::AttachmentLoadingImage,
+                crate::i18n::locale(cx),
+            ))
             .into_any_element(),
     };
     let on_close = std::rc::Rc::new(on_close);

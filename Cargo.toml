@@ -127,6 +127,10 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 fontdb = "0.23"
 ttf-parser = "0.25.1"
+# Desktop i18n: the system language tag. Already in the dependency graph as
+# cosmic-text's transitive dependency, so declaring it adds no new third-party
+# code (Rust still requires the direct dependency here).
+sys-locale = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 ignore = "0.4"
 nucleo-matcher = "0.3"

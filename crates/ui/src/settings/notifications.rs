@@ -7,6 +7,7 @@
 
 use gpui::{Context, EventEmitter, SharedString, Window, div, prelude::*, px};
 
+use crate::i18n::{self, MessageId};
 use crate::icons;
 use crate::popover;
 use crate::settings::widgets;
@@ -138,6 +139,7 @@ impl popover::ScrollRailHost for NotificationsPage {
 impl Render for NotificationsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let accent = theme.accent;
         let sound = self.sound;
         let completion_sound = self.completion_sound;
@@ -145,7 +147,8 @@ impl Render for NotificationsPage {
         let attention_sound = self.attention_sound;
         let desktop = self.desktop;
         let background_only = self.background_only;
-        let toggle = |id: &'static str, label: &'static str, enabled: bool, interactive: bool| {
+        // `label` is an owned string so a localized value can be passed.
+        let toggle = |id: &'static str, label: SharedString, enabled: bool, interactive: bool| {
             // Keep the familiar 32×18 visual inside a 40×40 activation target.
             // Disabled subordinate controls remain named switches in the
             // accessibility tree, but have no focus or input handlers.
@@ -164,7 +167,10 @@ impl Render for NotificationsPage {
                     gpui::Toggled::False
                 })
                 .when(!interactive, |el| {
-                    el.aria_description("Unavailable while its parent setting is off")
+                    el.aria_description(i18n::translate(
+                        MessageId::NotificationsUnavailableParentOff,
+                        locale,
+                    ))
                 })
                 .child(widgets::toggle_switch(&theme, enabled))
         };
@@ -178,26 +184,33 @@ impl Render for NotificationsPage {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Session sounds"))
+                            .child(widgets::row_title(
+                                &theme,
+                                i18n::translate(MessageId::NotificationsSessionSounds, locale),
+                            ))
                             .child(widgets::meta_line(
                                 &theme,
                                 vec![
                                     div()
-                                        .child(SharedString::from(
-                                            "Allow sounds for the selected session events below.",
-                                        ))
+                                        .child(SharedString::from(i18n::translate(
+                                            MessageId::NotificationsSessionSoundsDescription,
+                                            locale,
+                                        )))
                                         .into_any_element(),
                                 ],
                             )),
                     )
-                    .child(
-                        interactive_switch(
-                            toggle("notifications-sound-toggle", "Session sounds", sound, true),
-                            accent,
-                            NotificationPreference::Sound,
-                            cx,
+                    .child(interactive_switch(
+                        toggle(
+                            "notifications-sound-toggle",
+                            i18n::translate(MessageId::NotificationsSessionSounds, locale).into(),
+                            sound,
+                            true,
                         ),
-                    ),
+                        accent,
+                        NotificationPreference::Sound,
+                        cx,
+                    )),
             )
             .child(
                 widgets::card_row(&theme, false)
@@ -209,20 +222,27 @@ impl Render for NotificationsPage {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Task completed"))
+                            .child(widgets::row_title(
+                                &theme,
+                                i18n::translate(MessageId::NotificationsTaskCompleted, locale),
+                            ))
                             .child(widgets::meta_line(
                                 &theme,
-                                vec![div()
-                                    .child(SharedString::from(
-                                        "Play a sound when an agent finishes a run.",
-                                    ))
-                                    .into_any_element()],
+                                vec![
+                                    div()
+                                        .child(SharedString::from(i18n::translate(
+                                            MessageId::NotificationsTaskCompletedDescription,
+                                            locale,
+                                        )))
+                                        .into_any_element(),
+                                ],
                             )),
                     )
                     .child(
                         toggle(
                             "notifications-completion-sound-toggle",
-                            "Task completed sound",
+                            i18n::translate(MessageId::NotificationsTaskCompletedSound, locale)
+                                .into(),
                             completion_sound,
                             sound,
                         )
@@ -246,30 +266,32 @@ impl Render for NotificationsPage {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Input required"))
+                            .child(widgets::row_title(
+                                &theme,
+                                i18n::translate(MessageId::NotificationsInputRequired, locale),
+                            ))
                             .child(widgets::meta_line(
                                 &theme,
-                                vec![div()
-                                    .child(SharedString::from(
-                                        "Play a sound when an agent needs your response.",
-                                    ))
-                                    .into_any_element()],
+                                vec![
+                                    div()
+                                        .child(SharedString::from(i18n::translate(
+                                            MessageId::NotificationsInputRequiredDescription,
+                                            locale,
+                                        )))
+                                        .into_any_element(),
+                                ],
                             )),
                     )
                     .child(
                         toggle(
                             "notifications-input-sound-toggle",
-                            "Input required sound",
+                            i18n::translate(MessageId::NotificationsInputRequiredSound, locale)
+                                .into(),
                             input_sound,
                             sound,
                         )
                         .when(sound, |el| {
-                            interactive_switch(
-                                el,
-                                accent,
-                                NotificationPreference::InputSound,
-                                cx,
-                            )
+                            interactive_switch(el, accent, NotificationPreference::InputSound, cx)
                         }),
                     ),
             )
@@ -283,20 +305,31 @@ impl Render for NotificationsPage {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Errors and disconnections"))
+                            .child(widgets::row_title(
+                                &theme,
+                                i18n::translate(
+                                    MessageId::NotificationsErrorsAndDisconnections,
+                                    locale,
+                                ),
+                            ))
                             .child(widgets::meta_line(
                                 &theme,
                                 vec![div()
-                                    .child(SharedString::from(
-                                        "Play a sound when a run fails or the connection remains unavailable.",
-                                    ))
+                                    .child(SharedString::from(i18n::translate(
+                                        MessageId::NotificationsErrorsAndDisconnectionsDescription,
+                                        locale,
+                                    )))
                                     .into_any_element()],
                             )),
                     )
                     .child(
                         toggle(
                             "notifications-attention-sound-toggle",
-                            "Errors and disconnections sound",
+                            i18n::translate(
+                                MessageId::NotificationsErrorsAndDisconnectionsSound,
+                                locale,
+                            )
+                            .into(),
                             attention_sound,
                             sound,
                         )
@@ -319,32 +352,37 @@ impl Render for NotificationsPage {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Desktop notifications"))
+                            .child(widgets::row_title(
+                                &theme,
+                                i18n::translate(
+                                    MessageId::NotificationsDesktopNotifications,
+                                    locale,
+                                ),
+                            ))
                             .child(widgets::meta_line(
                                 &theme,
                                 vec![
                                     div()
-                                        .child(SharedString::from(
-                                            "Show a system banner on the same events, so pings \
-                                             reach you while Zeron is in the background.",
-                                        ))
+                                        .child(SharedString::from(i18n::translate(
+                                            MessageId::NotificationsDesktopDescription,
+                                            locale,
+                                        )))
                                         .into_any_element(),
                                 ],
                             )),
                     )
-                    .child(
-                        interactive_switch(
-                            toggle(
-                                "notifications-desktop-toggle",
-                                "Desktop notifications",
-                                desktop,
-                                true,
-                            ),
-                            accent,
-                            NotificationPreference::Desktop,
-                            cx,
+                    .child(interactive_switch(
+                        toggle(
+                            "notifications-desktop-toggle",
+                            i18n::translate(MessageId::NotificationsDesktopNotifications, locale)
+                                .into(),
+                            desktop,
+                            true,
                         ),
-                    ),
+                        accent,
+                        NotificationPreference::Desktop,
+                        cx,
+                    )),
             )
             .child(
                 // Sub-option of the banner row: dimmed + inert while banners
@@ -358,14 +396,18 @@ impl Render for NotificationsPage {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Only when in the background"))
+                            .child(widgets::row_title(
+                                &theme,
+                                i18n::translate(MessageId::NotificationsBackgroundOnly, locale),
+                            ))
                             .child(widgets::meta_line(
                                 &theme,
                                 vec![
                                     div()
-                                        .child(SharedString::from(
-                                            "Skip the banner while a Zeron window is focused.",
-                                        ))
+                                        .child(SharedString::from(i18n::translate(
+                                            MessageId::NotificationsBackgroundOnlyDescription,
+                                            locale,
+                                        )))
                                         .into_any_element(),
                                 ],
                             )),
@@ -373,7 +415,8 @@ impl Render for NotificationsPage {
                     .child(
                         toggle(
                             "notifications-background-toggle",
-                            "Only notify when Zeron is in the background",
+                            i18n::translate(MessageId::NotificationsBackgroundOnlyLabel, locale)
+                                .into(),
                             background_only,
                             desktop,
                         )
@@ -402,12 +445,15 @@ impl Render for NotificationsPage {
                     .track_scroll(&self.scroll.scroll)
                     .child(
                         widgets::page_column()
-                            .child(widgets::page_header(&theme, "Notifications", None))
+                            .child(widgets::page_header(
+                                &theme,
+                                i18n::translate(MessageId::SettingsSectionNotifications, locale),
+                                None,
+                            ))
                             .child(
                                 widgets::page_subtitle(
                                     &theme,
-                                    "Choose which session events can play a sound, and when desktop \
-                                     notifications appear.",
+                                    i18n::translate(MessageId::NotificationsSubtitle, locale),
                                 )
                                 .max_w(px(512.0))
                                 .line_height(px(20.0)),

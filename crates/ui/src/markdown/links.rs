@@ -1,9 +1,11 @@
 //! Original content and validated navigation are deliberately separate.
+use crate::i18n::MessageId;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkTarget {
     pub label: String,
     pub original: String,
-    pub navigation: Result<String, &'static str>,
+    pub navigation: Result<String, MessageId>,
 }
 impl LinkTarget {
     pub fn new(label: &str, original: &str) -> Self {

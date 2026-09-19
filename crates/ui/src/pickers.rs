@@ -71,6 +71,7 @@ fn workspace_footer_row() -> gpui::Div {
 }
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::i18n::{self, Locale, MessageId};
 use crate::motion;
 use crate::popover::{self, Loadable, MenuKey};
 use crate::settings::composer::ComposerDefaults;
@@ -222,17 +223,42 @@ pub fn clamp_reasoning(
 // Pure: labels + traits summary
 // ---------------------------------------------------------------------------
 
-pub fn reasoning_label(level: ReasoningLevel) -> &'static str {
-    match level {
-        ReasoningLevel::Minimal => "Minimal",
-        ReasoningLevel::Low => "Low",
-        ReasoningLevel::Medium => "Medium",
-        ReasoningLevel::High => "High",
-        ReasoningLevel::XHigh => "X-High",
-        ReasoningLevel::Max => "Max",
-        ReasoningLevel::Ultra => "Ultra",
-        ReasoningLevel::Ultracode => "Ultracode",
-        ReasoningLevel::Ultrathink => "Ultrathink",
+pub fn reasoning_label(level: ReasoningLevel, locale: Locale) -> &'static str {
+    i18n::translate(
+        match level {
+            ReasoningLevel::Minimal => MessageId::PickerReasoningMinimal,
+            ReasoningLevel::Low => MessageId::PickerReasoningLow,
+            ReasoningLevel::Medium => MessageId::PickerReasoningMedium,
+            ReasoningLevel::High => MessageId::PickerReasoningHigh,
+            ReasoningLevel::XHigh => MessageId::PickerReasoningXHigh,
+            ReasoningLevel::Max => MessageId::PickerReasoningMax,
+            ReasoningLevel::Ultra => MessageId::PickerReasoningUltra,
+            ReasoningLevel::Ultracode => MessageId::PickerReasoningUltracode,
+            ReasoningLevel::Ultrathink => MessageId::PickerReasoningUltrathink,
+        },
+        locale,
+    )
+}
+
+/// Label of the local (non-worktree) checkout row: the picked ref already has
+/// a worktree, so the row names that reuse; otherwise the space's own folder
+/// is the current checkout.
+fn local_checkout_label(has_worktree: bool, locale: Locale) -> &'static str {
+    i18n::translate(
+        if has_worktree {
+            MessageId::PickerCheckoutCurrentWorktree
+        } else {
+            MessageId::PickerCheckoutCurrentCheckout
+        },
+        locale,
+    )
+}
+
+/// Label of one checkout row in the checkout-kind dropdown.
+fn checkout_kind_label(kind: CheckoutKind, has_worktree: bool, locale: Locale) -> &'static str {
+    match kind {
+        CheckoutKind::NewWorktree => i18n::translate(MessageId::PickerCheckoutNewWorktree, locale),
+        CheckoutKind::Local => local_checkout_label(has_worktree, locale),
     }
 }
 
@@ -246,10 +272,11 @@ pub fn traits_summary(
     model: Option<&Model>,
     reasoning: Option<ReasoningLevel>,
     selections: &serde_json::Map<String, serde_json::Value>,
+    locale: Locale,
 ) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(level) = reasoning {
-        parts.push(reasoning_label(level).to_string());
+        parts.push(reasoning_label(level, locale).to_string());
     }
     if let Some(model) = model {
         for option in &model.options {
@@ -598,8 +625,12 @@ pub struct Pickers {
 impl Pickers {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| {
-            ComposerInput::with_context("Search…", "PaletteSearch", cx)
-                .with_accessibility_role(gpui::Role::SearchInput)
+            ComposerInput::with_context(
+                i18n::translate(MessageId::PickerSearch, i18n::locale(cx)),
+                "PaletteSearch",
+                cx,
+            )
+            .with_accessibility_role(gpui::Role::SearchInput)
         });
         let search_events = cx.subscribe(&search, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Edited => {
@@ -1027,7 +1058,10 @@ impl Pickers {
         // reason).
         self.search_reset_muted = !self.search.read(cx).text().is_empty();
         self.search.update(cx, |input, cx| {
-            input.set_placeholder("Search…", cx);
+            input.set_placeholder(
+                i18n::translate(MessageId::PickerSearch, i18n::locale(cx)),
+                cx,
+            );
             if !input.text().is_empty() {
                 input.set_text("", cx);
             }
@@ -1070,28 +1104,40 @@ impl Pickers {
                 self.switch_error = None; // stale mid-session failures don't linger
                 let handle = self.search.read(cx).focus_handle(cx);
                 self.search.update(cx, |input, cx| {
-                    input.set_placeholder("Search refs…", cx);
+                    input.set_placeholder(
+                        i18n::translate(MessageId::PickerSearchRefs, i18n::locale(cx)),
+                        cx,
+                    );
                 });
                 window.focus(&handle, cx);
             }
             PickerKind::Space => {
                 let handle = self.search.read(cx).focus_handle(cx);
                 self.search.update(cx, |input, cx| {
-                    input.set_placeholder("Search projects…", cx);
+                    input.set_placeholder(
+                        i18n::translate(MessageId::SpacesSearchProjects, i18n::locale(cx)),
+                        cx,
+                    );
                 });
                 window.focus(&handle, cx);
             }
             PickerKind::Device => {
                 let handle = self.search.read(cx).focus_handle(cx);
                 self.search.update(cx, |input, cx| {
-                    input.set_placeholder("Search devices…", cx);
+                    input.set_placeholder(
+                        i18n::translate(MessageId::AddSpaceSearchDevices, i18n::locale(cx)),
+                        cx,
+                    );
                 });
                 window.focus(&handle, cx);
             }
             PickerKind::HarnessModel => {
                 let handle = self.search.read(cx).focus_handle(cx);
                 self.search.update(cx, |input, cx| {
-                    input.set_placeholder("Search models…", cx);
+                    input.set_placeholder(
+                        i18n::translate(MessageId::PickerSearchModels, i18n::locale(cx)),
+                        cx,
+                    );
                 });
                 window.focus(&handle, cx);
             }
@@ -1271,7 +1317,9 @@ impl Pickers {
                         // Display hygiene for catalogs from older engines
                         // (`default` alias rows, orphan `[1m]` variants,
                         // version-less alias labels).
-                        Ok(models) => Loadable::Ready(normalize_model_rows(harness, models)),
+                        Ok(models) => {
+                            Loadable::Ready(normalize_model_rows(harness, models, i18n::locale(cx)))
+                        }
                         Err(err) => Loadable::Error(err.to_string()),
                     },
                     Err(err) => Loadable::Error(err.to_string()),
@@ -1872,25 +1920,25 @@ impl Pickers {
 
     /// Label of the checkout-kind trigger (t3code `resolveEnvModeLabel` /
     /// `resolveCurrentWorkspaceLabel`).
-    fn checkout_label(&self) -> &'static str {
-        match self.config.checkout {
-            CheckoutKind::NewWorktree => "New worktree",
-            CheckoutKind::Local => {
-                if self.selected_ref_worktree().is_some() {
-                    "Current worktree"
-                } else {
-                    "Current checkout"
-                }
-            }
-        }
+    fn checkout_label(&self, locale: Locale) -> &'static str {
+        checkout_kind_label(
+            self.config.checkout,
+            self.selected_ref_worktree().is_some(),
+            locale,
+        )
     }
 
     /// Label of the ref trigger: `From <ref>` only when a NEW worktree will be
     /// created off it (t3code `getBranchTriggerLabel`); the bare name otherwise.
-    fn ref_label(&self) -> SharedString {
+    fn ref_label(&self, locale: Locale) -> SharedString {
         match (self.config.checkout, self.effective_ref_name()) {
-            (_, None) => SharedString::from("Select ref"),
-            (CheckoutKind::NewWorktree, Some(name)) => SharedString::from(format!("From {name}")),
+            (_, None) => SharedString::from(i18n::translate(MessageId::PickerSelectRef, locale)),
+            (CheckoutKind::NewWorktree, Some(name)) => SharedString::from(i18n::fill(
+                MessageId::PickerRefFrom,
+                "{name}",
+                &name,
+                locale,
+            )),
             (CheckoutKind::Local, Some(name)) => SharedString::from(name),
         }
     }
@@ -2035,6 +2083,7 @@ impl Pickers {
     /// tag, check on the canvas's effective device).
     fn render_device_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
+        let locale = i18n::locale(cx);
         let now = chrono::Utc::now();
         let rows = self.filtered_device_rows(cx);
         let (effective, local, online): (Option<String>, Option<String>, Vec<bool>) = {
@@ -2054,7 +2103,10 @@ impl Pickers {
                 .p(px(Theme::SPACE_SM))
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from("No devices match."))
+                .child(SharedString::from(i18n::translate(
+                    MessageId::PickerNoDevicesMatch,
+                    locale,
+                )))
                 .into_any_element()
         } else {
             popover::menu_scroll_host("device-list-host")
@@ -2090,7 +2142,10 @@ impl Pickers {
                                             .flex_none()
                                             .text_size(crate::typography::ui_rems(10.0))
                                             .text_color(theme.text_muted)
-                                            .child(SharedString::from("You")),
+                                            .child(SharedString::from(i18n::translate(
+                                                MessageId::PickerDeviceYou,
+                                                locale,
+                                            ))),
                                     )
                                 })
                                 // Disconnected glyph, not the word (user request).
@@ -2122,6 +2177,7 @@ impl Pickers {
     /// door names the host.
     fn render_space_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
+        let locale = i18n::locale(cx);
         let rows = self.filtered_space_rows(cx);
         let selected = self
             .state
@@ -2134,16 +2190,16 @@ impl Pickers {
         let body: AnyElement = if rows.is_empty() {
             // Distinguish "the filter ate everything" from "this device has
             // no projects yet" — the scoped list makes the latter common.
-            let empty: &str = if self.search.read(cx).text().is_empty() {
-                "No projects on this device."
+            let empty: MessageId = if self.search.read(cx).text().is_empty() {
+                MessageId::PickerNoProjectsOnDevice
             } else {
-                "No projects match."
+                MessageId::PickerNoProjectsMatch
             };
             div()
                 .p(px(Theme::SPACE_SM))
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from(empty.to_string()))
+                .child(SharedString::from(i18n::translate(empty, locale)))
                 .into_any_element()
         } else {
             popover::menu_scroll_host("space-list-host")
@@ -2193,7 +2249,7 @@ impl Pickers {
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .child("Don't work in a project"),
+                .child(i18n::translate(MessageId::PickerNoProjectOptOut, locale)),
         );
         // Action row under a hairline: mint a project.
         let new_project = popover::menu_row_nav(&theme, false, false, "project-new".to_string())
@@ -2213,7 +2269,10 @@ impl Pickers {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .child(SharedString::from("New project…")),
+                    .child(SharedString::from(i18n::translate(
+                        MessageId::SpacesNewProject,
+                        locale,
+                    ))),
             );
         div()
             .flex()
@@ -2592,12 +2651,13 @@ impl Pickers {
         };
         let (device_label, project_label, offline) = {
             let state = self.state.read(cx);
+            let locale = i18n::locale(cx);
             let device_id = state.effective_device_id();
             let device_label: SharedString = device_id
                 .as_deref()
                 .and_then(|id| state.device_name(id))
                 .map(str::to_string)
-                .unwrap_or_else(|| "This device".to_string())
+                .unwrap_or_else(|| i18n::translate(MessageId::PickerThisDevice, locale).to_string())
                 .into();
             let offline = device_id
                 .as_deref()
@@ -2605,7 +2665,7 @@ impl Pickers {
             let project_label: SharedString = state
                 .selected_space_row()
                 .map(|s| s.display_name().to_string())
-                .unwrap_or_else(|| "No project".to_string())
+                .unwrap_or_else(|| i18n::translate(MessageId::PickerNoProject, locale).to_string())
                 .into();
             (device_label, project_label, offline)
         };
@@ -2686,7 +2746,7 @@ impl Pickers {
             PickerKind::Checkout,
             "picker-checkout",
             kind_icon,
-            SharedString::from(self.checkout_label()),
+            SharedString::from(self.checkout_label(i18n::locale(cx))),
             &theme,
             cx,
         );
@@ -2694,7 +2754,7 @@ impl Pickers {
             PickerKind::Branch,
             "picker-branch",
             crate::icons::GIT_BRANCH,
-            self.ref_label(),
+            self.ref_label(i18n::locale(cx)),
             &theme,
             cx,
         );
@@ -2723,6 +2783,7 @@ impl Pickers {
     /// chip clusters; sessions name their target in the titlebar.
     pub fn render_footer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         // A selected chat whose workspace row hasn't synced yet (the moment
         // right after send mints it) still renders the DRAFT footer — the
         // values are identical, so the toolbar never blinks through a
@@ -2760,9 +2821,15 @@ impl Pickers {
             };
             let is_worktree = chat.cwd.as_deref().is_some_and(|cwd| cwd != space.path);
             let (icon_path, label) = if is_worktree {
-                (crate::icons::FOLDER_WITH_FILES, "Worktree")
+                (
+                    crate::icons::FOLDER_WITH_FILES,
+                    i18n::translate(MessageId::PickerCheckoutWorktree, locale),
+                )
             } else {
-                (crate::icons::FOLDER, "Local checkout")
+                (
+                    crate::icons::FOLDER,
+                    i18n::translate(MessageId::PickerCheckoutLocal, locale),
+                )
             };
             // Keep the same reading order and leading edge as the draft.
             let left = div()
@@ -2786,7 +2853,9 @@ impl Pickers {
                     chat.branch
                         .clone()
                         .map(SharedString::from)
-                        .unwrap_or_else(|| SharedString::from("No ref")),
+                        .unwrap_or_else(|| {
+                            SharedString::from(i18n::translate(MessageId::PickerNoRef, locale))
+                        }),
                     &theme,
                 ));
             // Checkout + branch stay together. PR and usage form the trailing
@@ -2833,7 +2902,7 @@ impl Pickers {
             _ => None,
         };
 
-        let ref_label = self.ref_label();
+        let ref_label = self.ref_label(i18n::locale(cx));
         let ref_chip = self.footer_chip(
             PickerKind::Branch,
             "picker-branch",
@@ -2850,7 +2919,7 @@ impl Pickers {
             PickerKind::Checkout,
             "picker-checkout",
             kind_icon,
-            SharedString::from(self.checkout_label()),
+            SharedString::from(self.checkout_label(i18n::locale(cx))),
             &theme,
             cx,
         );
@@ -3003,7 +3072,10 @@ impl Pickers {
                         // Projects/devices load nothing; no retry surface exists.
                         PickerKind::Space | PickerKind::Device => {}
                     }))
-                    .child(SharedString::from("Retry")),
+                    .child(SharedString::from(i18n::translate(
+                        MessageId::CommonRetry,
+                        i18n::locale(cx),
+                    ))),
             )
             .into_any_element()
     }
@@ -3046,12 +3118,16 @@ impl Pickers {
     /// "Showing X of Y refs" footer when the list is capped.
     fn render_branch_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
+        let locale = i18n::locale(cx);
         if self.state.read(cx).selected_space_row().is_none() {
             return div()
                 .p(px(Theme::SPACE_SM))
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from("No project selected"))
+                .child(SharedString::from(i18n::translate(
+                    MessageId::PickerNoProjectSelected,
+                    locale,
+                )))
                 .into_any_element();
         }
         let rows = self.filtered_ref_rows(cx);
@@ -3079,7 +3155,10 @@ impl Pickers {
                 .p(px(Theme::SPACE_SM))
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from("No refs found."))
+                .child(SharedString::from(i18n::translate(
+                    MessageId::PickerNoRefsFound,
+                    locale,
+                )))
                 .into_any_element(),
             Loadable::Ready(_) => {
                 let active = self.active;
@@ -3100,9 +3179,15 @@ impl Pickers {
                                     // Right-aligned muted tag (t3code `text-[10px]
                                     // text-muted-foreground/45`): current beats worktree.
                                     let tag: Option<&'static str> = if row.current {
-                                        Some("current")
+                                        Some(i18n::translate(
+                                            MessageId::PickerRefTagCurrent,
+                                            locale,
+                                        ))
                                     } else if row.worktree_path.is_some() {
-                                        Some("worktree")
+                                        Some(i18n::translate(
+                                            MessageId::PickerRefTagWorktree,
+                                            locale,
+                                        ))
                                     } else {
                                         None
                                     };
@@ -3126,7 +3211,10 @@ impl Pickers {
                                                 .flex_none()
                                                 .text_size(crate::typography::ui_rems(10.0))
                                                 .text_color(theme.text_muted)
-                                                .child(SharedString::from("switching…")),
+                                                .child(SharedString::from(i18n::translate(
+                                                    MessageId::PickerRefSwitching,
+                                                    locale,
+                                                ))),
                                         )
                                     })
                                     .when_some(
@@ -3175,8 +3263,13 @@ impl Pickers {
                         .py(px(4.0))
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_faint)
-                        .child(SharedString::from(format!(
-                            "Showing {shown} of {total} refs"
+                        .child(SharedString::from(i18n::fill_many(
+                            MessageId::PickerRefsShownOfTotal,
+                            &[
+                                ("{shown}", &shown.to_string()),
+                                ("{total}", &total.to_string()),
+                            ],
+                            locale,
                         ))),
                 ),
             );
@@ -3188,12 +3281,9 @@ impl Pickers {
     /// rows — "Current checkout"/"Current worktree" (local) and "New worktree".
     fn render_checkout_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
+        let locale = i18n::locale(cx);
         let has_worktree = self.selected_ref_worktree().is_some();
-        let local_label: &'static str = if has_worktree {
-            "Current worktree"
-        } else {
-            "Current checkout"
-        };
+        let local_label = local_checkout_label(has_worktree, locale);
         let local_icon = if has_worktree {
             crate::icons::FOLDER_WITH_FILES
         } else {
@@ -3203,7 +3293,7 @@ impl Pickers {
             (CheckoutKind::Local, local_label, local_icon),
             (
                 CheckoutKind::NewWorktree,
-                "New worktree",
+                checkout_kind_label(CheckoutKind::NewWorktree, has_worktree, locale),
                 crate::icons::FOLDER_WITH_FILES,
             ),
         ];
@@ -3310,6 +3400,7 @@ impl Pickers {
 
         let locked = self.harness_locked(cx);
         let effective = self.effective_harness(cx);
+        let locale = i18n::locale(cx);
         let model_scroll = self.model_scroll.clone();
         let query = self.search.read(cx).text().trim().to_string();
         let searching = !query.is_empty();
@@ -3335,17 +3426,20 @@ impl Pickers {
                     div()
                         .text_size(crate::typography::ui_rems(13.0))
                         .text_color(theme.text)
-                        .child(SharedString::from("No agents available")),
+                        .child(SharedString::from(i18n::translate(
+                            MessageId::PickerNoAgents,
+                            locale,
+                        ))),
                 )
                 .child(
                     div()
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted)
                         .text_center()
-                        .child(SharedString::from(
-                            "Enable an installed agent in Settings → Agents, \
-                             or install an agent CLI.",
-                        )),
+                        .child(SharedString::from(i18n::translate(
+                            MessageId::PickerNoAgentsHint,
+                            locale,
+                        ))),
                 )
                 .into_any_element();
         }
@@ -3502,11 +3596,14 @@ impl Pickers {
         let list_children: Vec<AnyElement> = if !rows.is_empty() {
             Vec::new()
         } else if searching {
-            vec![empty_list_note(&theme, "No models found")]
+            vec![empty_list_note(
+                &theme,
+                i18n::translate(MessageId::PickerNoModels, locale),
+            )]
         } else if favorites_view {
             vec![empty_list_note(
                 &theme,
-                "No starred models yet — hit a row's star",
+                i18n::translate(MessageId::PickerNoStarredModels, locale),
             )]
         } else {
             match effective_models {
@@ -3787,6 +3884,7 @@ impl Pickers {
     }
 
     fn setting_groups(&self, cx: &App) -> Vec<SettingGroup> {
+        let locale = i18n::locale(cx);
         let mut groups = Vec::new();
         let levels = self.trait_ladder(cx);
         if !levels.is_empty() {
@@ -3794,11 +3892,11 @@ impl Pickers {
             let default = default_reasoning(&levels);
             groups.push(SettingGroup {
                 id: ModelSetting::Reasoning,
-                label: "Reasoning".into(),
+                label: i18n::translate(MessageId::PickerReasoning, locale).into(),
                 choices: levels
                     .into_iter()
                     .map(|level| SettingChoice {
-                        label: reasoning_label(level).into(),
+                        label: reasoning_label(level, locale).into(),
                         value: String::new(),
                         reasoning: Some(level),
                         selected: selected == Some(level),
@@ -3936,6 +4034,7 @@ impl Pickers {
     /// Each model setting gets a compact trigger and its own nested choices.
     fn render_traits_sections(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
+        let locale = i18n::locale(cx);
         let base_index = self.model_rows_len(cx);
         let mut rows = Vec::new();
         for (ix, group) in self.setting_groups(cx).into_iter().enumerate() {
@@ -4093,7 +4192,9 @@ impl Pickers {
                                     }))
                                     .child(SharedString::from(choice.label))
                                     .child(div().flex_1())
-                                    .when(choice.default, |el| el.child(default_badge(&theme)))
+                                    .when(choice.default, |el| {
+                                        el.child(default_badge(&theme, locale))
+                                    })
                                     .when(
                                         choice.selected,
                                         |el| {
@@ -4209,13 +4310,16 @@ impl popover::ScrollRailHost for Pickers {
 /// The "Default" marker beside a section's default choice: a ghost badge —
 /// bare muted text, no border or fill (user request; t3code draws an outline
 /// pill here).
-fn default_badge(theme: &Theme) -> gpui::Div {
+fn default_badge(theme: &Theme, locale: Locale) -> gpui::Div {
     div()
         .flex_none()
         .text_size(crate::typography::ui_rems(10.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(theme.for_popup().text_muted)
-        .child(SharedString::from("Default"))
+        .child(SharedString::from(i18n::translate(
+            MessageId::PickerDefaultBadge,
+            locale,
+        )))
 }
 
 /// Brand mark + optional tint for a harness (the Claude mark keeps its brand
@@ -4348,7 +4452,15 @@ fn empty_list_note(theme: &Theme, copy: &str) -> AnyElement {
 /// not the wire's terse "Opus" alias — user request). Idempotent over
 /// already-clean lists. The send path recomposes the advertised id from the
 /// base + trait (`pick_model_value`), so a folded pick still runs.
-pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Vec<Model> {
+///
+/// The Context Window group this adds is our own copy, not wire data, so it is
+/// resolved against `locale` here; opening the picker re-folds the catalog, so
+/// a language switch cannot leave the tray showing the previous locale's label.
+pub(crate) fn normalize_model_rows(
+    harness: HarnessId,
+    models: Vec<Model>,
+    locale: Locale,
+) -> Vec<Model> {
     fn strip_1m(id: &str) -> Option<&str> {
         id.strip_suffix("[1m]").or_else(|| id.strip_suffix("-1m"))
     }
@@ -4402,7 +4514,7 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
                 if !model.options.iter().any(|o| o.id == "contextWindow") {
                     model.options.push(zeron_proto::ModelOption {
                         id: "contextWindow".into(),
-                        label: "Context Window".into(),
+                        label: i18n::translate(MessageId::PickerContextWindow, locale).into(),
                         choices: vec![
                             zeron_proto::ModelOptionChoice {
                                 id: "200k".into(),
@@ -4562,7 +4674,10 @@ impl Render for Pickers {
             match self.open_kind() {
                 Some(PickerKind::Branch) => {
                     self.search.update(cx, |input, cx| {
-                        input.set_placeholder("Search refs…", cx);
+                        input.set_placeholder(
+                            i18n::translate(MessageId::PickerSearchRefs, i18n::locale(cx)),
+                            cx,
+                        );
                     });
                     let handle = self.search.read(cx).focus_handle(cx);
                     if handle.is_focused(window) {
@@ -4628,7 +4743,7 @@ impl Render for Pickers {
         // so instead of wearing a brand mark for an agent that can't run.
         let no_agents = self.no_agents_available() && self.effective_harness(cx).is_none();
         let model_label: SharedString = if no_agents {
-            SharedString::from("No agents available")
+            SharedString::from(i18n::translate(MessageId::PickerNoAgents, i18n::locale(cx)))
         } else {
             let loaded = self.selected_model(cx).map(|m| m.label.clone());
             let label = loaded.or_else(|| {
@@ -4676,6 +4791,7 @@ impl Render for Pickers {
             self.selected_model(cx),
             self.effective_reasoning(cx),
             &explicit_options,
+            i18n::locale(cx),
         );
         let traits_active = traits_customized(
             self.selected_model(cx),
@@ -5758,6 +5874,7 @@ mod tests {
                 bare_model("gpt-x-9[1m]", "GPT X-9"),
                 bare_model("nano", "Nano"),
             ],
+            Locale::En,
         );
         assert_eq!(
             models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
@@ -5765,6 +5882,16 @@ mod tests {
         );
         assert_eq!(models[0].label, "Titan");
         assert_eq!(models[1].label, "GPT X-9");
+        // The folded Context Window group is our own copy, so it follows the
+        // locale; the pinned choice stays a wire id.
+        assert_eq!(
+            models[0]
+                .options
+                .iter()
+                .find(|o| o.id == "contextWindow")
+                .map(|o| o.label.as_str()),
+            Some("Context Window")
+        );
         // Folded rows pin the Context Window trait to 1M.
         assert!(
             models[0]
@@ -5775,8 +5902,11 @@ mod tests {
         assert!(models[2].options.is_empty());
 
         // A `default`-only list survives (nothing real to prefer).
-        let only_default =
-            normalize_model_rows(HarnessId::Codex, vec![bare_model("default", "Default")]);
+        let only_default = normalize_model_rows(
+            HarnessId::Codex,
+            vec![bare_model("default", "Default")],
+            Locale::En,
+        );
         assert_eq!(only_default.len(), 1);
 
         // A base-plus-variant pair (already folded by a NEWER engine — the
@@ -5788,13 +5918,17 @@ mod tests {
                 bare_model("titan-5", "Titan 5"),
                 bare_model("titan-5[1m]", "Titan 5 (1M)"),
             ],
+            Locale::En,
         );
         assert_eq!(paired.len(), 1);
         assert_eq!(paired[0].id, "titan-5");
 
         // Idempotent over a clean list.
         let clean = vec![bare_model("titan-5", "Titan 5")];
-        assert_eq!(normalize_model_rows(HarnessId::Codex, clean.clone()), clean);
+        assert_eq!(
+            normalize_model_rows(HarnessId::Codex, clean.clone(), Locale::En),
+            clean
+        );
     }
 
     #[test]
@@ -5812,6 +5946,7 @@ mod tests {
                 bare_model("haiku", "Haiku"),
                 bare_model("claude-nova-1", "Nova 1"),
             ],
+            Locale::En,
         );
         assert_eq!(
             models.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
@@ -5867,12 +6002,28 @@ mod tests {
         selections.insert("context".into(), serde_json::Value::String("1m".into()));
         selections.insert("speed".into(), serde_json::Value::String("fast".into()));
         assert_eq!(
-            traits_summary(Some(&model), Some(ReasoningLevel::High), &selections),
+            traits_summary(
+                Some(&model),
+                Some(ReasoningLevel::High),
+                &selections,
+                Locale::En
+            ),
             Some("High · 1M · Fast".to_string())
+        );
+        // The ladder label follows the locale; model option labels are wire
+        // data and never translate.
+        assert_eq!(
+            traits_summary(
+                Some(&model),
+                Some(ReasoningLevel::High),
+                &selections,
+                Locale::ZhCn
+            ),
+            Some("高 · 1M · Fast".to_string())
         );
         // All defaults: the effective choices still read on the trigger.
         assert_eq!(
-            traits_summary(Some(&model), None, &serde_json::Map::new()),
+            traits_summary(Some(&model), None, &serde_json::Map::new(), Locale::En),
             Some("Standard · Normal".to_string())
         );
         // A saved choice the option no longer offers falls back to the default
@@ -5883,7 +6034,7 @@ mod tests {
             serde_json::Value::String("ludicrous".into()),
         );
         assert_eq!(
-            traits_summary(Some(&model), None, &stale),
+            traits_summary(Some(&model), None, &stale, Locale::En),
             Some("Standard · Normal".to_string())
         );
         // Remembered picks drop what the model doesn't offer before sending.
@@ -5901,12 +6052,26 @@ mod tests {
             traits_summary(
                 None,
                 Some(ReasoningLevel::Ultrathink),
-                &serde_json::Map::new()
+                &serde_json::Map::new(),
+                Locale::En
+            ),
+            Some("Ultrathink".to_string())
+        );
+        // A product-owned tier keeps its own name in Chinese.
+        assert_eq!(
+            traits_summary(
+                None,
+                Some(ReasoningLevel::Ultrathink),
+                &serde_json::Map::new(),
+                Locale::ZhCn
             ),
             Some("Ultrathink".to_string())
         );
         // Nothing to describe → "Traits" fallback upstream.
-        assert_eq!(traits_summary(None, None, &serde_json::Map::new()), None);
+        assert_eq!(
+            traits_summary(None, None, &serde_json::Map::new(), Locale::En),
+            None
+        );
 
         // Customized (bright trigger) only when something departs from its
         // default: default-choice selections and the default reasoning level
@@ -5944,6 +6109,64 @@ mod tests {
             &ladder,
             &serde_json::Map::new()
         ));
+    }
+
+    /// Labels that used to be the enums' own `&'static str` come from the
+    /// message table now: ordinary words and the checkout kinds translate, and
+    /// the product's own reasoning tiers keep their names.
+    #[test]
+    fn labels_are_resolved_per_locale() {
+        assert_eq!(
+            reasoning_label(ReasoningLevel::Minimal, Locale::En),
+            "Minimal"
+        );
+        assert_eq!(
+            reasoning_label(ReasoningLevel::Minimal, Locale::ZhCn),
+            "最少"
+        );
+        assert_eq!(reasoning_label(ReasoningLevel::Low, Locale::ZhCn), "低");
+        assert_eq!(reasoning_label(ReasoningLevel::Medium, Locale::ZhCn), "中");
+        assert_eq!(reasoning_label(ReasoningLevel::High, Locale::ZhCn), "高");
+        assert_eq!(reasoning_label(ReasoningLevel::XHigh, Locale::En), "X-High");
+        assert_eq!(reasoning_label(ReasoningLevel::XHigh, Locale::ZhCn), "超高");
+        assert_eq!(reasoning_label(ReasoningLevel::Max, Locale::ZhCn), "最高");
+        assert_eq!(
+            reasoning_label(ReasoningLevel::Ultra, Locale::ZhCn),
+            "Ultra"
+        );
+        assert_eq!(
+            reasoning_label(ReasoningLevel::Ultracode, Locale::ZhCn),
+            "Ultracode"
+        );
+        assert_eq!(
+            reasoning_label(ReasoningLevel::Ultrathink, Locale::ZhCn),
+            "Ultrathink"
+        );
+
+        assert_eq!(
+            checkout_kind_label(CheckoutKind::NewWorktree, false, Locale::En),
+            "New worktree"
+        );
+        assert_eq!(
+            checkout_kind_label(CheckoutKind::NewWorktree, false, Locale::ZhCn),
+            "新建工作树"
+        );
+        assert_eq!(
+            checkout_kind_label(CheckoutKind::Local, false, Locale::En),
+            "Current checkout"
+        );
+        assert_eq!(
+            checkout_kind_label(CheckoutKind::Local, false, Locale::ZhCn),
+            "当前检出"
+        );
+        assert_eq!(
+            checkout_kind_label(CheckoutKind::Local, true, Locale::En),
+            "Current worktree"
+        );
+        assert_eq!(
+            checkout_kind_label(CheckoutKind::Local, true, Locale::ZhCn),
+            "当前工作树"
+        );
     }
 
     #[test]

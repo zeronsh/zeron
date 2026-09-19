@@ -1,4 +1,5 @@
 //! Bounded media decoding. SVG resources are resolved in memory, never on the UI host.
+use crate::{files::MediaFailure, i18n::MessageId};
 use gpui::{Image, ImageFormat};
 use std::{
     io::Cursor,
@@ -145,17 +146,18 @@ pub(crate) fn svg_options() -> usvg::Options<'static> {
     }
 }
 
-pub(crate) fn decode_image(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, String> {
+pub(crate) fn decode_image(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, MediaFailure> {
     if bytes.len() > zeron_proto::MAX_WORKSPACE_IMAGE_BYTES {
-        return Err("Image exceeds preview size limit".into());
+        return Err(MediaFailure::Copy(MessageId::FilesImageSizeLimit));
     }
     if mime == "image/svg+xml" {
-        let tree = usvg::Tree::from_data(&bytes, &svg_options()).map_err(|e| e.to_string())?;
+        let tree = usvg::Tree::from_data(&bytes, &svg_options())
+            .map_err(|e| MediaFailure::Detail(e.to_string()))?;
         let (width, height) = (tree.size().width(), tree.size().height());
         // Re-serialize the parsed tree: scripts, HTML and external resources never reach GPUI.
         let svg = tree.to_string(&usvg::WriteOptions::default());
         if svg.len() > zeron_proto::MAX_WORKSPACE_IMAGE_BYTES {
-            return Err("Prepared SVG exceeds preview size limit".into());
+            return Err(MediaFailure::Copy(MessageId::FilesImageSvgSizeLimit));
         }
         let maximum = raster_size(width, height, (900.0, 480.0), 4.0, PREVIEW_PIXELS);
         // Reserve the largest admitted preview across supported display densities,
@@ -175,7 +177,7 @@ pub(crate) fn decode_image(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, Str
 }
 
 /// Repository icons retain only a small static thumbnail, even for large source logos.
-pub(crate) fn decode_project_icon(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, String> {
+pub(crate) fn decode_project_icon(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, MediaFailure> {
     if mime == "image/svg+xml" {
         decode_image(mime, bytes).map(|media| media.for_view((16.0, 16.0), 2.0, 4096))
     } else {
@@ -188,23 +190,28 @@ pub(crate) fn decode_generated_image(
     bytes: Vec<u8>,
     mime: &str,
     max_bytes: usize,
-) -> Result<MediaImage, String> {
+) -> Result<MediaImage, MediaFailure> {
     if bytes.len() > max_bytes
         || !matches!(
             mime,
             "image/png" | "image/jpeg" | "image/webp" | "image/gif"
         )
     {
-        return Err("Unsupported generated image".into());
+        return Err(MediaFailure::Detail("Unsupported generated image".into()));
     }
-    let actual = image::guess_format(&bytes).map_err(|e| e.to_string())?;
+    let actual = image::guess_format(&bytes).map_err(|e| MediaFailure::Detail(e.to_string()))?;
     if Some(actual) != image::ImageFormat::from_mime_type(mime) {
-        return Err("Generated image format does not match its metadata".into());
+        return Err(MediaFailure::Detail(
+            "Generated image format does not match its metadata".into(),
+        ));
     }
     decode_raster_image_bounded(bytes, max_bytes, Some(2048))
 }
 
-pub(crate) fn decode_raster_image(bytes: Vec<u8>, max_bytes: usize) -> Result<MediaImage, String> {
+pub(crate) fn decode_raster_image(
+    bytes: Vec<u8>,
+    max_bytes: usize,
+) -> Result<MediaImage, MediaFailure> {
     decode_raster_image_bounded(bytes, max_bytes, None)
 }
 
@@ -212,20 +219,22 @@ fn decode_raster_image_bounded(
     bytes: Vec<u8>,
     max_bytes: usize,
     max_side: Option<u32>,
-) -> Result<MediaImage, String> {
+) -> Result<MediaImage, MediaFailure> {
     if bytes.len() > max_bytes {
-        return Err("Image exceeds preview size limit".into());
+        return Err(MediaFailure::Copy(MessageId::FilesImageSizeLimit));
     }
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| MediaFailure::Detail(e.to_string()))?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(4096);
     limits.max_image_height = Some(4096);
     limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
     // Decode one frame and encode a static PNG so GPUI cannot expand unbounded animation frames.
-    let decoded = reader.decode().map_err(|e| e.to_string())?;
+    let decoded = reader
+        .decode()
+        .map_err(|e| MediaFailure::Detail(e.to_string()))?;
     // Generated previews retain one bounded 8-bit frame. This keeps each
     // cache entry below the cache budget, including CPU and GPU copies.
     let decoded = if let Some(side) = max_side {
@@ -238,7 +247,7 @@ fn decode_raster_image_bounded(
     let mut png = Cursor::new(Vec::new());
     decoded
         .write_to(&mut png, image::ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| MediaFailure::Detail(e.to_string()))?;
     let bytes = png.into_inner();
     // GPUI retains decoded CPU pixels as well as the uploaded GPU texture.
     let retained = bytes.len() + decoded.width() as usize * decoded.height() as usize * 8;

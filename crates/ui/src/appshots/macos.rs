@@ -26,9 +26,11 @@ use objc::rc::autoreleasepool;
 use objc::runtime::{Class, Object};
 use objc::{class, msg_send, sel, sel_impl};
 
+use crate::i18n::MessageId;
+
 use super::{
     ACCESSIBILITY_SETTINGS_URL, AccessibilitySnapshot, AppshotBackend, AppshotCapabilities,
-    AppshotPlatform, CapabilityState, CaptureError, CaptureTarget, CapturedAppshot,
+    AppshotPlatform, CapabilityState, CaptureError, CaptureFailure, CaptureTarget, CapturedAppshot,
     SCREEN_RECORDING_SETTINGS_URL,
 };
 
@@ -801,7 +803,9 @@ fn capture_with_screen_capture_kit(
         let _: () = msg_send![window, release];
     }
     let image = image_result?? as *mut c_void;
-    let png = encode_png(image);
+    // Diagnostic channel: the caller logs this failure and retries through
+    // CoreGraphics, which rebuilds the user-facing error on its own path.
+    let png = encode_png(image).map_err(|error| error.to_string());
     unsafe {
         CFRelease(image.cast());
     }
@@ -927,30 +931,42 @@ fn capture_png(window_id: CGWindowID) -> Result<Vec<u8>, CaptureError> {
         kCGWindowImageNominalResolution | kCGWindowImageBoundsIgnoreFraming,
     )
     .ok_or_else(|| {
-        CaptureError::CaptureFailed("The application window could not be captured.".into())
+        CaptureError::CaptureFailed(CaptureFailure::new(
+            MessageId::AppshotErrorMacWindowUnavailable,
+        ))
     })?;
     use foreign_types::ForeignType;
-    encode_png(image.as_ptr().cast()).map_err(CaptureError::CaptureFailed)
+    encode_png(image.as_ptr().cast())
 }
 
-fn encode_png(image: *mut c_void) -> Result<Vec<u8>, String> {
+fn encode_png(image: *mut c_void) -> Result<Vec<u8>, CaptureError> {
     unsafe extern "C" {
         fn CGImageGetWidth(image: *mut c_void) -> usize;
         fn CGImageGetHeight(image: *mut c_void) -> usize;
     }
     if image.is_null() {
-        return Err("The captured window was empty.".into());
+        return Err(CaptureError::CaptureFailed(CaptureFailure::new(
+            MessageId::AppshotErrorMacEmptyImage,
+        )));
     }
-    let width = u32::try_from(unsafe { CGImageGetWidth(image) })
-        .map_err(|_| "Screenshot width exceeds the capture budget")?;
-    let height = u32::try_from(unsafe { CGImageGetHeight(image) })
-        .map_err(|_| "Screenshot height exceeds the capture budget")?;
-    super::validate_capture_dimensions(width, height).map_err(|error| error.to_string())?;
+    let width = u32::try_from(unsafe { CGImageGetWidth(image) }).map_err(|_| {
+        CaptureError::CaptureFailed(CaptureFailure::new(
+            MessageId::AppshotErrorScreenshotWidthBudget,
+        ))
+    })?;
+    let height = u32::try_from(unsafe { CGImageGetHeight(image) }).map_err(|_| {
+        CaptureError::CaptureFailed(CaptureFailure::new(
+            MessageId::AppshotErrorScreenshotHeightBudget,
+        ))
+    })?;
+    super::validate_capture_dimensions(width, height)?;
     unsafe {
         let rep: *mut Object = msg_send![class!(NSBitmapImageRep), alloc];
         let rep: *mut Object = msg_send![rep, initWithCGImage: image];
         if rep.is_null() {
-            return Err("The screenshot could not be encoded.".into());
+            return Err(CaptureError::CaptureFailed(CaptureFailure::new(
+                MessageId::AppshotErrorScreenshotEncodeFailed,
+            )));
         }
         let properties: *mut Object = msg_send![class!(NSDictionary), dictionary];
         // NSBitmapImageFileTypePNG = 4.
@@ -958,15 +974,21 @@ fn encode_png(image: *mut c_void) -> Result<Vec<u8>, String> {
             msg_send![rep, representationUsingType: 4usize properties: properties];
         let _: () = msg_send![rep, release];
         if data.is_null() {
-            return Err("The screenshot could not be encoded.".into());
+            return Err(CaptureError::CaptureFailed(CaptureFailure::new(
+                MessageId::AppshotErrorScreenshotEncodeFailed,
+            )));
         }
         let len: usize = msg_send![data, length];
         if len as u64 > crate::attachments::MAX_ATTACHMENT_BYTES {
-            return Err("The captured window is larger than Zeron's 24 MB image limit.".into());
+            return Err(CaptureError::CaptureFailed(CaptureFailure::new(
+                MessageId::AppshotErrorImageLimit,
+            )));
         }
         let bytes: *const u8 = msg_send![data, bytes];
         if bytes.is_null() || len == 0 {
-            return Err("The captured window was empty.".into());
+            return Err(CaptureError::CaptureFailed(CaptureFailure::new(
+                MessageId::AppshotErrorMacEmptyImage,
+            )));
         }
         Ok(std::slice::from_raw_parts(bytes, len).to_vec())
     }

@@ -17,6 +17,7 @@ use super::{
 };
 use crate::{
     file_icons::{self, FileIconIdentity},
+    i18n::{self, MessageId},
     icons::{self, icon},
     theme::Theme,
 };
@@ -293,13 +294,15 @@ impl FilesSurface {
         });
         let Some(context) = self.request_context.clone() else {
             self.search_state.loading = false;
-            self.search_state.error = Some("No workspace available for this chat.".into());
+            self.search_state.error =
+                Some(i18n::translate(MessageId::FilesNoWorkspace, i18n::locale(cx)).into());
             cx.notify();
             return;
         };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.search_state.loading = false;
-            self.search_state.error = Some("Workspace service is still starting.".into());
+            self.search_state.error =
+                Some(i18n::translate(MessageId::FilesServiceStarting, i18n::locale(cx)).into());
             cx.notify();
             return;
         };
@@ -333,7 +336,7 @@ impl FilesSurface {
                         surface.search_state.active = 0;
                     }
                     Err(error) => {
-                        surface.search_state.error = Some(error.to_string().into());
+                        surface.search_state.error = Some(error.text(i18n::locale(cx)));
                     }
                 }
                 surface.search_list.reset_with_uniform_height(
@@ -429,7 +432,7 @@ impl FilesSurface {
                     Err(error) => {
                         let _ = this.update(cx, |surface, cx| {
                             if surface.tree.generation() == generation {
-                                surface.search_state.error = Some(error.to_string().into());
+                                surface.search_state.error = Some(error.text(i18n::locale(cx)));
                                 cx.notify();
                             }
                         });
@@ -465,21 +468,25 @@ impl FilesSurface {
 
     pub(super) fn render_search_results(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         if let Some(error) = self.search_state.error.clone() {
             return centered_search_message(error, theme.danger.opacity(0.82));
         }
         if self.search_state.results.is_empty() {
-            let label = if self.search_state.loading {
-                "Searching…"
-            } else {
-                "No files found."
-            };
+            let label = i18n::translate(
+                if self.search_state.loading {
+                    MessageId::FilesSearching
+                } else {
+                    MessageId::FilesNoFilesFound
+                },
+                locale,
+            );
             return centered_search_message(label.into(), theme.text_faint);
         }
         div()
             .id("files-search-results")
             .role(gpui::Role::Tree)
-            .aria_label("Fuzzy workspace file results")
+            .aria_label(i18n::translate(MessageId::FilesSearchResultsLabel, locale))
             .flex_1()
             .min_h_0()
             .flex()
@@ -497,7 +504,12 @@ impl FilesSurface {
                             .font_family(theme.font_sans.clone())
                             .text_size(px(10.0))
                             .text_color(theme.text_faint)
-                            .child("Showing the first 200 matches"),
+                            .child(i18n::fill(
+                                MessageId::FilesSearchLimit,
+                                "{n}",
+                                &SEARCH_RESULT_LIMIT.to_string(),
+                                locale,
+                            )),
                     )
                 },
             )

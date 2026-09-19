@@ -3,7 +3,11 @@ use super::{
     links::*,
     render::{LinkUi, activate_link, range_rects},
 };
-use crate::{icons, popover, theme::Theme};
+use crate::{
+    i18n::{self, MessageId},
+    icons, popover,
+    theme::Theme,
+};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ClickEvent, DispatchPhase, Element, ElementId,
     FocusHandle, GlobalElementId, InspectorElementId, LayoutId, MouseButton, Pixels, Point, Role,
@@ -272,6 +276,7 @@ impl Element for LinkRanges {
             }
             if let Some((index, position)) = *state.menu.borrow() {
                 let theme = theme.for_popup();
+                let locale = i18n::locale(cx);
                 let menu = state.menu.clone();
                 let dismiss_menu = state.menu.clone();
                 let return_focus = state.focus[index].clone();
@@ -328,18 +333,30 @@ impl Element for LinkRanges {
                         menu.borrow_mut().take();
                         window.refresh();
                     });
-                for (action_ix, (action, label, icon)) in [
-                    (LinkAction::Internal, "Open in Zeron", icons::GLOBE),
+                for (action_ix, (action, element_id, label, icon)) in [
+                    (
+                        LinkAction::Internal,
+                        "Open in Zeron",
+                        MessageId::MarkdownOpenInZeron,
+                        icons::GLOBE,
+                    ),
                     (
                         LinkAction::External,
                         "Open in external browser",
+                        MessageId::MarkdownOpenInExternalBrowser,
                         icons::ARROW_UP_RIGHT,
                     ),
-                    (LinkAction::Copy, "Copy link address", icons::COPY),
+                    (
+                        LinkAction::Copy,
+                        "Copy link address",
+                        MessageId::MarkdownCopyLinkAddress,
+                        icons::COPY,
+                    ),
                 ]
                 .into_iter()
                 .enumerate()
                 {
+                    let label = i18n::translate(label, locale);
                     let target = state.targets[index].clone();
                     let ui = self.ui.clone();
                     let menu = state.menu.clone();
@@ -350,7 +367,7 @@ impl Element for LinkRanges {
                             false,
                             format!("{}-link-{index}-action-{action_ix}", self.id),
                         )
-                        .id(label)
+                        .id(element_id)
                         .child(icons::icon(icon).size(px(16.)).text_color(theme.text_muted))
                         .child(label)
                         .track_focus(&state.menu_focus[action_ix])
@@ -383,14 +400,17 @@ impl Element for LinkRanges {
                                 .text_color(theme.text_muted),
                         )
                     }))
-                    .child("Open links in Zeron")
+                    .child(i18n::translate(MessageId::MarkdownOpenLinksInZeron, locale))
                     .track_focus(&state.menu_focus[3])
                     .role(Role::Button)
-                    .aria_label(if open_in_zeron {
-                        "Open links in Zeron, checked"
-                    } else {
-                        "Open links in Zeron, unchecked"
-                    })
+                    .aria_label(i18n::translate(
+                        if open_in_zeron {
+                            MessageId::MarkdownOpenLinksInZeronChecked
+                        } else {
+                            MessageId::MarkdownOpenLinksInZeronUnchecked
+                        },
+                        locale,
+                    ))
                     .focus_visible(|s| s.bg(crate::theme::card_selected_bg()))
                     .on_click(move |_, window, cx| {
                         crate::settings::update(

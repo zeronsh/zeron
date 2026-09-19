@@ -26,6 +26,7 @@ use gpui::{
 use zeron_proto::{TerminalEvent, TerminalSession};
 use zeron_rpc::methods;
 
+use crate::i18n::{self, MessageId};
 use crate::motion::{self, AnimationExt as _, TAB_SLIDE};
 use crate::popover::{MenuScrollbarMetrics, MenuScrollbarState, ScrollRailHost};
 use crate::settings::{TERMINAL_MAX_VH, TERMINAL_MIN_HEIGHT};
@@ -564,7 +565,13 @@ impl TerminalPanel {
         let tab_no = entry.tabs.len() + 1;
         entry.tabs.push(TerminalTab {
             key,
-            title: format!("Terminal {tab_no}").into(),
+            title: i18n::fill(
+                MessageId::TerminalTabTitle,
+                "{n}",
+                &tab_no.to_string(),
+                i18n::locale(cx),
+            )
+            .into(),
             terminal_id: None,
             emulator: Emulator::new(80, 24),
             exited: None,
@@ -1657,7 +1664,10 @@ impl Render for TerminalPanel {
                 .justify_center()
                 .text_size(px(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from("Select a chat to open a terminal"))
+                .child(i18n::translate(
+                    MessageId::TerminalSelectChat,
+                    i18n::locale(cx),
+                ))
                 .into_any_element();
         };
         if std::mem::take(&mut self.focus_pending) && self.open {

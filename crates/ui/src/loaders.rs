@@ -13,6 +13,7 @@ use gpui::{
     PathBuilder, Render, RenderOnce, SharedString, Styled, Window, canvas, div, point, px,
 };
 
+use crate::i18n::{self, MessageId};
 use crate::motion::{self, GRADIENT_SPIN, PULSE_STAGGER, SPLASH_OUT, ZERON_PULSE};
 use crate::theme::{GlyphPalette, Theme};
 
@@ -365,7 +366,10 @@ pub fn splash_overlay(theme: &Theme, fading: bool, view: EntityId, cx: &mut App)
             div()
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted.opacity(0.7))
-                .child(SharedString::from("Setting up Zeron environment")),
+                .child(i18n::translate(
+                    MessageId::LoadersBootSplash,
+                    i18n::locale(cx),
+                )),
         );
     if fading {
         motion::splash_out("boot-splash-out", content).into_any_element()

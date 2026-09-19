@@ -14,11 +14,27 @@ pub(super) struct PendingSidebarPins {
     pub unconfirmed: bool,
 }
 
+/// A pin write failure. Copy this crate authors stays a key until the notice is
+/// stored, and an engine or transport payload is shown as it arrived.
+pub(super) enum PinWriteFailure {
+    Copy(MessageId),
+    Detail(String),
+}
+
+impl PinWriteFailure {
+    fn text(self, locale: Locale) -> SharedString {
+        match self {
+            Self::Copy(id) => SharedString::from(i18n::translate(id, locale)),
+            Self::Detail(detail) => SharedString::from(detail),
+        }
+    }
+}
+
 pub(super) fn preferences_reply(
     value: serde_json::Value,
-) -> Result<SidebarPreferencesState, String> {
+) -> Result<SidebarPreferencesState, PinWriteFailure> {
     serde_json::from_value(value.get("sidebarPreferences").cloned().unwrap_or_default())
-        .map_err(|_| "The engine did not confirm the saved pins".into())
+        .map_err(|_| PinWriteFailure::Copy(MessageId::SidebarPinsNotConfirmed))
 }
 
 impl Shell {
@@ -78,15 +94,19 @@ impl Shell {
     ) -> bool {
         self.discard_stale_sidebar_pin_writes(cx);
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.set_pin_write_notice("Engine not connected. Pins were not changed.".into());
+            self.set_pin_write_notice(SharedString::from(i18n::translate(
+                MessageId::SidebarPinsEngineOffline,
+                i18n::locale(cx),
+            )));
             cx.notify();
             return false;
         };
         if let Some(pending) = &mut self.sidebar_pin_write {
             if pending.unconfirmed {
-                self.set_pin_write_notice(
-                    "Waiting for the engine to confirm the previous pin change.".into(),
-                );
+                self.set_pin_write_notice(SharedString::from(i18n::translate(
+                    MessageId::SidebarPinsAwaitingConfirmation,
+                    i18n::locale(cx),
+                )));
                 cx.notify();
                 return false;
             }
@@ -118,7 +138,7 @@ impl Shell {
                 let result =
                     match futures::future::select(Box::pin(request), Box::pin(deadline)).await {
                         futures::future::Either::Left((result, _)) => result
-                            .map_err(|error| error.to_string())
+                            .map_err(|error| PinWriteFailure::Detail(error.to_string()))
                             .and_then(preferences_reply),
                         futures::future::Either::Right((_, request)) => {
                             // The old request may still run. Do not send a later
@@ -129,7 +149,7 @@ impl Shell {
                             // drop may overtake it until it resolves or disconnects.
                             request
                                 .await
-                                .map_err(|error| error.to_string())
+                                .map_err(|error| PinWriteFailure::Detail(error.to_string()))
                                 .and_then(preferences_reply)
                         }
                     };
@@ -151,7 +171,7 @@ impl Shell {
     pub(super) fn finish_sidebar_pin_write(
         &mut self,
         id: u64,
-        result: Result<SidebarPreferencesState, String>,
+        result: Result<SidebarPreferencesState, PinWriteFailure>,
         cx: &mut Context<Self>,
     ) -> Option<SidebarPinChange> {
         self.discard_stale_sidebar_pin_writes(cx);
@@ -171,8 +191,17 @@ impl Shell {
                     }
                 });
             }
-            Err(error) => {
-                self.set_pin_write_notice(format!("Couldn't save pins: {error}").into());
+            Err(failure) => {
+                let locale = i18n::locale(cx);
+                self.set_pin_write_notice(
+                    i18n::fill(
+                        MessageId::SidebarPinsSaveFailed,
+                        "{error}",
+                        &failure.text(locale),
+                        locale,
+                    )
+                    .into(),
+                );
             }
         }
         let pending = self.sidebar_pin_write.as_mut().unwrap();
@@ -197,7 +226,10 @@ impl Shell {
             let pending = self.sidebar_pin_write.as_mut().unwrap();
             pending.queue.clear();
             pending.unconfirmed = true;
-            self.set_pin_write_notice("Couldn't confirm pins. Queued edits were cancelled; waiting for the engine before allowing more pin changes.".into());
+            self.set_pin_write_notice(SharedString::from(i18n::translate(
+                MessageId::SidebarPinsUnconfirmed,
+                i18n::locale(cx),
+            )));
             cx.notify();
         }
     }

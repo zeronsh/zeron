@@ -33,6 +33,7 @@ use zeron_rpc::{RpcError, methods};
 
 use crate::appshots::{self, CapturedAppshot};
 use crate::attachments::{self, StagedAttachment};
+use crate::i18n::{self, Locale, MessageId};
 use crate::motion;
 use crate::notice::{NoticeChipIcon, notice_chip};
 use crate::pickers::Pickers;
@@ -3974,27 +3975,47 @@ fn mention_response_is_current(state: &FileMentionState, request: u64) -> bool {
 /// version-skew case: `SearchFiles` shipped after v0.1.9, so a session hosted
 /// by a device on an older daemon answers "unknown method" while the same
 /// search works for local sessions.
-fn mention_error_message(err: &RpcError) -> SharedString {
+fn mention_error_message(err: &RpcError, locale: Locale) -> SharedString {
     match err {
         RpcError::UnknownMethod(_) => {
-            "The session's device runs an older zeron — update it to search its files".into()
+            i18n::translate(MessageId::ComposerFileMentionOlderDevice, locale)
         }
-        RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
-        RpcError::BadParams(_) | RpcError::Failed(_) => "File search failed".into(),
+        RpcError::Transport(_) | RpcError::Closed => {
+            i18n::translate(MessageId::ComposerDeviceUnreachable, locale)
+        }
+        RpcError::BadParams(_) | RpcError::Failed(_) => {
+            i18n::translate(MessageId::ComposerFileMentionFailed, locale)
+        }
     }
+    .into()
 }
 
 /// A failed command discovery, translated for the popup.
-fn slash_error_message(err: &RpcError) -> SharedString {
+fn slash_error_message(err: &RpcError, locale: Locale) -> SharedString {
     match err {
-        RpcError::UnknownMethod(_) => {
-            "The session's device runs an older zeron — update it to list commands".into()
+        RpcError::UnknownMethod(_) => i18n::translate(MessageId::ComposerSlashOlderDevice, locale),
+        RpcError::Transport(_) | RpcError::Closed => {
+            i18n::translate(MessageId::ComposerDeviceUnreachable, locale)
         }
-        RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
         RpcError::BadParams(_) | RpcError::Failed(_) => {
-            "Couldn't load this agent's commands".into()
+            i18n::translate(MessageId::ComposerSlashFailed, locale)
         }
     }
+    .into()
+}
+
+/// The severity label for the composer's failure notice, from the message
+/// table. `warning` is the recorded severity; the label must never be derived
+/// from the message copy, which changes with the locale.
+fn failure_notice_label(warning: bool, locale: Locale) -> &'static str {
+    i18n::translate(
+        if warning {
+            MessageId::ComposerNoticeWarning
+        } else {
+            MessageId::ComposerNoticeError
+        },
+        locale,
+    )
 }
 
 pub struct Composer {
@@ -4047,6 +4068,11 @@ pub struct Composer {
     /// session navigation, which must continue to snap.
     launching_new_chat: bool,
     pub(crate) failure: Option<SharedString>,
+    /// Severity of the `failure` notice: true renders the amber "Warning"
+    /// chip, false the red "Error" one. Recorded explicitly because the chip
+    /// label comes from the message table and must not be compared against
+    /// display copy (that broke under translation).
+    failure_warning: bool,
     /// The chat key `failure` belongs to (`None` = global, e.g. "Engine not
     /// connected"). Chat-scoped failures survive navigation and render only
     /// under their own chat — a blanket clear-on-switch erased the one
@@ -4206,8 +4232,11 @@ impl Composer {
         cx.on_release(|this, cx| this.release_queue_previews(cx))
             .detach();
         let input = cx.new(|cx| {
-            let mut input =
-                ComposerInput::with_context("Do anything…", MESSAGE_COMPOSER_CONTEXT, cx);
+            let mut input = ComposerInput::with_context(
+                i18n::translate(MessageId::ComposerPlaceholder, i18n::locale(cx)),
+                MESSAGE_COMPOSER_CONTEXT,
+                cx,
+            );
             input.enable_mentions();
             input
         });
@@ -4290,6 +4319,7 @@ impl Composer {
             sending: false,
             launching_new_chat: false,
             failure: None,
+            failure_warning: false,
             wizard: None,
             wizard_focus: cx.focus_handle(),
             answered_requests: HashSet::new(),
@@ -4351,7 +4381,10 @@ impl Composer {
                 .split(',')
                 .filter(|s| !s.trim().is_empty())
                 .filter_map(|path| {
-                    match attachments::stage_file(std::path::Path::new(path.trim())) {
+                    match attachments::stage_file(
+                        std::path::Path::new(path.trim()),
+                        i18n::locale(cx),
+                    ) {
                         Ok(att) => Some(att),
                         Err(err) => {
                             tracing::warn!(%path, error = %err, "ZERON_ATTACH stage failed");
@@ -4463,8 +4496,9 @@ impl Composer {
         if incoming > attachments::MAX_ATTACHMENT_BYTES
             || staged_bytes.saturating_add(incoming) > appshots::MAX_STAGED_APPSHOT_BYTES
         {
-            self.failure = Some(
-                "Remove an Appshot before adding another (96 MB staged Appshot limit).".into(),
+            self.set_failure(
+                i18n::translate(MessageId::ComposerAppshotLimit, i18n::locale(cx)),
+                false,
             );
             self.failure_key = Some(key);
             cx.notify();
@@ -4487,14 +4521,28 @@ impl Composer {
         } else {
             self.appshots.entry(key).or_default().push(appshot);
         }
-        self.failure = None;
+        self.clear_failure();
         self.failure_key = None;
         cx.notify();
         true
     }
 
-    pub fn show_appshot_error(&mut self, message: String, cx: &mut Context<Self>) {
+    /// Record a failure notice. `warning` selects the amber "Warning" chip
+    /// over the red "Error" one; the caller knows the severity, so it is never
+    /// inferred from the (translated) message copy.
+    pub(crate) fn set_failure(&mut self, message: impl Into<SharedString>, warning: bool) {
         self.failure = Some(message.into());
+        self.failure_warning = warning;
+    }
+
+    /// Drop the failure notice and its recorded severity.
+    fn clear_failure(&mut self) {
+        self.failure = None;
+        self.failure_warning = false;
+    }
+
+    pub fn show_appshot_error(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.set_failure(message, false);
         self.failure_key = Some(self.current_key.clone());
         cx.notify();
     }
@@ -4523,10 +4571,10 @@ impl Composer {
             if attachments::format_by_extension(path).is_none() {
                 continue;
             }
-            match attachments::stage_file(path) {
+            match attachments::stage_file(path, i18n::locale(cx)) {
                 Ok(att) => staged.push(att),
                 Err(message) => {
-                    self.failure = Some(message.into());
+                    self.set_failure(message, false);
                     self.failure_key = Some(self.current_key.clone());
                     cx.notify();
                 }
@@ -4636,12 +4684,13 @@ impl Composer {
                     "composer-comments",
                     &crate::badges::MessageBadge {
                         icon: crate::icons::CHAT_ROUND_LINE,
-                        label: crate::comments::chip_label(count).into(),
+                        label: crate::badges::BadgeLabel::Comments(count),
                         // The staged set is already on screen in the changes
                         // pane, so a hover card would only repeat it.
                         details: Vec::new(),
                     },
                     theme,
+                    i18n::locale(cx),
                 )),
         )
     }
@@ -4785,8 +4834,21 @@ impl Composer {
                 .map(str::to_owned)
                 .unwrap_or_else(|| appshot.app_name.clone())
                 .into();
-            let preview_label: SharedString = format!("Preview {source}").into();
-            let remove_label: SharedString = format!("Remove {source}").into();
+            let locale = i18n::locale(cx);
+            let preview_label: SharedString = i18n::fill(
+                MessageId::ComposerAppshotPreview,
+                "{source}",
+                source.as_ref(),
+                locale,
+            )
+            .into();
+            let remove_label: SharedString = i18n::fill(
+                MessageId::ComposerAppshotRemove,
+                "{source}",
+                source.as_ref(),
+                locale,
+            )
+            .into();
             let preview_aria = preview_label.clone();
             let remove_aria = remove_label.clone();
             let (image_width, image_height) =
@@ -4978,7 +5040,7 @@ impl Composer {
             files: true,
             directories: false,
             multiple: true,
-            prompt: Some("Attach".into()),
+            prompt: Some(i18n::translate(MessageId::ComposerAttach, i18n::locale(cx)).into()),
         });
         self.picker_task = Some(cx.spawn(async move |this, cx| {
             let result = rx.await;
@@ -5156,7 +5218,8 @@ impl Composer {
                         tracing::warn!(%err, "file mention search failed");
                         composer.mention.results.clear();
                         composer.mention.active = None;
-                        composer.mention.error = Some(mention_error_message(&err));
+                        composer.mention.error =
+                            Some(mention_error_message(&err, i18n::locale(cx)));
                     }
                 }
                 composer.sync_mention_controls(cx);
@@ -5253,11 +5316,14 @@ impl Composer {
                     .py(px(10.0))
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
-                    .child(if token.query.is_empty() {
-                        "No files available"
-                    } else {
-                        "No matching files"
-                    }),
+                    .child(i18n::translate(
+                        if token.query.is_empty() {
+                            MessageId::ComposerFileMentionNoFiles
+                        } else {
+                            MessageId::ComposerFileMentionNoMatches
+                        },
+                        i18n::locale(cx),
+                    )),
             );
         } else {
             let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(self.mention.results.len());
@@ -5430,7 +5496,7 @@ impl Composer {
                     },
                     Err(err) => {
                         tracing::debug!(%err, "slash command discovery failed");
-                        composer.slash.error = Some(slash_error_message(&err));
+                        composer.slash.error = Some(slash_error_message(&err, i18n::locale(cx)));
                     }
                 }
                 composer.refilter_slash(cx);
@@ -5575,11 +5641,14 @@ impl Composer {
                     .py(px(10.0))
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
-                    .child(if commands.is_empty() {
-                        "This agent has no slash commands"
-                    } else {
-                        "No matching commands"
-                    }),
+                    .child(i18n::translate(
+                        if commands.is_empty() {
+                            MessageId::ComposerSlashNoCommands
+                        } else {
+                            MessageId::ComposerSlashNoMatches
+                        },
+                        i18n::locale(cx),
+                    )),
             );
         } else {
             let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(self.slash.filtered.len());
@@ -5725,8 +5794,10 @@ impl Composer {
             self.clear_queue_edit(cx);
         } else if !edited_row_exists && self.editing_queued.is_some() && !self.queue_edit_finishing
         {
-            self.failure =
-                Some("The queued message was removed; your edit remains in the composer".into());
+            self.set_failure(
+                i18n::translate(MessageId::ComposerQueuedMessageRemoved, i18n::locale(cx)),
+                false,
+            );
             // Recover both drafts when another device removes the reserved row.
             if let Some((draft, mut attachments, mut appshots)) = self.queue_edit_draft.take() {
                 appshots.extend(self.appshots.remove(&self.current_key).unwrap_or_default());
@@ -5820,7 +5891,13 @@ impl Composer {
                     self.advance_task = None;
                     // The shared input becomes the panel's free-text override.
                     self.input.update(cx, |input, cx| {
-                        input.set_placeholder("Type your own answer, or pick an option above", cx)
+                        input.set_placeholder(
+                            i18n::translate(
+                                MessageId::ComposerQuestionPlaceholderPick,
+                                i18n::locale(cx),
+                            ),
+                            cx,
+                        )
                     });
                 }
             }
@@ -5842,8 +5919,12 @@ impl Composer {
                     if released {
                         self.wizard = None;
                         self.advance_task = None;
-                        self.input
-                            .update(cx, |input, cx| input.set_placeholder("Do anything…", cx));
+                        self.input.update(cx, |input, cx| {
+                            input.set_placeholder(
+                                i18n::translate(MessageId::ComposerPlaceholder, i18n::locale(cx)),
+                                cx,
+                            )
+                        });
                     }
                 }
             }
@@ -5956,7 +6037,10 @@ impl Composer {
     /// reasoning / options on the Run request itself (§1.7).
     fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.failure = Some("Engine not connected".into());
+            self.set_failure(
+                i18n::translate(MessageId::ErrorEngineNotConnected, i18n::locale(cx)),
+                true,
+            );
             self.failure_key = None; // global — meaningful on every chat
             cx.notify();
             return;
@@ -6021,8 +6105,10 @@ impl Composer {
             if !engine.engine_info().supports(capability)
                 || !self.state.read(cx).chat_host_supports(&chat_id, capability)
             {
-                self.failure =
-                    Some("Update the chat's engine to queue messages during a response.".into());
+                self.set_failure(
+                    i18n::translate(MessageId::ComposerQueueUnsupported, i18n::locale(cx)),
+                    false,
+                );
                 cx.notify();
                 return;
             }
@@ -6202,7 +6288,7 @@ impl Composer {
 
         self.input.update(cx, |input, cx| input.set_text("", cx));
         self.drafts.remove(&self.current_key);
-        self.failure = None;
+        self.clear_failure();
         self.sending = true;
         // A queued row is represented by the queue panel, not the transcript.
         // Claiming an own-turn anchor for it here would replace the live
@@ -6218,6 +6304,9 @@ impl Composer {
         let restore_text = typed;
         let err_chat_id = chat_id.clone();
         let err_message_id = message_id.clone();
+        // Read before the spawn: the failure copy inside must match the locale
+        // the user saw when they hit send.
+        let locale = i18n::locale(cx);
         self.send_task = Some(cx.spawn(async move |this, cx| {
             let result: Result<Option<String>, String> = async {
                 // Attachments stage FIRST — before the chat row or anything
@@ -6265,7 +6354,10 @@ impl Composer {
                         .await
                         {
                             tracing::warn!(name = %att.name, error = %err, "local attachment stage failed");
-                            return Err("Couldn't stage the attachment locally.".to_string());
+                            return Err(
+                                i18n::translate(MessageId::ComposerStageAttachmentFailed, locale)
+                                    .to_string(),
+                            );
                         }
                         transfers.push(serde_json::json!({
                             "uploadId": upload_id,
@@ -6302,10 +6394,11 @@ impl Composer {
                             Ok(path) => attachment_paths.push(path),
                             Err(err) => {
                                 tracing::warn!(name = %att.name, error = %err, "attachment upload failed");
-                                return Err(
-                                    "Couldn't upload the attachment — the device may be offline."
-                                        .to_string(),
-                                );
+                                return Err(i18n::translate(
+                                    MessageId::ComposerUploadAttachmentFailed,
+                                    locale,
+                                )
+                                .to_string());
                             }
                         }
                     }
@@ -6502,12 +6595,15 @@ impl Composer {
                         .client()
                         .call(methods::QUEUE_MESSAGE, params)
                         .await
-                        .map_err(|e| format!("Send failed: {e}"))?;
+                        .map_err(|e| i18n::fill(MessageId::ComposerSendFailed, "{e}", &e.to_string(), locale))?;
                     let queue_id = reply
                         .get("id")
                         .and_then(serde_json::Value::as_str)
                         .filter(|id| !id.is_empty())
-                        .ok_or_else(|| "Send failed: queue did not return an id".to_string())?;
+                        .ok_or_else(|| {
+                            i18n::translate(MessageId::ComposerSendFailedNoQueueId, locale)
+                                .to_string()
+                        })?;
                     return Ok(Some(queue_id.to_string()));
                 }
 
@@ -6528,7 +6624,7 @@ impl Composer {
                     message_id: message_id.clone(),
                 };
                 let command = serde_json::to_value(&command)
-                    .map_err(|e| format!("Send failed: {e}"))?;
+                    .map_err(|e| i18n::fill(MessageId::ComposerSendFailed, "{e}", &e.to_string(), locale))?;
                 let mut params = serde_json::json!({ "chatId": chat_id, "command": command });
                 if !transfers.is_empty() {
                     params["transfers"] = serde_json::Value::Array(transfers);
@@ -6544,7 +6640,7 @@ impl Composer {
                     std::time::Duration::from_secs(30),
                 )
                 .await
-                .map_err(|e| format!("Send failed: {e}"))?;
+                .map_err(|e| i18n::fill(MessageId::ComposerSendFailed, "{e}", &e.to_string(), locale))?;
                 Ok(None)
             }
             .await;
@@ -6586,7 +6682,7 @@ impl Composer {
                     } else {
                         err_chat_id.clone()
                     };
-                    composer.failure = Some(message.into());
+                    composer.set_failure(message, false);
                     composer.failure_key = Some(restore_key.clone());
                     composer.state.update(cx, |s, cx| {
                         s.remove_echo(&err_chat_id, &err_message_id);
@@ -6661,7 +6757,15 @@ impl Composer {
             if let Err(err) = result {
                 this.update(cx, |composer, cx| {
                     composer.interrupting.remove(&task_chat_id);
-                    composer.failure = Some(format!("Stop failed: {err}").into());
+                    composer.set_failure(
+                        i18n::fill(
+                            MessageId::ComposerStopFailed,
+                            "{err}",
+                            &err.to_string(),
+                            i18n::locale(cx),
+                        ),
+                        false,
+                    );
                     composer.failure_key = Some(failure_chat);
                     cx.notify();
                 })
@@ -6685,11 +6789,14 @@ impl Composer {
         let has_pick = wizard.page_has_pick();
         self.input.update(cx, |input, cx| {
             input.set_placeholder(
-                if has_pick {
-                    "Type your own answer, or leave this blank to use the selected option"
-                } else {
-                    "Type your own answer, or pick an option above"
-                },
+                i18n::translate(
+                    if has_pick {
+                        MessageId::ComposerQuestionPlaceholderBlank
+                    } else {
+                        MessageId::ComposerQuestionPlaceholderPick
+                    },
+                    i18n::locale(cx),
+                ),
                 cx,
             )
         });
@@ -6742,7 +6849,10 @@ impl Composer {
         self.input.update(cx, |input, cx| {
             input.set_text("", cx);
             // The panel borrowed the composer input; hand back its identity.
-            input.set_placeholder("Do anything…", cx);
+            input.set_placeholder(
+                i18n::translate(MessageId::ComposerPlaceholder, i18n::locale(cx)),
+                cx,
+            );
             input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
         });
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -6766,7 +6876,15 @@ impl Composer {
             let result = engine.client().call(methods::QUEUE_COMMAND, params).await;
             if let Err(err) = result {
                 this.update(cx, |composer, cx| {
-                    composer.failure = Some(format!("Answer failed: {err}").into());
+                    composer.set_failure(
+                        i18n::fill(
+                            MessageId::ComposerAnswerFailed,
+                            "{err}",
+                            &err.to_string(),
+                            i18n::locale(cx),
+                        ),
+                        false,
+                    );
                     composer.failure_key = Some(failure_chat);
                     // The answer never left this device — put the panel back.
                     composer.answered_requests.remove(&request_id);
@@ -6986,7 +7104,10 @@ impl Composer {
                                 .mt(px(4.0))
                                 .text_size(crate::typography::ui_rems(12.0))
                                 .text_color(theme.text_muted.opacity(0.65))
-                                .child(SharedString::from("Select one or more options.")),
+                                .child(i18n::translate(
+                                    MessageId::ComposerQuestionMultiSelect,
+                                    i18n::locale(cx),
+                                )),
                         )
                     })
                     .child(
@@ -7020,19 +7141,33 @@ impl Composer {
                     .pb(px(16.0))
                     .pt(px(4.0))
                     .child(if page > 0 {
-                        crate::popover::btn_ghost(&theme, "Back", "wizard-back")
-                            .id("wizard-back")
-                            .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
-                            .into_any_element()
+                        crate::popover::btn_ghost(
+                            &theme,
+                            i18n::translate(MessageId::CommonBack, i18n::locale(cx)),
+                            "wizard-back",
+                        )
+                        .id("wizard-back")
+                        .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
+                        .into_any_element()
                     } else {
                         gpui::Empty.into_any_element()
                     })
                     .child(
-                        crate::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
-                            .id("wizard-submit")
-                            .px(px(16.0))
-                            .when(!can_advance, |el| el.opacity(0.4))
-                            .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
+                        crate::popover::btn_primary(
+                            &theme,
+                            i18n::translate(
+                                if last {
+                                    MessageId::ComposerWizardSubmit
+                                } else {
+                                    MessageId::ComposerWizardNext
+                                },
+                                i18n::locale(cx),
+                            ),
+                        )
+                        .id("wizard-submit")
+                        .px(px(16.0))
+                        .when(!can_advance, |el| el.opacity(0.4))
+                        .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
                     ),
             )
             .into_any_element()
@@ -7120,6 +7255,7 @@ impl Render for Composer {
             window.focus(&focus, cx);
         }
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let wizard_active = self.wizard.is_some();
         if self.mention.token.is_some()
             && (wizard_active || !self.input.focus_handle(cx).is_focused(window))
@@ -7261,6 +7397,7 @@ impl Render for Composer {
                 .as_ref()
                 .is_none_or(|key| *key == self.current_key)
         });
+        let failure_warning = self.failure_warning;
         // Composer honesty: when the target's delivery path is degraded, say
         // UP FRONT that a send will queue (a durable local write delivered on
         // reconnect) instead of letting the button imply instant delivery.
@@ -7284,9 +7421,9 @@ impl Render for Composer {
             let offline = state.connectivity.state == S::Offline;
             degraded.then(|| {
                 let text: SharedString = if offline {
-                    "Offline — messages will send when you're back online.".into()
+                    i18n::translate(MessageId::ComposerSendWhenOnline, locale).into()
                 } else {
-                    "Messages will send once the connection recovers.".into()
+                    i18n::translate(MessageId::ComposerSendWhenReconnected, locale).into()
                 };
                 (text, offline)
             })
@@ -7302,15 +7439,15 @@ impl Render for Composer {
             .px(px(Theme::SPACE_LG))
             .pb(px(Theme::SPACE_LG))
             .when_some(failure, |el, message| {
-                // Amber with "Warning" for the offline-ish case (engine not
-                // connected), red with "Error" for send/run failures. Click
+                // Amber "Warning" for the offline-ish case (engine not
+                // connected), red "Error" for send/run failures. The severity
+                // is the recorded flag, never the translated copy. Click
                 // dismisses.
-                let offline = message.as_ref() == "Engine not connected";
                 el.child(
                     notice_chip(
                         &theme,
-                        offline,
-                        if offline { "Warning" } else { "Error" },
+                        failure_warning,
+                        failure_notice_label(failure_warning, locale),
                         message,
                         NoticeChipIcon::Plain,
                     )
@@ -7319,7 +7456,7 @@ impl Render for Composer {
                     .mt(px(6.0))
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.failure = None;
+                        this.clear_failure();
                         this.failure_key = None;
                         cx.notify();
                     })),
@@ -8291,13 +8428,51 @@ mod tests {
             composer.on_submit(cx);
             // With no engine attached, reaching the normal send error proves
             // Enter dispatched instead of silently stopping at the UI gate.
-            assert_eq!(composer.failure.as_deref(), Some("Engine not connected"));
+            assert_eq!(
+                composer.failure.as_deref(),
+                Some(i18n::translate(
+                    MessageId::ErrorEngineNotConnected,
+                    Locale::En
+                ))
+            );
+            assert!(
+                composer.failure_warning,
+                "a disconnected engine renders the amber Warning chip"
+            );
             composer.queue_edit_finishing = true;
             assert!(
                 composer.send_blocked(cx),
                 "Pending edits must still block submission"
             );
         });
+    }
+
+    /// The failure chip's severity comes from the recorded `failure_warning`
+    /// flag, never from the display copy — comparing the copy broke under
+    /// translation. Both locales must pick the Warning row for the same
+    /// disconnected-engine path.
+    #[gpui::test]
+    fn failure_severity_is_locale_independent(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        composer.update(cx, |composer, cx| {
+            composer.send("hello".to_string(), false, cx);
+            assert!(
+                composer.failure_warning,
+                "an unreachable engine is a warning"
+            );
+            assert_eq!(
+                composer.failure.as_deref(),
+                Some(i18n::translate(
+                    MessageId::ErrorEngineNotConnected,
+                    Locale::En
+                ))
+            );
+        });
+        assert_eq!(failure_notice_label(true, Locale::En), "Warning");
+        assert_eq!(failure_notice_label(true, Locale::ZhCn), "警告");
+        assert_eq!(failure_notice_label(false, Locale::En), "Error");
+        assert_eq!(failure_notice_label(false, Locale::ZhCn), "错误");
     }
 
     /// Issue #406: Enter submits — it must never stop a run. Stop mode only

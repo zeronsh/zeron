@@ -28,6 +28,7 @@ use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
 use crate::comments::ReviewComment;
+use crate::i18n::{self, Locale, MessageId};
 use zeron_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 use zeron_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
 use zeron_proto::{
@@ -579,6 +580,30 @@ pub use zeron_proto::view::{
     parse_auth_state, project_label, sort_active, sort_chats, sort_spaces, sort_tabs,
 };
 
+/// The locale-aware companion to [`format_time_ago`]: the same bucket, named by
+/// this crate's copy ("刚刚", "5 分钟"). Every row that shows a relative time
+/// renders this; the English-only form stays for the terminal viewport.
+pub fn time_ago_compact(then: DateTime<Utc>, now: DateTime<Utc>, locale: Locale) -> String {
+    i18n::compact_ago(zeron_proto::view::compact_age(then, now), locale)
+}
+
+/// The locale-aware companion to [`chat_location`]: the same two halves, with a
+/// chat that names no project labelled by this crate's copy ("无项目") instead of
+/// `zeron_proto`'s English. The engine writes `~` as the cwd when no directory
+/// was picked (`workspace_host.rs`), which is what reaches this branch.
+pub fn chat_location_in(chat: &Chat, locale: Locale) -> Option<String> {
+    let parts = zeron_proto::view::chat_location_parts(chat);
+    zeron_proto::view::location_line(
+        parts.project.map(|project| match project {
+            zeron_proto::view::ProjectName::Named(name) => name,
+            zeron_proto::view::ProjectName::Unset => {
+                i18n::translate(MessageId::PickerNoProject, locale).to_string()
+            }
+        }),
+        parts.reference,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Org gate (pure)
 // ---------------------------------------------------------------------------
@@ -661,7 +686,9 @@ pub struct AppState {
     pub devices: Vec<Device>,
     // Last published device presentation. Heartbeats refresh the underlying
     // timestamps without invalidating every view when no displayed value changed.
-    device_presentation: Option<Vec<(Device, bool, String)>>,
+    // The freshness bucket is language-neutral: the label is rendered from the
+    // current locale, so a language switch cannot leave a stale one here.
+    device_presentation: Option<Vec<(Device, bool, crate::settings::devices::LastSeen)>>,
     // Presence ticks also retire stale remote session indicators. Remember
     // their last published appearance even when the device rows stay online.
     session_presence_presentation: Vec<Indicator>,
@@ -1105,7 +1132,7 @@ impl AppState {
                 (
                     metadata,
                     crate::settings::devices::device_online(device.last_seen_at, now),
-                    crate::settings::devices::format_last_seen(device.last_seen_at, now),
+                    crate::settings::devices::last_seen_bucket(device.last_seen_at, now),
                 )
             })
             .collect();
@@ -1666,11 +1693,16 @@ impl AppState {
     /// the sidebar filter trigger, and the composer's space chip. Returns
     /// `(tag, offline)`; staleness renders as a disconnected GLYPH at the
     /// call sites (user request), never words in the tag.
-    pub fn space_device_tag(&self, space: &Space, now: DateTime<Utc>) -> (String, bool) {
+    pub fn space_device_tag(
+        &self,
+        space: &Space,
+        now: DateTime<Utc>,
+        locale: Locale,
+    ) -> (String, bool) {
         let offline = !self.device_online(&space.device_id, now);
         let device = self
             .device_name(&space.device_id)
-            .unwrap_or("Unknown device");
+            .unwrap_or_else(|| i18n::translate(MessageId::DeviceUnknown, locale));
         (format!("@ {device}"), offline)
     }
 
@@ -1987,7 +2019,9 @@ impl AppState {
                 self.pending_deep_link = Some(link);
                 self.apply_pending_deep_link(cx);
             }
-            Err(error) => self.deep_link_notice = Some(error.to_string()),
+            Err(error) => {
+                self.deep_link_notice = Some(i18n::translate(error, i18n::locale(cx)).to_string());
+            }
         }
         cx.notify();
     }
@@ -2005,8 +2039,10 @@ impl AppState {
         };
         if locator != link.workspace {
             self.pending_deep_link = None;
-            self.deep_link_notice =
-                Some("This conversation link belongs to another workspace".into());
+            self.deep_link_notice = Some(
+                i18n::translate(MessageId::StateDeepLinkOtherWorkspace, i18n::locale(cx))
+                    .to_string(),
+            );
             return;
         }
         if self.chats.iter().any(|chat| chat.id == link.chat_id) {
@@ -2014,7 +2050,9 @@ impl AppState {
             self.select_chat(Some(link.chat_id), cx);
         } else if self.chats_synced {
             self.pending_deep_link = None;
-            self.deep_link_notice = Some("The linked conversation was not found".into());
+            self.deep_link_notice = Some(
+                i18n::translate(MessageId::StateDeepLinkMissing, i18n::locale(cx)).to_string(),
+            );
         }
     }
 
@@ -4390,6 +4428,43 @@ mod tests {
     }
 
     #[test]
+    fn compact_times_read_in_both_locales() {
+        let now = Utc::now();
+        let ago = |secs: i64| now - chrono::Duration::seconds(secs);
+        // One bucket per row: minutes, hours, days, weeks, months, years.
+        let buckets = [
+            0,
+            59,
+            60,
+            60 * 60,
+            24 * 3600,
+            7 * 86400,
+            35 * 86400,
+            400 * 86400,
+        ];
+        for secs in buckets {
+            // English is `zeron_proto`'s own renderer, byte for byte — the
+            // terminal viewport shows that one.
+            assert_eq!(
+                time_ago_compact(ago(secs), now, Locale::En),
+                format_time_ago(ago(secs), now)
+            );
+        }
+        for (secs, chinese) in [
+            (0, "刚刚"),
+            (60, "1 分钟"),
+            (45 * 60, "45 分钟"),
+            (60 * 60, "1 小时"),
+            (24 * 3600, "1 天"),
+            (7 * 86400, "1 周"),
+            (35 * 86400, "1 个月"),
+            (400 * 86400, "1 年"),
+        ] {
+            assert_eq!(time_ago_compact(ago(secs), now, Locale::ZhCn), chinese);
+        }
+    }
+
+    #[test]
     fn chat_location_joins_project_and_branch() {
         let mut c = chat_with_cwd("x", 1, Some("/home/w/dev/soccertcg"));
         c.branch = Some("zeron/rebalance".into());
@@ -4406,6 +4481,42 @@ mod tests {
         assert_eq!(chat_location(&c), None);
         c.branch = None;
         assert_eq!(chat_location(&c), None);
+    }
+
+    #[test]
+    fn chat_location_reads_in_both_locales() {
+        let mut c = chat_with_cwd("x", 1, Some("/home/w/dev/soccertcg"));
+        c.branch = Some("main".into());
+        // English is `zeron_proto`'s own renderer, byte for byte.
+        assert_eq!(
+            chat_location_in(&c, Locale::En).as_deref(),
+            chat_location(&c).as_deref()
+        );
+        // A real basename is data: the same in both locales.
+        assert_eq!(
+            chat_location_in(&c, Locale::ZhCn).as_deref(),
+            Some("soccertcg · main")
+        );
+        // The engine writes `~` when no directory was picked, which the shared
+        // rule classifies as "no project" — copy, so it reads in the locale.
+        let mut home = chat_with_cwd("h", 1, Some("~"));
+        home.branch = Some("main".into());
+        assert_eq!(
+            chat_location_in(&home, Locale::ZhCn).as_deref(),
+            Some("无项目 · main")
+        );
+        assert_eq!(
+            chat_location_in(&home, Locale::En).as_deref(),
+            Some("No project · main")
+        );
+        // No cwd at all: the half is absent, so neither locale invents a label.
+        let mut bare = chat_with_cwd("b", 1, None);
+        bare.branch = Some("main".into());
+        assert_eq!(
+            chat_location_in(&bare, Locale::ZhCn).as_deref(),
+            Some("main")
+        );
+        assert_eq!(chat_location_in(&bare, Locale::ZhCn), chat_location(&bare));
     }
 
     #[test]

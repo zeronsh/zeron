@@ -3,6 +3,8 @@
 use sha2::{Digest, Sha256};
 use zeron_proto::{AuthState, Chat, HarnessId, WorkspaceScope};
 
+use crate::i18n::MessageId;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationDeepLink {
     pub chat_id: String,
@@ -11,7 +13,7 @@ pub struct ConversationDeepLink {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessConversationLink {
-    pub label: &'static str,
+    pub label: MessageId,
     pub url: String,
 }
 
@@ -49,18 +51,20 @@ pub fn zeron_conversation_link(chat_id: &str, workspace: &str) -> String {
     )
 }
 
-pub fn parse_zeron_conversation_link(url: &str) -> Result<ConversationDeepLink, &'static str> {
+pub fn parse_zeron_conversation_link(url: &str) -> Result<ConversationDeepLink, MessageId> {
     let rest = url
         .strip_prefix("zeron://open/chat/")
-        .ok_or("not a Zeron conversation link")?;
-    let (chat_id, query) = rest.split_once('?').ok_or("missing workspace locator")?;
+        .ok_or(MessageId::LinksNotConversationLink)?;
+    let (chat_id, query) = rest
+        .split_once('?')
+        .ok_or(MessageId::LinksMissingWorkspaceLocator)?;
     if chat_id.is_empty() || chat_id.contains('/') {
-        return Err("invalid conversation id");
+        return Err(MessageId::LinksInvalidConversationId);
     }
     let workspace = query
         .split('&')
         .find_map(|part| part.strip_prefix("workspace="))
-        .ok_or("missing workspace locator")?;
+        .ok_or(MessageId::LinksMissingWorkspaceLocator)?;
     Ok(ConversationDeepLink {
         chat_id: decode_component(chat_id)?,
         workspace: decode_component(workspace)?,
@@ -76,7 +80,7 @@ pub fn harness_conversation_link(chat: &Chat) -> Option<HarnessConversationLink>
         return None;
     }
     Some(HarnessConversationLink {
-        label: "Codex conversation link",
+        label: MessageId::ChatMenuHarnessLink,
         url: format!("codex://threads/{}", encode_component(id)),
     })
 }
@@ -94,7 +98,7 @@ fn encode_component(value: &str) -> String {
     out
 }
 
-fn decode_component(value: &str) -> Result<String, &'static str> {
+fn decode_component(value: &str) -> Result<String, MessageId> {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -102,16 +106,17 @@ fn decode_component(value: &str) -> Result<String, &'static str> {
         if bytes[index] == b'%' {
             let encoded = bytes
                 .get(index + 1..index + 3)
-                .ok_or("invalid URL escape")?;
-            let text = std::str::from_utf8(encoded).map_err(|_| "invalid URL escape")?;
-            out.push(u8::from_str_radix(text, 16).map_err(|_| "invalid URL escape")?);
+                .ok_or(MessageId::LinksInvalidUrlEscape)?;
+            let text =
+                std::str::from_utf8(encoded).map_err(|_| MessageId::LinksInvalidUrlEscape)?;
+            out.push(u8::from_str_radix(text, 16).map_err(|_| MessageId::LinksInvalidUrlEscape)?);
             index += 3;
         } else {
             out.push(bytes[index]);
             index += 1;
         }
     }
-    String::from_utf8(out).map_err(|_| "invalid UTF-8 in URL")
+    String::from_utf8(out).map_err(|_| MessageId::LinksInvalidUtf8)
 }
 
 #[cfg(test)]
@@ -160,9 +165,22 @@ mod tests {
 
     #[test]
     fn malformed_or_foreign_links_are_rejected() {
-        assert!(parse_zeron_conversation_link("https://example.com").is_err());
-        assert!(parse_zeron_conversation_link("zeron://open/chat/id").is_err());
-        assert!(parse_zeron_conversation_link("zeron://open/chat/%GG?workspace=x").is_err());
+        assert_eq!(
+            parse_zeron_conversation_link("https://example.com"),
+            Err(MessageId::LinksNotConversationLink)
+        );
+        assert_eq!(
+            parse_zeron_conversation_link("zeron://open/chat/id"),
+            Err(MessageId::LinksMissingWorkspaceLocator)
+        );
+        assert_eq!(
+            parse_zeron_conversation_link("zeron://open/chat/?workspace=x"),
+            Err(MessageId::LinksInvalidConversationId)
+        );
+        assert_eq!(
+            parse_zeron_conversation_link("zeron://open/chat/%GG?workspace=x"),
+            Err(MessageId::LinksInvalidUrlEscape)
+        );
     }
 
     #[test]
@@ -218,12 +236,9 @@ mod tests {
 
     #[test]
     fn codex_link_is_exact_and_unverified_harnesses_are_omitted() {
-        assert_eq!(
-            harness_conversation_link(&harness_chat(HarnessId::Codex))
-                .unwrap()
-                .url,
-            "codex://threads/thread%2Fone"
-        );
+        let link = harness_conversation_link(&harness_chat(HarnessId::Codex)).unwrap();
+        assert_eq!(link.url, "codex://threads/thread%2Fone");
+        assert_eq!(link.label, MessageId::ChatMenuHarnessLink);
         assert!(harness_conversation_link(&harness_chat(HarnessId::Hermes)).is_none());
     }
 }

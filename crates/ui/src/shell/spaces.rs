@@ -9,6 +9,7 @@
 //! Child module of `shell` so it renders straight off `Shell`'s private state.
 
 use super::*;
+use crate::i18n::{self, MessageId};
 use crate::pickers::{breadcrumbs, browser_rows, completion_prefix_len, parent_path};
 use gpui::{FocusHandle, Window};
 use std::collections::HashSet;
@@ -202,6 +203,7 @@ mod pinned_session_tests {
         pinned_session_clamped_index, pinned_session_drop_index, project_pinned_first,
         reorder_visible_pins, retain_known_pins,
     };
+    use crate::shell::sidebar_pins::PinWriteFailure;
     use std::collections::HashSet;
 
     fn ids(values: &[&str]) -> Vec<String> {
@@ -479,7 +481,11 @@ mod pinned_session_tests {
                 let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
                 assert!(!shell.apply_sidebar_pin_change(key, pin_change("third"), cx));
                 assert_eq!(
-                    shell.finish_sidebar_pin_write(id, Err("late error".into()), cx),
+                    shell.finish_sidebar_pin_write(
+                        id,
+                        Err(PinWriteFailure::Detail("late error".into())),
+                        cx
+                    ),
                     None
                 );
                 assert!(shell.sidebar_pin_write.is_none());
@@ -546,7 +552,11 @@ mod pinned_session_tests {
                     state.apply_sidebar_preferences(pin_snapshot(7, &["remote"]));
                 });
                 assert_eq!(
-                    shell.finish_sidebar_pin_write(write_id, Err("rejected".into()), cx),
+                    shell.finish_sidebar_pin_write(
+                        write_id,
+                        Err(PinWriteFailure::Detail("rejected".into())),
+                        cx
+                    ),
                     Some(pin_change("second"))
                 );
                 assert_eq!(
@@ -555,7 +565,11 @@ mod pinned_session_tests {
                     "an older failure must not roll back a newer drop"
                 );
                 assert_eq!(
-                    shell.finish_sidebar_pin_write(write_id, Err("rejected".into()), cx),
+                    shell.finish_sidebar_pin_write(
+                        write_id,
+                        Err(PinWriteFailure::Detail("rejected".into())),
+                        cx
+                    ),
                     None
                 );
                 assert_eq!(
@@ -599,7 +613,11 @@ mod pinned_session_tests {
                 assert_eq!(shell.active_sidebar_pins(cx), ids(&["saved"]));
                 shell.apply_sidebar_pin_change(key, pin_change("new-drop"), cx);
                 let second = shell.sidebar_pin_write.as_ref().unwrap().id;
-                shell.finish_sidebar_pin_write(first, Err("late failure".into()), cx);
+                shell.finish_sidebar_pin_write(
+                    first,
+                    Err(PinWriteFailure::Detail("late failure".into())),
+                    cx,
+                );
                 assert_eq!(shell.active_sidebar_pins(cx), ids(&["saved", "new-drop"]));
                 shell.state.update(cx, |state, _| {
                     state.apply_sidebar_preferences(pin_snapshot(8, &["newer-remote"]));
@@ -1865,7 +1883,10 @@ impl Render for SidebarViewOptionsTooltip {
             .shadow_md()
             .text_size(crate::typography::ui_rems(11.0))
             .text_color(theme.text)
-            .child("Sidebar view options")
+            .child(i18n::translate(
+                MessageId::SidebarViewOptions,
+                i18n::locale(cx),
+            ))
     }
 }
 
@@ -2877,8 +2898,13 @@ impl Shell {
         self.close_sidebar_view_menu(cx);
         // "PaletteSearch" context: ↑↓/⏎ stay unbound in the input and bubble
         // to the card's key handler.
-        let search =
-            cx.new(|cx| ComposerInput::with_context("Search projects…", "PaletteSearch", cx));
+        let search = cx.new(|cx| {
+            ComposerInput::with_context(
+                i18n::translate(MessageId::SpacesSearchProjects, i18n::locale(cx)),
+                "PaletteSearch",
+                cx,
+            )
+        });
         let search_events = cx.subscribe(&search, |this: &mut Shell, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 if let Some(menu) = this.spaces_menu.open_mut() {
@@ -3076,6 +3102,7 @@ impl Shell {
         let Some(menu_state) = self.sidebar_view_menu.get() else {
             return div().into_any_element();
         };
+        let locale = i18n::locale(cx);
         let active = menu_state.active;
         let focus = menu_state.focus.clone();
         let organization = self.settings.sidebar_organization;
@@ -3085,17 +3112,17 @@ impl Shell {
         let show_pr = self.settings.sidebar_show_pull_request;
 
         let labels = [
-            "By device",
-            "By project",
-            "In one list",
-            "Last updated",
-            "Created",
-            "Branch",
-            "Pull request",
-            "Harness",
-            "Project icon",
-            "Location",
-            "Compact mode",
+            MessageId::SidebarViewByDevice,
+            MessageId::SidebarViewByProject,
+            MessageId::SidebarViewInOneList,
+            MessageId::SidebarViewLastUpdated,
+            MessageId::SidebarViewCreated,
+            MessageId::SidebarViewBranch,
+            MessageId::SidebarViewPullRequest,
+            MessageId::SidebarViewHarness,
+            MessageId::SidebarViewProjectIcon,
+            MessageId::SidebarViewLocation,
+            MessageId::SidebarViewCompactMode,
         ];
         let icons = [
             icons::LAPTOP,
@@ -3147,7 +3174,11 @@ impl Shell {
                         .flex_none()
                         .text_color(theme.text_muted),
                 )
-                .child(div().flex_1().child(SharedString::from(labels[ix])))
+                .child(
+                    div()
+                        .flex_1()
+                        .child(SharedString::from(i18n::translate(labels[ix], locale))),
+                )
                 .child(div().w(px(14.0)).flex_none().when(selected[ix], |el| {
                     el.child(
                         icon(icons::CHECK)
@@ -3174,7 +3205,10 @@ impl Shell {
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_sidebar_view_menu(cx)))
             .flex()
             .flex_col()
-            .child(popover::menu_heading(theme, "Organize"))
+            .child(popover::menu_heading(
+                theme,
+                i18n::translate(MessageId::SidebarViewOrganize, locale),
+            ))
             .child(
                 div()
                     .flex()
@@ -3183,13 +3217,22 @@ impl Shell {
                     .children(organization_rows),
             )
             .child(popover::menu_separator())
-            .child(popover::menu_heading(theme, "Sort"))
+            .child(popover::menu_heading(
+                theme,
+                i18n::translate(MessageId::SidebarViewSort, locale),
+            ))
             .child(div().flex().flex_col().gap(px(2.0)).children(sort_rows))
             .child(popover::menu_separator())
-            .child(popover::menu_heading(theme, "Show"))
+            .child(popover::menu_heading(
+                theme,
+                i18n::translate(MessageId::SidebarViewShow, locale),
+            ))
             .child(div().flex().flex_col().gap(px(2.0)).children(show_rows))
             .child(popover::menu_separator())
-            .child(popover::menu_heading(theme, "Layout"))
+            .child(popover::menu_heading(
+                theme,
+                i18n::translate(MessageId::SidebarViewLayout, locale),
+            ))
             .child(div().flex().flex_col().gap(px(2.0)).children(layout_rows))
             .into_any_element()
     }
@@ -3203,19 +3246,23 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let filter = self.settings.space_filter.clone();
+        let locale = i18n::locale(cx);
         // Name + the dropdown rows' "@ device" tag on the trigger itself, so
         // the filtered space's host reads without opening the picker.
         let (label, device_tag): (SharedString, Option<(SharedString, bool)>) = {
             let state = self.state.read(cx);
             match filter.as_deref().and_then(|id| state.space_row(id)) {
                 Some(space) => {
-                    let (tag, offline) = state.space_device_tag(space, Utc::now());
+                    let (tag, offline) = state.space_device_tag(space, Utc::now(), locale);
                     (
                         space.display_name().to_string().into(),
                         Some((tag.into(), offline)),
                     )
                 }
-                None => (SharedString::from("All projects"), None),
+                None => (
+                    SharedString::from(i18n::translate(MessageId::SpacesAllProjects, locale)),
+                    None,
+                ),
             }
         };
         let open = self.spaces_menu.is_open();
@@ -3328,7 +3375,7 @@ impl Shell {
         let view_trigger = div()
             .id("sidebar-view-options")
             .role(gpui::Role::Button)
-            .aria_label("Sidebar view options")
+            .aria_label(i18n::translate(MessageId::SidebarViewOptions, locale))
             .aria_expanded(view_open)
             .track_focus(&view_focus)
             .size(px(29.0))
@@ -3411,6 +3458,7 @@ impl Shell {
     /// the active filter; right-click for rename/remove) + "New project…".
     fn render_spaces_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let theme = &theme.for_popup();
+        let locale = i18n::locale(cx);
         let (search, active, focus, list_scroll) = {
             let Some(menu) = self.spaces_menu.get() else {
                 return div().into_any_element();
@@ -3440,7 +3488,7 @@ impl Shell {
                 .map(|row| match row {
                     SpacesMenuRow::All => (
                         SpacesMenuRow::All,
-                        SharedString::from("All projects"),
+                        SharedString::from(i18n::translate(MessageId::SpacesAllProjects, locale)),
                         None,
                         false,
                         filter.is_none(),
@@ -3449,7 +3497,8 @@ impl Shell {
                         let selected = filter.as_deref() == Some(id.as_str());
                         match state.space_row(&id) {
                             Some(space) => {
-                                let (tag, offline) = state.space_device_tag(space, Utc::now());
+                                let (tag, offline) =
+                                    state.space_device_tag(space, Utc::now(), locale);
                                 (
                                     SpacesMenuRow::Space(id),
                                     space.display_name().to_string().into(),
@@ -3598,7 +3647,10 @@ impl Shell {
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .child(SharedString::from("New project…")),
+                        .child(SharedString::from(i18n::translate(
+                            MessageId::SpacesNewProject,
+                            locale,
+                        ))),
                 ),
             )
             .into_any_element()
@@ -3686,6 +3738,7 @@ impl Shell {
         status: ChatIndicator,
         chat: zeron_proto::Chat,
         state: &AppState,
+        locale: i18n::Locale,
     ) -> ActiveChatRow {
         // Line 1 is "project @ device" (t3code's project row);
         // project-less sessions read as their home-dir cwd `~`.
@@ -3697,7 +3750,7 @@ impl Shell {
         };
         let device = state
             .device_name(&chat.device_id)
-            .unwrap_or("Unknown device")
+            .unwrap_or(i18n::translate(MessageId::DeviceUnknown, locale))
             .to_string();
         let mut folder = project.clone();
         // Unknown device → no fragment, same as the archived list.
@@ -3742,6 +3795,7 @@ impl Shell {
     ) -> SidebarSessionRows {
         let now = Utc::now();
         let filter = self.settings.space_filter.clone();
+        let locale = i18n::locale(cx);
         let profile_key = self.active_sidebar_pin_profile_key(cx);
         let saved_pins = self.active_sidebar_pins(cx);
         let frozen_pinned = self
@@ -3763,7 +3817,7 @@ impl Shell {
             });
             chats
                 .into_iter()
-                .map(|(status, chat)| self.sidebar_chat_data(status, chat, state))
+                .map(|(status, chat)| self.sidebar_chat_data(status, chat, state, locale))
                 .collect()
         };
         let pinned_order = frozen_pinned
@@ -3952,7 +4006,8 @@ impl Shell {
                     group: _,
                 } = row;
                 let time_ago: SharedString =
-                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
+                    time_ago_compact(chat.last_message_at.unwrap_or(chat.created_at), now, locale)
+                        .into();
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
                 let harness = self
                     .settings
@@ -4010,9 +4065,9 @@ impl Shell {
                 let slot_height = height - removed;
                 let element = self.render_chat_row(
                     chat.id.clone(),
-                    transcript::single_line(
-                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                    )
+                    transcript::single_line(&chat.title.clone().unwrap_or_else(|| {
+                        i18n::translate(MessageId::SessionUntitled, locale).into()
+                    }))
                     .into(),
                     time_ago,
                     folder.into(),
@@ -4145,7 +4200,12 @@ impl Shell {
                     )
                 });
             let visible_label: SharedString = if collapsed {
-                format!("{label} ({row_count})").into()
+                i18n::fill_many(
+                    MessageId::SidebarGroupCount,
+                    &[("{group}", &label), ("{n}", &row_count.to_string())],
+                    locale,
+                )
+                .into()
             } else {
                 label.into()
             };
@@ -4202,10 +4262,17 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.pinned_open;
-        let label = if open {
-            "Pinned".into()
+        let locale = i18n::locale(cx);
+        let label: SharedString = if open {
+            i18n::translate(MessageId::SidebarPinned, locale).into()
         } else {
-            format!("Pinned ({})", items.len()).into()
+            i18n::fill(
+                MessageId::SidebarPinnedCount,
+                "{n}",
+                &items.len().to_string(),
+                locale,
+            )
+            .into()
         };
         let chevron = self.sidebar_disclosure_chevron("pinned", open, theme);
         let header = sidebar_disclosure_header(theme, label, chevron)
@@ -4282,10 +4349,17 @@ impl Shell {
             return content;
         }
         let open = self.sessions_open;
-        let label = if open {
-            "Sessions".into()
+        let locale = i18n::locale(cx);
+        let label: SharedString = if open {
+            i18n::translate(MessageId::SidebarSessions, locale).into()
         } else {
-            format!("Sessions ({count})").into()
+            i18n::fill(
+                MessageId::SidebarSessionsCount,
+                "{n}",
+                &count.to_string(),
+                locale,
+            )
+            .into()
         };
         let chevron = self.sidebar_disclosure_chevron("sessions", open, theme);
         let header = sidebar_disclosure_header(theme, label, chevron)
@@ -4358,6 +4432,7 @@ impl Shell {
         const PAGE: usize = 25;
         let now = Utc::now();
         let filter = self.settings.space_filter.clone();
+        let locale = i18n::locale(cx);
         let mut rows: Vec<zeron_proto::Chat> = {
             let state = self.state.read(cx);
             state
@@ -4379,7 +4454,12 @@ impl Shell {
             let state = self.state.read(cx);
             rows.into_iter()
                 .map(|chat| {
-                    self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state)
+                    self.sidebar_chat_data(
+                        state.display_status_for(&chat, now),
+                        chat,
+                        state,
+                        locale,
+                    )
                 })
                 .collect()
         };
@@ -4417,9 +4497,15 @@ impl Shell {
         // Match Pinned: a muted label with a right-aligned disclosure chevron.
         // The count only shows while collapsed.
         let label: SharedString = if open {
-            "Archived".into()
+            i18n::translate(MessageId::SidebarArchived, locale).into()
         } else {
-            format!("Archived ({total})").into()
+            i18n::fill(
+                MessageId::SidebarArchivedCount,
+                "{n}",
+                &total.to_string(),
+                locale,
+            )
+            .into()
         };
         let chevron = self.sidebar_disclosure_chevron("archived", open, theme);
         let header = sidebar_disclosure_header(theme, label, chevron)
@@ -4454,12 +4540,16 @@ impl Shell {
                 list = list.child(
                     self.render_chat_row(
                         chat.id.clone(),
-                        transcript::single_line(
-                            &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                        transcript::single_line(&chat.title.clone().unwrap_or_else(|| {
+                            i18n::translate(MessageId::SessionUntitled, locale).into()
+                        }))
+                        .into(),
+                        time_ago_compact(
+                            chat.last_message_at.unwrap_or(chat.created_at),
+                            now,
+                            locale,
                         )
                         .into(),
-                        format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now)
-                            .into(),
                         row.folder.into(),
                         row.branch.map(SharedString::from),
                         row.change_request,
@@ -4505,7 +4595,12 @@ impl Shell {
                                 .size(px(14.0))
                                 .flex_none(),
                         )
-                        .child(SharedString::from(format!("Show {remaining} more"))),
+                        .child(SharedString::from(i18n::fill(
+                            MessageId::SidebarShowMore,
+                            "{n}",
+                            &remaining.to_string(),
+                            locale,
+                        ))),
                 );
             }
             body.into_any_element()
@@ -4523,8 +4618,13 @@ impl Shell {
         // "PaletteSearch" context: navigation keys stay unbound so ↑↓/←/→/⏎
         // bubble to the palette frame (`add_space_key`) instead of moving the
         // text caret — Enter and ⌘Enter are both handled there.
-        let search =
-            cx.new(|cx| ComposerInput::with_context("Search devices…", "PaletteSearch", cx));
+        let search = cx.new(|cx| {
+            ComposerInput::with_context(
+                i18n::translate(MessageId::AddSpaceSearchDevices, i18n::locale(cx)),
+                "PaletteSearch",
+                cx,
+            )
+        });
         let search_events = cx.subscribe(&search, |this: &mut Shell, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 // Typing `/` after a query that names a folder descends into
@@ -4585,8 +4685,12 @@ impl Shell {
         flow.active = 0;
         flow.error = None;
         let search = flow.search.clone();
+        let locale = i18n::locale(cx);
         search.update(cx, |input, cx| {
-            input.set_placeholder("Search locations…", cx);
+            input.set_placeholder(
+                i18n::translate(MessageId::AddSpaceSearchLocations, locale),
+                cx,
+            );
             input.set_text("", cx);
         });
         self.load_space_drives(cx);
@@ -4608,7 +4712,10 @@ impl Shell {
         flow.browser_repo = false;
         let search = flow.search.clone();
         search.update(cx, |input, cx| {
-            input.set_placeholder("Search folders…", cx);
+            input.set_placeholder(
+                i18n::translate(MessageId::AddSpaceSearchFolders, i18n::locale(cx)),
+                cx,
+            );
             input.set_text("", cx);
         });
         self.load_space_folders(path, cx);
@@ -4635,13 +4742,17 @@ impl Shell {
             flow.home = None;
         }
         let search = flow.search.clone();
+        let locale = i18n::locale(cx);
         search.update(cx, |input, cx| {
             input.set_placeholder(
-                if step == ProjectStep::Devices {
-                    "Search devices…"
-                } else {
-                    "Search locations…"
-                },
+                i18n::translate(
+                    if step == ProjectStep::Devices {
+                        MessageId::AddSpaceSearchDevices
+                    } else {
+                        MessageId::AddSpaceSearchLocations
+                    },
+                    locale,
+                ),
                 cx,
             );
             input.set_text("", cx);
@@ -4665,15 +4776,18 @@ impl Shell {
         let Some(flow) = &self.add_space else {
             return Vec::new();
         };
-        let locations: Vec<_> = std::iter::once(("Home".to_string(), None))
-            .chain(
-                flow.drives
-                    .ready()
-                    .into_iter()
-                    .flatten()
-                    .map(|d| (d.name.clone(), Some(d.path.clone()))),
-            )
-            .collect();
+        let locations: Vec<_> = std::iter::once((
+            i18n::translate(MessageId::AddSpaceHome, i18n::locale(cx)).to_string(),
+            None,
+        ))
+        .chain(
+            flow.drives
+                .ready()
+                .into_iter()
+                .flatten()
+                .map(|d| (d.name.clone(), Some(d.path.clone()))),
+        )
+        .collect();
         let names: Vec<_> = locations.iter().map(|(name, _)| name.as_str()).collect();
         popover::filter_indices(flow.search.read(cx).text(), &names)
             .into_iter()
@@ -4926,7 +5040,9 @@ impl Shell {
         flow.active = 0;
         flow.list_scroll.set_offset(gpui::Point::default());
         let Some(engine) = engine else {
-            flow.browser = Loadable::Error("Device is not connected".into());
+            flow.browser = Loadable::Error(
+                i18n::translate(MessageId::AddSpaceDeviceNotConnected, i18n::locale(cx)).into(),
+            );
             cx.notify();
             return;
         };
@@ -5177,6 +5293,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).for_popup();
+        let locale = i18n::locale(cx);
         let flow = self.add_space.as_mut()?;
         if std::mem::take(&mut flow.focus_pending) {
             window.focus(&flow.search.focus_handle(cx), cx);
@@ -5321,22 +5438,31 @@ impl Shell {
         } else if let Some(message) = load_error.filter(|_| step == ProjectStep::Folders) {
             results = results.child(
                 popover::error_row(&theme, &message).p(px(14.0)).child(
-                    popover::btn_ghost(&theme, "Retry", "project-retry")
-                        .id("project-retry")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let path = this.add_space.as_ref().and_then(|f| f.browser_path.clone());
-                            this.load_space_folders(path, cx);
-                        })),
+                    popover::btn_ghost(
+                        &theme,
+                        i18n::translate(MessageId::CommonRetry, locale),
+                        "project-retry",
+                    )
+                    .id("project-retry")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let path = this.add_space.as_ref().and_then(|f| f.browser_path.clone());
+                        this.load_space_folders(path, cx);
+                    })),
                 ),
             );
         } else if empty {
             results = results.child(div().p(px(24.0)).text_color(theme.text_muted).child(
-                match step {
-                    ProjectStep::Devices => "No devices found",
-                    ProjectStep::Locations => "No locations found",
-                    ProjectStep::Folders if query.is_empty() => "No folders here",
-                    ProjectStep::Folders => "No folders match",
-                },
+                i18n::translate(
+                    match step {
+                        ProjectStep::Devices => MessageId::AddSpaceNoDevices,
+                        ProjectStep::Locations => MessageId::AddSpaceNoLocations,
+                        ProjectStep::Folders if query.is_empty() => {
+                            MessageId::AddSpaceNoFoldersHere
+                        }
+                        ProjectStep::Folders => MessageId::AddSpaceNoFoldersMatch,
+                    },
+                    locale,
+                ),
             ));
         }
         if step == ProjectStep::Locations && drives_loading {
@@ -5346,7 +5472,7 @@ impl Shell {
                     .py(px(6.0))
                     .text_color(theme.text_muted)
                     .text_size(crate::typography::ui_rems(11.0))
-                    .child("Loading locations…"),
+                    .child(i18n::translate(MessageId::AddSpaceLoadingLocations, locale)),
             );
         }
         let crumb =
@@ -5404,7 +5530,7 @@ impl Shell {
             .child(
                 crumb(
                     "project-crumb-root".into(),
-                    "New project".into(),
+                    i18n::translate(MessageId::CommonNewProject, locale).into(),
                     None,
                     step == ProjectStep::Devices,
                 )
@@ -5540,16 +5666,31 @@ impl Shell {
                 &theme,
                 icons::ARROW_UP,
                 icons::ARROW_DOWN,
-                "Navigate",
+                i18n::translate(MessageId::PaletteHintNavigate, locale),
             ))
-            .child(popover::key_hint_text(&theme, "↵", "Open"))
-            .child(popover::key_hint_text(&theme, "esc", "Close"))
+            .child(popover::key_hint_text(
+                &theme,
+                "↵",
+                i18n::translate(MessageId::PaletteHintOpen, locale),
+            ))
+            .child(popover::key_hint_text(
+                &theme,
+                "esc",
+                i18n::translate(MessageId::PaletteHintClose, locale),
+            ))
             .child(div().flex_1())
             .when(step == ProjectStep::Folders, |el| {
                 el.child(
                     popover::btn_ghost(
                         &theme,
-                        if busy { "Adding…" } else { "Add project" },
+                        i18n::translate(
+                            if busy {
+                                MessageId::AddSpaceAdding
+                            } else {
+                                MessageId::AddSpaceAddProject
+                            },
+                            locale,
+                        ),
                         "project-add",
                     )
                     .id("project-add")
@@ -5639,7 +5780,12 @@ impl Shell {
             .space_row(&space_id)
             .map(|s| s.display_name().to_string())
             .unwrap_or_default();
-        let input = cx.new(|cx| ComposerInput::new("Project name", cx));
+        let input = cx.new(|cx| {
+            ComposerInput::new(
+                i18n::translate(MessageId::SpaceRenamePlaceholder, i18n::locale(cx)),
+                cx,
+            )
+        });
         input.update(cx, |input, cx| input.set_text(current, cx));
         let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
@@ -5687,6 +5833,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).for_popup();
+        let locale = i18n::locale(cx);
         let mut overlays: Vec<AnyElement> = Vec::new();
 
         if let Some((space_id, position)) = self.space_menu.get().cloned() {
@@ -5707,7 +5854,10 @@ impl Shell {
                             this.open_rename_space(rename_id.clone(), cx)
                         }))
                         .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
-                        .child(SharedString::from("Rename…")),
+                        .child(SharedString::from(i18n::translate(
+                            MessageId::SpaceMenuRename,
+                            locale,
+                        ))),
                 )
                 .child(popover::menu_separator())
                 .child(
@@ -5724,7 +5874,10 @@ impl Shell {
                                 .size(px(16.0))
                                 .text_color(theme.danger),
                         )
-                        .child(SharedString::from("Remove…")),
+                        .child(SharedString::from(i18n::translate(
+                            MessageId::SpaceMenuRemove,
+                            locale,
+                        ))),
                 )
                 .into_any_element();
             overlays.push(popover::menu_at(
@@ -5748,7 +5901,10 @@ impl Shell {
                         cx.stop_propagation();
                     }
                 }))
-                .child(popover::dialog_title(&theme, "Rename project"))
+                .child(popover::dialog_title(
+                    &theme,
+                    i18n::translate(MessageId::SpaceRenameTitle, locale),
+                ))
                 .child(
                     div()
                         .mt(px(12.0))
@@ -5762,19 +5918,24 @@ impl Shell {
                         .justify_end()
                         .gap(px(8.0))
                         .child(
-                            popover::btn_ghost(&theme, "Cancel", "rename-space-cancel")
-                                .id("rename-space-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.rename_space_dialog = None;
-                                    cx.notify();
-                                })),
+                            popover::btn_ghost(
+                                &theme,
+                                i18n::translate(MessageId::CommonCancel, locale),
+                                "rename-space-cancel",
+                            )
+                            .id("rename-space-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.rename_space_dialog = None;
+                                cx.notify();
+                            })),
                         )
                         .child(
-                            popover::btn_primary(&theme, "Rename")
-                                .id("rename-space-save")
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.submit_rename_space(cx)),
-                                ),
+                            popover::btn_primary(
+                                &theme,
+                                i18n::translate(MessageId::SpaceRenameAction, locale),
+                            )
+                            .id("rename-space-save")
+                            .on_click(cx.listener(|this, _, _, cx| this.submit_rename_space(cx))),
                         ),
                 )
                 .into_any_element();
@@ -5788,25 +5949,37 @@ impl Shell {
                 (
                     space
                         .map(|s| s.display_name().to_string())
-                        .unwrap_or_else(|| "this project".into()),
+                        .unwrap_or_else(|| {
+                            i18n::translate(MessageId::SpaceRemoveUnknownProject, locale).into()
+                        }),
                     space
                         .and_then(|s| state.device_name(&s.device_id))
-                        .unwrap_or("its device")
+                        .unwrap_or(i18n::translate(MessageId::SpaceRemoveUnknownDevice, locale))
                         .to_string(),
                     state.chats_in_space(&space_id).len(),
                 )
             };
-            let copy = if count == 1 {
-                format!(
-                    "Removing “{name}” permanently deletes its 1 session on {device}. This can’t be undone."
-                )
-            } else {
-                format!(
-                    "Removing “{name}” permanently deletes its {count} sessions on {device}. This can’t be undone."
-                )
-            };
+            // Two whole-sentence templates: the count picks the English plural
+            // form, and Chinese repeats the same wording for both.
+            let count_text = count.to_string();
+            let copy = i18n::fill_many(
+                if count == 1 {
+                    MessageId::SpaceRemoveConfirmOne
+                } else {
+                    MessageId::SpaceRemoveConfirmMany
+                },
+                &[
+                    ("{name}", name.as_str()),
+                    ("{device}", device.as_str()),
+                    ("{count}", count_text.as_str()),
+                ],
+                locale,
+            );
             let card = popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Remove project?"))
+                .child(popover::dialog_title(
+                    &theme,
+                    i18n::translate(MessageId::SpaceRemoveTitle, locale),
+                ))
                 .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, copy)))
                 .child(
                     div()
@@ -5816,19 +5989,26 @@ impl Shell {
                         .justify_end()
                         .gap(px(8.0))
                         .child(
-                            popover::btn_ghost(&theme, "Cancel", "delete-space-cancel")
-                                .id("delete-space-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.delete_space_confirm = None;
-                                    cx.notify();
-                                })),
+                            popover::btn_ghost(
+                                &theme,
+                                i18n::translate(MessageId::CommonCancel, locale),
+                                "delete-space-cancel",
+                            )
+                            .id("delete-space-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.delete_space_confirm = None;
+                                cx.notify();
+                            })),
                         )
                         .child(
-                            popover::btn_danger(&theme, "Remove")
-                                .id("delete-space-confirm")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.delete_space(space_id.clone(), cx)
-                                })),
+                            popover::btn_danger(
+                                &theme,
+                                i18n::translate(MessageId::CommonRemove, locale),
+                            )
+                            .id("delete-space-confirm")
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| this.delete_space(space_id.clone(), cx),
+                            )),
                         ),
                 )
                 .into_any_element();

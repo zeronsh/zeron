@@ -17,6 +17,7 @@ use zeron_doc::{QueueDeliveryGate, QueuedMessage};
 use zeron_rpc::methods;
 
 use crate::composer::{Composer, QUEUE_COMPOSER_OVERLAP};
+use crate::i18n::{self, Locale, MessageId};
 use crate::icons::{self, icon};
 use crate::motion::{self, AnimationExt as _, TAB_SLIDE};
 use crate::settings::shortcuts::modifier_send_label;
@@ -92,9 +93,9 @@ enum QueuePrimaryAction {
 }
 
 impl QueuePrimaryAction {
-    fn tooltip(self) -> &'static str {
+    fn tooltip(self, locale: Locale) -> &'static str {
         match self {
-            Self::SendNow => "Send now (interrupt)",
+            Self::SendNow => i18n::translate(MessageId::QueueSendNowInterrupt, locale),
         }
     }
 }
@@ -206,16 +207,21 @@ fn queue_visible_text(text: &str, attachments: &[String]) -> String {
 }
 
 /// Presentation-only metadata. Never expose the observed accessibility payload.
-fn queue_attachment_labels(text: &str, paths: &[String]) -> Vec<String> {
+fn queue_attachment_labels(text: &str, paths: &[String], locale: Locale) -> Vec<String> {
     let presentations = crate::appshots::presentations(text);
     paths
         .iter()
         .map(|path| match presentations.get(path) {
-            Some(appshot) => format!("{} Appshot", appshot.app_name),
+            Some(appshot) => i18n::fill(
+                MessageId::QueueAppshotLabel,
+                "{name}",
+                &appshot.app_name,
+                locale,
+            ),
             None => std::path::Path::new(path)
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or("Image")
+                .unwrap_or_else(|| i18n::translate(MessageId::QueueImageName, locale))
                 .to_owned(),
         })
         .collect()
@@ -394,6 +400,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key = SharedString::from(format!("queue-{}", item.id));
+        let locale = i18n::locale(cx);
         let being_edited = editing.as_deref() == Some(item.id.as_str());
         let being_removed = self.queue_removing.contains(&item.id);
         let delivery_blocked = item.delivery_gate.is_some();
@@ -401,9 +408,14 @@ impl Composer {
         let text = match &item.delivery_gate {
             Some(QueueDeliveryGate::Editing {
                 owner_device_id, ..
-            }) if !being_edited => SharedString::from(format!("Editing on {owner_device_id}")),
+            }) if !being_edited => SharedString::from(i18n::fill(
+                MessageId::QueueEditingOnDevice,
+                "{owner}",
+                owner_device_id,
+                locale,
+            )),
             Some(QueueDeliveryGate::ReviewRequired { .. }) if !being_edited => {
-                SharedString::from("Needs review")
+                SharedString::from(i18n::translate(MessageId::QueueNeedsReview, locale))
             }
             _ => one_line(&queue_visible_text(&item.text, &item.attachments)),
         };
@@ -412,7 +424,7 @@ impl Composer {
         let edit = self.queue_action(
             &key,
             "edit",
-            "Edit",
+            i18n::translate(MessageId::CommonEdit, locale),
             icons::PEN,
             !being_removed,
             theme,
@@ -425,9 +437,9 @@ impl Composer {
             &key,
             "drop",
             if being_removed {
-                "Removing…"
+                i18n::translate(MessageId::QueueRemoving, locale)
             } else {
-                "Remove"
+                i18n::translate(MessageId::CommonRemove, locale)
             },
             icons::TRASH_BIN_MINIMALISTIC,
             !being_removed,
@@ -450,6 +462,7 @@ impl Composer {
                 show_latest_shortcut,
                 resolved_primary.is_some() && !being_removed,
             ),
+            locale,
             theme,
             cx.listener(move |this, _, _, cx| {
                 this.activate_queued_primary(primary_id.clone(), primary_action, cx);
@@ -458,7 +471,7 @@ impl Composer {
         let save = self.queue_action(
             &key,
             "save",
-            "Save to queue",
+            i18n::translate(MessageId::QueueSaveToQueue, locale),
             icons::QUEUE_CHECK,
             !self.queue_edit_finishing,
             theme,
@@ -469,7 +482,7 @@ impl Composer {
         let cancel = self.queue_action(
             &key,
             "cancel",
-            "Cancel",
+            i18n::translate(MessageId::CommonCancel, locale),
             icons::QUEUE_CLOSE,
             !self.queue_edit_finishing,
             theme,
@@ -538,9 +551,16 @@ impl Composer {
             // from the editing state.
             .when(being_edited, |el| el.child(div().w(px(14.0)).flex_none()))
             .when(!being_edited, |el| {
-                let labels = queue_attachment_labels(&item.text, &item.attachments);
+                let labels = queue_attachment_labels(&item.text, &item.attachments, locale);
                 let summary = if labels.len() > 1 {
-                    format!("{} attachments · {}", labels.len(), labels.join(" · "))
+                    i18n::fill_many(
+                        MessageId::QueueAttachmentSummary,
+                        &[
+                            ("{n}", &labels.len().to_string()),
+                            ("{labels}", &labels.join(" · ")),
+                        ],
+                        locale,
+                    )
                 } else {
                     labels.join(" · ")
                 };
@@ -596,8 +616,11 @@ impl Composer {
                             .bg(crate::theme::ink(0.06))
                             .text_size(px(11.0))
                             .text_color(theme.text_muted)
-                            .aria_label(format!(
-                                "{remaining} more attachments; edit message to view all"
+                            .aria_label(i18n::fill(
+                                MessageId::QueueMoreAttachmentsHint,
+                                "{n}",
+                                &remaining.to_string(),
+                                locale,
                             ))
                             .child(format!("+{remaining}")),
                     )
@@ -612,9 +635,9 @@ impl Composer {
                         .text_size(px(QUEUE_TEXT_SIZE))
                         .text_color(theme.text_muted)
                         .child(if self.queue_edit_finishing {
-                            "Saving…"
+                            i18n::translate(MessageId::QueueSaving, locale)
                         } else {
-                            "Editing in composer"
+                            i18n::translate(MessageId::QueueEditingInComposer, locale)
                         }),
                 )
             })
@@ -809,7 +832,8 @@ impl Composer {
                     );
                 } else {
                     this.show_appshot_error(
-                        "Could not load the image. Try opening it again.".into(),
+                        i18n::translate(MessageId::QueueImageLoadFailed, i18n::locale(cx))
+                            .to_string(),
                         cx,
                     );
                 }
@@ -826,6 +850,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         use crate::attachments;
+        let locale = i18n::locale(cx);
         let device = self
             .state
             .read(cx)
@@ -858,7 +883,12 @@ impl Composer {
                 let accent = Theme::of(cx).accent;
                 frame
                     .role(gpui::Role::Button)
-                    .aria_label(format!("Preview {}", label))
+                    .aria_label(i18n::fill(
+                        MessageId::ComposerAppshotPreview,
+                        "{source}",
+                        &label,
+                        locale,
+                    ))
                     .tab_index(0)
                     .focus_visible(move |style| style.border_color(accent))
                     .hover(move |style| style.border_color(accent))
@@ -882,7 +912,7 @@ impl Composer {
                     let accent = Theme::of(cx).accent;
                     frame
                         .role(gpui::Role::Button)
-                        .aria_label("Open attachment preview")
+                        .aria_label(i18n::translate(MessageId::QueuePreviewImage, locale))
                         .tab_index(0)
                         .focus_visible(move |style| style.border_color(accent))
                         .cursor_pointer()
@@ -969,13 +999,14 @@ impl Composer {
         action: QueuePrimaryAction,
         enabled: bool,
         show_shortcut: bool,
+        locale: Locale,
         theme: &Theme,
         on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     ) -> AnyElement {
         let tooltip = if enabled {
-            action.tooltip()
+            action.tooltip(locale)
         } else {
-            "Waiting for provider capabilities"
+            i18n::translate(MessageId::QueueWaitingForProvider, locale)
         };
         let accent = theme.accent;
         let compact = self.queue_preview_limit() == 1;
@@ -1031,7 +1062,9 @@ impl Composer {
                     .text_color(theme.text_muted)
                     .into_any_element()
             } else {
-                div().child("Send now").into_any_element()
+                div()
+                    .child(i18n::translate(MessageId::QueueSendNow, locale))
+                    .into_any_element()
             })
             .into_any_element()
     }
@@ -1092,7 +1125,7 @@ impl Composer {
         self.queue_rpc(
             methods::MOVE_QUEUED_MESSAGE,
             serde_json::json!({ "id": id, "toIndex": to }),
-            "Couldn't reorder the queue",
+            MessageId::QueueReorderFailed,
             cx,
         );
     }
@@ -1122,7 +1155,8 @@ impl Composer {
             (chat_id, host_device_id, supported)
         };
         if !supported {
-            self.failure = Some("The chat host does not support safe queue removal".into());
+            self.failure =
+                Some(i18n::translate(MessageId::QueueHostNoSafeRemoval, i18n::locale(cx)).into());
             cx.notify();
             return;
         }
@@ -1164,8 +1198,10 @@ impl Composer {
                             "queued message had already left the queue before removal"
                         );
                         if selected_matches {
-                            composer.failure =
-                                Some("That message had already left the queue".into());
+                            composer.set_failure(
+                                i18n::translate(MessageId::QueueAlreadyLeft, i18n::locale(cx)),
+                                false,
+                            );
                             composer
                                 .state
                                 .update(cx, |state, cx| state.refresh_selected_queue(cx));
@@ -1174,7 +1210,10 @@ impl Composer {
                     Err(err) => {
                         tracing::warn!(error = %err, "host-authoritative queue removal failed");
                         if selected_matches {
-                            composer.failure = Some("Couldn't remove the message".into());
+                            composer.set_failure(
+                                i18n::translate(MessageId::QueueRemoveFailed, i18n::locale(cx)),
+                                false,
+                            );
                             composer
                                 .state
                                 .update(cx, |state, cx| state.refresh_selected_queue(cx));
@@ -1198,7 +1237,7 @@ impl Composer {
         self.queue_rpc(
             methods::SEND_QUEUED_MESSAGE_NOW,
             serde_json::json!({ "id": id }),
-            "Couldn't send that message",
+            MessageId::QueueSendFailed,
             cx,
         );
     }
@@ -1274,7 +1313,8 @@ impl Composer {
             (chat_id, host_device_id, supported)
         };
         if !supported {
-            self.failure = Some("Update the chat host to edit queued messages safely".into());
+            self.failure =
+                Some(i18n::translate(MessageId::QueueHostNeedsUpdate, i18n::locale(cx)).into());
             cx.notify();
             return;
         }
@@ -1303,41 +1343,73 @@ impl Composer {
             if let Ok(reply) = &result
                 && reply.get("outcome").and_then(|v| v.as_str()) == Some("acquired")
             {
-                let paths = reply.get("attachments")
+                let paths = reply
+                    .get("attachments")
                     .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok());
                 let mut load_failed = paths.is_none();
                 for path in paths.unwrap_or_default() {
                     let loaded = crate::attachments::read_attachment_image(
-                        &engine, cx.background_executor(), Some(&host_device_id), &path,
+                        &engine,
+                        cx.background_executor(),
+                        Some(&host_device_id),
+                        &path,
                         None,
-                    ).await;
+                    )
+                    .await;
                     match loaded {
-                        Some(loaded) => loaded_attachments.push(crate::attachments::StagedAttachment {
-                            id: uuid::Uuid::new_v4().to_string(), name: loaded.name, image: loaded.image,
-                        }),
-                        None => { load_failed = true; break; }
+                        Some(loaded) => {
+                            loaded_attachments.push(crate::attachments::StagedAttachment {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                name: loaded.name,
+                                image: loaded.image,
+                            })
+                        }
+                        None => {
+                            load_failed = true;
+                            break;
+                        }
                     }
                 }
                 if !load_failed {
-                    let paths: Vec<String> = serde_json::from_value(reply["attachments"].clone()).unwrap_or_default();
+                    let paths: Vec<String> =
+                        serde_json::from_value(reply["attachments"].clone()).unwrap_or_default();
                     match crate::appshots::restore_queued_appshots(
-                        reply.get("text").and_then(|v| v.as_str()).unwrap_or_default(),
-                        &paths, &loaded_attachments,
+                        reply
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default(),
+                        &paths,
+                        &loaded_attachments,
                     ) {
-                        Ok((ordinary, shots)) => { loaded_attachments = ordinary; loaded_appshots = shots; }
-                        Err(_) => { load_failed = true; }
+                        Ok((ordinary, shots)) => {
+                            loaded_attachments = ordinary;
+                            loaded_appshots = shots;
+                        }
+                        Err(_) => {
+                            load_failed = true;
+                        }
                     }
                 }
                 if load_failed {
-                    let _ = engine.client().call(methods::FINISH_QUEUED_MESSAGE_EDIT, serde_json::json!({
-                        "chatId": chat_id, "id": id, "leaseId": reply.get("leaseId"),
-                        "action": "cancel", "targetDeviceId": host_device_id,
-                    })).await;
+                    let _ = engine
+                        .client()
+                        .call(
+                            methods::FINISH_QUEUED_MESSAGE_EDIT,
+                            serde_json::json!({
+                                "chatId": chat_id, "id": id, "leaseId": reply.get("leaseId"),
+                                "action": "cancel", "targetDeviceId": host_device_id,
+                            }),
+                        )
+                        .await;
                     this.update(cx, |composer, cx| {
                         composer.queue_edit_pending_id = None;
-                        composer.failure = Some("Couldn't load the queued attachments or Appshot context. Check the connection and update the chat host.".into());
+                        composer.set_failure(
+                            i18n::translate(MessageId::QueueAttachmentLoadFailed, i18n::locale(cx)),
+                            false,
+                        );
                         cx.notify();
-                    }).ok();
+                    })
+                    .ok();
                     return;
                 }
             }
@@ -1348,16 +1420,20 @@ impl Composer {
                         if reply.get("outcome").and_then(|v| v.as_str()) == Some("acquired") =>
                     {
                         let Some(lease_id) = reply.get("leaseId").and_then(|v| v.as_str()) else {
-                            composer.failure =
-                                Some("The chat host returned an invalid edit lease".into());
+                            composer.set_failure(
+                                i18n::translate(MessageId::QueueInvalidLease, i18n::locale(cx)),
+                                false,
+                            );
                             cx.notify();
                             return;
                         };
                         let Some(base_text_hash) =
                             reply.get("baseTextHash").and_then(|v| v.as_str())
                         else {
-                            composer.failure =
-                                Some("The chat host returned an invalid edit lease".into());
+                            composer.set_failure(
+                                i18n::translate(MessageId::QueueInvalidLease, i18n::locale(cx)),
+                                false,
+                            );
                             cx.notify();
                             return;
                         };
@@ -1366,11 +1442,17 @@ impl Composer {
                             .and_then(|v| v.as_str())
                             .unwrap_or_default()
                             .to_string();
-                        let attachments: Vec<String> = serde_json::from_value(reply["attachments"].clone()).unwrap_or_default();
+                        let attachments: Vec<String> =
+                            serde_json::from_value(reply["attachments"].clone())
+                                .unwrap_or_default();
                         let text = queue_visible_text(&raw_text, &attachments);
-                        let text = if !attachments.is_empty() && text == crate::attachments::ATTACHMENT_ONLY_TEXT {
+                        let text = if !attachments.is_empty()
+                            && text == crate::attachments::ATTACHMENT_ONLY_TEXT
+                        {
                             String::new()
-                        } else { text };
+                        } else {
+                            text
+                        };
                         let selected_matches = composer.state.read(cx).selected_chat.as_deref()
                             == Some(chat_id.as_str());
                         if !selected_matches || !composer.can_edit_queue_in_composer() {
@@ -1400,29 +1482,47 @@ impl Composer {
                         composer.queue_edit_host_device_id = Some(host_device_id.clone());
                         composer.queue_edit_draft = Some((
                             composer.input.read(cx).text().to_string(),
-                            composer.attachments.remove(&composer.current_key).unwrap_or_default(),
-                            composer.appshots.remove(&composer.current_key).unwrap_or_default(),
+                            composer
+                                .attachments
+                                .remove(&composer.current_key)
+                                .unwrap_or_default(),
+                            composer
+                                .appshots
+                                .remove(&composer.current_key)
+                                .unwrap_or_default(),
                         ));
-                        composer.attachments.insert(composer.current_key.clone(), loaded_attachments);
-                        composer.appshots.insert(composer.current_key.clone(), loaded_appshots);
+                        composer
+                            .attachments
+                            .insert(composer.current_key.clone(), loaded_attachments);
+                        composer
+                            .appshots
+                            .insert(composer.current_key.clone(), loaded_appshots);
                         composer.focus_pending = true;
-                        composer.input.update(cx, |input, cx| input.set_text(text, cx));
+                        composer
+                            .input
+                            .update(cx, |input, cx| input.set_text(text, cx));
                         composer.start_queue_edit_renewal(engine.clone(), cx);
                     }
                     Ok(reply)
                         if reply.get("outcome").and_then(|v| v.as_str()) == Some("locked") =>
                     {
-                        composer.failure =
-                            Some("That queued message is being edited on another device".into());
+                        composer.set_failure(
+                            i18n::translate(MessageId::QueueEditedElsewhere, i18n::locale(cx)),
+                            false,
+                        );
                     }
                     Ok(_) => {
-                        composer.failure =
-                            Some("That queued message is no longer available".into());
+                        composer.set_failure(
+                            i18n::translate(MessageId::QueueMessageGone, i18n::locale(cx)),
+                            false,
+                        );
                     }
                     Err(err) => {
                         tracing::warn!(error = %err, "begin queue edit failed");
-                        composer.failure =
-                            Some("Connect to the chat host to edit this message".into());
+                        composer.set_failure(
+                            i18n::translate(MessageId::QueueConnectToEdit, i18n::locale(cx)),
+                            false,
+                        );
                     }
                 }
                 cx.notify();
@@ -1501,7 +1601,8 @@ impl Composer {
             self.queue_edit_host_device_id.clone(),
             self.state.read(cx).engine().cloned(),
         ) else {
-            self.failure = Some("The edit lease was lost; your text is still in the editor".into());
+            self.failure =
+                Some(i18n::translate(MessageId::QueueLeaseLost, i18n::locale(cx)).into());
             cx.notify();
             return;
         };
@@ -1530,29 +1631,54 @@ impl Composer {
                     let mut paths = Vec::new();
                     for attachment in &staged {
                         let path = crate::attachments::upload_attachment(
-                            &engine, cx.background_executor(), Some(&host_device_id),
-                            &uuid::Uuid::new_v4().to_string(), attachment, None,
-                        ).await.map_err(|err| err.to_string())?;
+                            &engine,
+                            cx.background_executor(),
+                            Some(&host_device_id),
+                            &uuid::Uuid::new_v4().to_string(),
+                            attachment,
+                            None,
+                        )
+                        .await
+                        .map_err(|err| err.to_string())?;
                         paths.push(path);
                     }
-                    let appshot_paths = staged.iter().zip(&paths)
-                        .map(|(attachment, path)| (attachment.id.clone(), path.clone())).collect();
+                    let appshot_paths = staged
+                        .iter()
+                        .zip(&paths)
+                        .map(|(attachment, path)| (attachment.id.clone(), path.clone()))
+                        .collect();
                     params["text"] = crate::appshots::with_appshots(
-                        params["text"].as_str().unwrap_or_default(), &staged_appshots, &appshot_paths,
-                    ).into();
-                    if params["text"].as_str().is_some_and(|text| text.trim().is_empty()) && !paths.is_empty() {
+                        params["text"].as_str().unwrap_or_default(),
+                        &staged_appshots,
+                        &appshot_paths,
+                    )
+                    .into();
+                    if params["text"]
+                        .as_str()
+                        .is_some_and(|text| text.trim().is_empty())
+                        && !paths.is_empty()
+                    {
                         params["text"] = crate::attachments::ATTACHMENT_ONLY_TEXT.into();
                     }
                     params["attachments"] = serde_json::json!(paths);
                 }
                 crate::attachments::call_with_timeout(
-                    &engine, cx.background_executor(), methods::FINISH_QUEUED_MESSAGE_EDIT,
-                    params, std::time::Duration::from_secs(30),
-                ).await.map_err(|err| err.to_string())
-            }.await;
+                    &engine,
+                    cx.background_executor(),
+                    methods::FINISH_QUEUED_MESSAGE_EDIT,
+                    params,
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+                .map_err(|err| err.to_string())
+            }
+            .await;
             this.update(cx, |composer, cx| {
                 composer.queue_edit_finishing = false;
-                composer.input.update(cx, |input, cx| { input.read_only = false; cx.notify(); });
+                composer.input.update(cx, |input, cx| {
+                    input.read_only = false;
+                    cx.notify();
+                });
                 match result {
                     Ok(reply) => match reply.get("outcome").and_then(|v| v.as_str()) {
                         Some("committed" | "cancelled" | "discarded" | "released") => {
@@ -1560,30 +1686,41 @@ impl Composer {
                             return;
                         }
                         Some("conflict") => {
-                            composer.failure = Some(
-                                "This message changed on another device; your edit was kept locally".into(),
+                            composer.set_failure(
+                                i18n::translate(
+                                    MessageId::QueueConflictKeptLocally,
+                                    i18n::locale(cx),
+                                ),
+                                false,
                             );
                         }
                         Some("missing") => {
-                            composer.failure = Some(
-                                "The queued message was removed; your edit was kept locally".into(),
+                            composer.set_failure(
+                                i18n::translate(
+                                    MessageId::QueueRemovedKeptLocally,
+                                    i18n::locale(cx),
+                                ),
+                                false,
                             );
                         }
                         _ => {
-                            composer.failure = Some(
-                                "The edit lease changed; your text is still in the editor".into(),
+                            composer.set_failure(
+                                i18n::translate(MessageId::QueueLeaseChangedKept, i18n::locale(cx)),
+                                false,
                             );
                         }
                     },
                     Err(err) => {
                         tracing::warn!(error = %err, "finish queue edit failed");
-                        composer.failure = Some(
-                            "Couldn't reach the chat host; your edit is still in the editor".into(),
+                        composer.set_failure(
+                            i18n::translate(MessageId::QueueUnreachableKept, i18n::locale(cx)),
+                            false,
                         );
                     }
                 }
                 cx.notify();
-            }).ok();
+            })
+            .ok();
         });
         self.queue_edit_task = Some(task);
     }
@@ -1621,9 +1758,12 @@ impl Composer {
                         if reply.get("outcome").and_then(|v| v.as_str()) == Some("renewed") => {}
                     Ok(_) => {
                         this.update(cx, |composer, cx| {
-                            composer.failure = Some(
-                                "Edit protection expired; review this message before sending"
-                                    .into(),
+                            composer.set_failure(
+                                i18n::translate(
+                                    MessageId::QueueEditProtectionExpired,
+                                    i18n::locale(cx),
+                                ),
+                                false,
                             );
                             cx.notify();
                         })
@@ -1666,12 +1806,14 @@ impl Composer {
         .detach();
     }
 
-    /// Fire one queue mutation at the chat's doc host.
+    /// Fire one queue mutation at the chat's doc host. `failure` names the
+    /// notice to show when the call fails; the locale is resolved where the
+    /// notice is built, so a language switch cannot strand it in an old one.
     fn queue_rpc(
         &mut self,
         method: &'static str,
         params: serde_json::Value,
-        failure: &'static str,
+        failure: MessageId,
         cx: &mut Context<Self>,
     ) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -1693,7 +1835,8 @@ impl Composer {
             (chat_id, host, supported)
         };
         if !host_supports_action {
-            self.failure = Some("The chat host does not support queue actions".into());
+            self.failure =
+                Some(i18n::translate(MessageId::QueueHostNoActions, i18n::locale(cx)).into());
             cx.notify();
             return;
         }
@@ -1768,7 +1911,7 @@ impl Composer {
                                 cx.notify();
                             });
                         }
-                        composer.failure = Some(failure.into());
+                        composer.set_failure(i18n::translate(failure, i18n::locale(cx)), false);
                         composer
                             .state
                             .update(cx, |state, cx| state.refresh_selected_queue(cx));
@@ -1940,16 +2083,16 @@ mod tests {
                 .collect(),
         );
         assert_eq!(
-            super::queue_attachment_labels(&body, &paths),
+            super::queue_attachment_labels(&body, &paths, super::Locale::En),
             vec!["Notes & Ideas Appshot", "reference.png"]
         );
         assert_eq!(
-            super::queue_attachment_labels(&body, &["/tmp/other.png".into()]),
+            super::queue_attachment_labels(&body, &["/tmp/other.png".into()], super::Locale::En),
             vec!["other.png"]
         );
         let malformed = format!("\n\n{}\n<appshot", crate::appshots::CONTEXT_MARKER);
         assert_eq!(
-            super::queue_attachment_labels(&malformed, &paths),
+            super::queue_attachment_labels(&malformed, &paths, super::Locale::En),
             vec!["shot & detail.png", "reference.png"]
         );
     }

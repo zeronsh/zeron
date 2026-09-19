@@ -1,6 +1,10 @@
 //! A read-only workspace image. The client resolves bytes on the owning device.
-use super::client::{FilesRequestContext, WorkspaceFilesClient};
+use super::{
+    MediaFailure,
+    client::{FilesRequestContext, WorkspaceFilesClient},
+};
 use crate::{
+    i18n::{self, MessageId},
     image_media::{MediaImage, decode_image, release_media},
     theme::Theme,
 };
@@ -27,7 +31,7 @@ pub(super) struct ImagePreview {
     task: Option<Task<()>>,
     source: Option<MediaImage>,
     display: Option<MediaImage>,
-    error: Option<String>,
+    error: Option<MediaFailure>,
     suspended: bool,
     bounds: Bounds<Pixels>,
     viewer: crate::image_viewer::ImageView,
@@ -84,7 +88,7 @@ impl ImagePreview {
     pub fn deleted(&mut self, cx: &mut Context<Self>) {
         self.suspend(cx);
         self.suspended = false;
-        self.error = Some("This image was removed from the workspace.".into());
+        self.error = Some(MediaFailure::Copy(MessageId::FilesImageRemoved));
     }
 
     pub fn reload(&mut self, cx: &mut Context<Self>) {
@@ -110,17 +114,17 @@ impl ImagePreview {
                                 path: path.clone(),
                             })
                             .await
-                            .map_err(|e| e.to_string())?
+                            .map_err(|e| MediaFailure::Detail(e.to_string()))?
                             .checkout_id
                     }
                 };
                 if checkout.is_empty() {
-                    return Err("Workspace checkout identity unavailable".into());
+                    return Err(MediaFailure::Copy(MessageId::FilesImageCheckoutUnavailable));
                 }
                 let (mime, bytes) = client
                     .read_image(path, checkout)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| MediaFailure::Detail(e.to_string()))?;
                 executor
                     .spawn(async move { decode_image(&mime, bytes) })
                     .await
@@ -132,7 +136,9 @@ impl ImagePreview {
             .await
             {
                 futures::future::Either::Left((result, _)) => result,
-                futures::future::Either::Right(_) => Err("Image preview timed out".into()),
+                futures::future::Either::Right(_) => {
+                    Err(MediaFailure::Copy(MessageId::FilesImageTimedOut))
+                }
             };
             let _ = this.update(cx, |view, cx| view.complete(generation, result, cx));
         }));
@@ -141,7 +147,7 @@ impl ImagePreview {
     fn complete(
         &mut self,
         generation: u64,
-        result: Result<MediaImage, String>,
+        result: Result<MediaImage, MediaFailure>,
         cx: &mut Context<Self>,
     ) {
         if self.suspended || generation != self.generation {
@@ -150,7 +156,7 @@ impl ImagePreview {
         self.task = None;
         match result.and_then(|media| {
             if media.bytes > MAX_MEDIA_BYTES {
-                Err("Image exceeds preview memory limit".into())
+                Err(MediaFailure::Copy(MessageId::FilesImageTooLarge))
             } else {
                 Ok(media)
             }
@@ -202,16 +208,16 @@ impl Render for ImagePreview {
                 cx,
             ));
         } else {
+            let locale = i18n::locale(cx);
             root = root.child(
                 div()
                     .px(px(16.0))
                     .text_size(px(12.0))
                     .text_color(theme.text_muted)
-                    .child(
-                        self.error
-                            .clone()
-                            .unwrap_or_else(|| "Loading image…".into()),
-                    ),
+                    .child(match self.error.as_ref() {
+                        Some(failure) => failure.text(locale),
+                        None => i18n::translate(MessageId::AttachmentLoadingImage, locale).into(),
+                    }),
             );
         }
         let entity = cx.weak_entity();
@@ -304,7 +310,11 @@ mod tests {
             assert!(view.source.is_none());
             view.activate(cx);
             assert!(view.task.is_some());
-            view.complete(generation, Err("obsolete failure".into()), cx);
+            view.complete(
+                generation,
+                Err(MediaFailure::Detail("obsolete failure".into())),
+                cx,
+            );
             assert!(view.error.is_none());
             weak
         });
@@ -320,13 +330,19 @@ mod tests {
             let mut oversized = media();
             oversized.bytes = MAX_MEDIA_BYTES + 1;
             view.complete(view.generation, Ok(oversized), cx);
-            assert!(view.error.as_ref().unwrap().contains("memory limit"));
+            assert_eq!(
+                view.error,
+                Some(MediaFailure::Copy(MessageId::FilesImageTooLarge))
+            );
             assert!(view.source.is_none());
             view.reload(cx);
             view.deleted(cx);
             view.activate(cx);
             assert!(view.task.is_none());
-            assert!(view.error.as_ref().unwrap().contains("removed"));
+            assert_eq!(
+                view.error,
+                Some(MediaFailure::Copy(MessageId::FilesImageRemoved))
+            );
         });
         let weak = view.update(cx, |view, cx| {
             view.reload(cx);

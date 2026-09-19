@@ -14,9 +14,10 @@ use x11rb::rust_connection::RustConnection;
 
 use super::atspi;
 use crate::appshots::{
-    AccessibilitySnapshot, CapabilityState, CaptureError, CapturedAppshot,
+    AccessibilitySnapshot, CapabilityState, CaptureError, CaptureFailure, CapturedAppshot,
     validate_capture_dimensions,
 };
+use crate::i18n::MessageId;
 
 static SHORTCUT_READY: AtomicBool = AtomicBool::new(true);
 
@@ -276,7 +277,11 @@ fn capture_native() -> Result<NativeCapture, CaptureError> {
         .flat_map(|depth| &depth.visuals)
         .find(|visual| visual.visual_id == visual_id)
         .copied()
-        .ok_or_else(|| CaptureError::CaptureFailed("X11 returned an unknown visual.".into()))?;
+        .ok_or_else(|| {
+            CaptureError::CaptureFailed(CaptureFailure::new(
+                MessageId::AppshotErrorX11UnknownVisual,
+            ))
+        })?;
     let layout = PixelLayout::from_visual_type(visual).map_err(failed)?;
     let mut rgba = Vec::with_capacity(rgba_len);
     for y in 0..geometry.height {
@@ -289,9 +294,9 @@ fn capture_native() -> Result<NativeCapture, CaptureError> {
     let still_active = property_u32(&connection, root, active_atom, AtomEnum::WINDOW.into())
         .and_then(|values| values.first().copied());
     if still_active != Some(active) {
-        return Err(CaptureError::CaptureFailed(
-            "The active X11 window changed during capture; try again.".into(),
-        ));
+        return Err(CaptureError::CaptureFailed(CaptureFailure::new(
+            MessageId::AppshotErrorX11WindowChanged,
+        )));
     }
     let title = window_title(&connection, active);
     let wm_class = window_class(&connection, active);
@@ -571,5 +576,8 @@ fn load_theme_icon(name: &str) -> Option<Vec<u8>> {
 }
 
 fn failed(error: impl std::fmt::Display) -> CaptureError {
-    CaptureError::CaptureFailed(format!("X11 Appshot capture failed: {error}"))
+    CaptureError::CaptureFailed(
+        CaptureFailure::new(MessageId::AppshotErrorX11CaptureFailed)
+            .with("{err}", error.to_string()),
+    )
 }

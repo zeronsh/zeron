@@ -14,11 +14,13 @@ use gpui::{
 use zeron_theme::vscode::{ImportReport, SourceCompilation};
 use zeron_theme::{
     AccentPreset, AccentSelection, CustomThemeEntry, CustomThemeStatus, InstallMode,
-    SurfacePreference, SurfaceTreatment, ThemeRegistry, ThemeSelection,
+    SurfacePreference, SurfaceTreatment, ThemeRegistry, ThemeSelection, ValidationCategory,
+    ValidationSeverity,
 };
 
 use crate::appearance::{self, AppearanceMode};
 use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::i18n::{self, LanguagePreference, Locale, MessageId};
 use crate::icons;
 use crate::popover::{self, Popup};
 use crate::settings::widgets;
@@ -64,20 +66,26 @@ impl FontKind {
         }
     }
 
-    fn label(self) -> &'static str {
-        match self {
-            Self::Ui => "Interface font",
-            Self::Terminal => "Terminal font",
-            Self::Code => "Code & diff font",
-        }
+    fn label(self, locale: Locale) -> &'static str {
+        i18n::translate(
+            match self {
+                Self::Ui => MessageId::FontKindUiLabel,
+                Self::Terminal => MessageId::FontKindTerminalLabel,
+                Self::Code => MessageId::FontKindCodeLabel,
+            },
+            locale,
+        )
     }
 
-    fn description(self) -> &'static str {
-        match self {
-            Self::Ui => "Menus, sidebars, and conversation text.",
-            Self::Terminal => "Terminal panes and shell output. Fixed-width families only.",
-            Self::Code => "Code blocks, diffs, and workspace file editors.",
-        }
+    fn description(self, locale: Locale) -> &'static str {
+        i18n::translate(
+            match self {
+                Self::Ui => MessageId::FontKindUiDescription,
+                Self::Terminal => MessageId::FontKindTerminalDescription,
+                Self::Code => MessageId::FontKindCodeDescription,
+            },
+            locale,
+        )
     }
 
     /// The catalog this slot may pick from. Only the terminal narrows: its
@@ -229,6 +237,7 @@ pub struct AppearancePage {
     size_menu_dismissed_at: Option<std::time::Instant>,
     terminal_size_menu_dismissed_at: Option<std::time::Instant>,
     code_size_menu_dismissed_at: Option<std::time::Instant>,
+    language_menu: Popup<()>,
     light_theme_menu: Popup<()>,
     dark_theme_menu: Popup<()>,
     import_dialog: Option<ImportDialog>,
@@ -295,6 +304,7 @@ impl AppearancePage {
             TRANSCRIPT_WIDTH_DEFAULT, TRANSCRIPT_WIDTH_MAX, TRANSCRIPT_WIDTH_MIN,
             TRANSCRIPT_WIDTH_STEP,
         };
+        let locale = i18n::locale(cx);
         let width = self
             .pending_width
             .unwrap_or_else(|| crate::settings::transcript_width(cx));
@@ -387,13 +397,19 @@ impl AppearancePage {
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
-                    .child(widgets::field_label(theme, "Conversation width"))
+                    .child(widgets::field_label(
+                        theme,
+                        i18n::translate(MessageId::AppearanceConversationWidth, locale),
+                    ))
                     .child(
                         div()
                             .text_size(typography::ui_rems(12.0))
                             .line_height(px(18.0))
                             .text_color(theme.text_muted)
-                            .child("Maximum width of messages. Adapts to smaller windows."),
+                            .child(i18n::translate(
+                                MessageId::AppearanceConversationWidthHint,
+                                locale,
+                            )),
                     ),
             )
             .child(
@@ -435,7 +451,7 @@ impl AppearancePage {
                                         );
                                         cx.notify();
                                     }))
-                                    .child("Reset"),
+                                    .child(i18n::translate(MessageId::CommonReset, locale)),
                             ),
                     )
                     .child(slider)
@@ -458,8 +474,13 @@ impl AppearancePage {
         // `PaletteSearch` binds text-editing keys only — arrows/Enter/Escape
         // stay unbound and bubble from the input to the menu card's own key
         // handler. `Submitted` never fires here, so Enter has exactly one path.
-        let font_search =
-            cx.new(|cx| ComposerInput::with_context("Search fonts", "PaletteSearch", cx));
+        let font_search = cx.new(|cx| {
+            ComposerInput::with_context(
+                i18n::translate(MessageId::AppearanceSearchFonts, i18n::locale(cx)),
+                "PaletteSearch",
+                cx,
+            )
+        });
         let font_search_events = cx.subscribe(&font_search, |this: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 this.on_font_search_edited(cx);
@@ -503,6 +524,7 @@ impl AppearancePage {
             size_menu_dismissed_at: None,
             terminal_size_menu_dismissed_at: None,
             code_size_menu_dismissed_at: None,
+            language_menu: Popup::default(),
             light_theme_menu: Popup::default(),
             dark_theme_menu: Popup::default(),
             import_dialog: None,
@@ -725,6 +747,7 @@ impl AppearancePage {
                 self.close_size_menu(kind, cx);
             }
         }
+        self.close_language_menu(cx);
     }
 
     fn close_size_menu(&mut self, kind: FontKind, cx: &mut Context<Self>) {
@@ -736,6 +759,22 @@ impl AppearancePage {
             FontKind::Terminal => popover::reap_popup(cx, |page| &mut page.terminal_size_menu),
             FontKind::Code => popover::reap_popup(cx, |page| &mut page.code_size_menu),
         }
+    }
+
+    fn close_language_menu(&mut self, cx: &mut Context<Self>) {
+        if !self.language_menu.begin_close() {
+            return;
+        }
+        popover::reap_popup(cx, |page| &mut page.language_menu);
+    }
+
+    fn toggle_language_menu(&mut self, cx: &mut Context<Self>) {
+        let was_open = self.language_menu.is_open();
+        self.close_other_menus(None, None, cx);
+        if !was_open {
+            self.language_menu.open(());
+        }
+        cx.notify();
     }
 
     fn dismiss_font_menu(&mut self, kind: FontKind, cx: &mut Context<Self>) {
@@ -908,7 +947,7 @@ impl AppearancePage {
     fn open_import(&mut self, cx: &mut Context<Self>) {
         let input = cx.new(|cx| {
             ComposerInput::with_context(
-                "Theme file, package.json, or extension folder",
+                i18n::translate(MessageId::ThemeImportSourcePlaceholder, i18n::locale(cx)),
                 "PaletteSearch",
                 cx,
             )
@@ -966,7 +1005,9 @@ impl AppearancePage {
         };
         let source = dialog.input.read(cx).text().trim().to_owned();
         if source.is_empty() {
-            dialog.error = Some("Choose a local theme file or extension folder.".into());
+            dialog.error = Some(
+                i18n::translate(MessageId::ThemeImportSourceRequired, i18n::locale(cx)).into(),
+            );
             cx.notify();
             return;
         }
@@ -987,7 +1028,9 @@ impl AppearancePage {
                 dialog.compilation = Some(compilation);
                 dialog.error = None;
             }
-            Err(error) => dialog.error = Some(error.to_string().into()),
+            Err(error) => {
+                dialog.error = Some(theme_library::error_text(&error, i18n::locale(cx)).into())
+            }
         }
         cx.notify();
     }
@@ -997,7 +1040,9 @@ impl AppearancePage {
             files: true,
             directories: true,
             multiple: false,
-            prompt: Some("Choose Theme Source".into()),
+            prompt: Some(
+                i18n::translate(MessageId::ThemeImportChooseSource, i18n::locale(cx)).into(),
+            ),
         });
         cx.spawn(async move |this, cx| {
             let path = match receiver.await {
@@ -1025,7 +1070,9 @@ impl AppearancePage {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Choose New Thread Composer Background".into()),
+            prompt: Some(
+                i18n::translate(MessageId::ThemeImportChooseBackground, i18n::locale(cx)).into(),
+            ),
         });
         cx.spawn(async move |this, cx| {
             let path = match receiver.await {
@@ -1058,7 +1105,8 @@ impl AppearancePage {
             return;
         };
         if dialog.selected.is_empty() {
-            dialog.error = Some("Select at least one variant to import.".into());
+            dialog.error =
+                Some(i18n::translate(MessageId::ThemeImportSelectVariant, i18n::locale(cx)).into());
             cx.notify();
             return;
         }
@@ -1070,7 +1118,7 @@ impl AppearancePage {
             Ok(_) => self.import_dialog = None,
             Err(error) => {
                 dialog.compilation = Some(compilation);
-                dialog.error = Some(error.to_string().into());
+                dialog.error = Some(theme_library::error_text(&error, i18n::locale(cx)).into());
             }
         }
         cx.notify();
@@ -1104,8 +1152,11 @@ fn source_name(path: &Path) -> String {
     path.file_stem()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
-        .unwrap_or("Custom theme")
-        .to_owned()
+        .map(str::to_owned)
+        // Untranslated on purpose: this name is stored with the imported theme
+        // and `family_id` is derived from it, so it identifies data rather than
+        // rendering copy.
+        .unwrap_or_else(|| "Custom theme".to_owned())
 }
 
 fn slug(value: &str) -> String {
@@ -1218,49 +1269,177 @@ fn bar(fraction: f32, tone: Hsla) -> gpui::Div {
         .bg(tone)
 }
 
-fn accent_helper(accent: AccentSelection) -> String {
+fn accent_helper(accent: AccentSelection, locale: Locale) -> String {
     match accent {
         AccentSelection::ThemeDefault => {
-            "Theme default · Uses the palette's intended color.".into()
+            i18n::translate(MessageId::AccentHelperDefault, locale).to_owned()
         }
-        AccentSelection::Preset(preset) => format!(
-            "{} · Controls, glyphs, selections, code, and activity.",
-            preset.label()
+        AccentSelection::Preset(preset) => i18n::fill(
+            MessageId::AccentHelperPreset,
+            "{accent}",
+            preset.label(),
+            locale,
         ),
     }
 }
 
-fn surface_label(surface: SurfacePreference) -> &'static str {
+fn surface_label(surface: SurfacePreference, locale: Locale) -> &'static str {
+    i18n::translate(
+        match surface {
+            SurfacePreference::ThemeDefault => MessageId::SurfaceThemeDefault,
+            SurfacePreference::Frosted => MessageId::SurfaceFrosted,
+            SurfacePreference::Opaque => MessageId::SurfaceOpaque,
+        },
+        locale,
+    )
+}
+
+/// Stable element id for a surface choice. The label is translated, so the id
+/// cannot be derived from it.
+fn surface_slug(surface: SurfacePreference) -> &'static str {
     match surface {
-        SurfacePreference::ThemeDefault => "Theme default",
-        SurfacePreference::Frosted => "Frosted",
-        SurfacePreference::Opaque => "Opaque",
+        SurfacePreference::ThemeDefault => "theme-default",
+        SurfacePreference::Frosted => "frosted",
+        SurfacePreference::Opaque => "opaque",
     }
 }
 
-fn surface_helper(surface: SurfacePreference, resolved: SurfaceTreatment) -> String {
+fn surface_helper(
+    surface: SurfacePreference,
+    resolved: SurfaceTreatment,
+    locale: Locale,
+) -> String {
     match surface {
-        SurfacePreference::ThemeDefault => format!(
-            "Uses this theme's {} default.",
+        SurfacePreference::ThemeDefault => i18n::fill(
+            MessageId::SurfaceHelperThemeDefault,
+            "{treatment}",
             match resolved {
-                SurfaceTreatment::Frosted => "frosted",
-                SurfaceTreatment::Opaque => "opaque",
-            }
+                SurfaceTreatment::Frosted => {
+                    i18n::translate(MessageId::SurfaceTreatmentFrosted, locale)
+                }
+                SurfaceTreatment::Opaque => {
+                    i18n::translate(MessageId::SurfaceTreatmentOpaque, locale)
+                }
+            },
+            locale,
         ),
-        SurfacePreference::Frosted => "Theme-colored glass where supported.".into(),
-        SurfacePreference::Opaque => "Solid surfaces for every theme.".into(),
+        SurfacePreference::Frosted => {
+            i18n::translate(MessageId::SurfaceHelperFrosted, locale).to_owned()
+        }
+        SurfacePreference::Opaque => {
+            i18n::translate(MessageId::SurfaceHelperOpaque, locale).to_owned()
+        }
     }
+}
+
+/// Message id behind one Appearance mode card.
+fn mode_message(mode: AppearanceMode) -> MessageId {
+    match mode {
+        AppearanceMode::System => MessageId::AppearanceModeSystem,
+        AppearanceMode::Light => MessageId::AppearanceModeLight,
+        AppearanceMode::Dark => MessageId::AppearanceModeDark,
+    }
+}
+
+fn language_selector(
+    page: &mut AppearancePage,
+    theme: &Theme,
+    current: LanguagePreference,
+    locale: Locale,
+    cx: &mut Context<AppearancePage>,
+) -> AnyElement {
+    let open = page.language_menu.is_open();
+    let closing = page.language_menu.closing_since();
+    let menu = popover::popover_card(theme)
+        .w(px(204.0))
+        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+            this.close_language_menu(cx);
+            cx.notify();
+        }))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .children(LanguagePreference::ALL.into_iter().map(|preference| {
+            let active = preference == current;
+            popover::menu_row(
+                theme,
+                active,
+                SharedString::from(format!("appearance-language-menu-{}", preference.id())),
+            )
+            .id(SharedString::from(format!(
+                "appearance-language-row-{}",
+                preference.id()
+            )))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                i18n::set_preference(preference, cx);
+                this.close_language_menu(cx);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .child(i18n::preference_label(preference, locale)),
+            )
+            .when(active, |row| {
+                row.child(
+                    icons::icon(icons::CHECK)
+                        .size(px(14.0))
+                        .text_color(theme.accent),
+                )
+            })
+        }))
+        .into_any_element();
+
+    div()
+        .id("appearance-language-dropdown")
+        .relative()
+        .w(px(204.0))
+        .h(px(36.0))
+        .px(px(11.0))
+        .rounded(px(9.0))
+        .border_1()
+        .border_color(if open {
+            theme.border_strong
+        } else {
+            theme.border
+        })
+        .bg(crate::theme::ink(0.025))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .cursor_pointer()
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_language_menu(cx)))
+        .child(
+            div()
+                .flex_1()
+                .child(i18n::preference_label(current, locale)),
+        )
+        .child(
+            icons::icon(icons::ALT_ARROW_DOWN)
+                .size(px(14.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+        )
+        .when_some(page.language_menu.get(), |trigger, _| {
+            trigger.child(popover::anchored_menu_below(
+                "appearance-language-menu",
+                menu,
+                closing,
+            ))
+        })
+        .into_any_element()
 }
 
 fn surface_choice(
     theme: &Theme,
     surface: SurfacePreference,
+    locale: Locale,
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(SharedString::from(format!(
             "appearance-surface-{}",
-            surface_label(surface).to_lowercase().replace(' ', "-")
+            surface_slug(surface)
         )))
         .h(px(30.0))
         .px(px(10.0))
@@ -1289,18 +1468,19 @@ fn surface_choice(
         .when(!selected, |control| {
             control.hover(|style| style.bg(theme.surface_raised_hover))
         })
-        .child(surface_label(surface))
+        .child(surface_label(surface, locale))
 }
 
 fn background_effect_choice(
     theme: &Theme,
     effect: crate::settings::NewThreadBackgroundEffect,
     selected: bool,
+    locale: Locale,
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(SharedString::from(format!(
             "new-thread-background-effect-{}",
-            effect.label().to_lowercase()
+            effect.slug()
         )))
         .h(px(28.0))
         .px(px(9.0))
@@ -1329,7 +1509,7 @@ fn background_effect_choice(
         .when(!selected, |control| {
             control.hover(|style| style.bg(theme.surface_raised_hover))
         })
-        .child(effect.label())
+        .child(i18n::translate(effect.label_message(), locale))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1576,15 +1756,18 @@ fn import_scene_preview(variant: &zeron_theme::ThemeVariant) -> AnyElement {
         .into_any_element()
 }
 
-fn report_panel(theme: &Theme, report: &ImportReport) -> gpui::Stateful<gpui::Div> {
-    let summary = format!(
-        "{} mapped · {} adjusted · {} inferred/fallback · {} unsupported · {} warnings · {} validation",
-        report.mappings.len(),
-        report.adjustments.len(),
-        report.fallbacks.len(),
-        report.dropped.len(),
-        report.warnings.len(),
-        report.validation.len(),
+fn report_panel(theme: &Theme, report: &ImportReport, locale: Locale) -> gpui::Stateful<gpui::Div> {
+    let summary = i18n::fill_many(
+        MessageId::ThemeReportSummary,
+        &[
+            ("{mapped}", &report.mappings.len().to_string()),
+            ("{adjusted}", &report.adjustments.len().to_string()),
+            ("{inferred}", &report.fallbacks.len().to_string()),
+            ("{unsupported}", &report.dropped.len().to_string()),
+            ("{warnings}", &report.warnings.len().to_string()),
+            ("{validation}", &report.validation.len().to_string()),
+        ],
+        locale,
     );
     div()
         .id(SharedString::from(format!(
@@ -1605,31 +1788,51 @@ fn report_panel(theme: &Theme, report: &ImportReport) -> gpui::Stateful<gpui::Di
         .text_color(theme.text_muted)
         .child(div().text_color(theme.text).child(summary))
         .children(report.adjustments.iter().map(|adjustment| {
-            div().mt(px(4.0)).child(SharedString::from(format!(
-                "Adjusted · {} {} → {} · {}",
-                adjustment.zeron_role, adjustment.original, adjustment.resolved, adjustment.reason
+            div().mt(px(4.0)).child(SharedString::from(i18n::fill_many(
+                MessageId::ThemeReportAdjusted,
+                &[
+                    ("{role}", &adjustment.zeron_role),
+                    ("{original}", &adjustment.original),
+                    ("{resolved}", &adjustment.resolved),
+                    ("{reason}", &adjustment.reason),
+                ],
+                locale,
             )))
         }))
         .children(report.fallbacks.iter().map(|message| {
-            div()
-                .mt(px(4.0))
-                .child(SharedString::from(format!("Fallback · {message}")))
+            div().mt(px(4.0)).child(SharedString::from(i18n::fill(
+                MessageId::ThemeReportFallback,
+                "{message}",
+                message,
+                locale,
+            )))
         }))
         .children(report.warnings.iter().map(|message| {
-            div()
-                .mt(px(4.0))
-                .child(SharedString::from(format!("Warning · {message}")))
+            div().mt(px(4.0)).child(SharedString::from(i18n::fill(
+                MessageId::ThemeReportWarning,
+                "{message}",
+                message,
+                locale,
+            )))
         }))
         .children(report.validation.iter().map(|issue| {
-            div().mt(px(4.0)).child(SharedString::from(format!(
-                "Validation {:?} {:?} · {}",
-                issue.category, issue.severity, issue.message
+            div().mt(px(4.0)).child(SharedString::from(i18n::fill_many(
+                MessageId::ThemeReportValidation,
+                &[
+                    ("{category}", category_label(issue.category, locale)),
+                    ("{severity}", severity_label(issue.severity, locale)),
+                    ("{message}", &issue.message),
+                ],
+                locale,
             )))
         }))
         .children(report.dropped.iter().map(|message| {
-            div()
-                .mt(px(4.0))
-                .child(SharedString::from(format!("Unsupported · {message}")))
+            div().mt(px(4.0)).child(SharedString::from(i18n::fill(
+                MessageId::ThemeReportUnsupported,
+                "{message}",
+                message,
+                locale,
+            )))
         }))
         .children(report.mappings.iter().map(|mapping| {
             div().mt(px(4.0)).child(SharedString::from(format!(
@@ -1637,6 +1840,28 @@ fn report_panel(theme: &Theme, report: &ImportReport) -> gpui::Stateful<gpui::Di
                 mapping.zeron_role, mapping.vscode_key
             )))
         }))
+}
+
+/// The report's enum labels, named instead of `Debug`-formatted so the panel
+/// reads as copy in both locales.
+fn category_label(category: ValidationCategory, locale: Locale) -> &'static str {
+    i18n::translate(
+        match category {
+            ValidationCategory::Structural => MessageId::ThemeReportCategoryStructural,
+            ValidationCategory::Contrast => MessageId::ThemeReportCategoryContrast,
+        },
+        locale,
+    )
+}
+
+fn severity_label(severity: ValidationSeverity, locale: Locale) -> &'static str {
+    i18n::translate(
+        match severity {
+            ValidationSeverity::Warning => MessageId::ThemeReportSeverityWarning,
+            ValidationSeverity::Error => MessageId::ThemeReportSeverityError,
+        },
+        locale,
+    )
 }
 
 fn accent_swatch(
@@ -1745,6 +1970,7 @@ impl AppearancePage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let slug = kind.slug();
+        let locale = i18n::locale(cx);
         // The scroll helpers key off `&'static str`, so the ids are spelled
         // out rather than formatted from the slug.
         let (host_id, list_id, rail_id) = match kind {
@@ -1801,9 +2027,9 @@ impl AppearancePage {
                 .text_size(px(12.0))
                 .text_color(theme.for_popup().text_faint)
                 .child(SharedString::from(if filtered {
-                    "No matching fonts"
+                    i18n::translate(MessageId::FontPickerNoMatches, locale)
                 } else {
-                    "No fonts"
+                    i18n::translate(MessageId::FontPickerNoFonts, locale)
                 }))
                 .into_any_element()
         } else {
@@ -2101,11 +2327,14 @@ impl AppearancePage {
 
         if self.theme_menu(appearance_kind).get().is_some() {
             let closing = self.theme_menu(appearance_kind).closing_since();
-            let heading = if appearance_kind.is_light() {
-                "Light themes"
-            } else {
-                "Dark themes"
-            };
+            let heading = i18n::translate(
+                if appearance_kind.is_light() {
+                    MessageId::ThemeMenuLightHeading
+                } else {
+                    MessageId::ThemeMenuDarkHeading
+                },
+                i18n::locale(cx),
+            );
             let menu = popover::popover_card(theme)
                 .w(px(260.0))
                 .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
@@ -2198,14 +2427,15 @@ impl AppearancePage {
         let error = dialog.error.clone();
         let ready = compilation.is_some() && !selected.is_empty();
         let hairline = crate::theme::hairline(0.08);
+        let locale = i18n::locale(cx);
 
-        let mode_control = |label: &'static str, description: &'static str, value: InstallMode| {
+        let mode_control = |label: &'static str,
+                            description: &'static str,
+                            id_slug: &str,
+                            value: InstallMode| {
             let active = mode == value;
             div()
-                .id(SharedString::from(format!(
-                    "theme-import-mode-{}",
-                    slug(label)
-                )))
+                .id(SharedString::from(format!("theme-import-mode-{id_slug}")))
                 .flex_1()
                 .min_w_0()
                 .p(px(10.0))
@@ -2284,7 +2514,10 @@ impl AppearancePage {
             .pb(px(18.0))
             .flex()
             .flex_col()
-            .child(section_label("Source"))
+            .child(section_label(i18n::translate(
+                MessageId::ThemeImportSource,
+                locale,
+            )))
             .child(
                 div()
                     .flex()
@@ -2300,29 +2533,38 @@ impl AppearancePage {
                             .items_center(),
                     )
                     .child(
-                        compact_action(theme, "Browse…", "theme-import-browse")
-                            .h(px(36.0))
-                            .px(px(12.0))
-                            .flex_none()
-                            .on_click(cx.listener(|this, _, _, cx| this.choose_import_source(cx))),
+                        compact_action(
+                            theme,
+                            i18n::translate(MessageId::CommonBrowse, locale),
+                            "theme-import-browse",
+                        )
+                        .h(px(36.0))
+                        .px(px(12.0))
+                        .flex_none()
+                        .on_click(cx.listener(|this, _, _, cx| this.choose_import_source(cx))),
                     ),
             )
             .child(
                 div()
                     .mt(px(16.0))
-                    .child(section_label("Keep it up to date"))
+                    .child(section_label(i18n::translate(
+                        MessageId::ThemeImportKeepUpdated,
+                        locale,
+                    )))
                     .child(
                         div()
                             .flex()
                             .gap(px(8.0))
                             .child(mode_control(
-                                "Import a copy",
-                                "Works independently from the original file.",
+                                i18n::translate(MessageId::ThemeImportModeCopy, locale),
+                                i18n::translate(MessageId::ThemeImportModeCopyHint, locale),
+                                "import-a-copy",
                                 InstallMode::Snapshot,
                             ))
                             .child(mode_control(
-                                "Link to source",
-                                "Reload changes from the file on disk.",
+                                i18n::translate(MessageId::ThemeImportModeLink, locale),
+                                i18n::translate(MessageId::ThemeImportModeLinkHint, locale),
+                                "link-to-source",
                                 InstallMode::Link,
                             )),
                     ),
@@ -2338,19 +2580,17 @@ impl AppearancePage {
                     .flex()
                     .items_baseline()
                     .justify_between()
-                    .child(section_label("Detected themes").mb(px(0.0)))
+                    .child(
+                        section_label(i18n::translate(MessageId::ThemeImportDetected, locale))
+                            .mb(px(0.0)),
+                    )
                     .child(
                         div()
                             .text_size(crate::typography::ui_rems(10.5))
                             .text_color(theme.text_muted)
-                            .child(SharedString::from(format!(
-                                "{} variant{}",
+                            .child(SharedString::from(i18n::variants(
                                 compilation.family.variants.len(),
-                                if compilation.family.variants.len() == 1 {
-                                    ""
-                                } else {
-                                    "s"
-                                }
+                                locale,
                             ))),
                     ),
             );
@@ -2358,11 +2598,14 @@ impl AppearancePage {
                 let variant_id = variant.id.clone();
                 let selected_now = selected.contains(&variant_id);
                 let review_open = review_variant.as_deref() == Some(variant_id.as_str());
-                let appearance = if variant.appearance.is_dark() {
-                    "Dark"
-                } else {
-                    "Light"
-                };
+                let appearance = i18n::translate(
+                    mode_message(if variant.appearance.is_dark() {
+                        AppearanceMode::Dark
+                    } else {
+                        AppearanceMode::Light
+                    }),
+                    locale,
+                );
                 let report = compilation.reports.get(&variant.id);
                 let sample = Theme::from_variant(
                     variant,
@@ -2452,11 +2695,14 @@ impl AppearancePage {
                                 .child(
                                     compact_action(
                                         theme,
-                                        if review_open {
-                                            "Hide details"
-                                        } else {
-                                            "Details"
-                                        },
+                                        i18n::translate(
+                                            if review_open {
+                                                MessageId::ThemeImportHideDetails
+                                            } else {
+                                                MessageId::ThemeImportShowDetails
+                                            },
+                                            locale,
+                                        ),
                                         format!("theme-import-review-{variant_id}"),
                                     )
                                     .on_click(cx.listener({
@@ -2486,7 +2732,9 @@ impl AppearancePage {
                                     .border_color(hairline)
                                     .child(import_scene_preview(variant)),
                             )
-                            .when_some(report, |row, report| row.child(report_panel(theme, report)))
+                            .when_some(report, |row, report| {
+                                row.child(report_panel(theme, report, locale))
+                            })
                         }),
                 );
             }
@@ -2499,9 +2747,10 @@ impl AppearancePage {
                         .bg(theme.warning.opacity(0.08))
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.warning)
-                        .child(SharedString::from(format!(
-                            "{} could not be compiled · {}",
-                            failure.name, failure.message
+                        .child(SharedString::from(i18n::fill_many(
+                            MessageId::ThemeImportCompileFailed,
+                            &[("{name}", &failure.name), ("{message}", &failure.message)],
+                            locale,
                         ))),
                 );
             }
@@ -2521,7 +2770,7 @@ impl AppearancePage {
                             .mt(px(1.0))
                             .flex_none(),
                     )
-                    .child("Zeron finds light and dark variants automatically."),
+                    .child(i18n::translate(MessageId::ThemeImportAutoVariants, locale)),
             );
         }
 
@@ -2559,11 +2808,14 @@ impl AppearancePage {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(popover::dialog_title(theme, "Add a theme"))
+                    .child(popover::dialog_title(
+                        theme,
+                        i18n::translate(MessageId::ThemeImportTitle, locale),
+                    ))
                     .child(
                         popover::dialog_body(
                             theme,
-                            "Import a local theme into your library or keep it linked to its source.",
+                            i18n::translate(MessageId::ThemeImportSubtitle, locale),
                         )
                         .mt(px(4.0)),
                     ),
@@ -2603,22 +2855,29 @@ impl AppearancePage {
             .justify_end()
             .gap(px(8.0))
             .child(
-                compact_action(theme, "Cancel", "theme-import-cancel")
-                    .h(px(34.0))
-                    .px(px(13.0))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.import_dialog = None;
-                        cx.notify();
-                    })),
+                compact_action(
+                    theme,
+                    i18n::translate(MessageId::CommonCancel, locale),
+                    "theme-import-cancel",
+                )
+                .h(px(34.0))
+                .px(px(13.0))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.import_dialog = None;
+                    cx.notify();
+                })),
             )
             .child(
                 popover::btn_primary(
                     theme,
-                    if compilation.is_some() {
-                        "Import selected"
-                    } else {
-                        "Analyze theme"
-                    },
+                    i18n::translate(
+                        if compilation.is_some() {
+                            MessageId::ThemeImportActionImport
+                        } else {
+                            MessageId::ThemeImportActionAnalyze
+                        },
+                        locale,
+                    ),
                 )
                 .id("theme-import-action")
                 .h(px(34.0))
@@ -2697,12 +2956,16 @@ impl AppearancePage {
         let entry = theme_library::entries(cx)
             .into_iter()
             .find(|entry| &entry.id == entry_id)?;
+        let locale = i18n::locale(cx);
         let mut card = popover::dialog_card(theme)
             .id("theme-review-card")
             .w(px(660.0))
             .max_h(px(720.0))
             .overflow_y_scroll()
-            .child(popover::dialog_title(theme, "Theme mapping"))
+            .child(popover::dialog_title(
+                theme,
+                i18n::translate(MessageId::ThemeReviewTitle, locale),
+            ))
             .child(
                 popover::dialog_body(theme, format!("{} · {}", entry.name, entry.source.label()))
                     .mt(px(6.0)),
@@ -2718,12 +2981,12 @@ impl AppearancePage {
                 )
                 .child(import_scene_preview(variant));
             if let Some(report) = entry.reports.get(&variant.id) {
-                card = card.child(report_panel(theme, report));
+                card = card.child(report_panel(theme, report, locale));
             }
         }
         card = card.child(
             div().mt(px(16.0)).flex().justify_end().child(
-                popover::btn_primary(theme, "Done")
+                popover::btn_primary(theme, i18n::translate(MessageId::CommonDone, locale))
                     .id("theme-review-close")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.review_entry = None;
@@ -2746,26 +3009,33 @@ impl AppearancePage {
     ) -> AnyElement {
         let id = entry.id.clone();
         let linked = entry.source.is_linked();
+        let locale = i18n::locale(cx);
         let source = entry
             .source
             .path()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "Self-contained snapshot".into());
+            .unwrap_or_else(|| {
+                i18n::translate(MessageId::ThemeLibrarySelfContained, locale).to_owned()
+            });
         let status = match &entry.status {
-            CustomThemeStatus::Ready => format!(
-                "{} · {} variant{} · {}",
-                entry.source.label(),
-                entry.family.variants.len(),
-                if entry.family.variants.len() == 1 {
-                    ""
-                } else {
-                    "s"
-                },
-                source
+            CustomThemeStatus::Ready => i18n::fill_many(
+                MessageId::ThemeLibraryStatus,
+                &[
+                    ("{source}", entry.source.label()),
+                    (
+                        "{variants}",
+                        &i18n::variants(entry.family.variants.len(), locale),
+                    ),
+                    ("{detail}", &source),
+                ],
+                locale,
             ),
-            CustomThemeStatus::Warning { message } => {
-                format!("Using last known good · {message}")
-            }
+            CustomThemeStatus::Warning { message } => i18n::fill(
+                MessageId::ThemeLibraryLastKnownGood,
+                "{message}",
+                message,
+                locale,
+            ),
         };
         widgets::card_row(theme, false)
             .child(widgets::row_tile(
@@ -2803,52 +3073,65 @@ impl AppearancePage {
                     .gap(px(2.0))
                     .when(linked, |actions| {
                         actions.child(
-                            compact_action(theme, "Reload", format!("theme-reload-{id}")).on_click(
-                                cx.listener({
-                                    let id = id.clone();
-                                    move |_, _, _, cx| {
-                                        let _ = theme_library::reload(&id, cx);
-                                        cx.notify();
-                                    }
-                                }),
-                            ),
+                            compact_action(
+                                theme,
+                                i18n::translate(MessageId::ThemeLibraryReload, locale),
+                                format!("theme-reload-{id}"),
+                            )
+                            .on_click(cx.listener({
+                                let id = id.clone();
+                                move |_, _, _, cx| {
+                                    let _ = theme_library::reload(&id, cx);
+                                    cx.notify();
+                                }
+                            })),
                         )
                     })
                     .child(
-                        compact_action(theme, "Reveal", format!("theme-reveal-{id}")).on_click(
-                            cx.listener({
-                                let id = id.clone();
-                                move |this, _, _, cx| {
-                                    if let Err(error) = theme_library::reveal(&id, cx) {
-                                        this.library_error = Some(error.to_string().into());
-                                    }
-                                    cx.notify();
+                        compact_action(
+                            theme,
+                            i18n::translate(MessageId::ThemeLibraryReveal, locale),
+                            format!("theme-reveal-{id}"),
+                        )
+                        .on_click(cx.listener({
+                            let id = id.clone();
+                            move |this, _, _, cx| {
+                                if let Err(error) = theme_library::reveal(&id, cx) {
+                                    this.library_error = Some(
+                                        theme_library::error_text(&error, i18n::locale(cx)).into(),
+                                    );
                                 }
-                            }),
-                        ),
-                    )
-                    .child(
-                        compact_action(theme, "Review", format!("theme-review-{id}")).on_click(
-                            cx.listener({
-                                let id = id.clone();
-                                move |this, _, _, cx| {
-                                    this.review_entry = Some(id.clone());
-                                    cx.notify();
-                                }
-                            }),
-                        ),
+                                cx.notify();
+                            }
+                        })),
                     )
                     .child(
                         compact_action(
                             theme,
-                            "Duplicate as editable",
+                            i18n::translate(MessageId::ThemeLibraryReview, locale),
+                            format!("theme-review-{id}"),
+                        )
+                        .on_click(cx.listener({
+                            let id = id.clone();
+                            move |this, _, _, cx| {
+                                this.review_entry = Some(id.clone());
+                                cx.notify();
+                            }
+                        })),
+                    )
+                    .child(
+                        compact_action(
+                            theme,
+                            i18n::translate(MessageId::ThemeLibraryDuplicate, locale),
                             format!("theme-duplicate-{id}"),
                         )
                         .on_click(cx.listener({
                             let id = id.clone();
                             move |this, _, _, cx| {
                                 if let Err(error) = theme_library::duplicate_as_editable(&id, cx) {
-                                    this.library_error = Some(error.to_string().into());
+                                    this.library_error = Some(
+                                        theme_library::error_text(&error, i18n::locale(cx)).into(),
+                                    );
                                 }
                                 cx.notify();
                             }
@@ -2856,28 +3139,40 @@ impl AppearancePage {
                     )
                     .when(linked, |actions| {
                         actions.child(
-                            compact_action(theme, "Unlink", format!("theme-unlink-{id}")).on_click(
-                                cx.listener({
-                                    let id = id.clone();
-                                    move |this, _, _, cx| {
-                                        if let Err(error) = theme_library::unlink(&id, cx) {
-                                            this.library_error = Some(error.to_string().into());
-                                        }
-                                        cx.notify();
+                            compact_action(
+                                theme,
+                                i18n::translate(MessageId::ThemeLibraryUnlink, locale),
+                                format!("theme-unlink-{id}"),
+                            )
+                            .on_click(cx.listener({
+                                let id = id.clone();
+                                move |this, _, _, cx| {
+                                    if let Err(error) = theme_library::unlink(&id, cx) {
+                                        this.library_error = Some(
+                                            theme_library::error_text(&error, i18n::locale(cx))
+                                                .into(),
+                                        );
                                     }
-                                }),
-                            ),
+                                    cx.notify();
+                                }
+                            })),
                         )
                     })
                     .child(
-                        compact_action(theme, "Remove", format!("theme-remove-{id}"))
-                            .text_color(theme.danger)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Err(error) = theme_library::remove(&id, cx) {
-                                    this.library_error = Some(error.to_string().into());
-                                }
-                                cx.notify();
-                            })),
+                        compact_action(
+                            theme,
+                            i18n::translate(MessageId::CommonRemove, locale),
+                            format!("theme-remove-{id}"),
+                        )
+                        .text_color(theme.danger)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Err(error) = theme_library::remove(&id, cx) {
+                                this.library_error = Some(
+                                    theme_library::error_text(&error, i18n::locale(cx)).into(),
+                                );
+                            }
+                            cx.notify();
+                        })),
                     ),
             )
             .into_any_element()
@@ -2892,6 +3187,7 @@ impl AppearancePage {
         let (linked, imported): (Vec<_>, Vec<_>) = entries
             .into_iter()
             .partition(|entry| entry.source.is_linked());
+        let locale = i18n::locale(cx);
         let mut rows = vec![
             widgets::card_row(theme, false)
                 .child(widgets::row_tile(theme, icons::FOLDER_WITH_FILES))
@@ -2899,20 +3195,26 @@ impl AppearancePage {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(widgets::row_title(theme, "Theme library"))
+                        .child(widgets::row_title(
+                            theme,
+                            i18n::translate(MessageId::ThemeLibraryTitle, locale),
+                        ))
                         .child(widgets::meta_line(
                             theme,
                             vec![
                                 div()
-                                    .child("Import or link custom themes.")
+                                    .child(i18n::translate(MessageId::ThemeLibrarySubtitle, locale))
                                     .into_any_element(),
                             ],
                         )),
                 )
                 .child(
-                    popover::btn_primary(theme, "Add theme")
-                        .id("theme-library-add")
-                        .on_click(cx.listener(|this, _, _, cx| this.open_import(cx))),
+                    popover::btn_primary(
+                        theme,
+                        i18n::translate(MessageId::ThemeLibraryAdd, locale),
+                    )
+                    .id("theme-library-add")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_import(cx))),
                 )
                 .into_any_element(),
         ];
@@ -2927,7 +3229,7 @@ impl AppearancePage {
                     .text_size(crate::typography::ui_rems(10.5))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text_faint)
-                    .child("IMPORTED")
+                    .child(i18n::translate(MessageId::ThemeLibraryImported, locale))
                     .into_any_element(),
             );
             rows.extend(
@@ -2947,7 +3249,7 @@ impl AppearancePage {
                     .text_size(crate::typography::ui_rems(10.5))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text_faint)
-                    .child("LINKED")
+                    .child(i18n::translate(MessageId::ThemeLibraryLinked, locale))
                     .into_any_element(),
             );
             rows.extend(
@@ -2971,6 +3273,8 @@ impl Render for AppearancePage {
         let current_themes = appearance::themes(cx);
         let current_accent = appearance::accent(cx);
         let current_surface = appearance::surface(cx);
+        let locale = i18n::locale(cx);
+        let current_language = i18n::preference(cx);
         let ui_settings = crate::settings::current(cx);
         let current_background = ui_settings.new_thread_composer_background;
         let current_background_effect = ui_settings.new_thread_background_effect;
@@ -2980,7 +3284,7 @@ impl Render for AppearancePage {
                 widgets::option_card(
                     &theme,
                     mode.icon(),
-                    mode.label(),
+                    i18n::translate(mode_message(mode), locale),
                     mode == current_mode,
                     preview(mode, &current_themes, current_accent, current_surface),
                 )
@@ -2998,9 +3302,9 @@ impl Render for AppearancePage {
             .enumerate()
         {
             let (label, mode) = if appearance_kind.is_light() {
-                ("Light theme", AppearanceMode::Light)
+                (MessageId::AppearanceThemeLight, AppearanceMode::Light)
             } else {
-                ("Dark theme", AppearanceMode::Dark)
+                (MessageId::AppearanceThemeDark, AppearanceMode::Dark)
             };
             let selector = self.render_theme_selector(appearance_kind, &current_themes, &theme, cx);
             theme_rows.push(
@@ -3010,13 +3314,14 @@ impl Render for AppearancePage {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(widgets::row_title(&theme, label))
+                            .child(widgets::row_title(&theme, i18n::translate(label, locale)))
                             .child(widgets::meta_line(
                                 &theme,
                                 vec![
                                     div()
-                                        .child(SharedString::from(
-                                            "Used whenever this appearance is active.",
+                                        .child(i18n::translate(
+                                            MessageId::AppearanceThemeActiveHint,
+                                            locale,
                                         ))
                                         .into_any_element(),
                                 ],
@@ -3044,12 +3349,12 @@ impl Render for AppearancePage {
         let surface_controls = SurfacePreference::ALL
             .into_iter()
             .map(|surface| {
-                surface_choice(&theme, surface, surface == current_surface).on_click(cx.listener(
-                    move |_, _, _, cx| {
+                surface_choice(&theme, surface, locale, surface == current_surface).on_click(
+                    cx.listener(move |_, _, _, cx| {
                         appearance::set_surface(surface, cx);
                         cx.notify();
-                    },
-                ))
+                    }),
+                )
             })
             .collect::<Vec<_>>();
         let mut settings_rows = theme_rows;
@@ -3060,12 +3365,18 @@ impl Render for AppearancePage {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(widgets::row_title(&theme, "Accent color"))
+                        .child(widgets::row_title(
+                            &theme,
+                            i18n::translate(MessageId::AppearanceAccentColor, locale),
+                        ))
                         .child(widgets::meta_line(
                             &theme,
                             vec![
                                 div()
-                                    .child(SharedString::from(accent_helper(current_accent)))
+                                    .child(SharedString::from(accent_helper(
+                                        current_accent,
+                                        locale,
+                                    )))
                                     .into_any_element(),
                             ],
                         )),
@@ -3088,7 +3399,10 @@ impl Render for AppearancePage {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(widgets::row_title(&theme, "Glass"))
+                        .child(widgets::row_title(
+                            &theme,
+                            i18n::translate(MessageId::AppearanceGlass, locale),
+                        ))
                         .child(widgets::meta_line(
                             &theme,
                             vec![
@@ -3096,6 +3410,7 @@ impl Render for AppearancePage {
                                     .child(SharedString::from(surface_helper(
                                         current_surface,
                                         theme.surface_treatment,
+                                        locale,
                                     )))
                                     .into_any_element(),
                             ],
@@ -3141,18 +3456,26 @@ impl Render for AppearancePage {
                     .child(SharedString::from(background.name.clone()))
                     .into_any_element(),
                 div()
-                    .child("Softened automatically on frosted themes.")
+                    .child(i18n::translate(MessageId::BackgroundSoftened, locale))
                     .into_any_element(),
             ],
             Some(_) => vec![
-                div().child("Image unavailable").into_any_element(),
                 div()
-                    .child("Choose a replacement or remove it.")
+                    .child(i18n::translate(
+                        MessageId::BackgroundImageUnavailable,
+                        locale,
+                    ))
+                    .into_any_element(),
+                div()
+                    .child(i18n::translate(
+                        MessageId::BackgroundChooseReplacement,
+                        locale,
+                    ))
                     .into_any_element(),
             ],
             None => vec![
                 div()
-                    .child("Add an image behind the composer on empty new threads.")
+                    .child(i18n::translate(MessageId::BackgroundHint, locale))
                     .into_any_element(),
             ],
         };
@@ -3163,7 +3486,10 @@ impl Render for AppearancePage {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(widgets::row_title(&theme, "New thread composer background"))
+                        .child(widgets::row_title(
+                            &theme,
+                            i18n::translate(MessageId::BackgroundTitle, locale),
+                        ))
                         .child(widgets::meta_line(&theme, background_meta)),
                 )
                 .child(
@@ -3178,7 +3504,7 @@ impl Render for AppearancePage {
                                 .child(
                                     compact_action(
                                         &theme,
-                                        "Replace image",
+                                        i18n::translate(MessageId::BackgroundReplace, locale),
                                         "new-thread-background-replace",
                                     )
                                     .on_click(cx.listener(
@@ -3188,7 +3514,7 @@ impl Render for AppearancePage {
                                 .child(
                                     compact_action(
                                         &theme,
-                                        "Remove",
+                                        i18n::translate(MessageId::CommonRemove, locale),
                                         "new-thread-background-remove",
                                     )
                                     .text_color(theme.danger)
@@ -3201,7 +3527,7 @@ impl Render for AppearancePage {
                             actions.child(
                                 compact_action(
                                     &theme,
-                                    "Choose image",
+                                    i18n::translate(MessageId::BackgroundChoose, locale),
                                     "new-thread-background-choose",
                                 )
                                 .on_click(cx.listener(
@@ -3216,11 +3542,16 @@ impl Render for AppearancePage {
             let effect_controls = crate::settings::NewThreadBackgroundEffect::ALL
                 .into_iter()
                 .map(|effect| {
-                    background_effect_choice(&theme, effect, effect == current_background_effect)
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            crate::settings::set_new_thread_background_effect(effect, cx);
-                            cx.notify();
-                        }))
+                    background_effect_choice(
+                        &theme,
+                        effect,
+                        effect == current_background_effect,
+                        locale,
+                    )
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        crate::settings::set_new_thread_background_effect(effect, cx);
+                        cx.notify();
+                    }))
                 })
                 .collect::<Vec<_>>();
             settings_rows.push(
@@ -3230,12 +3561,18 @@ impl Render for AppearancePage {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(widgets::row_title(&theme, "Background effect"))
+                            .child(widgets::row_title(
+                                &theme,
+                                i18n::translate(MessageId::BackgroundEffect, locale),
+                            ))
                             .child(widgets::meta_line(
                                 &theme,
                                 vec![
                                     div()
-                                        .child(current_background_effect.description())
+                                        .child(i18n::translate(
+                                            current_background_effect.description_message(),
+                                            locale,
+                                        ))
                                         .into_any_element(),
                                 ],
                             )),
@@ -3309,14 +3646,14 @@ impl Render for AppearancePage {
                             .flex()
                             .flex_col()
                             .gap(px(4.0))
-                            .child(widgets::field_label(&theme, kind.label()))
+                            .child(widgets::field_label(&theme, kind.label(locale)))
                             .child(
                                 div()
                                     .max_w(px(520.0))
                                     .text_size(typography::ui_rems(12.0))
                                     .line_height(px(18.0))
                                     .text_color(theme.text_muted)
-                                    .child(kind.description()),
+                                    .child(kind.description(locale)),
                             ),
                     )
                     .child(
@@ -3338,11 +3675,14 @@ impl Render for AppearancePage {
                 font_section = font_section.child(
                     widgets::error_strip(
                         &theme,
-                        format!(
-                            "{} \"{}\" isn't available on this device. Using {}.",
-                            kind.label(),
-                            requested.label(),
-                            effective.label()
+                        i18n::fill_many(
+                            MessageId::FontFallbackUnavailable,
+                            &[
+                                ("{slot}", kind.label(locale)),
+                                ("{family}", requested.label()),
+                                ("{fallback}", effective.label()),
+                            ],
+                            locale,
                         ),
                     )
                     .font_family(fixed.clone()),
@@ -3389,11 +3729,15 @@ impl Render for AppearancePage {
                     .track_scroll(&self.scroll.scroll)
                     .child(
                         widgets::page_column()
-                            .child(widgets::page_header(&theme, "Appearance", None))
+                            .child(widgets::page_header(
+                                &theme,
+                                i18n::translate(MessageId::AppearanceTitle, locale),
+                                None,
+                            ))
                             .child(
                                 widgets::page_subtitle(
                                     &theme,
-                                    "Choose how Zeron looks. These settings stay on this device.",
+                                    i18n::translate(MessageId::AppearanceSubtitle, locale),
                                 )
                                 .max_w(px(512.0))
                                 .line_height(px(20.0)),
@@ -3404,10 +3748,60 @@ impl Render for AppearancePage {
                                     .flex()
                                     .flex_col()
                                     .gap(px(12.0))
-                                    .child(widgets::field_label(&theme, "Appearance"))
+                                    .child(widgets::field_label(
+                                        &theme,
+                                        i18n::translate(MessageId::AppearanceTitle, locale),
+                                    ))
                                     .child(widgets::option_card_row().children(cards)),
                             )
                             .child(widgets::section_card(&theme).children(settings_rows))
+                            .child(
+                                widgets::section_card(&theme).child(
+                                    widgets::card_row(&theme, true)
+                                        .child(widgets::row_tile(&theme, icons::GLOBE))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .child(widgets::row_title(
+                                                    &theme,
+                                                    i18n::translate(
+                                                        MessageId::LanguageLabel,
+                                                        locale,
+                                                    ),
+                                                ))
+                                                .child(widgets::meta_line(
+                                                    &theme,
+                                                    vec![
+                                                        div()
+                                                            .child(SharedString::from(
+                                                                i18n::preference_status(
+                                                                    current_language,
+                                                                    locale,
+                                                                    locale,
+                                                                ),
+                                                            ))
+                                                            .into_any_element(),
+                                                        div()
+                                                            .child(i18n::translate(
+                                                                MessageId::LanguageHint,
+                                                                locale,
+                                                            ))
+                                                            .into_any_element(),
+                                                    ],
+                                                )),
+                                        )
+                                        .child(div().flex_none().ml(px(10.0)).child(
+                                            language_selector(
+                                                self,
+                                                &theme,
+                                                current_language,
+                                                locale,
+                                                cx,
+                                            ),
+                                        )),
+                                ),
+                            )
                             .child(font_section)
                             .when_some(library_warning, |page, warning| {
                                 page.child(
@@ -3454,23 +3848,48 @@ mod tests {
 
     #[test]
     fn accent_helper_explains_default_and_override_scope() {
-        assert!(accent_helper(AccentSelection::ThemeDefault).contains("intended"));
-        let copy = accent_helper(AccentSelection::Preset(AccentPreset::Pink));
+        assert!(accent_helper(AccentSelection::ThemeDefault, Locale::En).contains("intended"));
+        let copy = accent_helper(AccentSelection::Preset(AccentPreset::Pink), Locale::En);
         assert!(copy.starts_with("Pink ·"));
         assert!(copy.contains("glyphs"));
+        // The preset name stays untranslated; only the surrounding copy does.
+        assert!(
+            accent_helper(AccentSelection::Preset(AccentPreset::Pink), Locale::ZhCn)
+                .starts_with("Pink ·")
+        );
     }
 
     #[test]
     fn surface_helper_explains_theme_default_and_global_overrides() {
-        let default = surface_helper(SurfacePreference::ThemeDefault, SurfaceTreatment::Opaque);
+        let default = surface_helper(
+            SurfacePreference::ThemeDefault,
+            SurfaceTreatment::Opaque,
+            Locale::En,
+        );
         assert!(default.contains("opaque default"));
         assert!(
-            surface_helper(SurfacePreference::Frosted, SurfaceTreatment::Opaque)
-                .contains("where supported")
+            surface_helper(
+                SurfacePreference::Frosted,
+                SurfaceTreatment::Opaque,
+                Locale::En
+            )
+            .contains("where supported")
         );
         assert!(
-            surface_helper(SurfacePreference::Opaque, SurfaceTreatment::Frosted)
-                .contains("every theme")
+            surface_helper(
+                SurfacePreference::Opaque,
+                SurfaceTreatment::Frosted,
+                Locale::En
+            )
+            .contains("every theme")
+        );
+        assert_eq!(
+            surface_helper(
+                SurfacePreference::Opaque,
+                SurfaceTreatment::Frosted,
+                Locale::ZhCn
+            ),
+            "所有主题均使用纯色表面。"
         );
     }
 
@@ -3591,7 +4010,10 @@ mod tests {
     #[test]
     fn each_font_kind_gets_distinct_labels_and_element_ids() {
         let slugs: Vec<_> = FontKind::ALL.iter().map(|kind| kind.slug()).collect();
-        let labels: Vec<_> = FontKind::ALL.iter().map(|kind| kind.label()).collect();
+        let labels: Vec<_> = FontKind::ALL
+            .iter()
+            .map(|kind| kind.label(Locale::En))
+            .collect();
         assert_eq!(
             slugs.iter().collect::<std::collections::HashSet<_>>().len(),
             3
@@ -3603,6 +4025,16 @@ mod tests {
                 .len(),
             3
         );
+        // Element ids stay on `slug`; the copy is locale-dependent.
+        assert_eq!(
+            labels,
+            ["Interface font", "Terminal font", "Code & diff font"]
+        );
+        let chinese: Vec<_> = FontKind::ALL
+            .iter()
+            .map(|kind| kind.label(Locale::ZhCn))
+            .collect();
+        assert_eq!(chinese, ["界面字体", "终端字体", "代码与差异字体"]);
     }
 
     #[test]
@@ -3777,5 +4209,90 @@ mod tests {
             assert!(!typography::set_terminal_family(UiFontFamily::System, cx));
             assert_eq!(typography::terminal_effective(cx), UiFontFamily::GeistMono);
         });
+    }
+
+    /// The switch path end to end: the persisted choice, the locale every render
+    /// path reads, the copy each migrated surface resolves, and a draw of this
+    /// page in both locales. gpui's test platform exposes no rendered-text API
+    /// (`TestWindow` has only `simulate_input`/`simulate_resize`), so copy is
+    /// asserted through the exact functions `render` calls, and the draw proves
+    /// the Language row itself lays out without panicking.
+    #[gpui::test]
+    fn switching_language_updates_locale_copy_and_the_settings_file(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(Default::default(), dir.path(), cx);
+            typography::init(
+                UiFontFamily::Geist,
+                UiFontSize::default(),
+                UiFontFamily::GeistMono,
+                typography::TERMINAL_FONT_SIZE_DEFAULT,
+                UiFontFamily::GeistMono,
+                typography::CODE_FONT_SIZE_DEFAULT,
+                FontAvailability::all(),
+                cx,
+            );
+            crate::theme_library::init(dir.path().to_path_buf(), cx);
+            i18n::init(LanguagePreference::English, cx);
+        });
+        let window = cx.add_window(|_, cx| AppearancePage::new(cx));
+
+        let shell_copy = |locale: Locale| i18n::translate(MessageId::SidebarNoSessions, locale);
+        let composer_copy =
+            |locale: Locale| i18n::translate(MessageId::ComposerPlaceholder, locale);
+        let diff_copy = |locale: Locale| {
+            crate::changes::clean_message(crate::changes::DiffScope::LatestTurn, None, locale)
+        };
+
+        cx.update(|cx| {
+            assert_eq!(i18n::locale(cx), Locale::En);
+            assert_eq!(shell_copy(i18n::locale(cx)), "No sessions yet");
+            assert_eq!(composer_copy(i18n::locale(cx)), "Do anything…");
+            assert_eq!(diff_copy(i18n::locale(cx)), "No changes this turn");
+
+            i18n::set_preference(LanguagePreference::SimplifiedChinese, cx);
+
+            assert_eq!(i18n::preference(cx), LanguagePreference::SimplifiedChinese);
+            assert_eq!(i18n::locale(cx), Locale::ZhCn);
+            assert_eq!(shell_copy(i18n::locale(cx)), "还没有会话");
+            assert_eq!(composer_copy(i18n::locale(cx)), "做任何事…");
+            assert_eq!(diff_copy(i18n::locale(cx)), "本轮没有改动");
+            assert_eq!(
+                i18n::translate(MessageId::LanguageLabel, i18n::locale(cx)),
+                "语言"
+            );
+            assert_eq!(
+                i18n::preference_label(LanguagePreference::System, i18n::locale(cx)),
+                "跟随系统"
+            );
+        });
+
+        // Persisted before the call returns, so a restart keeps the choice.
+        assert_eq!(
+            crate::settings::UiSettings::load(dir.path()).language,
+            LanguagePreference::SimplifiedChinese
+        );
+
+        // Back to English restores the original copy for the same surfaces.
+        cx.update(|cx| {
+            i18n::set_preference(LanguagePreference::English, cx);
+            assert_eq!(i18n::locale(cx), Locale::En);
+            assert_eq!(shell_copy(i18n::locale(cx)), "No sessions yet");
+            assert_eq!(diff_copy(i18n::locale(cx)), "No changes this turn");
+        });
+
+        for preference in [
+            LanguagePreference::SimplifiedChinese,
+            LanguagePreference::English,
+        ] {
+            cx.update(|cx| i18n::set_preference(preference, cx));
+            cx.update_window(window.into(), |_, window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            })
+            .unwrap();
+        }
     }
 }

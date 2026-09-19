@@ -1,4 +1,5 @@
 use super::{BrowserEvent, BrowserSurface};
+use crate::i18n::{self, MessageId};
 use crate::{icons, surface_chrome, theme::Theme};
 use gpui::{
     AnyElement, Context, Focusable, IntoElement, KeyDownEvent, MouseButton, Render, Window, div,
@@ -102,12 +103,13 @@ impl BrowserSurface {
     }
 
     fn preview_body(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let locale = i18n::locale(cx);
         let snapshot = &self.previews;
         let available = snapshot.error.is_none();
         let subtitle = if snapshot.remote {
-            "Running on your device"
+            i18n::translate(MessageId::BrowserPreviewsRemoteSubtitle, locale)
         } else {
-            "Running locally"
+            i18n::translate(MessageId::BrowserPreviewsLocalSubtitle, locale)
         };
         let mut content = div()
             .w_full()
@@ -135,7 +137,10 @@ impl BrowserSurface {
             };
             content = content.child(
                 div()
-                    .id(gpui::SharedString::from(format!("preview-row-{}", service.id)))
+                    .id(gpui::SharedString::from(format!(
+                        "preview-row-{}",
+                        service.id
+                    )))
                     .w_full()
                     .h(px(56.0))
                     .px(px(14.0))
@@ -210,7 +215,12 @@ impl BrowserSurface {
                             .text_size(crate::typography::ui_rems(12.0))
                             .text_color(theme.text_muted)
                             .role(gpui::Role::Button)
-                            .aria_label(format!("Open {} preview", service.name))
+                            .aria_label(i18n::fill(
+                                MessageId::BrowserPreviewOpenAria,
+                                "{name}",
+                                &service.name,
+                                locale,
+                            ))
                             .when(available, |el| {
                                 el.cursor_pointer()
                                     .hover(|style| style.bg(crate::theme::ink(0.05)))
@@ -220,17 +230,17 @@ impl BrowserSurface {
                                     }))
                             })
                             .when(!available, |el| el.opacity(0.4))
-                            .child("Open"),
+                            .child(i18n::translate(MessageId::BrowserPreviewOpen, locale)),
                     ),
             );
         }
         if snapshot.services.is_empty() {
             let message = if self.previews_loading {
-                "Looking for dev servers…"
+                i18n::translate(MessageId::BrowserPreviewsSearching, locale)
             } else if snapshot.remote {
-                "Start a dev server in this project on your other device. Its preview will appear here when that device is online."
+                i18n::translate(MessageId::BrowserPreviewsEmptyRemote, locale)
             } else {
-                "Start a dev server in this project. It will appear here automatically, ready to open."
+                i18n::translate(MessageId::BrowserPreviewsEmptyLocal, locale)
             };
             content = content.child(
                 div()
@@ -261,9 +271,9 @@ impl BrowserSurface {
                 .text_color(theme.text_muted)
                 .cursor_pointer()
                 .role(gpui::Role::Button)
-                .aria_label("Enter a website address")
+                .aria_label(i18n::translate(MessageId::BrowserEnterAddressAria, locale))
                 .on_click(cx.listener(|this, _, window, cx| this.focus_address(window, cx)))
-                .child("Or enter a website address"),
+                .child(i18n::translate(MessageId::BrowserEnterAddressOr, locale)),
         );
         div()
             .id("browser-previews")
@@ -281,21 +291,22 @@ impl BrowserSurface {
         if self.page.url.is_none() && self.previews_task.is_some() {
             return self.preview_body(theme, cx);
         }
+        let locale = i18n::locale(cx);
         let external = !cfg!(any(target_os = "macos", target_os = "linux"));
         let has_error = self.page.error.is_some();
         let title = if has_error {
-            "Couldn’t load this page"
+            i18n::translate(MessageId::BrowserLoadFailedTitle, locale)
         } else if external && self.page.url.is_some() {
-            "Opened in your browser"
+            i18n::translate(MessageId::BrowserOpenedExternallyTitle, locale)
         } else {
-            "Preview your work"
+            i18n::translate(MessageId::BrowserEmptyTitle, locale)
         };
         let description = if let Some(error) = &self.page.error {
-            error.clone()
+            error.text(locale)
         } else if external {
-            "Open a website or local app in your default browser. Embedded browsing is available on macOS and Linux.".into()
+            i18n::translate(MessageId::BrowserEmptyExternalDescription, locale).to_owned()
         } else {
-            "Preview your local app or keep a website beside your conversation.".into()
+            i18n::translate(MessageId::BrowserEmptyDescription, locale).to_owned()
         };
         div()
             .size_full()
@@ -356,9 +367,9 @@ impl BrowserSurface {
                             .cursor_pointer()
                             .role(gpui::Role::Button)
                             .aria_label(if has_error {
-                                "Retry page"
+                                i18n::translate(MessageId::BrowserRetryPageAria, locale)
                             } else {
-                                "Enter an address"
+                                i18n::translate(MessageId::BrowserEnterAddress, locale)
                             })
                             .hover(|style| style.bg(crate::theme::wash(0.10)))
                             .flex()
@@ -374,9 +385,9 @@ impl BrowserSurface {
                                 }
                             }))
                             .child(if has_error {
-                                "Try again"
+                                i18n::translate(MessageId::BrowserTryAgain, locale)
                             } else {
-                                "Enter an address"
+                                i18n::translate(MessageId::BrowserEnterAddress, locale)
                             })
                             .when(!has_error, |el| {
                                 el.child(
@@ -399,12 +410,13 @@ impl BrowserSurface {
 impl Render for BrowserSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let focused = self.address.focus_handle(cx).is_focused(window);
         let external = !cfg!(any(target_os = "macos", target_os = "linux"));
         let has_page = self.page.url.is_some();
         let back = button(
             "browser-back",
-            "Back",
+            i18n::translate(MessageId::CommonBack, locale),
             icons::ARROW_LEFT,
             self.page.can_back,
             &theme,
@@ -415,7 +427,7 @@ impl Render for BrowserSurface {
         });
         let forward = button(
             "browser-forward",
-            "Forward",
+            i18n::translate(MessageId::BrowserForward, locale),
             icons::ARROW_RIGHT,
             self.page.can_forward,
             &theme,
@@ -426,7 +438,7 @@ impl Render for BrowserSurface {
         });
         let reload = button(
             "browser-reload",
-            "Reload page",
+            i18n::translate(MessageId::BrowserReload, locale),
             icons::REFRESH,
             has_page,
             &theme,
@@ -477,7 +489,7 @@ impl Render for BrowserSurface {
                         .justify_center()
                         .cursor_pointer()
                         .role(gpui::Role::Button)
-                        .aria_label("Go to address")
+                        .aria_label(i18n::translate(MessageId::BrowserGoAria, locale))
                         .hover(|s| s.bg(crate::theme::wash(0.10)))
                         .on_mouse_down(MouseButton::Left, |_, w, _| w.prevent_default())
                         .on_click(cx.listener(|this, _, w, cx| this.submit(w, cx)))
@@ -490,7 +502,7 @@ impl Render for BrowserSurface {
             });
         let open = button(
             "browser-external",
-            "Open in default browser",
+            i18n::translate(MessageId::BrowserOpenExternal, locale),
             icons::ARROW_UP_RIGHT,
             has_page,
             &theme,
@@ -623,28 +635,75 @@ impl Render for BrowserSurface {
                             && u.host_str()
                                 .is_some_and(|host| host.ends_with(".localhost")))
                 });
-        div().id("browser-surface").size_full().flex().flex_col().track_focus(&self.focus)
-            .key_context("Browser").on_key_down(cx.listener(Self::key_down))
-            .on_key_up(cx.listener(|this,event: &gpui::KeyUpEvent,w,cx| {
+        div()
+            .id("browser-surface")
+            .size_full()
+            .flex()
+            .flex_col()
+            .track_focus(&self.focus)
+            .key_context("Browser")
+            .on_key_down(cx.listener(Self::key_down))
+            .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, w, cx| {
                 #[cfg(target_os = "linux")]
-                if this.focus.is_focused(w) {this.linux_key(&event.keystroke,false);cx.stop_propagation();}
+                if this.focus.is_focused(w) {
+                    this.linux_key(&event.keystroke, false);
+                    cx.stop_propagation();
+                }
                 #[cfg(not(target_os = "linux"))]
-                let _=(this,event,w,cx);
+                let _ = (this, event, w, cx);
             }))
             .on_action(cx.listener(|this, _: &super::Reload, _, cx| this.reload(cx)))
-            .on_action(cx.listener(|this, _: &super::FocusAddress, w, cx| this.focus_address(w, cx)))
-            .on_action(cx.listener(|_, _: &super::NewTab, _, cx| cx.emit(BrowserEvent::NewTab(None))))
+            .on_action(
+                cx.listener(|this, _: &super::FocusAddress, w, cx| this.focus_address(w, cx)),
+            )
+            .on_action(
+                cx.listener(|_, _: &super::NewTab, _, cx| cx.emit(BrowserEvent::NewTab(None))),
+            )
             .on_action(cx.listener(|_, _: &super::CloseTab, _, cx| cx.emit(BrowserEvent::Close)))
             .on_action(cx.listener(|this, _: &super::Back, _, _| this.history(false)))
             .on_action(cx.listener(|this, _: &super::Forward, _, _| this.history(true)))
             .child(toolbar)
-            .when_some(self.validation.clone(), |el, message| el.child(div().px(px(12.0)).py(px(8.0)).text_size(crate::typography::ui_rems(11.0)).text_color(theme.danger).child(message)))
-            .when(remote_loopback, |el| el.child(div().px(px(12.0)).py(px(8.0)).border_b_1().border_color(theme.border)
-                .text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted)
-                .child("Localhost opens on this device. Open a detected preview from a new tab to reach your other device.")))
+            .when_some(self.validation, |el, message| {
+                el.child(
+                    div()
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.danger)
+                        .child(i18n::translate(message, locale)),
+                )
+            })
+            .when(remote_loopback, |el| {
+                el.child(
+                    div()
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child(i18n::translate(
+                            MessageId::BrowserRemoteLoopbackHint,
+                            locale,
+                        )),
+                )
+            })
             .child(body)
-            .when(external, |el| el.child(div().h(px(26.0)).px(px(10.0)).flex().items_center().gap(px(5.0)).border_t_1().border_color(theme.border)
-                .text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_faint)
-                .child(icons::icon(icons::ARROW_UP_RIGHT).size(px(11.0))).child("Opens in your default browser")))
+            .when(external, |el| {
+                el.child(
+                    div()
+                        .h(px(26.0))
+                        .px(px(10.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(5.0))
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .text_size(crate::typography::ui_rems(10.0))
+                        .text_color(theme.text_faint)
+                        .child(icons::icon(icons::ARROW_UP_RIGHT).size(px(11.0)))
+                        .child(i18n::translate(MessageId::BrowserExternalFooter, locale)),
+                )
+            })
     }
 }

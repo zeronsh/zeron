@@ -30,6 +30,7 @@ use zeron_rpc::methods;
 use crate::changes::{Changes, ChangesEvent};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
 use crate::files::{FilesCloseDisposition, FilesEvent, FilesSurface, WorkspacePathDrag};
+use crate::i18n::{self, Locale, MessageId};
 use crate::icons::{self, icon};
 use crate::loaders;
 use crate::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT, TAB_SLIDE};
@@ -52,7 +53,7 @@ use crate::settings::{
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
-    format_time_ago, org_name_valid, parse_orgs, sort_memberships,
+    org_name_valid, parse_orgs, sort_memberships, time_ago_compact,
 };
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
 use crate::theme::Theme;
@@ -433,7 +434,23 @@ impl SettingsSection {
 
     /// Sidebar + header label (zeron settings-sidebar.tsx SECTIONS / __root.tsx
     /// `settingsTitle` — the same strings in both places).
-    pub fn label(self) -> &'static str {
+    pub fn label_message(self) -> MessageId {
+        match self {
+            SettingsSection::Devices => MessageId::SettingsSectionDevices,
+            SettingsSection::Harnesses => MessageId::SettingsSectionHarnesses,
+            SettingsSection::Agents => MessageId::SettingsSectionAgents,
+            SettingsSection::Appearance => MessageId::AppearanceTitle,
+            SettingsSection::Files => MessageId::SettingsSectionFiles,
+            SettingsSection::Notifications => MessageId::SettingsSectionNotifications,
+            SettingsSection::Shortcuts => MessageId::SettingsSectionShortcuts,
+            SettingsSection::Appshots => MessageId::SettingsSectionAppshots,
+            SettingsSection::Archived => MessageId::ArchivedTitle,
+        }
+    }
+
+    /// Stable element-id fragment. The label is translated, so the id cannot be
+    /// derived from it; these are the exact English labels the id used before.
+    pub const fn slug(self) -> &'static str {
         match self {
             SettingsSection::Devices => "Devices",
             SettingsSection::Harnesses => "Agents",
@@ -1222,6 +1239,7 @@ async fn wait_for_remote_engine_shutdown(
     ipc_port: u16,
     data_dir: &std::path::Path,
     timeout: Duration,
+    locale: Locale,
 ) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -1237,9 +1255,11 @@ async fn wait_for_remote_engine_shutdown(
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(format!(
-                "the daemon did not finish stopping within {} seconds",
-                timeout.as_secs()
+            return Err(i18n::fill(
+                MessageId::ErrorDaemonStopTimeout,
+                "{seconds}",
+                &timeout.as_secs().to_string(),
+                locale,
             ));
         }
         tokio::time::sleep(RUNTIME_CHANGE_POLL_INTERVAL).await;
@@ -1252,6 +1272,7 @@ async fn stop_synced_runtime(
     engine: crate::state::EngineHandle,
     ipc_port: u16,
     data_dir: &std::path::Path,
+    locale: Locale,
 ) -> Result<(), String> {
     let stop_error = if matches!(engine.mode(), EngineMode::Remote { .. }) {
         engine
@@ -1264,7 +1285,8 @@ async fn stop_synced_runtime(
         None
     };
     engine.shutdown().await;
-    match wait_for_remote_engine_shutdown(ipc_port, data_dir, RUNTIME_CHANGE_TIMEOUT).await {
+    match wait_for_remote_engine_shutdown(ipc_port, data_dir, RUNTIME_CHANGE_TIMEOUT, locale).await
+    {
         Ok(()) => Ok(()),
         Err(error) => match stop_error {
             Some(stop_error) => Err(format!("{stop_error}; {error}")),
@@ -1276,7 +1298,10 @@ async fn stop_synced_runtime(
 /// What an import-summary stream item means for the wizard: `Ok((imported,
 /// skipped))` only when the engine reported zero errors; otherwise the
 /// user-facing failure message. Pure so the partial-failure path is testable.
-fn import_summary_outcome(item: &serde_json::Value) -> Result<(usize, usize), String> {
+fn import_summary_outcome(
+    item: &serde_json::Value,
+    locale: Locale,
+) -> Result<(usize, usize), String> {
     let count = |key: &str| item.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
     let errors: Vec<&str> = item
         .get("errors")
@@ -1286,32 +1311,85 @@ fn import_summary_outcome(item: &serde_json::Value) -> Result<(usize, usize), St
     if errors.is_empty() {
         return Ok((count("importedChats"), count("skippedChats")));
     }
-    let first = errors.first().copied().unwrap_or("unknown error");
+    let first = errors.first().copied().unwrap_or(i18n::translate(
+        MessageId::ImportSummaryUnknownError,
+        locale,
+    ));
+    let imported = count("importedChats").to_string();
     Err(if errors.len() == 1 {
-        format!("{} imported, 1 failure: {first}", count("importedChats"))
+        i18n::fill_many(
+            MessageId::ImportSummaryOneFailure,
+            &[("{imported}", &imported), ("{first}", first)],
+            locale,
+        )
     } else {
-        format!(
-            "{} imported, {} failures — first: {first}",
-            count("importedChats"),
-            errors.len()
+        i18n::fill_many(
+            MessageId::ImportSummaryManyFailures,
+            &[
+                ("{imported}", &imported),
+                ("{count}", &errors.len().to_string()),
+                ("{first}", first),
+            ],
+            locale,
         )
     })
 }
 
 /// The offer step's description of what a switch would bring along, or `None`
 /// when the local profile holds nothing importable. Spaces count as work:
-/// a projects-only profile must get the import choice too.
-fn local_work_phrase(chats: usize, spaces: usize) -> Option<String> {
-    let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+/// a projects-only profile must get the import choice too. Each count picks its
+/// own English plural row; Chinese has one form.
+fn local_work_phrase(chats: usize, spaces: usize, locale: Locale) -> Option<String> {
+    let count_row = |n: usize, one: MessageId, many: MessageId| {
+        if n == 1 {
+            i18n::translate(one, locale).to_string()
+        } else {
+            i18n::fill(many, "{n}", &n.to_string(), locale)
+        }
+    };
     match (chats, spaces) {
         (0, 0) => None,
-        (c, 0) => Some(format!("the {}", plural(c, "session"))),
-        (0, s) => Some(format!("the {}", plural(s, "project"))),
-        (c, s) => Some(format!(
-            "the {} and {}",
-            plural(c, "session"),
-            plural(s, "project")
-        )),
+        (c, 0) => {
+            let sessions = count_row(
+                c,
+                MessageId::LocalWorkSessionsOne,
+                MessageId::LocalWorkSessionsMany,
+            );
+            Some(i18n::fill_many(
+                MessageId::LocalWorkOnly,
+                &[("{phrase}", &sessions)],
+                locale,
+            ))
+        }
+        (0, s) => {
+            let projects = count_row(
+                s,
+                MessageId::LocalWorkProjectsOne,
+                MessageId::LocalWorkProjectsMany,
+            );
+            Some(i18n::fill_many(
+                MessageId::LocalWorkOnly,
+                &[("{phrase}", &projects)],
+                locale,
+            ))
+        }
+        (c, s) => {
+            let sessions = count_row(
+                c,
+                MessageId::LocalWorkSessionsOne,
+                MessageId::LocalWorkSessionsMany,
+            );
+            let projects = count_row(
+                s,
+                MessageId::LocalWorkProjectsOne,
+                MessageId::LocalWorkProjectsMany,
+            );
+            Some(i18n::fill_many(
+                MessageId::LocalWorkBoth,
+                &[("{sessions}", &sessions), ("{projects}", &projects)],
+                locale,
+            ))
+        }
     }
 }
 
@@ -2047,7 +2125,7 @@ impl Shell {
 
     pub fn show_appshot_error(
         &mut self,
-        message: String,
+        message: impl Into<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2120,7 +2198,8 @@ impl Shell {
             self.debug_upload = None;
             if let Some((pct, img_path)) = spec.split_once(':')
                 && let Ok(pct) = pct.parse::<u64>()
-                && let Ok(att) = crate::attachments::stage_file(std::path::Path::new(img_path))
+                && let Ok(att) =
+                    crate::attachments::stage_file(std::path::Path::new(img_path), i18n::locale(cx))
             {
                 let pending_path = format!("pending/{}/{}", att.id, att.name);
                 let device_ids: Vec<String> = {
@@ -2223,11 +2302,20 @@ impl Shell {
                     if self.settings.notifications_enabled
                         && !(self.settings.notifications_background_only && app_focused)
                     {
-                        let title = title.unwrap_or_else(|| "New session".into());
+                        let title = title.unwrap_or_else(|| {
+                            i18n::translate(MessageId::SessionUntitled, i18n::locale(cx))
+                                .to_string()
+                        });
                         let body = match sound {
-                            crate::sound::Sound::Done => "Run finished",
-                            crate::sound::Sound::Request => "Waiting on your input",
-                            crate::sound::Sound::Attention => "Run failed",
+                            crate::sound::Sound::Done => {
+                                i18n::translate(MessageId::NotifyRunFinished, i18n::locale(cx))
+                            }
+                            crate::sound::Sound::Request => {
+                                i18n::translate(MessageId::NotifyWaitingInput, i18n::locale(cx))
+                            }
+                            crate::sound::Sound::Attention => {
+                                i18n::translate(MessageId::NotifyRunFailed, i18n::locale(cx))
+                            }
                         };
                         crate::notify::post(&title, body, Some(&chat_id));
                     }
@@ -2249,10 +2337,16 @@ impl Shell {
                     && !(self.settings.notifications_background_only && app_focused)
                 {
                     let body = match connectivity {
-                        zeron_proto::ConnectivityState::Offline => "Your device is offline",
-                        _ => "Zeron is trying to reconnect",
+                        zeron_proto::ConnectivityState::Offline => {
+                            i18n::translate(MessageId::NotifyDeviceOffline, i18n::locale(cx))
+                        }
+                        _ => i18n::translate(MessageId::NotifyReconnecting, i18n::locale(cx)),
                     };
-                    crate::notify::post("Connection unavailable", body, None);
+                    crate::notify::post(
+                        i18n::translate(MessageId::NotifyConnectionUnavailable, i18n::locale(cx)),
+                        body,
+                        None,
+                    );
                 }
             }
         }
@@ -2522,7 +2616,7 @@ impl Shell {
                     let files = files.read(cx);
                     (
                         *surface,
-                        files.tab_title(),
+                        files.tab_title(i18n::locale(cx)),
                         files.has_unsaved_changes(),
                         None,
                     )
@@ -2531,7 +2625,12 @@ impl Shell {
                     let path = self.file_surface_paths.get(id);
                     let title = path
                         .map(|path| workspace_file_title(path))
-                        .unwrap_or_else(|| SharedString::from("File"));
+                        .unwrap_or_else(|| {
+                            SharedString::from(i18n::translate(
+                                MessageId::SurfaceFileFallback,
+                                i18n::locale(cx),
+                            ))
+                        });
                     (
                         *surface,
                         title,
@@ -2544,7 +2643,14 @@ impl Shell {
                     .get(id)
                     // Contextual title (user request): the pane's scope
                     // label, or the pinned commit's subject.
-                    .map(|changes| (*surface, changes.read(cx).tab_title(), false, None)),
+                    .map(|changes| {
+                        (
+                            *surface,
+                            changes.read(cx).tab_title(i18n::locale(cx)),
+                            false,
+                            None,
+                        )
+                    }),
                 RightSurface::Terminal(tab) => terminals
                     .iter()
                     .find(|(k, _, _)| k == tab)
@@ -2557,7 +2663,7 @@ impl Shell {
                     let browser = browser.read(cx);
                     (
                         *surface,
-                        browser.title(),
+                        browser.title(i18n::locale(cx)),
                         false,
                         browser.page.url.clone().map(Into::into),
                     )
@@ -3770,9 +3876,13 @@ impl Shell {
         };
         if let Some(link) = link {
             cx.write_to_clipboard(ClipboardItem::new_string(link));
-            self.sidebar_notice = Some("Zeron conversation link copied".into());
+            self.sidebar_notice = Some(
+                i18n::translate(MessageId::NoticeConversationLinkCopied, i18n::locale(cx)).into(),
+            );
         } else {
-            self.sidebar_notice = Some("Conversation link is not ready yet".into());
+            self.sidebar_notice = Some(
+                i18n::translate(MessageId::NoticeConversationLinkNotReady, i18n::locale(cx)).into(),
+            );
         }
         self.close_chat_menu(cx);
         cx.notify();
@@ -3788,7 +3898,15 @@ impl Shell {
             .and_then(crate::links::harness_conversation_link);
         if let Some(link) = link {
             cx.write_to_clipboard(ClipboardItem::new_string(link.url));
-            self.sidebar_notice = Some(format!("{} copied", link.label).into());
+            self.sidebar_notice = Some(
+                i18n::fill(
+                    MessageId::NoticeCopied,
+                    "{label}",
+                    i18n::translate(link.label, i18n::locale(cx)),
+                    i18n::locale(cx),
+                )
+                .into(),
+            );
         }
         self.close_chat_menu(cx);
         cx.notify();
@@ -3804,7 +3922,9 @@ impl Shell {
             .and_then(|chat| chat.harness_session_id.clone());
         if let Some(id) = id.filter(|id| !id.trim().is_empty()) {
             cx.write_to_clipboard(ClipboardItem::new_string(id));
-            self.sidebar_notice = Some("Harness session ID copied".into());
+            self.sidebar_notice = Some(
+                i18n::translate(MessageId::NoticeHarnessSessionIdCopied, i18n::locale(cx)).into(),
+            );
         }
         self.close_chat_menu(cx);
         cx.notify();
@@ -4106,7 +4226,8 @@ impl Shell {
     /// Fire a Mutate op; failures surface in the sidebar notice strip.
     fn mutate(&mut self, params: serde_json::Value, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.sidebar_notice = Some("Engine not connected".into());
+            self.sidebar_notice =
+                Some(i18n::translate(MessageId::ErrorEngineNotConnected, i18n::locale(cx)).into());
             cx.notify();
             return;
         };
@@ -4132,7 +4253,11 @@ impl Shell {
             .and_then(|c| c.title.clone())
             .unwrap_or_default();
         let input = cx.new(|cx| {
-            ComposerInput::new("Session title", cx).with_accessibility_role(gpui::Role::TextInput)
+            ComposerInput::new(
+                i18n::translate(MessageId::RenameSessionPlaceholder, i18n::locale(cx)),
+                cx,
+            )
+            .with_accessibility_role(gpui::Role::TextInput)
         });
         input.update(cx, |input, cx| input.set_text(current, cx));
         let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| {
@@ -4239,13 +4364,21 @@ impl Shell {
             Some(WorkspaceScope::Synced | WorkspaceScope::Development)
         );
         let result = if remote && !state.sidebar_preferences.can_edit() {
-            Err("Pins are still syncing")
+            Some(MessageId::SidebarPinsStillSyncing)
         } else {
             let current = self.active_sidebar_pins(cx);
             zeron_proto::validate_sidebar_pin_update(&current, pins)
+                .err()
+                .map(|rejection| match rejection {
+                    zeron_proto::SidebarPinRejection::NotUnique => MessageId::SidebarPinsInvalid,
+                    zeron_proto::SidebarPinRejection::Limit => MessageId::SidebarPinsLimit,
+                })
         };
-        if let Err(message) = result {
-            self.sidebar_notice = Some(message.into());
+        if let Some(rejection) = result {
+            self.sidebar_notice = Some(SharedString::from(i18n::translate(
+                rejection,
+                i18n::locale(cx),
+            )));
             cx.notify();
             return false;
         }
@@ -4448,13 +4581,15 @@ impl Shell {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.runtime_change_error = Some("Engine not connected".into());
+            self.runtime_change_error =
+                Some(i18n::translate(MessageId::ErrorEngineNotConnected, i18n::locale(cx)).into());
             self.sync_flow = SyncFlow::SignedOutRestartRequired;
             cx.notify();
             return;
         };
         self.sync_flow = SyncFlow::SigningOut;
         self.runtime_change_error = None;
+        let locale = i18n::locale(cx);
         let ipc_port = self.boot.ipc_port;
         let data_dir = self.data_dir.clone();
         let shutdown_dir = data_dir.clone();
@@ -4464,9 +4599,16 @@ impl Shell {
                     .client()
                     .call(methods::SIGN_OUT, serde_json::json!({}))
                     .await
-                    .map_err(|error| format!("Sign out failed: {error}"))?;
+                    .map_err(|error| {
+                        i18n::fill(
+                            MessageId::ErrorSignOutFailed,
+                            "{err}",
+                            &error.to_string(),
+                            locale,
+                        )
+                    })?;
             }
-            stop_synced_runtime(engine, ipc_port, &shutdown_dir).await
+            stop_synced_runtime(engine, ipc_port, &shutdown_dir, locale).await
         });
         let state = self.state.clone();
         let boot = self.boot.clone();
@@ -4534,8 +4676,15 @@ impl Shell {
                         if local {
                             shell.sync_flow = SyncFlow::Enabling;
                         }
-                        shell.sidebar_notice =
-                            Some(format!("Could not cancel sign-in: {err}").into());
+                        shell.sidebar_notice = Some(
+                            i18n::fill(
+                                MessageId::ErrorCancelSignInFailed,
+                                "{err}",
+                                &err.to_string(),
+                                i18n::locale(cx),
+                            )
+                            .into(),
+                        );
                     }
                 }
                 cx.notify();
@@ -4588,7 +4737,8 @@ impl Shell {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.runtime_change_error = Some("Engine not connected".into());
+            self.runtime_change_error =
+                Some(i18n::translate(MessageId::ErrorEngineNotConnected, i18n::locale(cx)).into());
             self.sync_flow = SyncFlow::RestartPending { notice_open: true };
             cx.notify();
             return;
@@ -4596,10 +4746,11 @@ impl Shell {
         self.sync_flow = SyncFlow::Switching { import };
         self.runtime_change_error = None;
         self.import_current = None;
+        let locale = i18n::locale(cx);
         let ipc_port = self.boot.ipc_port;
         let data_dir = self.data_dir.clone();
         let transition = Tokio::spawn(cx, async move {
-            stop_synced_runtime(engine, ipc_port, &data_dir).await
+            stop_synced_runtime(engine, ipc_port, &data_dir, locale).await
         });
         let state = self.state.clone();
         let boot = self.boot.clone();
@@ -4670,8 +4821,10 @@ impl Shell {
             }
             Some(_) => {
                 self.sync_flow = SyncFlow::RestartPending { notice_open: true };
-                self.runtime_change_error =
-                    Some("The synced workspace did not come up — restart to finish.".into());
+                self.runtime_change_error = Some(
+                    i18n::translate(MessageId::ErrorSyncedWorkspaceNotReady, i18n::locale(cx))
+                        .into(),
+                );
                 cx.notify();
             }
             None => {}
@@ -4686,7 +4839,8 @@ impl Shell {
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.sync_flow = SyncFlow::RestartPending { notice_open: true };
-            self.runtime_change_error = Some("Engine not connected".into());
+            self.runtime_change_error =
+                Some(i18n::translate(MessageId::ErrorEngineNotConnected, i18n::locale(cx)).into());
             cx.notify();
             return;
         };
@@ -4719,8 +4873,13 @@ impl Shell {
                         // offer the in-place retry (idempotent).
                         if matches!(shell.sync_flow, SyncFlow::Importing { .. }) {
                             shell.sync_flow = SyncFlow::ImportFailed { notice_open: true };
-                            shell.runtime_change_error =
-                                Some("The import stream ended before it finished.".into());
+                            shell.runtime_change_error = Some(
+                                i18n::translate(
+                                    MessageId::ErrorImportStreamEnded,
+                                    i18n::locale(cx),
+                                )
+                                .into(),
+                            );
                         }
                         cx.notify();
                     }
@@ -4766,7 +4925,7 @@ impl Shell {
                 // the stream ended — never present a partial migration as
                 // complete (the engine keeps collecting per-item failures
                 // precisely so this can be surfaced).
-                match import_summary_outcome(item) {
+                match import_summary_outcome(item, i18n::locale(cx)) {
                     Ok((imported, skipped)) => {
                         self.sync_flow = SyncFlow::ImportDone { imported, skipped };
                     }
@@ -4786,7 +4945,8 @@ impl Shell {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.runtime_change_error = Some("Engine not connected".into());
+            self.runtime_change_error =
+                Some(i18n::translate(MessageId::ErrorEngineNotConnected, i18n::locale(cx)).into());
             cx.notify();
             return;
         };
@@ -4799,6 +4959,7 @@ impl Shell {
         }
 
         self.runtime_change_error = None;
+        let locale = i18n::locale(cx);
         let ipc_port = self.boot.ipc_port;
         let data_dir = self.data_dir.clone();
         let shutdown = Tokio::spawn(cx, async move {
@@ -4807,7 +4968,8 @@ impl Shell {
                 .call(methods::STOP_ENGINE, serde_json::json!({}))
                 .await
                 .map_err(|err| err.to_string())?;
-            wait_for_remote_engine_shutdown(ipc_port, &data_dir, RUNTIME_CHANGE_TIMEOUT).await
+            wait_for_remote_engine_shutdown(ipc_port, &data_dir, RUNTIME_CHANGE_TIMEOUT, locale)
+                .await
         });
         self.runtime_change_task = Some(cx.spawn(async move |this, cx| {
             let result = match shutdown.await {
@@ -4821,11 +4983,17 @@ impl Shell {
                         if shell.prepare_quit(cx) {
                             crate::app_menus::quit_after_save(cx);
                         }
-                    },
+                    }
                     Err(err) => {
-                        shell.runtime_change_error = Some(format!(
-                            "Could not stop the remote engine: {err}. Run `zeron daemon stop`, then quit and reopen Zeron."
-                        ).into());
+                        shell.runtime_change_error = Some(
+                            i18n::fill(
+                                MessageId::ErrorStopRemoteEngine,
+                                "{err}",
+                                &err.to_string(),
+                                i18n::locale(cx),
+                            )
+                            .into(),
+                        );
                         cx.notify();
                     }
                 }
@@ -4864,7 +5032,15 @@ impl Shell {
                     {
                         shell.sync_flow = SyncFlow::Idle;
                     }
-                    shell.sidebar_notice = Some(format!("Sign in failed: {err}").into());
+                    shell.sidebar_notice = Some(
+                        i18n::fill(
+                            MessageId::ErrorSignInFailed,
+                            "{err}",
+                            &err.to_string(),
+                            i18n::locale(cx),
+                        )
+                        .into(),
+                    );
                     cx.notify();
                 }
             })
@@ -4880,7 +5056,11 @@ impl Shell {
             return;
         }
         let name_input = cx.new(|cx| {
-            ComposerInput::new("Workspace name", cx).with_accessibility_role(gpui::Role::TextInput)
+            ComposerInput::new(
+                i18n::translate(MessageId::OrgGateNamePlaceholder, i18n::locale(cx)),
+                cx,
+            )
+            .with_accessibility_role(gpui::Role::TextInput)
         });
         let events = cx.subscribe(&name_input, |this: &mut Shell, _, event, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
@@ -4933,7 +5113,8 @@ impl Shell {
         }
         let name = org.name_input.read(cx).text().trim().to_string();
         if !org_name_valid(&name) {
-            org.error = Some("Enter a workspace name".into());
+            org.error =
+                Some(i18n::translate(MessageId::OrgGateNameRequired, i18n::locale(cx)).into());
             cx.notify();
             return;
         }
@@ -5708,6 +5889,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let locale = i18n::locale(cx);
         let section_icon = |item: SettingsSection| match item {
             SettingsSection::Devices => icons::MONITOR,
             SettingsSection::Harnesses => icons::WIDGET,
@@ -5742,7 +5924,10 @@ impl Shell {
                             .text_size(crate::typography::ui_rems(11.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text_muted.opacity(0.6))
-                            .child(SharedString::from("Settings")),
+                            .child(SharedString::from(i18n::translate(
+                                MessageId::SettingsTitle,
+                                locale,
+                            ))),
                     )
                     .child(
                         div().flex().flex_col().gap(px(2.0)).children(
@@ -5757,7 +5942,7 @@ impl Shell {
                                     div()
                                         .id(SharedString::from(format!(
                                             "settings-nav-{}",
-                                            item.label()
+                                            item.slug()
                                         )))
                                         .flex()
                                         .flex_row()
@@ -5788,7 +5973,10 @@ impl Shell {
                                                 .size(px(16.0))
                                                 .text_color(theme.text_muted),
                                         )
-                                        .child(SharedString::from(item.label()))
+                                        .child(SharedString::from(i18n::translate(
+                                            item.label_message(),
+                                            locale,
+                                        )))
                                 }),
                         ),
                     ),
@@ -5817,7 +6005,10 @@ impl Shell {
                                 .size(px(16.0))
                                 .text_color(theme.text_muted),
                         )
-                        .child(SharedString::from("Back")),
+                        .child(SharedString::from(i18n::translate(
+                            MessageId::CommonBack,
+                            locale,
+                        ))),
                 ),
             )
             .into_any_element()
@@ -5905,16 +6096,25 @@ impl Shell {
         } else {
             spaces::status_dot_color(status, theme)
         };
+        let locale = i18n::locale(cx);
         let status_label: Option<&'static str> = if undelivered {
-            Some("Failed")
+            Some(i18n::translate(MessageId::ChatStatusFailed, locale))
         } else if queued {
-            Some("Queued")
+            Some(i18n::translate(MessageId::ChatStatusQueued, locale))
         } else {
             match status {
-                zeron_proto::ChatIndicator::Working => Some("Working"),
-                zeron_proto::ChatIndicator::AwaitingInput => Some("Input"),
-                zeron_proto::ChatIndicator::Errored => Some("Failed"),
-                zeron_proto::ChatIndicator::Completed => Some("Done"),
+                zeron_proto::ChatIndicator::Working => {
+                    Some(i18n::translate(MessageId::ChatStatusWorking, locale))
+                }
+                zeron_proto::ChatIndicator::AwaitingInput => {
+                    Some(i18n::translate(MessageId::ChatStatusInput, locale))
+                }
+                zeron_proto::ChatIndicator::Errored => {
+                    Some(i18n::translate(MessageId::ChatStatusFailed, locale))
+                }
+                zeron_proto::ChatIndicator::Completed => {
+                    Some(i18n::translate(MessageId::ChatStatusDone, locale))
+                }
                 zeron_proto::ChatIndicator::Idle => None,
             }
         };
@@ -5954,7 +6154,10 @@ impl Shell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .aria_label(status_label.unwrap_or("Idle"))
+                .aria_label(match status_label {
+                    Some(label) => label,
+                    None => i18n::translate(MessageId::ChatStatusIdle, locale),
+                })
                 .child(glyph)
                 .into_any_element()
         });
@@ -6018,9 +6221,9 @@ impl Shell {
                             .text_size(crate::typography::ui_rems(10.0))
                             .text_color(theme.text_muted)
                             .child(SharedString::from(if archived {
-                                "Unarchive"
+                                i18n::translate(MessageId::CommonUnarchive, locale)
                             } else {
-                                "Archive"
+                                i18n::translate(MessageId::ChatActionArchive, locale)
                             })),
                     )
                 })
@@ -6095,16 +6298,29 @@ impl Shell {
             div()
                 .id(SharedString::from(format!("{row_id}-corner")))
                 .aria_label(if corner_hovered {
-                    if archived { "Unarchive" } else { "Archive" }
+                    i18n::translate(
+                        if archived {
+                            MessageId::CommonUnarchive
+                        } else {
+                            MessageId::ChatActionArchive
+                        },
+                        locale,
+                    )
                 } else {
                     if compact {
-                        if remote {
-                            "Remote session"
-                        } else {
-                            "Session actions"
-                        }
+                        i18n::translate(
+                            if remote {
+                                MessageId::ChatCornerRemoteSession
+                            } else {
+                                MessageId::ChatCornerSessionActions
+                            },
+                            locale,
+                        )
                     } else {
-                        status_label.unwrap_or("Idle")
+                        match status_label {
+                            Some(label) => label,
+                            None => i18n::translate(MessageId::ChatStatusIdle, locale),
+                        }
                     }
                 })
                 .when(compact, |el| el.w(px(18.0)).justify_center())
@@ -6509,11 +6725,12 @@ impl Shell {
     /// transport error belongs in logs, not the sidebar.
     fn render_connection_pill(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         use zeron_proto::ConnectivityState as S;
+        let locale = i18n::locale(cx);
         let conn = self.state.read(cx).connectivity.clone();
         let (label, glyph): (SharedString, AnyElement) = match conn.state {
             S::Disabled | S::Connected => return None,
             S::Offline => (
-                "Offline — sends are saved".into(),
+                i18n::translate(MessageId::ConnectionOffline, locale).into(),
                 div()
                     .size(px(5.0))
                     .rounded_full()
@@ -6521,7 +6738,7 @@ impl Shell {
                     .into_any_element(),
             ),
             S::Reconnecting => (
-                "Reconnecting…".into(),
+                i18n::translate(MessageId::ConnectionReconnecting, locale).into(),
                 loaders::mini_mono_spinner(
                     "connection-spinner",
                     2.0,
@@ -6557,6 +6774,7 @@ impl Shell {
     }
 
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let locale = i18n::locale(cx);
         if self.sidebar_session_transfer.as_ref().is_some_and(|drag| {
             !cx.has_active_drag() || !self.sidebar_session_transfer_is_valid(&drag.payload, cx)
         }) {
@@ -6767,27 +6985,37 @@ impl Shell {
         ) = match workspace_scope {
             Some(WorkspaceScope::Local) => {
                 let line = if matches!(self.sync_flow, SyncFlow::RestartPending { .. }) {
-                    "Sync ready after restart"
+                    i18n::translate(MessageId::SidebarSyncReadyAfterRestart, locale)
                 } else {
-                    "Local only"
+                    i18n::translate(MessageId::SidebarLocalOnly, locale)
                 };
-                (line.into(), None, "Stored on this device".into())
+                (
+                    line.into(),
+                    None,
+                    i18n::translate(MessageId::SidebarStoredOnDevice, locale).into(),
+                )
             }
             Some(WorkspaceScope::Development) => (
-                "Development".into(),
-                Some("Local development runtime".into()),
-                "Authentication disabled".into(),
+                i18n::translate(MessageId::SidebarDevelopment, locale).into(),
+                Some(i18n::translate(MessageId::SidebarLocalDevRuntime, locale).into()),
+                i18n::translate(MessageId::SidebarAuthDisabled, locale).into(),
             ),
             Some(WorkspaceScope::Synced) | None => {
                 let line: SharedString = user
                     .as_ref()
                     .map(|u| u.name.clone().unwrap_or_else(|| u.email.clone()).into())
-                    .unwrap_or_else(|| SharedString::from("Not signed in"));
+                    .unwrap_or_else(|| {
+                        i18n::translate(MessageId::SidebarNotSignedIn, locale).into()
+                    });
                 let email = user
                     .as_ref()
                     .map(|u| SharedString::from(u.email.clone()))
                     .unwrap_or_else(|| line.clone());
-                (line, Some("Alpha".into()), email)
+                (
+                    line,
+                    Some(i18n::translate(MessageId::SidebarAlphaBuild, locale).into()),
+                    email,
+                )
             }
         };
         let user_menu =
@@ -6872,7 +7100,10 @@ impl Shell {
                                             .px(px(10.0))
                                             .text_color(theme.text_muted)
                                             .text_size(crate::typography::ui_rems(12.0))
-                                            .child("Drop here to unpin")
+                                            .child(SharedString::from(i18n::translate(
+                                                MessageId::SidebarDropToUnpin,
+                                                locale,
+                                            )))
                                     })
                                     .children(regular_items)
                                     .into_any_element(),
@@ -6892,7 +7123,10 @@ impl Shell {
                 .pb(px(Theme::SPACE_SM))
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from("No sessions yet"))
+                .child(SharedString::from(i18n::translate(
+                    MessageId::SidebarNoSessions,
+                    locale,
+                )))
                 .into_any_element()
         };
 
@@ -7016,17 +7250,36 @@ impl Shell {
             return None;
         }
         let desktop_update = self.install.supports_desktop_update();
+        let locale = i18n::locale(cx);
 
         let (label, clickable): (SharedString, bool) = if desktop_update {
             match &self.update_flow {
-                UpdateFlow::Idle => (format!("Update available — v{latest}").into(), true),
-                UpdateFlow::Downloading => (format!("Downloading v{latest}…").into(), false),
-                UpdateFlow::Ready(_) => ("Update ready — restart to apply".into(), true),
-                UpdateFlow::Failed(message) => (format!("Update failed: {message}").into(), true),
+                UpdateFlow::Idle => (
+                    i18n::fill(MessageId::UpdateAvailable, "{version}", &latest, locale).into(),
+                    true,
+                ),
+                UpdateFlow::Downloading => (
+                    i18n::fill(MessageId::UpdateDownloading, "{version}", &latest, locale).into(),
+                    false,
+                ),
+                UpdateFlow::Ready(_) => (
+                    i18n::translate(MessageId::UpdateReadyRestart, locale).into(),
+                    true,
+                ),
+                UpdateFlow::Failed(message) => (
+                    i18n::fill(MessageId::UpdateFailed, "{message}", message, locale).into(),
+                    true,
+                ),
             }
         } else {
             (
-                format!("Update available — v{latest} · run `zeron update`").into(),
+                i18n::fill(
+                    MessageId::UpdateAvailableAdvisory,
+                    "{version}",
+                    &latest,
+                    locale,
+                )
+                .into(),
                 true,
             )
         };
@@ -7148,6 +7401,7 @@ impl Shell {
     ) -> AnyElement {
         let theme = &theme.for_popup();
         let open = self.user_menu.is_open();
+        let locale = i18n::locale(cx);
         let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
         // Bottom-of-sidebar identity: avatar circle + scope/account label and
         // its secondary status line.
@@ -7272,7 +7526,10 @@ impl Shell {
                                         .size(px(16.0))
                                         .text_color(theme.text_muted),
                                 )
-                                .child(SharedString::from("Enable sync"))
+                                .child(SharedString::from(i18n::translate(
+                                    MessageId::MenuEnableSync,
+                                    locale,
+                                )))
                                 .into_any_element()
                         }
                         AccountMenuAction::SyncInProgress => {
@@ -7284,7 +7541,10 @@ impl Shell {
                                         .size(px(16.0))
                                         .text_color(theme.text_muted),
                                 )
-                                .child(SharedString::from("Sync setup in progress"))
+                                .child(SharedString::from(i18n::translate(
+                                    MessageId::MenuSyncInProgress,
+                                    locale,
+                                )))
                                 .into_any_element()
                         }
                         AccountMenuAction::RestartPending => {
@@ -7296,7 +7556,10 @@ impl Shell {
                                         .size(px(16.0))
                                         .text_color(theme.text_muted),
                                 )
-                                .child(SharedString::from("Finish sync setup"))
+                                .child(SharedString::from(i18n::translate(
+                                    MessageId::MenuFinishSyncSetup,
+                                    locale,
+                                )))
                                 .into_any_element()
                         }
                         AccountMenuAction::SignOut => {
@@ -7308,7 +7571,10 @@ impl Shell {
                                         .size(px(16.0))
                                         .text_color(theme.text_muted),
                                 )
-                                .child(SharedString::from("Sign out"))
+                                .child(SharedString::from(i18n::translate(
+                                    MessageId::CommonSignOut,
+                                    locale,
+                                )))
                                 .into_any_element()
                         }
                     };
@@ -7325,7 +7591,10 @@ impl Shell {
                                 .size(px(16.0))
                                 .text_color(theme.text_muted),
                         )
-                        .child(SharedString::from("Settings")),
+                        .child(SharedString::from(i18n::translate(
+                            MessageId::SettingsTitle,
+                            locale,
+                        ))),
                 )
                 .into_any_element();
             trigger = trigger.child(popover::anchored_menu_above(
@@ -7352,12 +7621,13 @@ impl Shell {
             .read(cx)
             .engine()
             .is_some_and(|engine| matches!(engine.mode(), EngineMode::Remote { .. }));
+        let locale = i18n::locale(cx);
         let runtime_change_label = if self.runtime_change_task.is_some() {
-            "Stopping engine…"
+            i18n::translate(MessageId::SyncStoppingEngine, locale)
         } else if remote_engine {
-            "Stop daemon and quit"
+            i18n::translate(MessageId::SyncStopDaemonAndQuit, locale)
         } else {
-            "Quit Zeron"
+            i18n::translate(MessageId::AppMenuQuit, locale)
         };
 
         if self.sync_flow == SyncFlow::Enabling && needs_org {
@@ -7374,17 +7644,18 @@ impl Shell {
             let state = self.state.read(cx);
             (state.chats.len(), state.spaces.len())
         };
-        let work_phrase = local_work_phrase(local_chats, local_spaces);
+        let work_phrase = local_work_phrase(local_chats, local_spaces, locale);
 
         let card = match self.sync_flow {
             SyncFlow::Enabling => popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Enable sync"))
-                .child(
-                    div().mt(px(6.0)).child(popover::dialog_body(
-                        &theme,
-                        "Finish signing in in your browser. Zeron will keep using this local workspace until you quit and reopen.",
-                    )),
-                )
+                .child(popover::dialog_title(
+                    &theme,
+                    i18n::translate(MessageId::MenuEnableSync, locale),
+                ))
+                .child(div().mt(px(6.0)).child(popover::dialog_body(
+                    &theme,
+                    i18n::translate(MessageId::SyncEnableBody, locale),
+                )))
                 .child(
                     div()
                         .mt(px(16.0))
@@ -7393,47 +7664,57 @@ impl Shell {
                         .justify_end()
                         .gap(px(8.0))
                         .child(
-                            popover::btn_ghost(&theme, "Cancel", "sync-enable-cancel")
-                                .id("sync-enable-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.cancel_auth_setup(cx)
-                                })),
+                            popover::btn_ghost(
+                                &theme,
+                                i18n::translate(MessageId::CommonCancel, locale),
+                                "sync-enable-cancel",
+                            )
+                            .id("sync-enable-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_auth_setup(cx))),
                         )
                         .child(
-                            popover::btn_primary(&theme, "Open browser again")
-                                .id("sync-enable-open-browser")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_sign_in(cx)
-                                })),
+                            popover::btn_primary(
+                                &theme,
+                                i18n::translate(MessageId::SyncOpenBrowserAgain, locale),
+                            )
+                            .id("sync-enable-open-browser")
+                            .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx))),
                         ),
                 )
                 .into_any_element(),
             SyncFlow::Canceling => popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Canceling sync setup…"))
-                .child(
-                    div().mt(px(6.0)).child(popover::dialog_body(
-                        &theme,
-                        "Removing the partial sign-in before returning to your local workspace.",
-                    )),
-                )
+                .child(popover::dialog_title(
+                    &theme,
+                    i18n::translate(MessageId::SyncCancelingTitle, locale),
+                ))
+                .child(div().mt(px(6.0)).child(popover::dialog_body(
+                    &theme,
+                    i18n::translate(MessageId::SyncCancelingBody, locale),
+                )))
                 .into_any_element(),
             // ── in-place switch wizard ────────────────────────────────────
             SyncFlow::SwitchOffer { notice_open: true } => {
                 let has_local_work = work_phrase.is_some();
                 let body: SharedString = match (&signed_in_email, &work_phrase) {
-                    (Some(email), Some(phrase)) => format!(
-                        "You're signed in as {email}. Bring {phrase} from this device into your synced workspace, or start it fresh."
+                    (Some(email), Some(phrase)) => i18n::fill_many(
+                        MessageId::SyncSwitchOfferWithWork,
+                        &[("{email}", email), ("{phrase}", phrase)],
+                        locale,
                     )
                     .into(),
-                    (Some(email), None) => format!(
-                        "You're signed in as {email}. Zeron can switch to your synced workspace now."
+                    (Some(email), None) => i18n::fill_many(
+                        MessageId::SyncSwitchOfferSignedIn,
+                        &[("{email}", email)],
+                        locale,
                     )
                     .into(),
-                    (None, Some(phrase)) => format!(
-                        "Bring {phrase} from this device into your synced workspace, or start it fresh."
+                    (None, Some(phrase)) => i18n::fill_many(
+                        MessageId::SyncSwitchOfferWithWorkNoEmail,
+                        &[("{phrase}", phrase)],
+                        locale,
                     )
                     .into(),
-                    (None, None) => "Zeron can switch to your synced workspace now.".into(),
+                    (None, None) => i18n::translate(MessageId::SyncSwitchOfferPlain, locale).into(),
                 };
                 let mut actions = div()
                     .mt(px(16.0))
@@ -7442,39 +7723,54 @@ impl Shell {
                     .justify_end()
                     .gap(px(8.0))
                     .child(
-                        popover::btn_ghost(&theme, "Later", "sync-switch-later")
-                            .id("sync-switch-later")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.postpone_sync_restart(cx)
-                            })),
+                        popover::btn_ghost(
+                            &theme,
+                            i18n::translate(MessageId::CommonLater, locale),
+                            "sync-switch-later",
+                        )
+                        .id("sync-switch-later")
+                        .on_click(cx.listener(|this, _, _, cx| this.postpone_sync_restart(cx))),
                     );
                 if has_local_work {
                     actions = actions
                         .child(
-                            popover::btn_ghost(&theme, "Start fresh", "sync-switch-fresh")
-                                .id("sync-switch-fresh")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_synced_switch(false, cx)
-                                })),
+                            popover::btn_ghost(
+                                &theme,
+                                i18n::translate(MessageId::SyncStartFresh, locale),
+                                "sync-switch-fresh",
+                            )
+                            .id("sync-switch-fresh")
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.start_synced_switch(false, cx)),
+                            ),
                         )
                         .child(
-                            popover::btn_primary(&theme, "Bring my work")
-                                .id("sync-switch-import")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_synced_switch(true, cx)
-                                })),
+                            popover::btn_primary(
+                                &theme,
+                                i18n::translate(MessageId::SyncBringMyWork, locale),
+                            )
+                            .id("sync-switch-import")
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.start_synced_switch(true, cx)),
+                            ),
                         );
                 } else {
                     actions = actions.child(
-                        popover::btn_primary(&theme, "Switch now")
-                            .id("sync-switch-now")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.start_synced_switch(false, cx)
-                            })),
+                        popover::btn_primary(
+                            &theme,
+                            i18n::translate(MessageId::SyncSwitchNow, locale),
+                        )
+                        .id("sync-switch-now")
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.start_synced_switch(false, cx)),
+                        ),
                     );
                 }
                 popover::dialog_card(&theme)
-                    .child(popover::dialog_title(&theme, "Sync is ready"))
+                    .child(popover::dialog_title(
+                        &theme,
+                        i18n::translate(MessageId::SyncReadyTitle, locale),
+                    ))
                     .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, body)))
                     .child(actions)
                     .into_any_element()
@@ -7482,14 +7778,14 @@ impl Shell {
             SyncFlow::Switching { import } => popover::dialog_card(&theme)
                 .child(popover::dialog_title(
                     &theme,
-                    "Switching to your synced workspace…",
+                    i18n::translate(MessageId::SyncSwitchingTitle, locale),
                 ))
                 .child(div().mt(px(6.0)).child(popover::dialog_body(
                     &theme,
                     if import {
-                        "Handing the engine over to your account. Your local sessions come along next."
+                        i18n::translate(MessageId::SyncSwitchingBodyImport, locale)
                     } else {
-                        "Handing the engine over to your account."
+                        i18n::translate(MessageId::SyncSwitchingBody, locale)
                     },
                 )))
                 .into_any_element(),
@@ -7500,17 +7796,24 @@ impl Shell {
                     (done as f32 / total as f32).clamp(0.0, 1.0)
                 };
                 let label: SharedString = if total == 0 {
-                    "Looking for local sessions…".into()
+                    i18n::translate(MessageId::SyncImportLooking, locale).into()
                 } else {
-                    format!("Importing session {} of {total}", (done + 1).min(total)).into()
+                    i18n::fill_many(
+                        MessageId::SyncImportProgress,
+                        &[
+                            ("{current}", &(done + 1).min(total).to_string()),
+                            ("{total}", &total.to_string()),
+                        ],
+                        locale,
+                    )
+                    .into()
                 };
                 let mut card = popover::dialog_card(&theme)
-                    .child(popover::dialog_title(&theme, "Bringing your work over"))
-                    .child(
-                        div()
-                            .mt(px(6.0))
-                            .child(popover::dialog_body(&theme, label)),
-                    );
+                    .child(popover::dialog_title(
+                        &theme,
+                        i18n::translate(MessageId::SyncImportTitle, locale),
+                    ))
+                    .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, label)));
                 if let Some(current) = self.import_current.clone() {
                     card = card.child(
                         div()
@@ -7541,44 +7844,66 @@ impl Shell {
                 .into_any_element()
             }
             SyncFlow::ImportDone { imported, skipped } => {
+                let imported_count = imported.to_string();
+                let skipped_count = skipped.to_string();
                 let body: SharedString = match (imported, skipped) {
-                    (0, 0) => "Your synced workspace is ready.".into(),
-                    (n, 0) => format!(
-                        "{n} session{} moved into your synced workspace.",
-                        if n == 1 { "" } else { "s" },
+                    (0, 0) => i18n::translate(MessageId::SyncImportDoneReady, locale).into(),
+                    (1, 0) => i18n::fill(
+                        MessageId::SyncImportDoneMovedOne,
+                        "{n}",
+                        &imported_count,
+                        locale,
                     )
                     .into(),
-                    (n, s) => format!(
-                        "{n} session{} imported, {s} already present.",
-                        if n == 1 { "" } else { "s" },
+                    (_, 0) => i18n::fill(
+                        MessageId::SyncImportDoneMovedMany,
+                        "{n}",
+                        &imported_count,
+                        locale,
+                    )
+                    .into(),
+                    (1, _) => i18n::fill_many(
+                        MessageId::SyncImportDoneImportedOne,
+                        &[("{n}", &imported_count), ("{skipped}", &skipped_count)],
+                        locale,
+                    )
+                    .into(),
+                    _ => i18n::fill_many(
+                        MessageId::SyncImportDoneImportedMany,
+                        &[("{n}", &imported_count), ("{skipped}", &skipped_count)],
+                        locale,
                     )
                     .into(),
                 };
                 popover::dialog_card(&theme)
-                    .child(popover::dialog_title(&theme, "You're all set"))
+                    .child(popover::dialog_title(
+                        &theme,
+                        i18n::translate(MessageId::SyncImportDoneTitle, locale),
+                    ))
                     .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, body)))
                     .child(
-                        div()
-                            .mt(px(16.0))
-                            .flex()
-                            .flex_row()
-                            .justify_end()
-                            .child(
-                                popover::btn_primary(&theme, "Continue")
-                                    .id("sync-switch-done")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.sync_flow = SyncFlow::Idle;
-                                        cx.notify();
-                                    })),
-                            ),
+                        div().mt(px(16.0)).flex().flex_row().justify_end().child(
+                            popover::btn_primary(
+                                &theme,
+                                i18n::translate(MessageId::CommonContinue, locale),
+                            )
+                            .id("sync-switch-done")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sync_flow = SyncFlow::Idle;
+                                cx.notify();
+                            })),
+                        ),
                     )
                     .into_any_element()
             }
             SyncFlow::ImportFailed { notice_open: true } => popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Import didn't finish"))
+                .child(popover::dialog_title(
+                    &theme,
+                    i18n::translate(MessageId::SyncImportFailedTitle, locale),
+                ))
                 .child(div().mt(px(6.0)).child(popover::dialog_body(
                     &theme,
-                    "Anything already imported is kept; retrying only copies what's missing.",
+                    i18n::translate(MessageId::SyncImportFailedBody, locale),
                 )))
                 .when_some(self.runtime_change_error.clone(), |card, error| {
                     card.child(
@@ -7598,36 +7923,37 @@ impl Shell {
                         .justify_end()
                         .gap(px(8.0))
                         .child(
-                            popover::btn_ghost(&theme, "Later", "import-failed-dismiss")
-                                .id("import-failed-dismiss")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.postpone_sync_restart(cx)
-                                })),
+                            popover::btn_ghost(
+                                &theme,
+                                i18n::translate(MessageId::CommonLater, locale),
+                                "import-failed-dismiss",
+                            )
+                            .id("import-failed-dismiss")
+                            .on_click(cx.listener(|this, _, _, cx| this.postpone_sync_restart(cx))),
                         )
                         .child(
-                            popover::btn_primary(&theme, "Retry import")
-                                .id("import-failed-retry")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.spawn_local_import(cx)
-                                })),
+                            popover::btn_primary(
+                                &theme,
+                                i18n::translate(MessageId::SyncRetryImport, locale),
+                            )
+                            .id("import-failed-retry")
+                            .on_click(cx.listener(|this, _, _, cx| this.spawn_local_import(cx))),
                         ),
                 )
                 .into_any_element(),
             SyncFlow::RestartPending { notice_open: true } => popover::dialog_card(&theme)
                 .child(popover::dialog_title(
                     &theme,
-                    "Sync needs a restart",
+                    i18n::translate(MessageId::SyncRestartTitle, locale),
                 ))
-                .child(
-                    div().mt(px(6.0)).child(popover::dialog_body(
-                        &theme,
-                        if remote_engine {
-                            "Zeron is using a background daemon. Stop it and quit Zeron, then reopen to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
-                        } else {
-                            "Quit and reopen Zeron to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
-                        },
-                    )),
-                )
+                .child(div().mt(px(6.0)).child(popover::dialog_body(
+                    &theme,
+                    if remote_engine {
+                        i18n::translate(MessageId::SyncRestartBodyDaemon, locale)
+                    } else {
+                        i18n::translate(MessageId::SyncRestartBody, locale)
+                    },
+                )))
                 .when_some(self.runtime_change_error.clone(), |card, error| {
                     card.child(
                         div()
@@ -7646,11 +7972,13 @@ impl Shell {
                         .justify_end()
                         .gap(px(8.0))
                         .child(
-                            popover::btn_ghost(&theme, "Later", "sync-restart-later")
-                                .id("sync-restart-later")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.postpone_sync_restart(cx)
-                                })),
+                            popover::btn_ghost(
+                                &theme,
+                                i18n::translate(MessageId::CommonLater, locale),
+                                "sync-restart-later",
+                            )
+                            .id("sync-restart-later")
+                            .on_click(cx.listener(|this, _, _, cx| this.postpone_sync_restart(cx))),
                         )
                         .child(
                             popover::btn_primary(&theme, runtime_change_label)
@@ -7658,20 +7986,21 @@ impl Shell {
                                 .when(self.runtime_change_task.is_some(), |button| {
                                     button.opacity(0.6)
                                 })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.quit_for_runtime_change(cx)
-                                })),
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.quit_for_runtime_change(cx)),
+                                ),
                         ),
                 )
                 .into_any_element(),
             SyncFlow::SignOutConfirm => popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Sign out?"))
-                .child(
-                    div().mt(px(6.0)).child(popover::dialog_body(
-                        &theme,
-                        "Zeron will remove your credentials, close the synced workspace, and continue in local mode.",
-                    )),
-                )
+                .child(popover::dialog_title(
+                    &theme,
+                    i18n::translate(MessageId::SyncSignOutTitle, locale),
+                ))
+                .child(div().mt(px(6.0)).child(popover::dialog_body(
+                    &theme,
+                    i18n::translate(MessageId::SyncSignOutBody, locale),
+                )))
                 .child(
                     div()
                         .mt(px(16.0))
@@ -7680,30 +8009,36 @@ impl Shell {
                         .justify_end()
                         .gap(px(8.0))
                         .child(
-                            popover::btn_ghost(&theme, "Cancel", "signout-cancel")
-                                .id("signout-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.sync_flow = SyncFlow::Idle;
-                                    cx.notify();
-                                })),
+                            popover::btn_ghost(
+                                &theme,
+                                i18n::translate(MessageId::CommonCancel, locale),
+                                "signout-cancel",
+                            )
+                            .id("signout-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sync_flow = SyncFlow::Idle;
+                                cx.notify();
+                            })),
                         )
                         .child(
-                            popover::btn_danger(&theme, "Sign out")
-                                .id("signout-confirm")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.confirm_sign_out(cx)
-                                })),
+                            popover::btn_danger(
+                                &theme,
+                                i18n::translate(MessageId::CommonSignOut, locale),
+                            )
+                            .id("signout-confirm")
+                            .on_click(cx.listener(|this, _, _, cx| this.confirm_sign_out(cx))),
                         ),
                 )
                 .into_any_element(),
             SyncFlow::SigningOut => popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Signing out…"))
-                .child(
-                    div().mt(px(6.0)).child(popover::dialog_body(
-                        &theme,
-                        "Removing account credentials and closing the synced workspace.",
-                    )),
-                )
+                .child(popover::dialog_title(
+                    &theme,
+                    i18n::translate(MessageId::SyncSigningOutTitle, locale),
+                ))
+                .child(div().mt(px(6.0)).child(popover::dialog_body(
+                    &theme,
+                    i18n::translate(MessageId::SyncSigningOutBody, locale),
+                )))
                 .into_any_element(),
             SyncFlow::Idle
             | SyncFlow::SwitchOffer { notice_open: false }
@@ -7854,6 +8189,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).for_popup();
+        let locale = i18n::locale(cx);
         let mut overlays: Vec<AnyElement> = Vec::new();
 
         if let Some(menu_state) = self.chat_menu.get().cloned() {
@@ -7881,7 +8217,10 @@ impl Shell {
                                 this.open_rename_chat(rename_id.clone(), cx)
                             }))
                             .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
-                            .child(SharedString::from("Rename…")),
+                            .child(SharedString::from(i18n::translate(
+                                MessageId::ChatMenuRename,
+                                locale,
+                            ))),
                     )
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-pin-{chat_id}"))
@@ -7890,7 +8229,14 @@ impl Shell {
                                 this.set_chat_pinned(pin_id.clone(), !is_pinned, cx)
                             }))
                             .child(icon(icons::PIN).size(px(16.0)).text_color(theme.text_muted))
-                            .child(SharedString::from(if is_pinned { "Unpin" } else { "Pin" })),
+                            .child(SharedString::from(i18n::translate(
+                                if is_pinned {
+                                    MessageId::ChatActionUnpin
+                                } else {
+                                    MessageId::ChatActionPin
+                                },
+                                locale,
+                            ))),
                     )
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-archive-{chat_id}"))
@@ -7903,7 +8249,10 @@ impl Shell {
                                     .size(px(16.0))
                                     .text_color(theme.text_muted),
                             )
-                            .child(SharedString::from("Archive")),
+                            .child(SharedString::from(i18n::translate(
+                                MessageId::ChatActionArchive,
+                                locale,
+                            ))),
                     )
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-copy-{chat_id}"))
@@ -7914,7 +8263,10 @@ impl Shell {
                                     .size(px(16.0))
                                     .text_color(theme.text_muted),
                             )
-                            .child(div().flex_1().child(SharedString::from("Copy")))
+                            .child(div().flex_1().child(SharedString::from(i18n::translate(
+                                MessageId::EditCopy,
+                                locale,
+                            ))))
                             .child(
                                 icon(icons::ALT_ARROW_RIGHT)
                                     .size(px(14.0))
@@ -7936,7 +8288,10 @@ impl Shell {
                                     .size(px(16.0))
                                     .text_color(theme.danger),
                             )
-                            .child(SharedString::from("Delete…")),
+                            .child(SharedString::from(i18n::translate(
+                                MessageId::ChatMenuDelete,
+                                locale,
+                            ))),
                     ),
                 ChatMenuPage::Copy => {
                     let chat = self
@@ -7970,7 +8325,10 @@ impl Shell {
                                     .size(px(16.0))
                                     .text_color(theme.text_muted),
                             )
-                            .child(SharedString::from("Back")),
+                            .child(SharedString::from(i18n::translate(
+                                MessageId::CommonBack,
+                                locale,
+                            ))),
                     )
                     .child(popover::menu_separator())
                     .child(
@@ -7984,7 +8342,10 @@ impl Shell {
                                     .size(px(16.0))
                                     .text_color(theme.text_muted),
                             )
-                            .child(SharedString::from("Zeron conversation link")),
+                            .child(SharedString::from(i18n::translate(
+                                MessageId::ChatMenuZeronLink,
+                                locale,
+                            ))),
                     )
                     .when_some(harness_link, |menu, link| {
                         menu.child(
@@ -8002,7 +8363,7 @@ impl Shell {
                                     .size(px(16.0))
                                     .text_color(theme.text_muted),
                             )
-                            .child(SharedString::from(link.label)),
+                            .child(SharedString::from(i18n::translate(link.label, locale))),
                         )
                     })
                     .when(session_id, |menu| {
@@ -8021,7 +8382,9 @@ impl Shell {
                                     .size(px(16.0))
                                     .text_color(theme.text_muted),
                             )
-                            .child(SharedString::from("Harness session ID")),
+                            .child(SharedString::from(
+                                i18n::translate(MessageId::ChatMenuHarnessSessionId, locale),
+                            )),
                         )
                     })
                 }
@@ -8048,7 +8411,10 @@ impl Shell {
                         cx.stop_propagation();
                     }
                 }))
-                .child(popover::dialog_title(&theme, "Rename session"))
+                .child(popover::dialog_title(
+                    &theme,
+                    i18n::translate(MessageId::RenameSessionTitle, locale),
+                ))
                 .child(
                     div()
                         .mt(px(12.0))
@@ -8062,19 +8428,24 @@ impl Shell {
                         .justify_end()
                         .gap(px(8.0))
                         .child(
-                            popover::btn_ghost(&theme, "Cancel", "rename-chat-cancel")
-                                .id("rename-chat-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.rename_dialog = None;
-                                    cx.notify();
-                                })),
+                            popover::btn_ghost(
+                                &theme,
+                                i18n::translate(MessageId::CommonCancel, locale),
+                                "rename-chat-cancel",
+                            )
+                            .id("rename-chat-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.rename_dialog = None;
+                                cx.notify();
+                            })),
                         )
                         .child(
-                            popover::btn_primary(&theme, "Rename")
-                                .id("rename-chat-save")
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.submit_rename_chat(cx)),
-                                ),
+                            popover::btn_primary(
+                                &theme,
+                                i18n::translate(MessageId::SpaceRenameAction, locale),
+                            )
+                            .id("rename-chat-save")
+                            .on_click(cx.listener(|this, _, _, cx| this.submit_rename_chat(cx))),
                         ),
                 )
                 .into_any_element();
@@ -8098,13 +8469,16 @@ impl Shell {
                     .iter()
                     .find(|c| c.id == chat_id)
                     .and_then(|c| c.title.clone())
-                    .unwrap_or_else(|| "New session".into()),
+                    .unwrap_or_else(|| i18n::translate(MessageId::SessionUntitled, locale).into()),
             );
             let card = popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Delete session?"))
+                .child(popover::dialog_title(
+                    &theme,
+                    i18n::translate(MessageId::DeleteSessionTitle, locale),
+                ))
                 .child(div().mt(px(6.0)).child(popover::dialog_body(
                     &theme,
-                    format!("\u{201C}{title}\u{201D} will be permanently deleted. This can\u{2019}t be undone."),
+                    i18n::fill(MessageId::DeleteSessionBody, "{title}", &title, locale),
                 )))
                 .child(
                     div()
@@ -8114,19 +8488,26 @@ impl Shell {
                         .justify_end()
                         .gap(px(8.0))
                         .child(
-                            popover::btn_ghost(&theme, "Cancel", "delete-chat-cancel")
-                                .id("delete-chat-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.delete_confirm = None;
-                                    cx.notify();
-                                })),
+                            popover::btn_ghost(
+                                &theme,
+                                i18n::translate(MessageId::CommonCancel, locale),
+                                "delete-chat-cancel",
+                            )
+                            .id("delete-chat-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.delete_confirm = None;
+                                cx.notify();
+                            })),
                         )
                         .child(
-                            popover::btn_danger(&theme, "Delete")
-                                .id("delete-chat-confirm")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.delete_chat(chat_id.clone(), cx)
-                                })),
+                            popover::btn_danger(
+                                &theme,
+                                i18n::translate(MessageId::CommonDelete, locale),
+                            )
+                            .id("delete-chat-confirm")
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| this.delete_chat(chat_id.clone(), cx),
+                            )),
                         ),
                 )
                 .into_any_element();
@@ -8387,22 +8768,32 @@ impl Shell {
                                 .text_size(crate::typography::ui_rems(16.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.text)
-                                .child(SharedString::from("Add a project to get started")),
+                                .child(SharedString::from(i18n::translate(
+                                    MessageId::OnboardingAddProject,
+                                    i18n::locale(cx),
+                                ))),
                         )
                         .child(
                             div()
                                 .mt(px(6.0))
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .text_color(theme.text_muted.opacity(0.7))
-                                .child(SharedString::from(
-                                    "A project is a folder on one of your devices.",
-                                )),
+                                .child(SharedString::from(i18n::translate(
+                                    MessageId::OnboardingProjectHint,
+                                    i18n::locale(cx),
+                                ))),
                         )
                         .child(
-                            popover::btn_primary(&theme_owned, "Add a project")
-                                .id("onboarding-add-space")
-                                .mt(px(20.0))
-                                .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx))),
+                            popover::btn_primary(
+                                &theme_owned,
+                                i18n::translate(
+                                    MessageId::OnboardingAddProjectAction,
+                                    i18n::locale(cx),
+                                ),
+                            )
+                            .id("onboarding-add-space")
+                            .mt(px(20.0))
+                            .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx))),
                         ),
                 ))
                 .into_any_element()
@@ -8581,7 +8972,10 @@ impl Shell {
                             style
                         }
                     })
-                    .child("Drop to attach"),
+                    .child(i18n::translate(
+                        MessageId::ComposerDropToAttach,
+                        i18n::locale(cx),
+                    )),
             )
             .into_any_element()
     }
@@ -8671,7 +9065,10 @@ impl Shell {
                         div()
                             .text_size(crate::typography::ui_rems(13.0))
                             .text_color(theme.text)
-                            .child(SharedString::from("Scroll to bottom")),
+                            .child(SharedString::from(i18n::translate(
+                                MessageId::TranscriptScrollToBottom,
+                                i18n::locale(cx),
+                            ))),
                     ),
             );
         // Frost OUTSIDE the entry animation (the composer pill's exact
@@ -8864,7 +9261,10 @@ impl Shell {
             Indicator::AwaitingInput => strip.into_any_element(),
             Indicator::Errored => strip
                 .text_color(theme.danger)
-                .child(SharedString::from("Run failed"))
+                .child(SharedString::from(i18n::translate(
+                    MessageId::NotifyRunFailed,
+                    i18n::locale(cx),
+                )))
                 .into_any_element(),
             Indicator::None if sending => strip
                 .child(loaders::gradient_spinner(
@@ -8878,7 +9278,10 @@ impl Shell {
                     div()
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from("Sending…")),
+                        .child(SharedString::from(i18n::translate(
+                            MessageId::ComposerSending,
+                            i18n::locale(cx),
+                        ))),
                 )
                 .into_any_element(),
             Indicator::None => strip.into_any_element(),
@@ -9044,6 +9447,7 @@ impl Shell {
     /// wasted short ones.
     fn render_surface_picker(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let text = theme.text;
         let muted = theme.text_muted;
         let border = theme.border;
@@ -9087,38 +9491,57 @@ impl Shell {
                     .flex_col()
                     .gap(px(8.0))
                     .child(
-                        row("surface-card-files", icons::FOLDER_WITH_FILES, "Files").on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.add_files_surface(window, cx);
-                            }),
-                        ),
+                        row(
+                            "surface-card-files",
+                            icons::FOLDER_WITH_FILES,
+                            i18n::translate(MessageId::SurfaceFiles, locale),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.add_files_surface(window, cx);
+                        })),
                     )
                     .child(
-                        row("surface-card-browser", icons::GLOBE, "Browser").on_click(cx.listener(
-                            |this, _, window, cx| this.add_browser_surface(None, window, cx),
-                        )),
+                        row(
+                            "surface-card-browser",
+                            icons::GLOBE,
+                            i18n::translate(MessageId::SurfaceBrowser, locale),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.add_browser_surface(None, window, cx)
+                        })),
                     )
                     .child(
-                        row("surface-card-terminal", icons::TERMINAL, "Terminal").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.add_terminal_surface(cx);
-                            }),
-                        ),
+                        row(
+                            "surface-card-terminal",
+                            icons::TERMINAL,
+                            i18n::translate(MessageId::SurfaceTerminal, locale),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.add_terminal_surface(cx);
+                        })),
                     )
                     // Git surfaces only where there IS git — the pane itself
                     // no longer gates on it (terminals work anywhere).
                     .when(self.space_git_detected(cx), |el| {
-                        el.child(row("surface-card-diffs", icons::LIST, "Diffs").on_click(
-                            cx.listener(|this, _, _, cx| {
+                        el.child(
+                            row(
+                                "surface-card-diffs",
+                                icons::LIST,
+                                i18n::translate(MessageId::SurfaceDiffs, locale),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
                                 this.add_diff_surface(cx);
-                            }),
-                        ))
+                            })),
+                        )
                         .child(
-                            row("surface-card-history", icons::GIT_BRANCH, "History").on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.add_history_surface(cx);
-                                }),
-                            ),
+                            row(
+                                "surface-card-history",
+                                icons::GIT_BRANCH,
+                                i18n::translate(MessageId::SurfaceHistory, locale),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.add_history_surface(cx);
+                            })),
                         )
                     }),
             )
@@ -9127,69 +9550,75 @@ impl Shell {
 
     fn render_signed_out_restart(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let runtime_change_label = if self.runtime_change_task.is_some() {
-            "Stopping engine…"
+            i18n::translate(MessageId::SyncStoppingEngine, locale)
         } else {
-            "Retry local mode"
+            i18n::translate(MessageId::SignedOutRetryLocalMode, locale)
         };
-        let card = div()
-            .w(px(380.0))
-            .px(px(32.0))
-            .py(px(40.0))
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_card)
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .items_center()
-            .text_center()
-            .child(
-                icon(icons::ZERON_LOGO)
-                    .w(px(31.4))
-                    .h(px(36.0))
-                    .text_color(theme.text),
-            )
-            .child(
-                div()
-                    .mt(px(24.0))
-                    .text_size(crate::typography::ui_rems(18.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(SharedString::from("Signed out")),
-            )
-            .child(
-                div()
-                    .mt(px(6.0))
-                    .mb(px(24.0))
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .line_height(px(19.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(
-                        "Zeron removed your credentials but could not finish closing the previous synced workspace. Retry before continuing in local mode.",
-                    )),
-            )
-            .when_some(self.runtime_change_error.clone(), |card, error| {
-                card.child(
-                    div()
-                        .mb(px(16.0))
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .line_height(px(17.0))
-                        .text_color(theme.danger)
-                        .child(error),
+        let card =
+            div()
+                .w(px(380.0))
+                .px(px(32.0))
+                .py(px(40.0))
+                .rounded(px(12.0))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.surface_card)
+                .shadow_lg()
+                .flex()
+                .flex_col()
+                .items_center()
+                .text_center()
+                .child(
+                    icon(icons::ZERON_LOGO)
+                        .w(px(31.4))
+                        .h(px(36.0))
+                        .text_color(theme.text),
                 )
-            })
-            .child(
-                popover::btn_primary(&theme, runtime_change_label)
-                    .id("signed-out-quit")
-                    .when(self.runtime_change_task.is_some(), |button| {
-                        button.opacity(0.6)
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.start_local_runtime_transition(false, cx)
-                    })),
-            );
+                .child(
+                    div()
+                        .mt(px(24.0))
+                        .text_size(crate::typography::ui_rems(18.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(SharedString::from(i18n::translate(
+                            MessageId::SignedOutTitle,
+                            locale,
+                        ))),
+                )
+                .child(
+                    div()
+                        .mt(px(6.0))
+                        .mb(px(24.0))
+                        .text_size(crate::typography::ui_rems(13.0))
+                        .line_height(px(19.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(i18n::translate(
+                            MessageId::SignedOutBody,
+                            locale,
+                        ))),
+                )
+                .when_some(self.runtime_change_error.clone(), |card, error| {
+                    card.child(
+                        div()
+                            .mb(px(16.0))
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .line_height(px(17.0))
+                            .text_color(theme.danger)
+                            .child(error),
+                    )
+                })
+                .child(
+                    popover::btn_primary(&theme, runtime_change_label)
+                        .id("signed-out-quit")
+                        .when(self.runtime_change_task.is_some(), |button| {
+                            button.opacity(0.6)
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.start_local_runtime_transition(false, cx)
+                        })),
+                );
 
         div()
             .absolute()
@@ -9226,6 +9655,7 @@ impl Shell {
         const CHIP_SLOT: f32 = CHIP_W + 4.0; // + the strip's own gap
 
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         // Heal drag state if the pointer was released outside the strip.
         if self.right_tab_drag.is_some() && !cx.has_active_drag() {
             self.right_tab_drag = None;
@@ -9347,7 +9777,12 @@ impl Shell {
             let workspace_path = self.workspace_path_for_surface(surface, cx);
             let accessible_name = detail.as_ref().unwrap_or(&title);
             let accessible_label = if dirty {
-                format!("{accessible_name}, unsaved changes")
+                i18n::fill(
+                    MessageId::TabUnsavedChanges,
+                    "{name}",
+                    accessible_name,
+                    i18n::locale(cx),
+                )
             } else {
                 accessible_name.to_string()
             };
@@ -9608,7 +10043,10 @@ impl Shell {
                                         .size(px(13.0))
                                         .text_color(theme.text_muted),
                                 )
-                                .child(SharedString::from("Files")),
+                                .child(SharedString::from(i18n::translate(
+                                    MessageId::SurfaceFiles,
+                                    locale,
+                                ))),
                         )
                         .child(
                             popover::menu_row(&theme, false, "right-plus-browser")
@@ -9622,7 +10060,10 @@ impl Shell {
                                         .size(px(13.0))
                                         .text_color(theme.text_muted),
                                 )
-                                .child(SharedString::from("Browser")),
+                                .child(SharedString::from(i18n::translate(
+                                    MessageId::SurfaceBrowser,
+                                    locale,
+                                ))),
                         )
                         .child(
                             popover::menu_row(&theme, false, "right-plus-terminal")
@@ -9636,7 +10077,10 @@ impl Shell {
                                         .size(px(13.0))
                                         .text_color(theme.text_muted),
                                 )
-                                .child(SharedString::from("Terminal")),
+                                .child(SharedString::from(i18n::translate(
+                                    MessageId::SurfaceTerminal,
+                                    locale,
+                                ))),
                         )
                         .when(self.space_git_detected(cx), |menu| {
                             menu.child(
@@ -9651,7 +10095,10 @@ impl Shell {
                                             .size(px(13.0))
                                             .text_color(theme.text_muted),
                                     )
-                                    .child(SharedString::from("Diffs")),
+                                    .child(SharedString::from(i18n::translate(
+                                        MessageId::SurfaceDiffs,
+                                        locale,
+                                    ))),
                             )
                             .child(
                                 popover::menu_row(&theme, false, "right-plus-history")
@@ -9665,7 +10112,10 @@ impl Shell {
                                             .size(px(13.0))
                                             .text_color(theme.text_muted),
                                     )
-                                    .child(SharedString::from("History")),
+                                    .child(SharedString::from(i18n::translate(
+                                        MessageId::SurfaceHistory,
+                                        locale,
+                                    ))),
                             )
                         }),
                 )
@@ -9757,6 +10207,7 @@ impl Shell {
 
     fn render_gate_card(&mut self, phase: &GatePhase, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let content: AnyElement = match phase {
             // Backend unreachable: quiet centered copy (zeron Gate `Failed`),
             // plus a Retry affordance (the native engine doesn't self-redial).
@@ -9784,7 +10235,10 @@ impl Shell {
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.glass_hover()))
                         .on_click(cx.listener(|this, _, _, cx| this.retry_engine(cx)))
-                        .child(SharedString::from("Retry")),
+                        .child(SharedString::from(i18n::translate(
+                            MessageId::CommonRetry,
+                            i18n::locale(cx),
+                        ))),
                 )
                 .into_any_element(),
             // Login card (zeron App.tsx Gate): centered card on the grid —
@@ -9814,7 +10268,10 @@ impl Shell {
                         .text_size(crate::typography::ui_rems(18.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme.text)
-                        .child(SharedString::from("Log in to Zeron")),
+                        .child(SharedString::from(i18n::translate(
+                            MessageId::GateSignInTitle,
+                            locale,
+                        ))),
                 )
                 .child(
                     div()
@@ -9823,9 +10280,10 @@ impl Shell {
                         .text_size(crate::typography::ui_rems(13.0))
                         .line_height(px(19.0))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from(
-                            "This opens your browser to finish logging in — you'll come right back.",
-                        )),
+                        .child(SharedString::from(i18n::translate(
+                            MessageId::GateSignInBody,
+                            locale,
+                        ))),
                 )
                 .child(
                     div()
@@ -9843,7 +10301,10 @@ impl Shell {
                         .cursor_pointer()
                         .hover(|s| s.opacity(0.9))
                         .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
-                        .child(SharedString::from("Log in")),
+                        .child(SharedString::from(i18n::translate(
+                            MessageId::GateSignInButton,
+                            locale,
+                        ))),
                 )
                 .into_any_element(),
         };
@@ -9878,6 +10339,7 @@ impl Shell {
     fn render_org_gate(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_org_ui(cx);
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let local_setup = self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local);
         let Some(org) = self.org.as_ref() else {
             return Empty.into_any_element();
@@ -9920,7 +10382,10 @@ impl Shell {
                                 .cursor_pointer()
                                 .hover(|s| s.bg(theme.glass_hover()))
                                 .on_click(cx.listener(|this, _, _, cx| this.load_orgs(cx)))
-                                .child(SharedString::from("Retry")),
+                                .child(SharedString::from(i18n::translate(
+                                    MessageId::CommonRetry,
+                                    i18n::locale(cx),
+                                ))),
                         ),
                     )
                     .into_any_element(),
@@ -9935,9 +10400,10 @@ impl Shell {
                             .text_size(crate::typography::ui_rems(11.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text_muted.opacity(0.6))
-                            .child(SharedString::from(
-                                "Or continue in a workspace you belong to",
-                            )),
+                            .child(SharedString::from(i18n::translate(
+                                MessageId::OrgGateMemberships,
+                                locale,
+                            ))),
                     )
                     .child(div().flex().flex_col().gap(px(4.0)).children(
                         rows.iter().enumerate().map(|(ix, row)| {
@@ -9968,14 +10434,10 @@ impl Shell {
         // explainer (+ signed-in email), name form with a white Create button,
         // then existing memberships and the account escape hatch.
         let blurb: SharedString = match email {
-            Some(email) => format!(
-                "Zeron is organized around workspaces — create one for yourself or your team. Signed in as {email}."
-            )
-            .into(),
-            None => {
-                "Zeron is organized around workspaces — create one for yourself or your team."
-                    .into()
+            Some(email) => {
+                i18n::fill(MessageId::OrgGateBodyWithEmail, "{email}", &email, locale).into()
             }
+            None => i18n::translate(MessageId::OrgGateBody, locale).into(),
         };
         let card = div()
             .w(px(400.0))
@@ -10000,7 +10462,10 @@ impl Shell {
                     .text_size(crate::typography::ui_rems(18.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text)
-                    .child(SharedString::from("Create your workspace")),
+                    .child(SharedString::from(i18n::translate(
+                        MessageId::OrgGateTitle,
+                        locale,
+                    ))),
             )
             .child(
                 div()
@@ -10048,9 +10513,9 @@ impl Shell {
                             .hover(|s| s.opacity(0.9))
                             .on_click(cx.listener(|this, _, _, cx| this.create_org(cx)))
                             .child(SharedString::from(if submitting {
-                                "Creating…"
+                                i18n::translate(MessageId::OrgGateCreating, locale)
                             } else {
-                                "Create"
+                                i18n::translate(MessageId::OrgGateCreate, locale)
                             })),
                     ),
             )
@@ -10075,9 +10540,9 @@ impl Shell {
                         .hover(|s| s.text_color(theme.text))
                         .on_click(cx.listener(|this, _, _, cx| this.cancel_auth_setup(cx)))
                         .child(SharedString::from(if local_setup {
-                            "Cancel sync setup"
+                            i18n::translate(MessageId::OrgGateCancelSyncSetup, locale)
                         } else {
-                            "Use a different account"
+                            i18n::translate(MessageId::OrgGateUseDifferentAccount, locale)
                         })),
                 ),
             );
@@ -11048,6 +11513,7 @@ impl Render for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Locale;
 
     #[test]
     fn sidebar_drag_nudges_each_edge_once_until_rearmed() {
@@ -11159,7 +11625,7 @@ mod tests {
             assert!(
                 Keystroke::parse(&combo).is_ok(),
                 "{} default {combo:?} does not parse",
-                id.label()
+                id.label_text(crate::i18n::Locale::En)
             );
         }
     }
@@ -11378,7 +11844,7 @@ mod tests {
             drop(listener);
         });
 
-        wait_for_remote_engine_shutdown(port, dir.path(), Duration::from_secs(2))
+        wait_for_remote_engine_shutdown(port, dir.path(), Duration::from_secs(2), Locale::En)
             .await
             .unwrap();
         release.await.unwrap();
@@ -11414,7 +11880,7 @@ mod tests {
             .call(methods::SIGN_OUT, serde_json::json!({}))
             .await
             .expect("sign out clears credentials");
-        stop_synced_runtime(synced, port, dir.path())
+        stop_synced_runtime(synced, port, dir.path(), Locale::En)
             .await
             .expect("synced runtime drains and releases ownership");
 
@@ -11442,7 +11908,7 @@ mod tests {
             released_by_task.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
-        wait_for_remote_engine_shutdown(port, dir.path(), Duration::from_secs(2))
+        wait_for_remote_engine_shutdown(port, dir.path(), Duration::from_secs(2), Locale::En)
             .await
             .unwrap();
         assert!(lock_released.load(std::sync::atomic::Ordering::SeqCst));
@@ -11455,9 +11921,14 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        let error = wait_for_remote_engine_shutdown(port, dir.path(), Duration::from_millis(100))
-            .await
-            .unwrap_err();
+        let error = wait_for_remote_engine_shutdown(
+            port,
+            dir.path(),
+            Duration::from_millis(100),
+            Locale::En,
+        )
+        .await
+        .unwrap_err();
 
         assert!(error.contains("did not finish stopping"));
         drop(listener);
@@ -11551,7 +12022,7 @@ mod tests {
         let clean = serde_json::json!({
             "kind": "summary", "importedChats": 2, "skippedChats": 1, "errors": []
         });
-        assert_eq!(import_summary_outcome(&clean), Ok((2, 1)));
+        assert_eq!(import_summary_outcome(&clean, Locale::En), Ok((2, 1)));
 
         // Any error means the wizard must NOT say "all set" — partial
         // migrations surface as an explicit failure with the first cause.
@@ -11559,7 +12030,7 @@ mod tests {
             "kind": "summary", "importedChats": 1, "skippedChats": 0,
             "errors": ["chat c2: journal copy failed"]
         });
-        let message = import_summary_outcome(&partial).expect_err("errors must fail");
+        let message = import_summary_outcome(&partial, Locale::En).expect_err("errors must fail");
         assert!(message.contains("journal copy failed"), "{message}");
         assert!(message.contains("1 imported"), "{message}");
 
@@ -11567,26 +12038,33 @@ mod tests {
             "kind": "summary", "importedChats": 0, "skippedChats": 0,
             "errors": ["a", "b", "c"]
         });
-        let message = import_summary_outcome(&many).expect_err("errors must fail");
+        let message = import_summary_outcome(&many, Locale::En).expect_err("errors must fail");
         assert!(message.contains("3 failures"), "{message}");
 
         // A summary missing the errors field entirely (older engine) is
         // treated as clean rather than failing every import.
         let legacy = serde_json::json!({ "kind": "summary", "importedChats": 4 });
-        assert_eq!(import_summary_outcome(&legacy), Ok((4, 0)));
+        assert_eq!(import_summary_outcome(&legacy, Locale::En), Ok((4, 0)));
     }
 
     #[test]
     fn spaces_only_local_work_still_gets_the_import_offer() {
-        assert_eq!(local_work_phrase(0, 0), None, "nothing to bring");
-        assert_eq!(local_work_phrase(2, 0).as_deref(), Some("the 2 sessions"));
         assert_eq!(
-            local_work_phrase(0, 1).as_deref(),
+            local_work_phrase(0, 0, Locale::En),
+            None,
+            "nothing to bring"
+        );
+        assert_eq!(
+            local_work_phrase(2, 0, Locale::En).as_deref(),
+            Some("the 2 sessions")
+        );
+        assert_eq!(
+            local_work_phrase(0, 1, Locale::En).as_deref(),
             Some("the 1 project"),
             "a projects-only profile must be offered the import, not a bare switch"
         );
         assert_eq!(
-            local_work_phrase(1, 2).as_deref(),
+            local_work_phrase(1, 2, Locale::En).as_deref(),
             Some("the 1 session and 2 projects")
         );
     }

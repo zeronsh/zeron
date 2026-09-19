@@ -32,6 +32,7 @@ use zeron_proto::Model;
 use zeron_proto::{AgentLoginPoll, AgentLoginStart, AgentLoginStatus, HarnessId};
 use zeron_rpc::methods;
 
+use crate::i18n::{self, MessageId};
 use crate::pickers::visible_harnesses;
 use crate::popover::{self, Loadable};
 use crate::settings::widgets;
@@ -40,18 +41,18 @@ use crate::theme::Theme;
 
 /// One-line blurb per agent (the t3code models page pairs every toggle row
 /// with a description; the catalog descriptor doesn't carry one).
-pub fn blurb(harness: HarnessId) -> &'static str {
+pub fn blurb_message(harness: HarnessId) -> MessageId {
     match harness {
-        HarnessId::ClaudeCode => "Anthropic's coding agent, driven through the Claude Code CLI.",
-        HarnessId::Codex => "OpenAI's coding agent, driven through the Codex CLI.",
-        HarnessId::Cursor => "Cursor's coding agent, driven through the cursor-agent CLI.",
-        HarnessId::Devin => "Cognition's Devin agent (devin CLI).",
-        HarnessId::Grok => "xAI's Grok Build agent (grok CLI).",
-        HarnessId::Hermes => "Nous Research's Hermes Agent (hermes CLI).",
-        HarnessId::Pi => "The pi coding agent (pi CLI).",
-        HarnessId::Opencode => "SST's opencode agent (opencode CLI).",
-        HarnessId::Antigravity => "Google's Antigravity agent (Antigravity ACP server).",
-        HarnessId::Mock => "Scripted test harness.",
+        HarnessId::ClaudeCode => MessageId::HarnessesBlurbClaudeCode,
+        HarnessId::Codex => MessageId::HarnessesBlurbCodex,
+        HarnessId::Cursor => MessageId::HarnessesBlurbCursor,
+        HarnessId::Devin => MessageId::HarnessesBlurbDevin,
+        HarnessId::Grok => MessageId::HarnessesBlurbGrok,
+        HarnessId::Hermes => MessageId::HarnessesBlurbHermes,
+        HarnessId::Pi => MessageId::HarnessesBlurbPi,
+        HarnessId::Opencode => MessageId::HarnessesBlurbOpencode,
+        HarnessId::Antigravity => MessageId::HarnessesBlurbAntigravity,
+        HarnessId::Mock => MessageId::HarnessesBlurbMock,
     }
 }
 
@@ -122,21 +123,21 @@ struct SignInFailure {
 }
 
 impl SignInPhase {
-    fn pending_label(self) -> &'static str {
+    fn pending_message(self) -> MessageId {
         match self {
-            Self::Starting => "Preparing Antigravity…",
-            Self::Installing => "Installing Antigravity…",
-            Self::Authenticating => "Finish signing in in your browser.",
-            Self::Enabling => "Enabling Antigravity…",
+            Self::Starting => MessageId::HarnessesPendingStarting,
+            Self::Installing => MessageId::HarnessesPendingInstalling,
+            Self::Authenticating => MessageId::HarnessesPendingAuthenticating,
+            Self::Enabling => MessageId::HarnessesPendingEnabling,
         }
     }
 
-    fn failure_label(self) -> &'static str {
+    fn failure_message(self) -> MessageId {
         match self {
-            Self::Starting => "Setup failed",
-            Self::Installing => "Installation failed",
-            Self::Authenticating => "Sign-in failed",
-            Self::Enabling => "Enable failed",
+            Self::Starting => MessageId::HarnessesFailureStarting,
+            Self::Installing => MessageId::HarnessesFailureInstalling,
+            Self::Authenticating => MessageId::HarnessesFailureAuthenticating,
+            Self::Enabling => MessageId::HarnessesFailureEnabling,
         }
     }
 }
@@ -307,13 +308,22 @@ impl HarnessesPage {
     }
 
     fn render_titles(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let mut card = widgets::section_card(theme).mt(px(20.0)).p(px(16.0))
-            .child(widgets::row_title(theme, "Session titles"))
-            .child(widgets::page_subtitle(theme, "Choose the agent and model for automatic titles on this device. Claude Code and Codex support restricted title generation."));
+        let locale = crate::i18n::locale(cx);
+        let mut card = widgets::section_card(theme)
+            .mt(px(20.0))
+            .p(px(16.0))
+            .child(widgets::row_title(
+                theme,
+                i18n::translate(MessageId::HarnessesSessionTitles, locale),
+            ))
+            .child(widgets::page_subtitle(
+                theme,
+                i18n::translate(MessageId::HarnessesSessionTitlesSubtitle, locale),
+            ));
         let Loadable::Ready(settings) = &self.title_settings else {
             let message = match &self.title_settings {
                 Loadable::Error(error) => error.clone(),
-                _ => "Loading title settings…".into(),
+                _ => i18n::translate(MessageId::HarnessesTitleSettingsLoading, locale).to_string(),
             };
             return card
                 .child(div().mt(px(8.0)).child(message))
@@ -335,7 +345,10 @@ impl HarnessesPage {
                             id.clone()
                         }
                     })
-                    .unwrap_or_else(|| "Automatic (cheapest model)".into())
+                    .unwrap_or_else(|| {
+                        i18n::translate(MessageId::HarnessesTitleModelAutomaticCheapest, locale)
+                            .to_string()
+                    })
             } else {
                 settings
                     .harness
@@ -344,7 +357,10 @@ impl HarnessesPage {
                         HarnessId::Codex => "Codex".to_string(),
                         _ => format!("{id:?}"),
                     })
-                    .unwrap_or_else(|| "Automatic (session agent when supported)".into())
+                    .unwrap_or_else(|| {
+                        i18n::translate(MessageId::HarnessesTitleHarnessAutomatic, locale)
+                            .to_string()
+                    })
             };
             let interactive = !self.title_saving && (!is_model || settings.harness.is_some());
             let mut row = div()
@@ -352,9 +368,9 @@ impl HarnessesPage {
                 .child(widgets::row_title(
                     theme,
                     if is_model {
-                        "Title model"
+                        i18n::translate(MessageId::HarnessesTitleModel, locale)
                     } else {
-                        "Title harness"
+                        i18n::translate(MessageId::HarnessesTitleHarness, locale)
                     },
                 ))
                 .child(
@@ -380,7 +396,7 @@ impl HarnessesPage {
                 );
             if self.title_menu == Some(is_model) {
                 let mut choices = vec![(
-                    "Automatic".to_string(),
+                    i18n::translate(MessageId::HarnessesTitleAutomatic, locale).to_string(),
                     TitleSettings {
                         harness: if is_model { settings.harness } else { None },
                         model: None,
@@ -471,7 +487,10 @@ impl HarnessesPage {
         if self.target_device.is_some() {
             // the sign-in redirect lands on a loopback port of the device
             // running the agent, which a browser here can't reach
-            self.error = Some("Turn this agent on from its own device to sign in.".into());
+            self.error = Some(
+                i18n::translate(MessageId::HarnessesSignInOtherDevice, i18n::locale(cx))
+                    .to_string(),
+            );
             cx.notify();
             return;
         }
@@ -500,7 +519,15 @@ impl HarnessesPage {
                 Ok(start) => start.login_id,
                 Err(error) => {
                     this.update(cx, |page, cx| {
-                        page.fail_sign_in(harness, format!("Sign-in failed to start: {error}"));
+                        page.fail_sign_in(
+                            harness,
+                            i18n::fill(
+                                MessageId::HarnessesSignInStartFailed,
+                                "{err}",
+                                &error,
+                                i18n::locale(cx),
+                            ),
+                        );
                         cx.notify();
                     })
                     .ok();
@@ -556,7 +583,13 @@ impl HarnessesPage {
                             AgentLoginStatus::Error => {
                                 page.fail_sign_in(
                                     harness,
-                                    poll.message.unwrap_or_else(|| "Unknown error".into()),
+                                    poll.message.unwrap_or_else(|| {
+                                        i18n::translate(
+                                            MessageId::HarnessesUnknownError,
+                                            i18n::locale(cx),
+                                        )
+                                        .to_string()
+                                    }),
                                 );
                                 true
                             }
@@ -593,7 +626,11 @@ impl HarnessesPage {
 
     fn finish_sign_in(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.fail_sign_in(harness, "Engine unavailable".into());
+            self.fail_sign_in(
+                harness,
+                i18n::translate(MessageId::HarnessesEngineUnavailable, i18n::locale(cx))
+                    .to_string(),
+            );
             return;
         };
         let params = self.with_target(serde_json::json!({
@@ -689,6 +726,7 @@ impl HarnessesPage {
     /// registered device.
     fn render_device_switcher(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         use crate::icons::{self, icon};
+        let locale = crate::i18n::locale(cx);
         let (mut devices, local_id) = {
             let s = self.state.read(cx);
             (s.devices.clone(), s.local_device_id.clone())
@@ -717,7 +755,9 @@ impl HarnessesPage {
         let trigger_label: SharedString = selected
             .as_ref()
             .map(|d| d.name.clone().into())
-            .unwrap_or_else(|| SharedString::from("This device"));
+            .unwrap_or_else(|| {
+                SharedString::from(i18n::translate(MessageId::PickerThisDevice, locale))
+            });
         let emerald = theme.success;
         let open = self.device_menu_open;
 
@@ -792,7 +832,10 @@ impl HarnessesPage {
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(popover::menu_heading(theme, "Devices"))
+                .child(popover::menu_heading(
+                    theme,
+                    i18n::translate(MessageId::CommonDevicesMenu, locale),
+                ))
                 .children(devices.into_iter().enumerate().map(|(ix, d)| {
                     let is_active = Some(d.id.as_str()) == effective.as_deref();
                     let is_local = local_id.as_deref() == Some(d.id.as_str());
@@ -820,7 +863,10 @@ impl HarnessesPage {
                                     .flex_none()
                                     .text_size(crate::typography::ui_rems(10.5))
                                     .text_color(theme.text_muted)
-                                    .child(SharedString::from("You")),
+                                    .child(SharedString::from(i18n::translate(
+                                        MessageId::PickerDeviceYou,
+                                        locale,
+                                    ))),
                             )
                         })
                         .child(
@@ -843,6 +889,7 @@ impl HarnessesPage {
 
     fn rows(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let theme = Theme::of(cx).clone();
+        let locale = crate::i18n::locale(cx);
         let Loadable::Ready(list) = &self.harnesses else {
             return Vec::new();
         };
@@ -881,7 +928,10 @@ impl HarnessesPage {
                 let (icon_path, tint) = crate::pickers::harness_brand_icon(harness);
                 let mut meta: Vec<gpui::AnyElement> = vec![
                     div()
-                        .child(SharedString::from(blurb(harness)))
+                        .child(SharedString::from(i18n::translate(
+                            blurb_message(harness),
+                            locale,
+                        )))
                         .into_any_element(),
                 ];
                 if let Some(sign_in) = signing_in {
@@ -898,12 +948,12 @@ impl HarnessesPage {
                                 cx.entity_id(),
                                 cx,
                             ))
-                            .child(SharedString::from(
-                                sign_in
-                                    .message
-                                    .clone()
-                                    .unwrap_or_else(|| sign_in.phase.pending_label().into()),
-                            ))
+                            .child(SharedString::from(sign_in.message.clone().unwrap_or_else(
+                                || {
+                                    i18n::translate(sign_in.phase.pending_message(), locale)
+                                        .to_string()
+                                },
+                            )))
                             .into_any_element(),
                     );
                 }
@@ -913,7 +963,7 @@ impl HarnessesPage {
                             .text_color(theme.danger_muted.opacity(0.9))
                             .child(SharedString::from(format!(
                                 "{} — {}",
-                                failure.phase.failure_label(),
+                                i18n::translate(failure.phase.failure_message(), locale),
                                 failure.message
                             )))
                             .into_any_element(),
@@ -924,12 +974,19 @@ impl HarnessesPage {
                         div()
                             .text_color(theme.warning_muted.opacity(0.9))
                             .child(SharedString::from(if enabled {
-                                format!(
-                                    "{} CLI not installed — turn it off or install it",
-                                    cli_name(harness)
+                                i18n::fill(
+                                    MessageId::HarnessesNotInstalledEnabled,
+                                    "{cli}",
+                                    cli_name(harness),
+                                    locale,
                                 )
                             } else {
-                                format!("Install the {} CLI to enable", cli_name(harness))
+                                i18n::fill(
+                                    MessageId::HarnessesNotInstalledEnable,
+                                    "{cli}",
+                                    cli_name(harness),
+                                    locale,
+                                )
                             }))
                             .into_any_element(),
                     );
@@ -973,7 +1030,10 @@ impl HarnessesPage {
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.cancel_sign_in(cx);
                                 }))
-                                .child(SharedString::from("Cancel")),
+                                .child(SharedString::from(i18n::translate(
+                                    MessageId::CommonCancel,
+                                    locale,
+                                ))),
                         )
                     })
                     .when(sign_in_failure.is_some(), |el| {
@@ -984,7 +1044,10 @@ impl HarnessesPage {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.start_sign_in(harness, cx);
                                 }))
-                                .child(SharedString::from("Retry")),
+                                .child(SharedString::from(i18n::translate(
+                                    MessageId::CommonRetry,
+                                    locale,
+                                ))),
                         )
                     })
                     .child(
@@ -1022,6 +1085,7 @@ impl popover::ScrollRailHost for HarnessesPage {
 impl Render for HarnessesPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        let locale = crate::i18n::locale(cx);
         let body: gpui::AnyElement = match &self.harnesses {
             Loadable::Idle | Loadable::Loading => widgets::section_card(&theme)
                 .p(px(16.0))
@@ -1046,7 +1110,10 @@ impl Render for HarnessesPage {
                                 page.load(cx);
                                 cx.notify();
                             }))
-                            .child(SharedString::from("Retry")),
+                            .child(SharedString::from(i18n::translate(
+                                MessageId::CommonRetry,
+                                locale,
+                            ))),
                     )
                     .into_any_element()
             }
@@ -1084,15 +1151,20 @@ impl Render for HarnessesPage {
                                     .flex_row()
                                     .items_center()
                                     .justify_between()
-                                    .child(widgets::page_header(&theme, "Agents", None))
+                                    .child(widgets::page_header(
+                                        &theme,
+                                        i18n::translate(
+                                            MessageId::SettingsSectionHarnesses,
+                                            locale,
+                                        ),
+                                        None,
+                                    ))
                                     .child(switcher),
                             )
                             .child(
                                 widgets::page_subtitle(
                                     &theme,
-                                    "Choose which coding agents the composer offers. The setting is per \
-                                     device — switch devices in the header. Agents whose CLI isn't \
-                                     installed on a device can't be enabled there.",
+                                    i18n::translate(MessageId::HarnessesSubtitle, locale),
                                 )
                                 .max_w(px(512.0))
                                 .line_height(px(20.0)),
@@ -1109,34 +1181,41 @@ impl Render for HarnessesPage {
 #[cfg(test)]
 mod tests {
     use super::SignInPhase;
+    use crate::i18n::MessageId;
 
     #[test]
     fn antigravity_setup_copy_matches_each_phase() {
         assert_eq!(
-            SignInPhase::Starting.pending_label(),
-            "Preparing Antigravity…"
-        );
-        assert_eq!(SignInPhase::Starting.failure_label(), "Setup failed");
-        assert_eq!(
-            SignInPhase::Installing.pending_label(),
-            "Installing Antigravity…"
+            SignInPhase::Starting.pending_message(),
+            MessageId::HarnessesPendingStarting
         );
         assert_eq!(
-            SignInPhase::Installing.failure_label(),
-            "Installation failed"
+            SignInPhase::Starting.failure_message(),
+            MessageId::HarnessesFailureStarting
         );
         assert_eq!(
-            SignInPhase::Authenticating.pending_label(),
-            "Finish signing in in your browser."
+            SignInPhase::Installing.pending_message(),
+            MessageId::HarnessesPendingInstalling
         );
         assert_eq!(
-            SignInPhase::Authenticating.failure_label(),
-            "Sign-in failed"
+            SignInPhase::Installing.failure_message(),
+            MessageId::HarnessesFailureInstalling
         );
         assert_eq!(
-            SignInPhase::Enabling.pending_label(),
-            "Enabling Antigravity…"
+            SignInPhase::Authenticating.pending_message(),
+            MessageId::HarnessesPendingAuthenticating
         );
-        assert_eq!(SignInPhase::Enabling.failure_label(), "Enable failed");
+        assert_eq!(
+            SignInPhase::Authenticating.failure_message(),
+            MessageId::HarnessesFailureAuthenticating
+        );
+        assert_eq!(
+            SignInPhase::Enabling.pending_message(),
+            MessageId::HarnessesPendingEnabling
+        );
+        assert_eq!(
+            SignInPhase::Enabling.failure_message(),
+            MessageId::HarnessesFailureEnabling
+        );
     }
 }

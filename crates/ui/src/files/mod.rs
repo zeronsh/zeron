@@ -14,6 +14,7 @@ use zeron_proto::ListWorkspaceDirectoryRequest;
 
 use crate::{
     composer::{ComposerInput, ComposerInputEvent},
+    i18n::{self, Locale, MessageId},
     state::AppState,
 };
 
@@ -62,6 +63,27 @@ pub(super) fn toolbar_button(id: &'static str, label: &'static str) -> gpui::Sta
                 .into()
         })
         .tooltip_show_delay(Duration::from_millis(350))
+}
+
+/// Why a workspace image or diagram has no pixels to show.
+///
+/// Localized copy is resolved at render time, so switching the language
+/// repaints the same row; `Detail` carries a raw client or engine payload and
+/// stays as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum MediaFailure {
+    Copy(MessageId),
+    Detail(String),
+}
+
+impl MediaFailure {
+    /// The row's copy in `locale`.
+    pub(super) fn text(&self, locale: Locale) -> SharedString {
+        match self {
+            Self::Copy(id) => i18n::translate(*id, locale).into(),
+            Self::Detail(detail) => detail.clone().into(),
+        }
+    }
 }
 
 /// A workspace-relative file or directory dragged out of a Files surface.
@@ -243,7 +265,7 @@ impl Render for FilesSurface {
                         .items_center()
                         .text_size(px(11.5))
                         .text_color(theme.text)
-                        .child("Retry")
+                        .child(i18n::translate(MessageId::CommonRetry, i18n::locale(cx)))
                         .on_click(cx.listener(|this, _, _, cx| this.retry_root(cx))),
                 )
                 .into_any_element()
@@ -298,10 +320,16 @@ impl Render for FilesSurface {
                                 .items_center()
                                 .cursor_pointer()
                                 .role(gpui::Role::Button)
-                                .aria_label("Refresh workspace files now")
+                                .aria_label(i18n::translate(
+                                    MessageId::FilesRefreshNowLabel,
+                                    i18n::locale(cx),
+                                ))
                                 .text_color(theme.text_muted)
                                 .hover(|style| style.bg(crate::theme::wash(0.07)))
-                                .child("Refresh now")
+                                .child(i18n::translate(
+                                    MessageId::FilesRefreshNow,
+                                    i18n::locale(cx),
+                                ))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.refresh(cx);
                                     this.reconcile_open_documents(cx);
@@ -405,7 +433,10 @@ impl Render for FilesSurface {
                 self.chat_id
             )))
             .role(gpui::Role::Group)
-            .aria_label("Workspace files")
+            .aria_label(i18n::translate(
+                MessageId::FilesSurfaceLabel,
+                i18n::locale(cx),
+            ))
             .size_full()
             .relative()
             .flex()
@@ -499,9 +530,12 @@ impl FilesSurface {
         cx: &mut Context<Self>,
     ) -> Self {
         let search = cx.new(|cx| {
-            ComposerInput::new("Search files", cx)
-                .with_accessibility_role(gpui::Role::SearchInput)
-                .with_text_metrics(11.0, 16.0)
+            ComposerInput::new(
+                i18n::translate(MessageId::FilesSearchPlaceholder, i18n::locale(cx)),
+                cx,
+            )
+            .with_accessibility_role(gpui::Role::SearchInput)
+            .with_text_metrics(11.0, 16.0)
         });
         let search_events = cx.subscribe(&search, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Edited => this.on_search_edited(cx),
@@ -647,6 +681,7 @@ impl FilesSurface {
         let position = menu.position;
         let availability = menu.availability;
         let closing = self.editor_context_menu.closing_since();
+        let locale = i18n::locale(cx);
 
         let card = crate::popover::popover_card(theme)
             .w(px(170.0))
@@ -656,7 +691,7 @@ impl FilesSurface {
             .child(Self::editor_context_menu_row(
                 theme,
                 "files-editor-context-cut",
-                "Cut",
+                i18n::translate(MessageId::EditCut, locale),
                 availability.cut,
                 editor.clone(),
                 editor::EditorContextAction::Cut,
@@ -665,7 +700,7 @@ impl FilesSurface {
             .child(Self::editor_context_menu_row(
                 theme,
                 "files-editor-context-copy",
-                "Copy",
+                i18n::translate(MessageId::EditCopy, locale),
                 availability.copy,
                 editor.clone(),
                 editor::EditorContextAction::Copy,
@@ -674,7 +709,7 @@ impl FilesSurface {
             .child(Self::editor_context_menu_row(
                 theme,
                 "files-editor-context-paste",
-                "Paste",
+                i18n::translate(MessageId::EditPaste, locale),
                 availability.paste,
                 editor.clone(),
                 editor::EditorContextAction::Paste,
@@ -684,7 +719,7 @@ impl FilesSurface {
             .child(Self::editor_context_menu_row(
                 theme,
                 "files-editor-context-select-all",
-                "Select All",
+                i18n::translate(MessageId::EditSelectAll, locale),
                 true,
                 editor,
                 editor::EditorContextAction::SelectAll,
@@ -771,11 +806,11 @@ impl FilesSurface {
         }
     }
 
-    pub fn tab_title(&self) -> SharedString {
+    pub fn tab_title(&self, locale: crate::i18n::Locale) -> SharedString {
         self.editor_path
             .as_deref()
             .and_then(|path| path.rsplit('/').next())
-            .unwrap_or("Files")
+            .unwrap_or_else(|| crate::i18n::translate(crate::i18n::MessageId::SurfaceFiles, locale))
             .into()
     }
 
@@ -824,7 +859,8 @@ impl FilesSurface {
         cx: &mut Context<Self>,
     ) {
         let Some(request_context) = self.request_context.clone() else {
-            self.error = Some("No workspace available for this chat.".into());
+            self.error =
+                Some(i18n::translate(MessageId::FilesNoWorkspace, i18n::locale(cx)).into());
             cx.notify();
             return;
         };
@@ -845,7 +881,7 @@ impl FilesSurface {
             self.tree.fail_load(
                 &directory,
                 cursor,
-                "Workspace service is still starting.",
+                i18n::translate(MessageId::FilesServiceStarting, i18n::locale(cx)),
                 generation,
             );
             self.sync_tree_list();
@@ -881,9 +917,9 @@ impl FilesSurface {
                         surface.tree.apply_page(page, generation);
                     }
                     Err(error) => {
-                        let message = error.to_string();
+                        let message = error.text(i18n::locale(cx));
                         if directory.is_empty() {
-                            surface.error = Some(message.clone().into());
+                            surface.error = Some(message.clone());
                         }
                         surface
                             .tree
@@ -955,7 +991,7 @@ impl FilesSurface {
         self.tree.reset();
         self.sync_tree_list();
         self.error = if next.is_none() {
-            Some("No workspace available for this chat.".into())
+            Some(i18n::translate(MessageId::FilesNoWorkspace, i18n::locale(cx)).into())
         } else {
             None
         };
@@ -1000,11 +1036,14 @@ impl FilesSurface {
             .child(
                 toolbar_button(
                     "files-toggle-ignored",
-                    if include_ignored {
-                        "Hide hidden and ignored files"
-                    } else {
-                        "Show all files (even hidden)"
-                    },
+                    i18n::translate(
+                        if include_ignored {
+                            MessageId::FilesHideIgnoredFiles
+                        } else {
+                            MessageId::FilesShowAllFiles
+                        },
+                        i18n::locale(cx),
+                    ),
                 )
                 .when(include_ignored, |element| {
                     element.bg(crate::theme::wash(0.1))

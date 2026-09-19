@@ -11,6 +11,7 @@ pub mod model;
 mod view;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::i18n::{self, Locale, MessageId};
 use gpui::{
     App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Subscription, Window,
 };
@@ -82,7 +83,7 @@ pub struct BrowserSurface {
     pub page: PageState,
     pub favicon: Option<std::sync::Arc<gpui::Image>>,
     address_edited: bool,
-    validation: Option<String>,
+    validation: Option<MessageId>,
     remote: bool,
     previews: zeron_proto::PreviewSnapshot,
     previews_loading: bool,
@@ -120,7 +121,9 @@ impl BrowserSurface {
         cx: &mut Context<Self>,
     ) -> Self {
         let address = cx.new(|cx| {
-            ComposerInput::with_context("Website or localhost:3000", "PaletteSearch", cx)
+            let placeholder =
+                i18n::translate(MessageId::BrowserAddressPlaceholder, i18n::locale(cx));
+            ComposerInput::with_context(placeholder, "PaletteSearch", cx)
                 .with_text_metrics(11.0, 16.0)
                 .with_single_line()
                 .with_accessibility_role(gpui::Role::TextInput)
@@ -182,8 +185,8 @@ impl BrowserSurface {
         }
     }
 
-    pub fn title(&self) -> gpui::SharedString {
-        self.page.label().into()
+    pub fn title(&self, locale: Locale) -> gpui::SharedString {
+        self.page.label(locale).into()
     }
     pub fn set_remote(&mut self, remote: bool) {
         self.remote = remote;
@@ -286,7 +289,10 @@ impl BrowserSurface {
                 if this
                     .update(cx, |this, cx| {
                         this.previews.services.clear();
-                        this.previews.error = Some("Connecting to preview discovery…".into());
+                        this.previews.error = Some(
+                            i18n::translate(MessageId::BrowserPreviewConnecting, i18n::locale(cx))
+                                .to_owned(),
+                        );
                         this.previews_loading = false;
                         cx.notify();
                     })
@@ -305,7 +311,7 @@ impl BrowserSurface {
         let url = match model::normalize_address(input) {
             Ok(url) => url,
             Err(message) => {
-                self.validation = Some(message.into());
+                self.validation = Some(message);
                 cx.notify();
                 return;
             }
@@ -337,7 +343,7 @@ impl BrowserSurface {
             };
             self.page.loading = result.is_ok();
             if let Err(error) = result {
-                self.page.error = Some(format!("Could not open this page: {error}"));
+                self.page.error = Some(error.into_open_failure());
             }
             window.focus(&self.focus, cx);
         }

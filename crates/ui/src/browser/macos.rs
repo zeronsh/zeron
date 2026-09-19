@@ -1,13 +1,12 @@
 //! AppKit boundary for the browser. Wry owns the native child and its UI
 //! delegate; our navigation delegate supplies browser policy and state. All
 //! callbacks enqueue events, never re-enter GPUI. No page-to-engine IPC.
-use super::model::{PageState, Presentation, allowed_navigation};
+use super::model::{PageFailure, PageState, Presentation, allowed_navigation};
+use crate::i18n::MessageId;
 use gpui::{Bounds, Pixels, Window};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{
-    DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send, sel,
-};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSView, NSWindowOrderingMode,
 };
@@ -154,7 +153,7 @@ pub(super) enum NativeEvent {
 struct ObserverState {
     tx: Sender,
     pending: Cell<bool>,
-    error: RefCell<Option<String>>,
+    error: RefCell<Option<PageFailure>>,
     requested_url: RefCell<Option<String>>,
 }
 
@@ -183,7 +182,7 @@ define_class!(
         #[unsafe(method(webView:decidePolicyForNavigationResponse:decisionHandler:))]
         fn response(&self, _view: &WKWebView, response: &WKNavigationResponse, decision: &block2::Block<dyn Fn(WKNavigationResponsePolicy)>) {
             let displayable = unsafe { response.canShowMIMEType() };
-            if !displayable { self.fail("This file can’t be previewed here. Open it in your default browser."); }
+            if !displayable { self.fail(PageFailure::message(MessageId::BrowserUnsupportedContent)); }
             decision.call((if displayable { WKNavigationResponsePolicy::Allow } else { WKNavigationResponsePolicy::Cancel },));
         }
         #[unsafe(method(webView:didStartProvisionalNavigation:))]
@@ -202,19 +201,19 @@ define_class!(
         fn provisional_error(&self, _view: &WKWebView, _navigation: Option<&WKNavigation>, error: &NSError) {
             if error.code() != -999 {
                 tracing::warn!(domain = %error.domain(), code = error.code(), "browser provisional navigation failed");
-                self.fail("Check the address and make sure your server is running, then try again.");
+                self.fail(PageFailure::message(MessageId::BrowserAddressUnreachable));
             }
         }
         #[unsafe(method(webView:didFailNavigation:withError:))]
         fn navigation_error(&self, _view: &WKWebView, _navigation: Option<&WKNavigation>, error: &NSError) {
             if error.code() != -999 {
                 tracing::warn!(domain = %error.domain(), code = error.code(), "browser navigation failed");
-                self.fail("The connection was interrupted. Try loading this page again.");
+                self.fail(PageFailure::message(MessageId::BrowserConnectionInterrupted));
             }
         }
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
         fn terminated(&self, _view: &WKWebView) {
-            self.fail("The page stopped responding. Reload to continue.");
+            self.fail(PageFailure::message(MessageId::BrowserPageStopped));
         }
     }
 );
@@ -236,8 +235,8 @@ impl Observer {
             }
         }
     }
-    fn fail(&self, message: &str) {
-        *self.ivars().error.borrow_mut() = Some(message.into());
+    fn fail(&self, failure: PageFailure) {
+        *self.ivars().error.borrow_mut() = Some(failure);
         self.changed();
     }
 }
@@ -291,8 +290,9 @@ pub(super) struct Host {
 }
 
 impl NativePage {
-    pub fn new(window: &Window, data: &BrowserData, tx: Sender) -> Result<Self, String> {
-        let mtm = MainThreadMarker::new().ok_or("Browser must be created on the main thread")?;
+    pub fn new(window: &Window, data: &BrowserData, tx: Sender) -> Result<Self, PageFailure> {
+        let mtm = MainThreadMarker::new()
+            .ok_or_else(|| PageFailure::message(MessageId::BrowserNotMainThread))?;
         let new_tab = tx.clone();
         let web = wry::WebViewBuilder::new()
             .with_webview_configuration(data.configuration(mtm))
@@ -307,12 +307,13 @@ impl NativePage {
             })
             .with_download_started_handler(|_, _| false)
             .build_as_child(window)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| PageFailure::detail(e.to_string()))?;
         let view = Retained::into_super(web.webview());
         window
             .enable_scene_overlay()
-            .map_err(|error| error.to_string())?;
-        let parent = unsafe { view.superview() }.ok_or("Browser parent is missing")?;
+            .map_err(|error| PageFailure::detail(error.to_string()))?;
+        let parent = unsafe { view.superview() }
+            .ok_or_else(|| PageFailure::message(MessageId::BrowserParentMissing))?;
         let clip: Retained<BrowserClipView> = unsafe {
             let object = mtm.alloc().set_ivars(ClipState {
                 dragging: Cell::new(false),
@@ -444,12 +445,14 @@ impl NativePage {
     pub fn present(&mut self, presentation: Presentation) {
         self.0.borrow_mut().present(presentation);
     }
-    pub fn load(&self, url: &str) -> Result<(), String> {
+    pub fn load(&self, url: &str) -> Result<(), PageFailure> {
         let host = self.0.borrow();
         host.data.register_preview(url);
         host.observer.ivars().error.borrow_mut().take();
         *host.observer.ivars().requested_url.borrow_mut() = Some(url.into());
-        host.web.load_url(url).map_err(|e| e.to_string())
+        host.web
+            .load_url(url)
+            .map_err(|e| PageFailure::detail(e.to_string()))
     }
     pub fn reload(&self) {
         let host = self.0.borrow();

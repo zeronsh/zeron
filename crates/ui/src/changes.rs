@@ -52,6 +52,7 @@ use crate::history::{
     GitHistory, GitHistoryCount, GitHistoryEvent, GitHistoryFetchButton, GitHistorySearchControl,
     GitHistoryViewButton,
 };
+use crate::i18n::{self, Locale, MessageId};
 use crate::markdown::render;
 use crate::motion::{self, AnimationExt as _, CHEVRON, COLLAPSE};
 use crate::popover::{self, Popup};
@@ -234,6 +235,57 @@ pub enum FileStatus {
     Renamed,
 }
 
+/// A parser-level note about one file, kept structured so the parser never
+/// needs a locale and no render path compares display copy: [`FileNotice::text`]
+/// resolves the row against the active locale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileNotice {
+    NewFile,
+    DeletedFile,
+    Binary,
+    /// `{from}` takes the pre-rename path, untranslated.
+    Renamed {
+        from: String,
+    },
+    /// `{mode}` takes the raw git mode ("100755"), untranslated.
+    ModeChanged {
+        mode: String,
+    },
+    /// The line budget [`truncate_file_lines`] applied.
+    Truncated {
+        max_lines: usize,
+        total: usize,
+    },
+}
+
+impl FileNotice {
+    /// The notice row's copy. File names, modes, and counts are inserted
+    /// verbatim and never translated.
+    pub fn text(&self, locale: Locale) -> String {
+        match self {
+            Self::NewFile => i18n::translate(MessageId::DiffNoticeNewFile, locale).to_string(),
+            Self::DeletedFile => {
+                i18n::translate(MessageId::DiffNoticeDeletedFile, locale).to_string()
+            }
+            Self::Binary => i18n::translate(MessageId::DiffNoticeBinary, locale).to_string(),
+            Self::Renamed { from } => {
+                i18n::fill(MessageId::DiffNoticeRenamed, "{from}", from, locale)
+            }
+            Self::ModeChanged { mode } => {
+                i18n::fill(MessageId::DiffNoticeModeChanged, "{mode}", mode, locale)
+            }
+            Self::Truncated { max_lines, total } => i18n::fill_many(
+                MessageId::DiffNoticeTruncated,
+                &[
+                    ("{max_lines}", &max_lines.to_string()),
+                    ("{total}", &total.to_string()),
+                ],
+                locale,
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileDiff {
     /// Display path (the post-change side).
@@ -243,7 +295,7 @@ pub struct FileDiff {
     pub status: FileStatus,
     pub binary: bool,
     /// Parser-collected notices (mode changes etc.).
-    pub notices: Vec<String>,
+    pub notices: Vec<FileNotice>,
     pub hunks: Vec<Hunk>,
     pub additions: u32,
     pub deletions: u32,
@@ -571,8 +623,9 @@ pub fn parse_patch(patch: &str) -> Vec<FileDiff> {
         } else if raw.starts_with("Binary files") || raw.starts_with("GIT binary patch") {
             file.binary = true;
         } else if let Some(mode) = raw.strip_prefix("new mode ") {
-            file.notices
-                .push(format!("Mode changed to {}", mode.trim()));
+            file.notices.push(FileNotice::ModeChanged {
+                mode: mode.trim().to_string(),
+            });
         } else if let Some(new) = raw.strip_prefix("+++ ") {
             let new = new.trim();
             if new == "/dev/null" {
@@ -591,19 +644,21 @@ pub fn parse_patch(patch: &str) -> Vec<FileDiff> {
 }
 
 /// Derived per-file notice rows (new/deleted/renamed/binary + parser notices).
-pub fn file_notices(file: &FileDiff) -> Vec<String> {
+pub fn file_notices(file: &FileDiff) -> Vec<FileNotice> {
     let mut notices = Vec::new();
     match file.status {
-        FileStatus::Added => notices.push("New file".to_string()),
-        FileStatus::Deleted => notices.push("Deleted file".to_string()),
+        FileStatus::Added => notices.push(FileNotice::NewFile),
+        FileStatus::Deleted => notices.push(FileNotice::DeletedFile),
         FileStatus::Renamed => {
             let from = file.old_path.as_deref().unwrap_or("?");
-            notices.push(format!("Renamed from {from}"));
+            notices.push(FileNotice::Renamed {
+                from: from.to_string(),
+            });
         }
         FileStatus::Modified => {}
     }
     if file.binary {
-        notices.push("Binary file — contents not shown".to_string());
+        notices.push(FileNotice::Binary);
     }
     notices.extend(file.notices.iter().cloned());
     notices
@@ -630,9 +685,8 @@ pub fn truncate_file_lines(file: &mut FileDiff, max_lines: usize) {
         budget -= hunk.lines.len();
         true
     });
-    file.notices.push(format!(
-        "Diff truncated — showing first {max_lines} of {total} lines"
-    ));
+    file.notices
+        .push(FileNotice::Truncated { max_lines, total });
     // The gutter fits what actually renders.
     file.max_line = file
         .hunks
@@ -858,12 +912,13 @@ pub fn diff_phase(resolved: Option<&CheckoutDiff>) -> DiffPhase {
 }
 
 /// Header label: "N Uncommitted change(s)".
-pub fn uncommitted_label(count: usize) -> String {
-    if count == 1 {
-        "1 Uncommitted change".to_string()
+pub fn uncommitted_label(count: usize, locale: Locale) -> String {
+    let id = if count == 1 {
+        MessageId::DiffUncommittedOne
     } else {
-        format!("{count} Uncommitted changes")
-    }
+        MessageId::DiffUncommittedMany
+    };
+    i18n::fill(id, "{n}", &count.to_string(), locale)
 }
 
 /// What the pane diffs against (t3code's scope dropdown).
@@ -892,13 +947,15 @@ impl DiffScope {
     /// picker instead, so it can keep its own tab and toolbar state.
     pub const ALL: [DiffScope; 3] = [Self::WorkingTree, Self::Branch, Self::LatestTurn];
 
-    pub fn label(self) -> &'static str {
+    /// The scope's display label, as a key: the render paths resolve it against
+    /// the active locale, so no caller sees English copy.
+    pub fn label_message(self) -> MessageId {
         match self {
-            Self::WorkingTree => "Working tree",
-            Self::Branch => "Branch changes",
-            Self::LatestTurn => "Latest turn",
-            Self::History => "History",
-            Self::Commit => "Commit",
+            Self::WorkingTree => MessageId::DiffScopeWorkingTree,
+            Self::Branch => MessageId::DiffScopeBranchChanges,
+            Self::LatestTurn => MessageId::DiffScopeLatestTurn,
+            Self::History => MessageId::SurfaceHistory,
+            Self::Commit => MessageId::CommonCommit,
         }
     }
 
@@ -914,18 +971,33 @@ impl DiffScope {
     }
 }
 
-/// Header-strip label per scope.
-pub fn scope_label(scope: DiffScope, count: usize, base: Option<&str>) -> String {
-    let files = if count == 1 { "file" } else { "files" };
+/// Header-strip label per scope. `{files}` takes a [`i18n::count_files`] result
+/// and `{base}` the comparison ref — data, never translated.
+pub fn scope_label(scope: DiffScope, count: usize, base: Option<&str>, locale: Locale) -> String {
+    let files = i18n::count_files(count, locale);
     match scope {
-        DiffScope::WorkingTree => uncommitted_label(count),
+        DiffScope::WorkingTree => uncommitted_label(count, locale),
         DiffScope::Branch => match base {
-            Some(base) => format!("{count} Changed {files} vs {base}"),
-            None => format!("{count} Changed {files}"),
+            Some(base) => i18n::fill_many(
+                MessageId::DiffChangedFilesVs,
+                &[("{files}", files.as_str()), ("{base}", base)],
+                locale,
+            ),
+            None => i18n::fill(MessageId::DiffChangedFiles, "{files}", &files, locale),
         },
-        DiffScope::LatestTurn => format!("{count} Changed {files} this turn"),
-        DiffScope::History => "History".to_string(),
-        DiffScope::Commit => format!("{count} Changed {files} in this commit"),
+        DiffScope::LatestTurn => i18n::fill(
+            MessageId::DiffChangedFilesThisTurn,
+            "{files}",
+            &files,
+            locale,
+        ),
+        DiffScope::History => i18n::translate(MessageId::SurfaceHistory, locale).to_string(),
+        DiffScope::Commit => i18n::fill(
+            MessageId::DiffChangedFilesInCommit,
+            "{files}",
+            &files,
+            locale,
+        ),
     }
 }
 
@@ -950,17 +1022,22 @@ pub fn default_base_ref(branches: &[String], current: Option<&str>) -> Option<St
         .cloned()
 }
 
-/// Empty-state copy per scope.
-pub fn clean_message(scope: DiffScope, base: Option<&str>) -> String {
+/// Empty-state copy per scope. `{base}` takes the comparison ref, which is
+/// never translated.
+pub fn clean_message(scope: DiffScope, base: Option<&str>, locale: Locale) -> String {
     match scope {
-        DiffScope::WorkingTree => "No uncommitted changes".to_string(),
+        DiffScope::WorkingTree => {
+            i18n::translate(MessageId::DiffNoUncommittedChanges, locale).to_string()
+        }
         DiffScope::Branch => match base {
-            Some(base) => format!("No changes vs {base}"),
-            None => "No branch changes".to_string(),
+            Some(base) => i18n::fill(MessageId::DiffNoChangesVs, "{base}", base, locale),
+            None => i18n::translate(MessageId::DiffNoBranchChanges, locale).to_string(),
         },
-        DiffScope::LatestTurn => "No changes this turn".to_string(),
-        DiffScope::History => "No commits found".to_string(),
-        DiffScope::Commit => "Empty commit".to_string(),
+        DiffScope::LatestTurn => {
+            i18n::translate(MessageId::DiffNoChangesThisTurn, locale).to_string()
+        }
+        DiffScope::History => i18n::translate(MessageId::DiffNoCommitsFound, locale).to_string(),
+        DiffScope::Commit => i18n::translate(MessageId::DiffEmptyCommit, locale).to_string(),
     }
 }
 
@@ -1633,13 +1710,36 @@ struct CommentDraft {
     _events: Subscription,
 }
 
+/// The file-watch banner state, kept structured so a language switch repaints
+/// it: copy is resolved at render time, and `{err}` is the raw engine payload.
+#[derive(Debug, Clone, PartialEq)]
+enum WatchError {
+    /// The stream ended (engine restart / reconnect) and the loop retries.
+    Interrupted,
+    /// The watch subscription itself failed.
+    Unavailable(String),
+}
+
+impl WatchError {
+    fn text(&self, locale: Locale) -> String {
+        match self {
+            Self::Interrupted => {
+                i18n::translate(MessageId::DiffWatchInterrupted, locale).to_string()
+            }
+            Self::Unavailable(err) => {
+                i18n::fill(MessageId::DiffWatchUnavailable, "{err}", err, locale)
+            }
+        }
+    }
+}
+
 /// The Changes pane entity. Lazy: no RPC until [`Changes::ensure_watch`] runs
 /// (the shell calls it when the pane first opens).
 pub struct Changes {
     state: Entity<AppState>,
     diffs: Vec<CheckoutDiff>,
     started: bool,
-    error: Option<SharedString>,
+    error: Option<WatchError>,
     /// Device the running watch targets: `None` = the connected engine itself,
     /// `Some(id)` = a remote chat's host (relay-forwarded). The stream only
     /// carries the TARGET device's checkouts, so a selection change onto a
@@ -1704,7 +1804,7 @@ pub enum ChangesEvent {
 
 impl gpui::EventEmitter<ChangesEvent> for Changes {}
 
-struct DiffHeaderTooltip(&'static str);
+struct DiffHeaderTooltip(MessageId);
 
 impl Render for DiffHeaderTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1719,7 +1819,7 @@ impl Render for DiffHeaderTooltip {
             .shadow_md()
             .text_size(px(11.0))
             .text_color(theme.text)
-            .child(self.0)
+            .child(i18n::translate(self.0, i18n::locale(cx)))
     }
 }
 
@@ -1800,7 +1900,9 @@ impl Changes {
 
     /// The surface-tab title (contextual, user request): the pinned commit's
     /// subject (short sha for subject-less commits), else the scope's label.
-    pub fn tab_title(&self) -> gpui::SharedString {
+    ///
+    /// The scope label resolves in `locale`; the subject and short sha are data.
+    pub fn tab_title(&self, locale: Locale) -> gpui::SharedString {
         if let Some(commit) = &self.commit {
             let subject = commit.subject.trim();
             if !subject.is_empty() {
@@ -1808,7 +1910,7 @@ impl Changes {
             }
             return commit.sha.chars().take(7).collect::<String>().into();
         }
-        gpui::SharedString::from(self.scope.label())
+        gpui::SharedString::from(i18n::translate(self.scope.label_message(), locale))
     }
 
     /// The selected chat's host device when it differs from the connected
@@ -1883,7 +1985,7 @@ impl Changes {
                         // Stream ended (engine restart / reconnect): banner + retry.
                         if this
                             .update(cx, |changes, cx| {
-                                changes.error = Some("Diff stream interrupted — retrying".into());
+                                changes.error = Some(WatchError::Interrupted);
                                 cx.notify();
                             })
                             .is_err()
@@ -1894,8 +1996,7 @@ impl Changes {
                     Err(err) => {
                         if this
                             .update(cx, |changes, cx| {
-                                changes.error =
-                                    Some(format!("Diff watch unavailable: {err}").into());
+                                changes.error = Some(WatchError::Unavailable(err.to_string()));
                                 cx.notify();
                             })
                             .is_err()
@@ -2808,7 +2909,12 @@ impl Changes {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let input = cx.new(|cx| ComposerInput::new("Request a change…", cx));
+        let input = cx.new(|cx| {
+            ComposerInput::new(
+                i18n::translate(MessageId::DiffRequestChange, i18n::locale(cx)),
+                cx,
+            )
+        });
         let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Submitted => this.commit_draft(cx),
             ComposerInputEvent::Edited => cx.notify(),
@@ -2931,8 +3037,13 @@ impl Changes {
     fn open_ref_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // "PaletteSearch" context: ↑↓/⏎ stay unbound in the input and bubble
         // to the card's key handler.
-        let search =
-            cx.new(|cx| ComposerInput::with_context("Search branches…", "PaletteSearch", cx));
+        let search = cx.new(|cx| {
+            ComposerInput::with_context(
+                i18n::translate(MessageId::DiffSearchBranches, i18n::locale(cx)),
+                "PaletteSearch",
+                cx,
+            )
+        });
         let search_events = cx.subscribe(&search, |this: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 if let Some(menu) = this.ref_menu.open_mut() {
@@ -3195,7 +3306,7 @@ impl Changes {
             DiffRow::Notice { file, notice } => files
                 .get(file as usize)
                 .and_then(|f| file_notices(f).into_iter().nth(notice as usize))
-                .map(|text| notice_row(text, &theme))
+                .map(|notice| notice_row(&notice, &theme, i18n::locale(cx)))
                 .unwrap_or_else(|| gpui::Empty.into_any_element()),
             DiffRow::HunkHeader { file, hunk } => files
                 .get(file as usize)
@@ -3417,6 +3528,7 @@ impl Changes {
                             fold.epoch
                         )),
                     }),
+                    i18n::locale(cx),
                 );
                 let clipped = div().w_full().overflow_hidden().child(body);
                 if fold.animating() {
@@ -3548,7 +3660,10 @@ impl Changes {
                         .flex_none()
                         .text_size(px(10.0))
                         .text_color(theme.text_faint)
-                        .child(SharedString::from("BIN")),
+                        .child(i18n::translate(
+                            MessageId::DiffFileBinaryBadge,
+                            i18n::locale(cx),
+                        )),
                 )
             })
             .when(adds > 0 || !file.binary, |el| {
@@ -3716,7 +3831,10 @@ impl Changes {
             cx.stop_propagation();
             this.toggle_wrap(cx);
         }))
-        .tooltip(|_, cx| cx.new(|_| DiffHeaderTooltip("Wrap long lines")).into())
+        .tooltip(|_, cx| {
+            cx.new(|_| DiffHeaderTooltip(MessageId::DiffWrapLongLines))
+                .into()
+        })
         .tooltip_show_delay(Duration::from_millis(350))
         .into_any_element()
     }
@@ -3828,7 +3946,7 @@ impl Changes {
                     .text_size(px(12.0))
                     .line_height(px(14.0))
                     .text_color(theme.text)
-                    .child(SharedString::from(scope.label())),
+                    .child(i18n::translate(scope.label_message(), i18n::locale(cx))),
             )
             .child(
                 crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
@@ -3957,7 +4075,11 @@ impl Changes {
                             this.set_scope(scope, cx);
                             this.close_scope_menu(cx);
                         }))
-                        .child(div().flex_1().child(SharedString::from(scope.label())))
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(i18n::translate(scope.label_message(), i18n::locale(cx))),
+                        )
                     }),
                 ),
             )
@@ -4106,11 +4228,14 @@ impl Changes {
                 .py(px(6.0))
                 .text_size(px(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from(if branches.is_empty() {
-                    "No branches"
-                } else {
-                    "No matching branches"
-                }))
+                .child(SharedString::from(i18n::translate(
+                    if branches.is_empty() {
+                        MessageId::DiffNoBranches
+                    } else {
+                        MessageId::DiffNoMatchingBranches
+                    },
+                    i18n::locale(cx),
+                )))
                 .into_any_element()
         } else {
             div()
@@ -4166,7 +4291,7 @@ impl Changes {
             .into_any_element()
     }
 
-    fn render_header_strip(&self, theme: &Theme) -> Option<AnyElement> {
+    fn render_header_strip(&self, theme: &Theme, locale: Locale) -> Option<AnyElement> {
         let parsed = self.parsed.as_ref()?;
         Some(
             div()
@@ -4189,6 +4314,7 @@ impl Changes {
                             self.scope,
                             parsed.file_count,
                             self.base_ref.as_deref(),
+                            locale,
                         ))),
                 )
                 .child(
@@ -4216,7 +4342,10 @@ impl Changes {
                             .rounded(px(4.0))
                             .bg(theme.warning.opacity(0.08))
                             .text_color(theme.warning.opacity(0.75))
-                            .child(SharedString::from("Partial snapshot")),
+                            .child(SharedString::from(i18n::translate(
+                                MessageId::DiffPartialSnapshot,
+                                locale,
+                            ))),
                     )
                 })
                 .into_any_element(),
@@ -4235,7 +4364,7 @@ fn del_color(theme: &Theme) -> gpui::Hsla {
 }
 
 /// One notice row ("New file", "Binary file — contents not shown", …).
-fn notice_row(notice: String, theme: &Theme) -> AnyElement {
+fn notice_row(notice: &FileNotice, theme: &Theme, locale: Locale) -> AnyElement {
     div()
         .h(px(NOTICE_HEIGHT))
         .w_full()
@@ -4245,7 +4374,7 @@ fn notice_row(notice: String, theme: &Theme) -> AnyElement {
         .px(px(Theme::SPACE_LG))
         .text_size(px(11.0))
         .text_color(theme.text_faint)
-        .child(SharedString::from(notice))
+        .child(SharedString::from(notice.text(locale)))
         .into_any_element()
 }
 
@@ -4700,15 +4829,16 @@ fn draft_cite_path(draft: &CommentDraft) -> &str {
 /// pane itself virtualizes these rows individually; this stacked form serves
 /// the transcript and the fold tween's clipped stand-in.)
 /// Full-document old/new highlighting for tool and checkout diffs.
-pub(crate) fn render_file_body_with_syntax(
+pub(crate) fn render_file_body_with_syntax_in(
     file: &FileDiff,
     highlights: Option<Arc<DiffHighlights>>,
     theme: &Theme,
+    locale: Locale,
 ) -> AnyElement {
     let mut children: Vec<AnyElement> = Vec::new();
     let gutter_px = gutter_width(file);
     for notice in file_notices(file) {
-        children.push(notice_row(notice, theme));
+        children.push(notice_row(&notice, theme, locale));
     }
     for hunk in &file.hunks {
         children.push(hunk_header_row(&hunk.header, theme));
@@ -4745,6 +4875,7 @@ fn render_file_body_upto(
     mode: DiffMode,
     code_width: DiffCodeWidth,
     scroll: Option<DiffCodeScrollContext>,
+    locale: Locale,
 ) -> AnyElement {
     let mut children: Vec<AnyElement> = Vec::new();
     let mut y = 0.0f32;
@@ -4762,7 +4893,7 @@ fn render_file_body_upto(
             if y >= max_px {
                 break 'build;
             }
-            children.push(notice_row(notice, theme));
+            children.push(notice_row(&notice, theme, locale));
             y += NOTICE_HEIGHT;
         }
         for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
@@ -4870,6 +5001,7 @@ impl Render for Changes {
         } else {
             diff_phase(active.as_ref())
         };
+        let locale = i18n::locale(cx);
         let error = self.error.clone();
         // Scoped fetch failures replace the content area. "no turn recorded"
         // is the expected pre-first-turn state, not an error; "unknown
@@ -4884,14 +5016,12 @@ impl Render for Changes {
             .map(|message| {
                 if message.contains("no turn recorded") {
                     (
-                        SharedString::from("No turn recorded yet — send a message first"),
+                        SharedString::from(i18n::translate(MessageId::DiffNoTurnRecorded, locale)),
                         false,
                     )
                 } else if message.contains("unknown method") {
                     (
-                        SharedString::from(
-                            "This chat's device is running an older Zeron — update it to view branch and turn diffs",
-                        ),
+                        SharedString::from(i18n::translate(MessageId::DiffDeviceOutdated, locale)),
                         false,
                     )
                 } else {
@@ -4934,7 +5064,7 @@ impl Render for Changes {
                         div()
                             .text_size(px(12.0))
                             .text_color(theme.text_faint)
-                            .child(SharedString::from("Preparing diff…")),
+                            .child(i18n::translate(MessageId::DiffPreparing, locale)),
                     )
                     .into_any_element(),
                 DiffPhase::Clean => div()
@@ -4944,7 +5074,11 @@ impl Render for Changes {
                     .justify_center()
                     .text_size(px(12.0))
                     .text_color(theme.text_faint)
-                    .child(SharedString::from(clean_message(scope, base.as_deref())))
+                    .child(SharedString::from(clean_message(
+                        scope,
+                        base.as_deref(),
+                        locale,
+                    )))
                     .into_any_element(),
                 DiffPhase::List => {
                     if self.parsed.is_some() {
@@ -4954,7 +5088,7 @@ impl Render for Changes {
                             .min_h_0()
                             .flex()
                             .flex_col()
-                            .children(self.render_header_strip(&theme))
+                            .children(self.render_header_strip(&theme, locale))
                             .child(
                                 div()
                                     .relative()
@@ -4996,7 +5130,7 @@ impl Render for Changes {
             // Changes is a code-adjacent surface: chrome stays Geist while
             // paths, hunks, gutters, and source runs keep their mono overrides.
             .font_family(theme.font_sans_fixed.clone())
-            .when_some(error, |el, message| {
+            .when_some(error, |el, error| {
                 el.child(
                     div()
                         .flex_none()
@@ -5006,7 +5140,7 @@ impl Render for Changes {
                         .border_color(theme.border)
                         .text_size(px(11.0))
                         .text_color(theme.warning)
-                        .child(message),
+                        .child(SharedString::from(error.text(locale))),
                 )
             })
             .child(content)
@@ -5167,27 +5301,92 @@ rename to new_name.rs
         let last = added.hunks[0].lines.last().unwrap();
         assert_eq!(last.kind, LineKind::Meta);
         assert!(last.text.contains("No newline"));
-        assert!(file_notices(added).iter().any(|n| n == "New file"));
+        assert!(
+            file_notices(added)
+                .iter()
+                .any(|notice| *notice == FileNotice::NewFile)
+        );
 
         let deleted = &files[2];
         assert_eq!(deleted.status, FileStatus::Deleted);
         assert_eq!(deleted.deletions, 1);
-        assert!(file_notices(deleted).iter().any(|n| n == "Deleted file"));
+        assert!(
+            file_notices(deleted)
+                .iter()
+                .any(|notice| *notice == FileNotice::DeletedFile)
+        );
 
         let binary = &files[3];
         assert!(binary.binary);
         assert_eq!(binary.status, FileStatus::Added);
         assert!(binary.hunks.is_empty());
-        assert!(file_notices(binary).iter().any(|n| n.contains("Binary")));
+        assert!(
+            file_notices(binary)
+                .iter()
+                .any(|notice| *notice == FileNotice::Binary)
+        );
 
         let renamed = &files[4];
         assert_eq!(renamed.status, FileStatus::Renamed);
         assert_eq!(renamed.path, "new_name.rs");
         assert_eq!(renamed.old_path.as_deref(), Some("old_name.rs"));
-        assert!(
-            file_notices(renamed)
-                .iter()
-                .any(|n| n.contains("old_name.rs"))
+        assert!(file_notices(renamed).iter().any(|notice| matches!(
+            notice,
+            FileNotice::Renamed { from } if from == "old_name.rs"
+        )));
+    }
+
+    /// The notice rows carry locale-independent data, so both locales render
+    /// from one parse and the file name survives verbatim.
+    #[test]
+    fn file_notices_render_in_both_locales() {
+        let files = parse_patch(PATCH);
+        let added = &files[1];
+        assert_eq!(file_notices(added)[0].text(Locale::En), "New file");
+        assert_eq!(file_notices(added)[0].text(Locale::ZhCn), "新文件");
+        assert_eq!(
+            file_notices(&files[2])[0].text(Locale::ZhCn),
+            "已删除的文件"
+        );
+        // The binary file is also `Added`, so its own row follows "New file".
+        let binary = file_notices(&files[3])
+            .into_iter()
+            .find(|notice| matches!(notice, FileNotice::Binary))
+            .expect("binary files announce themselves");
+        assert_eq!(binary.text(Locale::En), "Binary file — contents not shown");
+        assert_eq!(binary.text(Locale::ZhCn), "二进制文件 — 不显示内容");
+        assert_eq!(
+            file_notices(&files[4])[0].text(Locale::En),
+            "Renamed from old_name.rs"
+        );
+        assert_eq!(
+            file_notices(&files[4])[0].text(Locale::ZhCn),
+            "重命名自 old_name.rs"
+        );
+
+        let mut modified = parse_patch("diff --git a/x b/x\nnew mode 100755\n").remove(0);
+        assert_eq!(
+            file_notices(&modified)[0].text(Locale::En),
+            "Mode changed to 100755"
+        );
+        assert_eq!(
+            file_notices(&modified)[0].text(Locale::ZhCn),
+            "权限模式变更为 100755"
+        );
+
+        let mut long = parse_patch(PATCH).remove(0); // 2 hunks, 8 lines
+        truncate_file_lines(&mut long, 6);
+        let truncated = file_notices(&long)
+            .into_iter()
+            .find(|notice| matches!(notice, FileNotice::Truncated { .. }))
+            .expect("truncation appends a notice");
+        assert_eq!(
+            truncated.text(Locale::En),
+            "Diff truncated — showing first 6 of 8 lines"
+        );
+        assert_eq!(
+            truncated.text(Locale::ZhCn),
+            "差异已截断 — 显示前 6 行，共 8 行"
         );
     }
 
@@ -5628,7 +5827,7 @@ rename to new_name.rs
         assert!(
             file_notices(&file)
                 .iter()
-                .any(|n| n.contains("first 6 of 8 lines"))
+                .any(|notice| notice.text(Locale::En).contains("first 6 of 8 lines"))
         );
         // body_height stays consistent with what actually renders.
         assert_eq!(
@@ -5982,37 +6181,115 @@ rename to new_name.rs
 
     #[test]
     fn header_label_pluralizes() {
-        assert_eq!(uncommitted_label(0), "0 Uncommitted changes");
-        assert_eq!(uncommitted_label(1), "1 Uncommitted change");
-        assert_eq!(uncommitted_label(4), "4 Uncommitted changes");
+        assert_eq!(uncommitted_label(0, Locale::En), "0 Uncommitted changes");
+        assert_eq!(uncommitted_label(1, Locale::En), "1 Uncommitted change");
+        assert_eq!(uncommitted_label(4, Locale::En), "4 Uncommitted changes");
+    }
+
+    /// The same call sites in Chinese: the count is formatted, the comparison
+    /// ref is untouched, and no English plural suffix is assembled.
+    #[test]
+    fn header_labels_follow_the_locale() {
+        assert_eq!(uncommitted_label(1, Locale::ZhCn), "1 个未提交的改动");
+        assert_eq!(uncommitted_label(4, Locale::ZhCn), "4 个未提交的改动");
+        assert_eq!(
+            scope_label(DiffScope::WorkingTree, 2, None, Locale::ZhCn),
+            "2 个未提交的改动"
+        );
+        assert_eq!(
+            scope_label(DiffScope::Branch, 1, Some("main"), Locale::ZhCn),
+            "1 个文件有改动，对比 main"
+        );
+        assert_eq!(
+            scope_label(DiffScope::Branch, 3, None, Locale::ZhCn),
+            "3 个文件有改动"
+        );
+        assert_eq!(
+            scope_label(DiffScope::LatestTurn, 2, None, Locale::ZhCn),
+            "本轮 2 个文件有改动"
+        );
+        assert_eq!(
+            scope_label(DiffScope::Commit, 2, None, Locale::ZhCn),
+            "该提交中 2 个文件有改动"
+        );
     }
 
     #[test]
     fn scope_labels_and_clean_messages() {
         assert_eq!(
-            scope_label(DiffScope::WorkingTree, 2, None),
+            scope_label(DiffScope::WorkingTree, 2, None, Locale::En),
             "2 Uncommitted changes"
         );
         assert_eq!(
-            scope_label(DiffScope::Branch, 1, Some("main")),
-            "1 Changed file vs main"
-        );
-        assert_eq!(scope_label(DiffScope::Branch, 3, None), "3 Changed files");
-        assert_eq!(
-            scope_label(DiffScope::LatestTurn, 2, None),
-            "2 Changed files this turn"
+            scope_label(DiffScope::Branch, 1, Some("main"), Locale::En),
+            "1 file changed vs main"
         );
         assert_eq!(
-            clean_message(DiffScope::WorkingTree, None),
+            scope_label(DiffScope::Branch, 3, None, Locale::En),
+            "3 files changed"
+        );
+        assert_eq!(
+            scope_label(DiffScope::LatestTurn, 2, None, Locale::En),
+            "2 files changed this turn"
+        );
+        assert_eq!(
+            scope_label(DiffScope::History, 2, None, Locale::En),
+            "History"
+        );
+        assert_eq!(
+            scope_label(DiffScope::Commit, 1, None, Locale::En),
+            "1 file changed in this commit"
+        );
+        assert_eq!(
+            clean_message(DiffScope::WorkingTree, None, Locale::En),
             "No uncommitted changes"
         );
         assert_eq!(
-            clean_message(DiffScope::Branch, Some("develop")),
+            clean_message(DiffScope::Branch, Some("develop"), Locale::En),
             "No changes vs develop"
         );
         assert_eq!(
-            clean_message(DiffScope::LatestTurn, None),
+            clean_message(DiffScope::LatestTurn, None, Locale::En),
             "No changes this turn"
+        );
+    }
+
+    /// Every scope names itself from the table, so a rendered label can never
+    /// be an inline literal.
+    #[test]
+    fn every_scope_has_a_message_key() {
+        for scope in [
+            DiffScope::WorkingTree,
+            DiffScope::Branch,
+            DiffScope::LatestTurn,
+            DiffScope::History,
+            DiffScope::Commit,
+        ] {
+            for locale in [Locale::En, Locale::ZhCn] {
+                assert!(!i18n::translate(scope.label_message(), locale).is_empty());
+            }
+        }
+    }
+
+    /// The Chinese path through the same call sites: copy comes from the table
+    /// and the comparison ref is left alone.
+    #[test]
+    fn clean_messages_follow_the_locale() {
+        assert_eq!(
+            clean_message(DiffScope::WorkingTree, None, Locale::ZhCn),
+            "没有未提交的改动"
+        );
+        assert_eq!(
+            clean_message(DiffScope::Branch, Some("develop"), Locale::ZhCn),
+            "与 develop 相比没有改动"
+        );
+        assert_eq!(
+            clean_message(DiffScope::History, None, Locale::ZhCn),
+            "没有找到提交"
+        );
+        assert_eq!(
+            clean_message(DiffScope::Commit, None, Locale::ZhCn),
+            "空提交"
         );
     }
 

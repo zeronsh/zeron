@@ -11,13 +11,34 @@ use std::time::Duration;
 
 use gpui::{Context, IntoElement, Render, SharedString, Window, div, prelude::*, px};
 
+use crate::i18n::{self, Locale, MessageId};
 use crate::theme::Theme;
+
+/// What a pill says. Kept as data rather than a string because the count is
+/// known when the message is split, and the phrase only when it is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BadgeLabel {
+    Comments(usize),
+}
+
+impl BadgeLabel {
+    pub fn text(&self, locale: Locale) -> String {
+        match self {
+            BadgeLabel::Comments(count) => i18n::counted(
+                MessageId::CountCommentOne,
+                MessageId::CountCommentMany,
+                *count,
+                locale,
+            ),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageBadge {
     /// An `icons::*` asset name.
     pub icon: &'static str,
-    pub label: SharedString,
+    pub label: BadgeLabel,
     /// Empty means the label says everything and the pill carries no card.
     pub details: Vec<BadgeDetail>,
 }
@@ -68,6 +89,7 @@ pub fn render(
     id: impl Into<gpui::ElementId>,
     badge: &MessageBadge,
     theme: &Theme,
+    locale: Locale,
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
@@ -87,7 +109,7 @@ pub fn render(
                 .size(px(ICON_SIZE))
                 .text_color(theme.text_muted.opacity(0.7)),
         )
-        .child(badge.label.clone())
+        .child(badge.label.text(locale))
         .when(!badge.details.is_empty(), |el| {
             let details = Arc::new(badge.details.clone());
             el.tooltip(move |_, cx| {
@@ -203,7 +225,17 @@ mod tests {
         let (text, badges) = split(&with_comments("do", &staged));
         assert_eq!(text, "do");
         assert_eq!(badges.len(), 1);
-        assert_eq!(badges[0].label.as_ref(), "2 comments");
+        assert_eq!(badges[0].label.text(Locale::En), "2 comments");
+        assert_eq!(badges[0].label.text(Locale::ZhCn), "2 条评论");
+    }
+
+    #[test]
+    fn a_comment_count_pluralizes_in_both_locales() {
+        let counts = [(1, "1 comment"), (2, "2 comments"), (0, "0 comments")];
+        for (count, expected) in counts {
+            assert_eq!(BadgeLabel::Comments(count).text(Locale::En), expected);
+        }
+        assert_eq!(BadgeLabel::Comments(1).text(Locale::ZhCn), "1 条评论");
     }
 
     #[test]
@@ -247,6 +279,6 @@ mod tests {
         let staged = vec![ReviewComment::new("a.rs", CommentSide::New, 3, "fix")];
         let (text, badges) = split(&with_comments("", &staged));
         assert_eq!(text, crate::comments::COMMENT_ONLY_TEXT);
-        assert_eq!(badges[0].label.as_ref(), "1 comment");
+        assert_eq!(badges[0].label.text(Locale::En), "1 comment");
     }
 }

@@ -11,6 +11,7 @@ use zeron_proto::{
 };
 use zeron_rpc::{RpcError, methods};
 
+use crate::i18n::{self, Locale, MessageId};
 use crate::state::{AppState, EngineHandle};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,15 +41,11 @@ impl FilesRequestContext {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum FilesClientError {
-    #[error("workspace request could not be encoded: {0}")]
     Encode(String),
-    #[error("workspace response was invalid: {0}")]
     Decode(String),
-    #[error("workspace connection unavailable: {0}")]
     Transport(String),
-    #[error("workspace request failed: {0}")]
     Request(String),
 }
 
@@ -56,7 +53,39 @@ impl FilesClientError {
     pub fn retryable(&self) -> bool {
         matches!(self, Self::Transport(_))
     }
+
+    fn message_id(&self) -> MessageId {
+        match self {
+            Self::Encode(_) => MessageId::FilesClientEncodeFailed,
+            Self::Decode(_) => MessageId::FilesClientDecodeFailed,
+            Self::Transport(_) => MessageId::FilesClientTransportFailed,
+            Self::Request(_) => MessageId::FilesClientRequestFailed,
+        }
+    }
+
+    fn payload(&self) -> &str {
+        match self {
+            Self::Encode(payload)
+            | Self::Decode(payload)
+            | Self::Transport(payload)
+            | Self::Request(payload) => payload,
+        }
+    }
+
+    /// The user-facing text for `locale`. The payload after the colon is a
+    /// verbatim engine or serde message, never translated.
+    pub fn text(&self, locale: Locale) -> gpui::SharedString {
+        i18n::fill(self.message_id(), "{err}", self.payload(), locale).into()
+    }
 }
+
+impl std::fmt::Display for FilesClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text(Locale::En))
+    }
+}
+
+impl std::error::Error for FilesClientError {}
 
 impl From<RpcError> for FilesClientError {
     fn from(error: RpcError) -> Self {
@@ -881,5 +910,85 @@ mod tests {
                 .is_err()
         );
         assert!(transport.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn display_matches_the_previous_english_copy() {
+        assert_eq!(
+            FilesClientError::Encode("bad request".into()).to_string(),
+            "workspace request could not be encoded: bad request"
+        );
+        assert_eq!(
+            FilesClientError::Decode("bad response".into()).to_string(),
+            "workspace response was invalid: bad response"
+        );
+        assert_eq!(
+            FilesClientError::Transport("connection closed".into()).to_string(),
+            "workspace connection unavailable: connection closed"
+        );
+        assert_eq!(
+            FilesClientError::Request("offline".into()).to_string(),
+            "workspace request failed: offline"
+        );
+    }
+
+    #[test]
+    fn rpc_errors_keep_their_mapping_and_display() {
+        assert_eq!(
+            FilesClientError::from(RpcError::Transport("offline".into())).to_string(),
+            "workspace connection unavailable: offline"
+        );
+        assert_eq!(
+            FilesClientError::from(RpcError::Closed).to_string(),
+            "workspace connection unavailable: connection closed"
+        );
+        assert_eq!(
+            FilesClientError::from(RpcError::UnknownMethod("x".into())).to_string(),
+            "workspace request failed: unknown method: x"
+        );
+        assert_eq!(
+            FilesClientError::from(RpcError::BadParams("y".into())).to_string(),
+            "workspace request failed: bad params: y"
+        );
+        assert_eq!(
+            FilesClientError::from(RpcError::Failed("boom".into())).to_string(),
+            "workspace request failed: boom"
+        );
+        assert!(FilesClientError::from(RpcError::Closed).retryable());
+        assert!(!FilesClientError::from(RpcError::Failed("boom".into())).retryable());
+    }
+
+    #[test]
+    fn chinese_text_differs_from_english_and_keeps_the_payload_verbatim() {
+        let cases = [
+            (
+                FilesClientError::Encode("payload".into()),
+                "工作区请求编码失败",
+                "payload",
+            ),
+            (
+                FilesClientError::Decode("payload".into()),
+                "工作区响应无效",
+                "payload",
+            ),
+            (
+                FilesClientError::Transport("connection closed".into()),
+                "工作区连接不可用",
+                "connection closed",
+            ),
+            (
+                FilesClientError::Request("payload".into()),
+                "工作区请求失败",
+                "payload",
+            ),
+        ];
+        for (error, chinese_prefix, payload) in cases {
+            let english = error.text(Locale::En).to_string();
+            assert_eq!(error.to_string(), english);
+            let chinese = error.text(Locale::ZhCn);
+            assert_ne!(chinese.to_string(), english);
+            assert!(chinese.contains(payload), "{chinese}");
+            assert!(chinese.contains(chinese_prefix), "{chinese}");
+        }
     }
 }
