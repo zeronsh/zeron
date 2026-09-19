@@ -3673,8 +3673,10 @@ impl Pickers {
     /// Model picker with favorites and harness tabs above a scoped search.
     /// Existing chats show only their own harness tab and models.
     fn render_harness_model_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let compact = self.compact_model_picker(cx);
         let height = self.menu_geometry().height.min(self.open_model_height);
         let (list_height, tray_height) = model_menu_budgets(height, self.setting_groups(cx).len());
+        let list_height = if compact { 216.0 } else { list_height };
 
         let theme = Theme::of(cx).for_popup();
 
@@ -3975,7 +3977,7 @@ impl Pickers {
         // ── traits tray: the reasoning ladder + model options PINNED under
         //    the list (the separate Traits popover folded in here — user
         //    request). Hidden entirely when the selected model has neither.
-        let has_tray = self.title.is_none()
+        let has_tray = !compact && self.title.is_none()
             && (!self.trait_ladder(cx).is_empty()
                 || self
                     .selected_model(cx)
@@ -7331,7 +7333,7 @@ mod tests {
             supports_steering: false,
         }
     }
-#[gpui::test]
+    #[gpui::test]
     fn compact_keyboard_reaches_every_control_and_returns_to_models(cx: &mut gpui::TestAppContext) {
         use compact::CompactControl;
         let haptics_before = crate::haptics::step_count();
@@ -7467,7 +7469,7 @@ mod tests {
             .unwrap();
     }
 
-#[gpui::test]
+    #[gpui::test]
     fn compact_catalog_failures_remain_visible_beside_ready_models(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
@@ -7537,7 +7539,7 @@ mod tests {
             .unwrap();
     }
 
-#[test]
+    #[test]
     fn compact_all_models_keeps_favorites_first_in_catalog_and_search() {
         let descriptors = vec![
             descriptor(HarnessId::ClaudeCode, "Claude"),
@@ -7572,7 +7574,6 @@ mod tests {
             );
         }
     }
-
 
     #[test]
     fn tab_search_never_leaves_the_viewed_harness() {
