@@ -9,6 +9,48 @@ final class ComposerEditorController: NSObject, UITextViewDelegate {
     var textChanged: (String) -> Void = { _ in }
     var focusChanged: (Bool) -> Void = { _ in }
     private var applying = false
+    private(set) var dictatedRange: NSRange?
+    var dictationInterrupted: () -> Void = {}
+
+    func beginDictation() -> Bool {
+        guard let view else { return false }
+        commit()
+        dictatedRange = view.selectedRange
+        return true
+    }
+
+    func endDictation() { dictatedRange = nil }
+
+    func replaceDictation(with text: String) {
+        guard let view, let range = dictatedRange,
+              NSMaxRange(range) <= view.text.utf16.count else { return }
+        let selection = view.selectedRange
+        applying = true
+        view.textStorage.replaceCharacters(in: range, with: text)
+        let replacement = NSRange(location: range.location, length: text.utf16.count)
+        dictatedRange = replacement
+        if selection.location == NSMaxRange(range), selection.length == 0 {
+            view.selectedRange = NSRange(location: NSMaxRange(replacement), length: 0)
+        } else if selection.location >= NSMaxRange(range) {
+            view.selectedRange = NSRange(location: selection.location + replacement.length - range.length,
+                                         length: selection.length)
+        } else if NSMaxRange(selection) <= range.location {
+            view.selectedRange = selection
+        } else {
+            view.selectedRange = NSRange(location: NSMaxRange(replacement), length: 0)
+        }
+        applying = false
+        textChanged(view.text)
+        view.invalidateIntrinsicContentSize()
+    }
+
+    func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
+                  replacementText text: String) -> Bool {
+        // Stop before any manual edit, including IME composition and undo. The
+        // latest partial stays editable and a late callback cannot erase it.
+        if !applying, dictatedRange != nil { dictationInterrupted() }
+        return true
+    }
 
     func commit() {
         guard let view else { return }
@@ -20,6 +62,7 @@ final class ComposerEditorController: NSObject, UITextViewDelegate {
 
     func apply(text: String) {
         guard let view, view.text != text else { return }
+        if dictatedRange != nil { dictationInterrupted() }
         applying = true
         view.unmarkText()
         view.text = text
@@ -31,6 +74,7 @@ final class ComposerEditorController: NSObject, UITextViewDelegate {
 
     func textViewDidChange(_ textView: UITextView) {
         guard !applying else { return }
+        if dictatedRange != nil { dictationInterrupted() }
         textChanged(textView.text)
         textView.invalidateIntrinsicContentSize()
     }
