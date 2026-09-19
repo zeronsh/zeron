@@ -18,6 +18,8 @@ fn test_accounts(root: &Path) -> AgentAccounts {
         claude_config_file: root.join("claude.json"),
         codex_home: root.join("codex"),
         cursor_sdk_auth_file: root.join("cursor-sdk").join("auth.json"),
+        grok_auth_file: root.join("grok").join("auth.json"),
+        devin_credentials_file: root.join("devin").join("credentials.toml"),
     };
     AgentAccounts::new(config)
 }

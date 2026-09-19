@@ -117,11 +117,23 @@ pub fn format_reset(resets_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Opt
 
 /// The provider cards, in display order: (harness, name, CLI command — named
 /// in the empty-state copy, zeron settings.agents.tsx `PROVIDERS`).
-pub const PROVIDERS: [(HarnessId, &str, &str); 3] = [
+pub const PROVIDERS: [(HarnessId, &str, &str); 5] = [
     (HarnessId::ClaudeCode, "Claude Code", "claude"),
     (HarnessId::Codex, "Codex", "codex"),
     (HarnessId::Cursor, "Cursor", "cursor-agent"),
+    (HarnessId::Grok, "Grok", "grok login"),
+    (HarnessId::Devin, "Devin", "devin auth login"),
 ];
+
+/// Providers with an engine-driven add-account flow (`StartAgentLogin`). Grok
+/// and Devin are detect/switch only — their CLIs own login (`grok login`,
+/// `devin auth login`), so their sections get no Add button.
+pub fn can_add_account(harness: HarnessId) -> bool {
+    matches!(
+        harness,
+        HarnessId::ClaudeCode | HarnessId::Codex | HarnessId::Cursor
+    )
+}
 
 /// Accounts of one provider, in the engine's order (slot creation). No
 /// active-first re-sort: switching accounts must not move the switched-to
@@ -1362,6 +1374,12 @@ impl Render for AccountsPage {
                                 "{name} isn't connected on this device — connect it to run \
                                  Cursor sessions."
                             ),
+                            // Grok/Devin have no add-account flow — the CLI's
+                            // own login is the only way in.
+                            HarnessId::Grok | HarnessId::Devin => format!(
+                                "No {name} login detected on this device — sign in \
+                                 with \u{201C}{cli}\u{201D}."
+                            ),
                             _ => format!(
                                 "No {name} login detected on this device — sign in \
                                  with \u{201C}{cli}\u{201D} or add an account."
@@ -1399,20 +1417,22 @@ impl Render for AccountsPage {
                                             .child(SharedString::from(name)),
                                     )
                                     .child(div().flex_1())
-                                    .child(
-                                        widgets::ghost_action(&theme)
-                                            .id(add_id)
-                                            .hover(|s| widgets::ghost_hover(&theme, s))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.start_login(harness, cx);
-                                            }))
-                                            .child(
-                                                crate::icons::icon(crate::icons::ADD_CIRCLE)
-                                                    .size(px(16.0))
-                                                    .text_color(theme.text_muted),
-                                            )
-                                            .child(SharedString::from("Add account")),
-                                    ),
+                                    .when(can_add_account(harness), |el| {
+                                        el.child(
+                                            widgets::ghost_action(&theme)
+                                                .id(add_id)
+                                                .hover(|s| widgets::ghost_hover(&theme, s))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.start_login(harness, cx);
+                                                }))
+                                                .child(
+                                                    crate::icons::icon(crate::icons::ADD_CIRCLE)
+                                                        .size(px(16.0))
+                                                        .text_color(theme.text_muted),
+                                                )
+                                                .child(SharedString::from("Add account")),
+                                        )
+                                    }),
                             )
                             .children(
                                 warnings
@@ -1475,9 +1495,9 @@ impl Render for AccountsPage {
                             )
                             .child(widgets::page_subtitle(
                                 &theme,
-                                "The Claude Code, Codex, and Cursor logins on this device. Zeron \
-                                 detects the live session, keeps each account backed up, and can \
-                                 swap between them.",
+                                "The Claude Code, Codex, Cursor, Grok, and Devin logins on this \
+                                 device. Zeron detects the live session, keeps each account \
+                                 backed up, and can swap between them.",
                             ))
                             .when_some(self.error.clone(), |el, message| {
                                 el.child(

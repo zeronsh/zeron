@@ -13,6 +13,15 @@
 //!   (`StoredSdkCredentials`) holding the named, expiring user API key its
 //!   browser login mints. Deliberately SEPARATE from `cursor-agent login`'s
 //!   whole-account session tokens, which zeron never reads.
+//! - **Grok** — `~/.grok/auth.json` (`GROK_AUTH_PATH` relocates the file,
+//!   `GROK_HOME` the dir): the OIDC token set `grok login` writes, keyed
+//!   `"{oidcIssuer}::{clientId}"`.
+//! - **Devin** — `credentials.toml` under the CLI's user-config dir
+//!   (`%APPDATA%\devin` on Windows, `$XDG_CONFIG_HOME/devin` or
+//!   `~/.config/devin` elsewhere): the session API key plus the api/webapp
+//!   hosts `devin auth login` minted it against. Grok and Devin are
+//!   detect/switch only — their CLIs own the login flow (`grok login`,
+//!   `devin auth login`), so there is no add-account flow for either.
 //!
 //! Claude-swap mechanics:
 //!
@@ -31,10 +40,14 @@
 //!    Codex spawns `codex login` against a throwaway `CODEX_HOME` and polls
 //!    until its loopback callback lands.
 //!
-//! Usage probes: all three providers expose the rate-limit view their own CLIs render
+//! Usage probes: each provider exposes the rate-limit view its own CLI renders
 //! (`/usage` in Claude Code, `/status` in Codex; Cursor's key has no quota view,
 //! so the probe exchanges it for a dashboard session and reads the
-//! `GetCurrentPeriodUsage` call the Cursor app itself makes). Unlike zeron (fetch on every
+//! `GetCurrentPeriodUsage` call the Cursor app itself makes). Grok's is the
+//! `cli-chat-proxy` `/v1/billing?format=credits` call behind its `/usage`
+//! modal; Devin's is the `SeatManagementService/GetUserStatus` Connect-RPC the
+//! CLI makes for `devin auth status` — its `planStatus` carries the dashboard's
+//! daily/weekly quota percents and reset times. Unlike zeron (fetch on every
 //! list, 60s cache), native only hits the network when `force_usage` is set —
 //! the default list stays offline-fast and deterministic; the UI passes
 //! `forceUsage` on page mount/refresh. Cached results (60s TTL) are served to
@@ -72,6 +85,16 @@ const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 /// The Cursor dashboard's current-period usage RPC (Connect-style POST).
 const CURSOR_CURRENT_PERIOD_USAGE: &str = "aiserver.v1.DashboardService/GetCurrentPeriodUsage";
 const CURSOR_DEFAULT_BACKEND: &str = "https://api2.cursor.sh";
+/// Grok Build's `/usage` modal data: the weekly billing window on the chat
+/// proxy the CLI talks to for everything else.
+const GROK_USAGE_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+/// The devin CLI's status RPC (Connect JSON) — identity plus `planStatus`
+/// quota windows; the `api_server_url` credential names its host.
+const DEVIN_STATUS_RPC: &str = "exa.seat_management_pb.SeatManagementService/GetUserStatus";
+const DEVIN_DEFAULT_API_SERVER: &str = "https://server.codeium.com";
+/// The CLI version reported in GetUserStatus metadata (mirrors what `devin
+/// auth status` sends — a stale-but-plausible version is fine here).
+const DEVIN_CLI_VERSION: &str = "3000.10.21";
 
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
@@ -108,6 +131,12 @@ pub struct AgentAccountsConfig {
     /// named, expiring API key minted by its browser login. SEPARATE from
     /// `cursor-agent login`'s session tokens — deliberately never read.
     pub cursor_sdk_auth_file: PathBuf,
+    /// Grok's credential store (`~/.grok/auth.json`): the OIDC token-set map
+    /// `grok login` writes. `$GROK_AUTH_PATH` relocates the file, `$GROK_HOME`
+    /// the dir.
+    pub grok_auth_file: PathBuf,
+    /// The devin CLI's `credentials.toml`: session API key + api/webapp hosts.
+    pub devin_credentials_file: PathBuf,
 }
 
 impl AgentAccountsConfig {
@@ -130,6 +159,10 @@ impl AgentAccountsConfig {
             claude_config_file,
             codex_home: env_dir("CODEX_HOME").unwrap_or_else(|| home_dir().join(".codex")),
             cursor_sdk_auth_file: home_dir().join(".cursor").join("sdk").join("auth.json"),
+            grok_auth_file: env_dir("GROK_AUTH_PATH")
+                .or_else(|| env_dir("GROK_HOME").map(|home| home.join("auth.json")))
+                .unwrap_or_else(|| home_dir().join(".grok").join("auth.json")),
+            devin_credentials_file: devin_credentials_file(),
         }
     }
 
@@ -146,9 +179,46 @@ impl AgentAccountsConfig {
     }
 }
 
+/// The devin CLI's `credentials.toml` — the file `devin auth status` reports:
+/// `%APPDATA%\devin` on Windows, the `~/.config/devin` user-config root the
+/// CLI's docs name everywhere else (macOS also tries the Application Support
+/// spelling for older installs).
+fn devin_credentials_file() -> PathBuf {
+    #[cfg(windows)]
+    {
+        return std::env::var_os("APPDATA")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home_dir().join("AppData").join("Roaming"))
+            .join("devin")
+            .join("credentials.toml");
+    }
+    #[cfg(not(windows))]
+    {
+        let primary = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home_dir().join(".config"))
+            .join("devin")
+            .join("credentials.toml");
+        #[cfg(target_os = "macos")]
+        if !primary.exists() {
+            let alt = home_dir()
+                .join("Library")
+                .join("Application Support")
+                .join("devin")
+                .join("credentials.toml");
+            if alt.exists() {
+                return alt;
+            }
+        }
+        primary
+    }
+}
+
 // ── slot storage ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SlotProfile {
     email: String,
@@ -255,6 +325,10 @@ type CachedUsage = (Option<UsageSnapshot>, Instant);
 struct UsageSnapshot {
     windows: Vec<AgentUsageWindow>,
     plan_label: Option<String>,
+    /// Identity learned from the probe that the credential store doesn't carry
+    /// (Devin's `credentials.toml` holds only a key) — surfaced on the account
+    /// card immediately instead of waiting for the slot write-back to list.
+    email: Option<String>,
 }
 
 struct Inner {
@@ -349,11 +423,25 @@ impl AgentAccounts {
                 });
             }
         }
+        if let Some(detected) = self.detect_grok() {
+            active_keys.insert(HarnessId::Grok, detected.account_key.clone());
+            self.snapshot_detected(HarnessId::Grok, &detected)?;
+        }
+        if let Some(detected) = self.detect_devin() {
+            active_keys.insert(HarnessId::Devin, detected.account_key.clone());
+            self.snapshot_detected(HarnessId::Devin, &detected)?;
+        }
 
         // Stable presentation order: provider, then slot creation order (never
         // active-first — switching must not reshuffle the cards).
         let mut accounts: Vec<AgentAccount> = Vec::new();
-        for harness in [HarnessId::ClaudeCode, HarnessId::Codex, HarnessId::Cursor] {
+        for harness in [
+            HarnessId::ClaudeCode,
+            HarnessId::Codex,
+            HarnessId::Cursor,
+            HarnessId::Grok,
+            HarnessId::Devin,
+        ] {
             let active_key = active_keys.get(&harness).cloned();
             let slots = self.read_slots(harness);
             for slot in &slots {
@@ -362,7 +450,12 @@ impl AgentAccounts {
                 accounts.push(AgentAccount {
                     id: slot.id.clone(),
                     harness,
-                    email: Some(slot.profile.email.clone()),
+                    // A probe-reported identity (Devin) beats the stored
+                    // profile's api-key placeholder.
+                    email: usage
+                        .as_ref()
+                        .and_then(|usage| usage.email.clone())
+                        .or_else(|| Some(slot.profile.email.clone())),
                     // A live plan from the usage probe (Codex `plan_type`)
                     // supersedes the login-time snapshot; fall back to the
                     // snapshot when the probe wasn't forced or failed.
@@ -426,6 +519,8 @@ impl AgentAccounts {
             HarnessId::ClaudeCode => self.activate_claude(&slot).await?,
             HarnessId::Codex => self.activate_codex(&slot)?,
             HarnessId::Cursor => self.write_cursor_auth(&slot.credentials)?,
+            HarnessId::Grok => self.write_grok_auth(&slot.credentials)?,
+            HarnessId::Devin => self.write_devin_credentials(&slot.credentials)?,
             other => {
                 return Err(EngineError::Other(format!(
                     "agent accounts are not supported for {other:?}"
@@ -1144,6 +1239,50 @@ impl AgentAccounts {
         read_json(&self.inner.config.cursor_sdk_auth_file).and_then(parse_cursor_auth)
     }
 
+    fn detect_grok(&self) -> Option<Detected> {
+        read_json(&self.inner.config.grok_auth_file).and_then(parse_grok_auth)
+    }
+
+    fn detect_devin(&self) -> Option<Detected> {
+        let raw = std::fs::read_to_string(&self.inner.config.devin_credentials_file).ok()?;
+        let credentials = parse_devin_credentials(&raw)?;
+        let api_key = str_field(&credentials, "apiKey")?;
+        let digest = Sha256::digest(api_key.as_bytes());
+        let account_key = format!("api-key:{}", &crate::repos::hex(&digest)[..12]);
+        // credentials.toml carries no identity — keep the probed profile a
+        // previous GetUserStatus write-back stored, else the placeholder would
+        // clobber it on every list.
+        let profile = self
+            .read_slots(HarnessId::Devin)
+            .into_iter()
+            .find(|s| s.account_key == account_key)
+            .map(|s| s.profile)
+            .filter(|p| !p.email.starts_with("API key"))
+            .unwrap_or_else(|| {
+                let tail: String = api_key
+                    .chars()
+                    .rev()
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                SlotProfile {
+                    email: format!("API key ·…{tail}"),
+                    display_name: None,
+                    organization: None,
+                    plan: None,
+                    auth_kind: AgentAuthKind::ApiKey,
+                }
+            });
+        Some(Detected {
+            account_key,
+            profile,
+            credentials: Some(credentials),
+            claude_config: None,
+        })
+    }
+
     /// A live cursor login that runs can actually use: present, parseable,
     /// and not past the minted key's expiry.
     fn cursor_live_usable(&self) -> bool {
@@ -1159,6 +1298,52 @@ impl AgentAccounts {
         let json = serde_json::to_string_pretty(credentials)
             .map_err(|e| EngineError::Other(format!("serialize cursor auth: {e}")))?;
         write_file_atomic(file, json.as_bytes(), true)
+    }
+
+    fn write_grok_auth(&self, credentials: &serde_json::Value) -> Result<(), EngineError> {
+        let file = &self.inner.config.grok_auth_file;
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let json = serde_json::to_string_pretty(credentials)
+            .map_err(|e| EngineError::Other(format!("serialize grok auth: {e}")))?;
+        write_file_atomic(file, json.as_bytes(), true)
+    }
+
+    /// Swap restores the whole flat `key = "value"` credentials.toml — the
+    /// slot's camelCase JSON keys map back onto the toml names the CLI reads.
+    fn write_devin_credentials(&self, credentials: &serde_json::Value) -> Result<(), EngineError> {
+        // A store with no key would silently log the user out of the devin
+        // CLI on switch — refuse rather than write an empty credentials.toml.
+        if str_field(credentials, "apiKey").is_none() {
+            return Err(EngineError::Other(
+                "devin slot has no API key — not overwriting credentials.toml".into(),
+            ));
+        }
+        let file = &self.inner.config.devin_credentials_file;
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut out = String::new();
+        if let Some(map) = credentials.as_object() {
+            for (key, value) in map {
+                let Some(value) = value.as_str() else {
+                    continue;
+                };
+                let toml_key = match key.as_str() {
+                    "apiKey" => "windsurf_api_key",
+                    "apiServerUrl" => "api_server_url",
+                    "devinWebappHost" => "devin_webapp_host",
+                    "devinApiUrl" => "devin_api_url",
+                    other => other,
+                };
+                out.push_str(toml_key);
+                out.push_str(" = \"");
+                out.push_str(&value.replace('\\', "\\\\").replace('"', "\\\""));
+                out.push_str("\"\n");
+            }
+        }
+        write_file_atomic(file, out.as_bytes(), true)
     }
 
     /// Persist a detected login into its slot (refreshing stored tokens).
@@ -1312,6 +1497,8 @@ impl AgentAccounts {
             HarnessId::ClaudeCode => self.claude_usage(slot, is_active).await,
             HarnessId::Codex => self.codex_usage(slot).await,
             HarnessId::Cursor => self.cursor_usage(slot).await,
+            HarnessId::Grok => self.grok_usage(slot, is_active).await,
+            HarnessId::Devin => self.devin_usage(slot).await,
             _ => None,
         };
         lock(&self.inner.usage_cache).insert(key, (usage.clone(), Instant::now()));
@@ -1339,7 +1526,7 @@ impl AgentAccounts {
     /// One usage probe: GET the endpoint and parse windows. `Err` means the
     /// token was rejected (401/403) — the only case worth a refresh.
     async fn claude_usage_request(&self, access_token: &str) -> Result<Option<UsageSnapshot>, ()> {
-        let response = self
+        let Ok(response) = self
             .inner
             .http
             .get(CLAUDE_USAGE_URL)
@@ -1347,18 +1534,20 @@ impl AgentAccounts {
             .header("anthropic-beta", "oauth-2025-04-20")
             .send()
             .await
-            .map_err(|_| ())?;
+        else {
+            return Ok(None);
+        };
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             || response.status() == reqwest::StatusCode::FORBIDDEN
         {
             return Err(());
         }
-        let body: serde_json::Value = response
-            .error_for_status()
-            .map_err(|_| ())?
-            .json()
-            .await
-            .map_err(|_| ())?;
+        let Ok(body) = response.error_for_status() else {
+            return Ok(None);
+        };
+        let Ok(body) = body.json::<serde_json::Value>().await else {
+            return Ok(None);
+        };
         Ok(claude_usage_windows(&body))
     }
 
@@ -1410,6 +1599,7 @@ impl AgentAccounts {
         Some(UsageSnapshot {
             windows,
             plan_label,
+            ..Default::default()
         })
     }
 
@@ -1454,8 +1644,201 @@ impl AgentAccounts {
             .ok()?;
         cursor_usage_window(&body).map(|window| UsageSnapshot {
             windows: vec![window],
-            plan_label: None,
+            ..Default::default()
         })
+    }
+
+    /// Grok Build's `/usage` view: `GET …/v1/billing?format=credits` on the
+    /// chat proxy the CLI talks to for everything else, authenticated the way
+    /// the CLI authenticates every cli-chat-proxy request — `X-XAI-Token-Auth`
+    /// selects the OIDC token-set scheme for the bearer token.
+    async fn grok_usage(&self, slot: &Slot, is_active: bool) -> Option<UsageSnapshot> {
+        let entry = grok_auth_entry(&slot.credentials, &slot.account_key)?;
+        let access_token = str_field(&entry, "key")?;
+        match self.grok_usage_request(&access_token).await {
+            Ok(usage) => usage,
+            // Same rule as Claude: only rotate slot-owned tokens — the running
+            // `grok` CLI refreshes the live auth.json itself.
+            Err(_) if !is_active => {
+                let fresh = self.refresh_grok_slot(slot).await?;
+                self.grok_usage_request(&fresh).await.ok().flatten()
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Same Err contract as [`Self::claude_usage_request`]: `Err` only when the
+    /// token was rejected — a transient 5xx or send failure must not burn the
+    /// single-use OIDC refresh grant on a non-active slot.
+    async fn grok_usage_request(&self, access_token: &str) -> Result<Option<UsageSnapshot>, ()> {
+        let Ok(response) = self
+            .inner
+            .http
+            .get(GROK_USAGE_URL)
+            .bearer_auth(access_token)
+            .header("X-XAI-Token-Auth", "xai-grok-cli")
+            .send()
+            .await
+        else {
+            return Ok(None);
+        };
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+            || response.status() == reqwest::StatusCode::FORBIDDEN
+        {
+            return Err(());
+        }
+        let Ok(body) = response.error_for_status() else {
+            return Ok(None);
+        };
+        let Ok(body) = body.json::<serde_json::Value>().await else {
+            return Ok(None);
+        };
+        Ok(grok_usage_windows(&body))
+    }
+
+    /// Devin's plan/quota view: the Connect-RPC `GetUserStatus` call the CLI
+    /// makes for `devin auth status`. `planStatus` carries the dashboard's
+    /// daily/weekly quota percents and their reset times; the response also
+    /// reports the identity `credentials.toml` doesn't store, which is written
+    /// back into the slot so later lists don't need the network for it.
+    async fn devin_usage(&self, slot: &Slot) -> Option<UsageSnapshot> {
+        let api_key = str_field(&slot.credentials, "apiKey")?;
+        let api_server = str_field(&slot.credentials, "apiServerUrl")
+            .unwrap_or_else(|| DEVIN_DEFAULT_API_SERVER.to_string());
+        let body: serde_json::Value = self
+            .inner
+            .http
+            .post(format!(
+                "{}/{DEVIN_STATUS_RPC}",
+                api_server.trim_end_matches('/')
+            ))
+            .header("Connect-Protocol-Version", "1")
+            .json(&serde_json::json!({
+                "metadata": {
+                    "apiKey": api_key,
+                    "ideName": "devin-cli",
+                    "ideVersion": DEVIN_CLI_VERSION,
+                    "extensionName": "devin-cli",
+                    "extensionVersion": DEVIN_CLI_VERSION,
+                    "locale": "en_US",
+                    "os": std::env::consts::OS,
+                    "sessionId": "zeron-accounts",
+                    "requestId": "1",
+                }
+            }))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        let status = body.get("userStatus")?;
+        // Identity first: credentials.toml holds only the key, so even a
+        // response carrying no usable planStatus still lands the real
+        // email/name on the card instead of the api-key placeholder.
+        let email = str_field(status, "email");
+        let name = str_field(status, "name").or_else(|| str_field(status, "displayName"));
+        let plan = status.get("planStatus");
+        let empty = serde_json::json!({});
+        let plan_info = plan.and_then(|p| p.get("planInfo")).unwrap_or(&empty);
+        let plan_label = devin_plan_label(
+            str_field(plan_info, "teamsTier").as_deref(),
+            str_field(plan_info, "planName").as_deref(),
+        );
+        let windows = plan.map(devin_usage_windows).unwrap_or_default();
+        // Adopt the probed identity into the slot (best-effort; a failed write
+        // just re-probes next time).
+        let mut updated = slot.clone();
+        if let Some(email) = &email {
+            updated.profile.email = email.clone();
+        }
+        if let Some(name) = name {
+            updated.profile.display_name = Some(name);
+        }
+        if updated.profile.plan.is_none() || updated.profile.plan.as_deref() == Some("API key") {
+            updated.profile.plan = plan_label.clone().or(updated.profile.plan.take());
+        }
+        if updated.profile != slot.profile {
+            updated.saved_at = now_ms();
+            if let Err(err) = self.write_slot(&updated) {
+                tracing::warn!(slot = %slot.id, error = %err, "devin identity write-back failed");
+            }
+        }
+        (email.is_some() || !windows.is_empty()).then_some(UsageSnapshot {
+            windows,
+            plan_label,
+            email,
+        })
+    }
+
+    /// Refresh a saved Grok slot's expired access token (OIDC
+    /// `refresh_token` grant against the entry's own issuer) so its usage
+    /// stays queryable. NEVER called for the active login — the live CLI owns
+    /// that token pair. Single-flight per slot, same as Claude.
+    async fn refresh_grok_slot(&self, slot: &Slot) -> Option<String> {
+        if !lock(&self.inner.inflight_refreshes).insert(slot.id.clone()) {
+            return None;
+        }
+        let result = self.refresh_grok_slot_once(slot).await;
+        lock(&self.inner.inflight_refreshes).remove(&slot.id);
+        result
+    }
+
+    async fn refresh_grok_slot_once(&self, slot: &Slot) -> Option<String> {
+        let entry = grok_auth_entry(&slot.credentials, &slot.account_key)?;
+        let refresh_token = str_field(&entry, "refresh_token")?;
+        let client_id = str_field(&entry, "oidc_client_id")?;
+        let issuer =
+            str_field(&entry, "oidc_issuer").unwrap_or_else(|| "https://auth.x.ai".to_string());
+        let body: serde_json::Value = self
+            .inner
+            .http
+            .post(format!("{}/oauth2/token", issuer.trim_end_matches('/')))
+            // RFC 6749: token endpoints take form params, not a JSON body.
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_token.as_str()),
+                ("client_id", client_id.as_str()),
+            ])
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        let access_token = str_field(&body, "access_token")?;
+        let expires_in = body
+            .get("expires_in")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(3600);
+        // Update the slot's matching entry in place; unknown siblings (other
+        // issuers, extra fields) pass through untouched.
+        let mut credentials = slot.credentials.clone();
+        let map = credentials.as_object_mut()?;
+        let entry = map.values_mut().find_map(|e| {
+            (str_field(e, "refresh_token").as_deref() == Some(refresh_token.as_str()))
+                .then(|| e.as_object_mut())
+                .flatten()
+        })?;
+        entry.insert("key".into(), serde_json::json!(access_token));
+        if let Some(rotated) = str_field(&body, "refresh_token") {
+            entry.insert("refresh_token".into(), serde_json::json!(rotated));
+        }
+        entry.insert(
+            "expires_at".into(),
+            serde_json::json!((Utc::now() + chrono::Duration::seconds(expires_in)).to_rfc3339()),
+        );
+        let mut refreshed = slot.clone();
+        refreshed.credentials = credentials;
+        refreshed.saved_at = now_ms();
+        if let Err(err) = self.write_slot(&refreshed) {
+            tracing::warn!(slot = %slot.id, error = %err, "refreshed grok slot write failed");
+        }
+        Some(access_token)
     }
 
     /// Refresh a saved Claude slot's expired access token so its usage stays
@@ -1894,6 +2277,247 @@ fn parse_when(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
     }
 }
 
+/// Daily/weekly quota windows from Devin's `planStatus`. The endpoint
+/// narrates REMAINING percent — the meters show used. `…ResetAtUnix` arrives
+/// as a proto3 int64 string over Connect-JSON.
+fn devin_usage_windows(plan: &serde_json::Value) -> Vec<AgentUsageWindow> {
+    let mut windows = Vec::new();
+    for (percent_key, reset_key, label) in [
+        ("dailyQuotaRemainingPercent", "dailyQuotaResetAtUnix", "Day"),
+        (
+            "weeklyQuotaRemainingPercent",
+            "weeklyQuotaResetAtUnix",
+            "Week",
+        ),
+    ] {
+        if let Some(remaining) = plan.get(percent_key).and_then(|v| v.as_f64())
+            && let Some(resets_at) = json_secs(plan.get(reset_key))
+        {
+            windows.push(AgentUsageWindow {
+                label: label.to_string(),
+                used_fraction: ((100.0 - remaining) / 100.0) as f32,
+                resets_at: Some(resets_at),
+            });
+        }
+    }
+    windows
+}
+
+/// Unix-seconds timestamp arriving as a JSON number or proto3 int64 string
+/// (Devin's `…ResetAtUnix` fields serialize as strings over Connect-JSON).
+fn json_secs(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
+    let secs = match value? {
+        serde_json::Value::Number(n) => n.as_i64()?,
+        serde_json::Value::String(s) => s.parse::<i64>().ok()?,
+        _ => return None,
+    };
+    DateTime::<Utc>::from_timestamp(secs, 0)
+}
+
+/// The `"{oidcIssuer}::{clientId}"` → token-set map entry belonging to a grok
+/// account key — by identity field, or by `oidc:{issuer}::{client}` for
+/// identity-less slots. A slot written before issuer-keyed detection falls
+/// back to the auth.x.ai token set, then any keyed entry.
+fn grok_auth_entry(
+    credentials: &serde_json::Value,
+    account_key: &str,
+) -> Option<serde_json::Value> {
+    let map = credentials.as_object()?;
+    map.iter()
+        .find(|(issuer_key, e)| {
+            format!("oidc:{issuer_key}") == account_key
+                || str_field(e, "user_id").as_deref() == Some(account_key)
+                || str_field(e, "principal_id").as_deref() == Some(account_key)
+                || str_field(e, "email").as_deref() == Some(account_key)
+        })
+        .map(|(_, e)| e)
+        .or_else(|| {
+            map.values().find(|e| {
+                str_field(e, "key").is_some()
+                    && str_field(e, "oidc_issuer")
+                        .is_some_and(|i| i.starts_with("https://auth.x.ai"))
+            })
+        })
+        .or_else(|| map.values().find(|e| str_field(e, "key").is_some()))
+        .cloned()
+        .filter(|e| e.is_object())
+}
+
+/// Parse grok's `auth.json`: a map of `"{issuer}::{client_id}"` → OIDC token
+/// set (`key` is the access token the CLI bears to cli-chat-proxy). The file
+/// can accumulate stale issuers, so prefer the auth.x.ai-scoped entry, then
+/// one carrying identity. An entry with no identity fields still detects —
+/// keyed by its stable issuer::client map key, never the rotating `key`.
+fn parse_grok_auth(auth: serde_json::Value) -> Option<Detected> {
+    let (map_key, entry) = auth
+        .as_object()?
+        .iter()
+        .filter(|(_, e)| str_field(e, "key").is_some())
+        .max_by_key(|(issuer_key, e)| {
+            let issuer = str_field(e, "oidc_issuer").unwrap_or_else(|| (*issuer_key).clone());
+            (
+                issuer.starts_with("https://auth.x.ai"),
+                str_field(e, "user_id").is_some()
+                    || str_field(e, "principal_id").is_some()
+                    || str_field(e, "email").is_some(),
+            )
+        })?;
+    if let Some(identity) = str_field(entry, "user_id")
+        .or_else(|| str_field(entry, "principal_id"))
+        .or_else(|| str_field(entry, "email"))
+    {
+        return Some(Detected {
+            account_key: identity.clone(),
+            profile: SlotProfile {
+                email: str_field(entry, "email").unwrap_or(identity),
+                display_name: str_field(entry, "first_name"),
+                organization: None,
+                plan: None,
+                auth_kind: AgentAuthKind::Oauth,
+            },
+            credentials: Some(auth),
+            claude_config: None,
+        });
+    }
+    // No identity fields: a bare token set. Key the slot by the issuer::client
+    // map key — hashing `key` would mint a new account on every token refresh.
+    let key = str_field(entry, "key")?;
+    let tail: String = key
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    Some(Detected {
+        account_key: format!("oidc:{map_key}"),
+        profile: SlotProfile {
+            email: format!("API key ·…{tail}"),
+            display_name: None,
+            organization: None,
+            plan: Some("API key".into()),
+            auth_kind: AgentAuthKind::ApiKey,
+        },
+        credentials: Some(auth),
+        claude_config: None,
+    })
+}
+
+/// Parse the devin CLI's `credentials.toml` — flat `key = "value"` basic
+/// strings are all `devin auth login` ever writes. Returns the camelCase JSON
+/// the slot stores (`{apiKey, apiServerUrl, devinWebappHost, devinApiUrl}`);
+/// unknown keys pass through under their own names so a swap restores them.
+fn parse_devin_credentials(toml_text: &str) -> Option<serde_json::Value> {
+    let mut creds = serde_json::Map::new();
+    for line in toml_text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let Some(inner) = value
+            .trim()
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+        else {
+            continue;
+        };
+        let key = match key.trim() {
+            "windsurf_api_key" | "devin_api_key" => "apiKey",
+            "api_server_url" => "apiServerUrl",
+            "devin_webapp_host" => "devinWebappHost",
+            "devin_api_url" => "devinApiUrl",
+            other => other,
+        };
+        creds.insert(key.to_string(), serde_json::json!(toml_unescape(inner)));
+    }
+    (!creds.is_empty()).then(|| serde_json::Value::Object(creds))
+}
+
+/// Backslash-unescape a TOML basic string's body (covers `\` + `"`; the
+/// credential values — URLs, tokens — carry nothing else in practice).
+fn toml_unescape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(escaped) = chars.next() {
+                out.push(escaped);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// "TEAMS_TIER_DEVIN_PRO" → "Devin Pro"; falls back to the plan's own name
+/// (`planName` alone is a bare "Pro", which reads as a different vendor's
+/// badge on the card).
+fn devin_plan_label(tier: Option<&str>, plan_name: Option<&str>) -> Option<String> {
+    if let Some(rest) = tier.and_then(|t| t.strip_prefix("TEAMS_TIER_")) {
+        let label = rest
+            .split('_')
+            .filter(|w| !w.is_empty())
+            .map(|w| {
+                let mut chars = w.chars();
+                match chars.next() {
+                    Some(first) => {
+                        format!("{}{}", first.to_uppercase(), chars.as_str().to_lowercase())
+                    }
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !label.is_empty() {
+            return Some(label);
+        }
+    }
+    plan_name.map(|name| format!("Devin {name}"))
+}
+
+/// The billing window from grok's `/v1/billing?format=credits`:
+/// `config.currentPeriod` bounds the active quota window and
+/// `productUsage` breaks the used percent out per product — `GrokBuild` is
+/// the CLI's bucket; the blended `creditUsagePercent` is the fallback.
+fn grok_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
+    let config = body.get("config")?;
+    let period = config.get("currentPeriod");
+    let used_percent = config
+        .get("productUsage")
+        .and_then(|u| u.as_array())
+        .and_then(|products| {
+            products.iter().find_map(|p| {
+                (p.get("product").and_then(|v| v.as_str()) == Some("GrokBuild"))
+                    .then(|| p.get("usagePercent").and_then(|v| v.as_f64()))
+                    .flatten()
+            })
+        })
+        .or_else(|| config.get("creditUsagePercent").and_then(|v| v.as_f64()))?;
+    let label = match period.and_then(|p| p.get("type")).and_then(|v| v.as_str()) {
+        Some("USAGE_PERIOD_TYPE_DAILY") => "Day",
+        Some("USAGE_PERIOD_TYPE_WEEKLY") => "Week",
+        Some("USAGE_PERIOD_TYPE_MONTHLY") => "Month",
+        _ => "Period",
+    };
+    Some(UsageSnapshot {
+        windows: vec![AgentUsageWindow {
+            label: label.to_string(),
+            used_fraction: (used_percent / 100.0) as f32,
+            resets_at: parse_when(
+                period
+                    .and_then(|p| p.get("end"))
+                    .or_else(|| config.get("billingPeriodEnd")),
+            ),
+        }],
+        ..Default::default()
+    })
+}
+
 /// Windows from Claude's `/api/oauth/usage`: the 5-hour session and weekly
 /// buckets, each a 0-100 `utilization` with an RFC3339 `resets_at`.
 fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
@@ -1911,7 +2535,7 @@ fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
     }
     (!windows.is_empty()).then_some(UsageSnapshot {
         windows,
-        plan_label: None,
+        ..Default::default()
     })
 }
 
@@ -2273,6 +2897,193 @@ mod tests {
         // No expiry field = never expires.
         assert!(cursor_key_usable(&serde_json::json!({"apiKey": "k"})));
         assert!(parse_cursor_auth(serde_json::json!({"version": 1})).is_none());
+    }
+
+    #[test]
+    fn grok_auth_parses_oidc_entry() {
+        // Live shape: `"{issuer}::{client_id}"` → OIDC token set.
+        let auth = serde_json::json!({
+            "https://auth.x.ai::client-1": {
+                "key": "access-1",
+                "auth_mode": "oidc",
+                "user_id": "user-1",
+                "email": "dev@x.ai",
+                "first_name": "Dev",
+                "refresh_token": "refresh-1",
+                "expires_at": "2026-09-19T03:30:13Z",
+                "oidc_issuer": "https://auth.x.ai",
+                "oidc_client_id": "client-1",
+            }
+        });
+        let detected = parse_grok_auth(auth.clone()).expect("parses");
+        assert_eq!(detected.account_key, "user-1");
+        assert_eq!(detected.profile.email, "dev@x.ai");
+        assert_eq!(detected.profile.display_name.as_deref(), Some("Dev"));
+        assert_eq!(detected.profile.auth_kind, AgentAuthKind::Oauth);
+        // Entry lookup for the usage probe/refresh keys off the account key.
+        let entry = grok_auth_entry(&auth, "user-1").expect("entry");
+        assert_eq!(entry["key"], "access-1");
+        assert_eq!(entry["refresh_token"], "refresh-1");
+        assert!(parse_grok_auth(serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn grok_auth_keys_identity_less_entries_by_issuer_not_token() {
+        // A bare token set has no identity to key on — the account key must
+        // survive access-token rotation, so it derives from the map key.
+        let auth = serde_json::json!({
+            "https://auth.x.ai::client-1": {
+                "key": "access-v1",
+                "refresh_token": "refresh-1",
+            }
+        });
+        let detected = parse_grok_auth(auth.clone()).expect("parses");
+        assert_eq!(detected.account_key, "oidc:https://auth.x.ai::client-1");
+        assert_eq!(detected.profile.auth_kind, AgentAuthKind::ApiKey);
+        // After a rotation the same map still resolves to the same account.
+        let rotated = serde_json::json!({
+            "https://auth.x.ai::client-1": { "key": "access-v2" }
+        });
+        assert_eq!(
+            parse_grok_auth(rotated).unwrap().account_key,
+            detected.account_key
+        );
+        // The usage probe finds the entry through the issuer-keyed account key.
+        let entry = grok_auth_entry(&auth, &detected.account_key).expect("entry");
+        assert_eq!(entry["refresh_token"], "refresh-1");
+    }
+
+    #[test]
+    fn grok_auth_prefers_auth_x_ai_and_identity_entries() {
+        // Stale issuers can sit next to the live OIDC entry — first-match
+        // would pick whichever the map yields first.
+        let auth = serde_json::json!({
+            "https://accounts.x.ai/sign-in": {
+                "key": "stale-access",
+                "user_id": "stale-user",
+                "email": "stale@x.ai",
+            },
+            "https://auth.x.ai::client-1": {
+                "key": "live-access",
+                "user_id": "live-user",
+                "email": "live@x.ai",
+            }
+        });
+        let detected = parse_grok_auth(auth).expect("parses");
+        assert_eq!(detected.account_key, "live-user");
+        assert_eq!(detected.profile.email, "live@x.ai");
+    }
+
+    #[test]
+    fn devin_usage_windows_inverts_remaining_and_uses_resets() {
+        // Live shape (observed): remaining-percent + proto3-string resets.
+        let plan = serde_json::json!({
+            "dailyQuotaRemainingPercent": 100,
+            "dailyQuotaResetAtUnix": "1789600000",
+            "weeklyQuotaRemainingPercent": 61,
+            "weeklyQuotaResetAtUnix": "1789700000",
+        });
+        let windows = devin_usage_windows(&plan);
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label, "Day");
+        assert!(windows[0].used_fraction.abs() < 1e-6);
+        assert!((windows[1].used_fraction - 0.39).abs() < 1e-6);
+        assert_eq!(
+            windows[1].resets_at,
+            Some(chrono::DateTime::<Utc>::from_timestamp(1_789_700_000, 0).unwrap())
+        );
+        // A missing reset drops just that window; a missing percent drops both.
+        let plan = serde_json::json!({ "dailyQuotaRemainingPercent": 50 });
+        assert!(devin_usage_windows(&plan).is_empty());
+    }
+
+    #[test]
+    fn grok_usage_windows_prefers_grokbuild_percent() {
+        // Live shape (observed): weekly window, per-product percents, blended
+        // `creditUsagePercent` alongside them.
+        let body = serde_json::json!({
+            "config": {
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "start": "2026-09-17T23:03:37.357568+00:00",
+                    "end": "2026-09-24T23:03:37.357568+00:00",
+                },
+                "creditUsagePercent": 40.0,
+                "productUsage": [
+                    { "product": "GrokBuild", "usagePercent": 51.0 },
+                    { "product": "GrokChat" },
+                ],
+                "billingPeriodEnd": "2026-09-24T23:03:37.357568+00:00",
+            }
+        });
+        let snapshot = grok_usage_windows(&body).expect("windows");
+        assert_eq!(snapshot.windows.len(), 1);
+        let window = &snapshot.windows[0];
+        assert_eq!(window.label, "Week");
+        assert!((window.used_fraction - 0.51).abs() < 1e-6);
+        assert_eq!(
+            window.resets_at,
+            Some(
+                "2026-09-24T23:03:37.357568+00:00"
+                    .parse::<chrono::DateTime<chrono::FixedOffset>>()
+                    .unwrap()
+                    .with_timezone(&Utc)
+            )
+        );
+        // No GrokBuild product → blended percent still yields a window.
+        let body = serde_json::json!({ "config": { "creditUsagePercent": 12.5 } });
+        let snapshot = grok_usage_windows(&body).expect("fallback");
+        assert_eq!(snapshot.windows[0].label, "Period");
+        assert!((snapshot.windows[0].used_fraction - 0.125).abs() < 1e-6);
+        assert!(grok_usage_windows(&serde_json::json!({ "config": {} })).is_none());
+    }
+
+    #[test]
+    fn devin_credentials_round_trip() {
+        // The flat basic-string toml `devin auth login` writes.
+        let toml = concat!(
+            "windsurf_api_key = \"devin-session-token$abc.def\"\n",
+            "api_server_url = \"https://server.codeium.com\"\n",
+            "devin_webapp_host = \"app.devin.ai\"\n",
+            "devin_api_url = \"https://api.devin.ai\"\n",
+        );
+        let creds = parse_devin_credentials(toml).expect("parses");
+        assert_eq!(creds["apiKey"], "devin-session-token$abc.def");
+        assert_eq!(creds["apiServerUrl"], "https://server.codeium.com");
+        assert_eq!(creds["devinApiUrl"], "https://api.devin.ai");
+        assert!(parse_devin_credentials("# just a comment\n").is_none());
+        assert!(parse_devin_credentials("windsurf_api_key = 42\n").is_none());
+    }
+
+    #[test]
+    fn devin_plan_labels() {
+        assert_eq!(
+            devin_plan_label(Some("TEAMS_TIER_DEVIN_PRO"), Some("Pro")).as_deref(),
+            Some("Devin Pro")
+        );
+        assert_eq!(
+            devin_plan_label(Some("TEAMS_TIER_TEAMS"), Some("Teams")).as_deref(),
+            Some("Teams")
+        );
+        assert_eq!(
+            devin_plan_label(None, Some("Pro")).as_deref(),
+            Some("Devin Pro")
+        );
+        assert_eq!(devin_plan_label(None, None), None);
+    }
+
+    #[test]
+    fn json_secs_parses_number_and_proto3_string() {
+        assert_eq!(
+            json_secs(Some(&serde_json::json!("1789804800"))),
+            Some(chrono::DateTime::<Utc>::from_timestamp(1_789_804_800, 0).unwrap())
+        );
+        assert_eq!(
+            json_secs(Some(&serde_json::json!(1789804800i64))),
+            Some(chrono::DateTime::<Utc>::from_timestamp(1_789_804_800, 0).unwrap())
+        );
+        assert_eq!(json_secs(Some(&serde_json::json!("nope"))), None);
+        assert_eq!(json_secs(None), None);
     }
 
     #[test]
