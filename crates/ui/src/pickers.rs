@@ -4941,6 +4941,117 @@ impl Pickers {
     }
 }
 
+/// Readable interaction state for the isolated compact-picker fixture.
+#[cfg(feature = "compact-picker-fixture")]
+pub struct CompactPickerFixtureState {
+    pub model_list: bool,
+    pub reasoning: Option<ReasoningLevel>,
+    pub fast: bool,
+    pub focused_model: Option<String>,
+    pub focused_model_favorite: bool,
+}
+
+/// Synthetic catalog and assertions for the isolated compact-picker fixture.
+/// None of this is linked into production builds.
+#[cfg(feature = "compact-picker-fixture")]
+impl Pickers {
+    pub fn fixture_compact_catalog(&mut self, cx: &mut Context<Self>) {
+        self.config.harness = Some(HarnessId::Codex);
+        self.config.model = Some("gpt-5.4".into());
+        self.config.reasoning = None;
+        self.defaults
+            .model_options_mut(HarnessId::Codex, "gpt-5.4")
+            .clear();
+        self.harnesses = Loadable::Ready(
+            serde_json::from_value(serde_json::json!([
+                {
+                    "id":"codex",
+                    "name":"Codex",
+                    "installed":true,
+                    "enabled":true,
+                    "supportsSteering":true,
+                    "steeringMode":"step-boundary",
+                    "reasoningLevels":[]
+                }
+            ]))
+            .unwrap(),
+        );
+        self.models.insert(
+            HarnessId::Codex,
+            Loadable::Ready(
+                serde_json::from_value(serde_json::json!([
+                    {
+                        "id":"gpt-5.4",
+                        "label":"GPT-5.4",
+                        "description":"Best for complex coding and reasoning",
+                        "reasoningLevels":["low","medium","high","xhigh"],
+                        "options":[
+                            {
+                                "id":"serviceTier",
+                                "label":"Service tier",
+                                "defaultChoice":"standard",
+                                "choices":[
+                                    {"id":"standard","label":"Standard"},
+                                    {"id":"fast","label":"Fast"}
+                                ]
+                            },
+                            {
+                                "id":"contextWindow",
+                                "label":"Context window",
+                                "defaultChoice":"standard",
+                                "choices":[
+                                    {"id":"standard","label":"Standard"},
+                                    {"id":"1m","label":"1M tokens"}
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "id":"gpt-5.3-codex",
+                        "label":"GPT-5.3 Codex",
+                        "description":"Optimized for agentic coding"
+                    },
+                    {
+                        "id":"gpt-5.2",
+                        "label":"GPT-5.2",
+                        "description":"General purpose reasoning"
+                    },
+                    {
+                        "id":"gpt-5.1-codex-mini",
+                        "label":"GPT-5.1 Codex Mini",
+                        "description":"Fast, efficient coding"
+                    }
+                ]))
+                .unwrap(),
+            ),
+        );
+        self.compact_model_list = false;
+        self.compact_control = compact::CompactControl::Model;
+        self.compact_keyboard = false;
+        self.active = 0;
+        self.catalog_rev += 1;
+        cx.notify();
+    }
+
+    pub fn fixture_compact_state(&self, cx: &App) -> CompactPickerFixtureState {
+        let focused = self
+            .compact_model_list
+            .then(|| self.model_rows(cx).get(self.active).cloned())
+            .flatten();
+        CompactPickerFixtureState {
+            model_list: self.compact_model_list,
+            reasoning: self.effective_reasoning(cx),
+            fast: self
+                .compact_fast_choice(cx)
+                .is_some_and(|(_, _, _, fast)| fast),
+            focused_model_favorite: focused
+                .as_ref()
+                .is_some_and(|row| self.defaults.is_favorite(row.harness, &row.model.id)),
+            focused_model: focused.map(|row| row.model.id),
+        }
+    }
+}
+
 /// The floating-scrollbar treatment for every picker list
 /// ([`popover::rail`] folds the note/hide/metrics/render + pointer listeners
 /// into one call): one shared rail state, fed by whichever handle
