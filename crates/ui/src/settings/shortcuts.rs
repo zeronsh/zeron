@@ -464,10 +464,11 @@ pub fn modifier_send_label(is_macos: bool) -> &'static str {
 /// extends the match and appears on the page by construction
 /// (`every_shortcut_lands_in_a_rendered_group` holds the other half: its group
 /// name must be listed here).
-const GROUP_ORDER: [&str; 7] = [
+const GROUP_ORDER: [&str; 8] = [
     "Files",
     "Browser",
     "Panels",
+    "Zoom",
     "Sessions",
     "Projects",
     "Jump to session",
@@ -480,6 +481,7 @@ fn group(id: ShortcutId) -> &'static str {
         ShortcutId::CaptureAppshot => "Appshots",
         ShortcutId::SaveFile => "Files",
         ShortcutId::BrowserReload => "Browser",
+        ShortcutId::ZoomIn | ShortcutId::ZoomOut | ShortcutId::ResetZoom => "Zoom",
         ShortcutId::ToggleSidebar | ShortcutId::ToggleChanges | ShortcutId::ToggleTerminal => {
             "Panels"
         }
@@ -502,6 +504,9 @@ fn description(id: ShortcutId) -> &'static str {
         }
         ShortcutId::SaveFile => "Save the active workspace file.",
         ShortcutId::BrowserReload => "Reload the focused browser tab.",
+        ShortcutId::ZoomIn => "Increase the interface and conversation text size.",
+        ShortcutId::ZoomOut => "Decrease the interface and conversation text size.",
+        ShortcutId::ResetZoom => "Restore the default interface text size.",
         ShortcutId::ToggleSidebar => "Show or hide sessions and settings navigation.",
         ShortcutId::ToggleChanges => "Show or hide the right sidebar for the current session.",
         ShortcutId::ToggleTerminal => "Show or hide the terminal for the current session.",

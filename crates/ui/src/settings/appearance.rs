@@ -2012,7 +2012,7 @@ impl AppearancePage {
         selections: &ThemeSelection,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> gpui::Stateful<gpui::Div> {
         let registry = ThemeRegistry::active();
         let selected_id = selections
             .variant_id(model_appearance(appearance_kind))
@@ -2171,7 +2171,7 @@ impl AppearancePage {
             ));
         }
 
-        trigger.into_any_element()
+        trigger
     }
 
     fn render_import_dialog(
@@ -2894,6 +2894,7 @@ impl AppearancePage {
             .partition(|entry| entry.source.is_linked());
         let mut rows = vec![
             widgets::card_row(theme, false)
+                .flex_wrap()
                 .child(widgets::row_tile(theme, icons::FOLDER_WITH_FILES))
                 .child(
                     div()
@@ -2911,6 +2912,7 @@ impl AppearancePage {
                 )
                 .child(
                     popover::btn_primary(theme, "Add theme")
+                        .ml_auto()
                         .id("theme-library-add")
                         .on_click(cx.listener(|this, _, _, cx| this.open_import(cx))),
                 )
@@ -3005,10 +3007,12 @@ impl Render for AppearancePage {
             let selector = self.render_theme_selector(appearance_kind, &current_themes, &theme, cx);
             theme_rows.push(
                 widgets::card_row(&theme, index == 0)
+                    .flex_wrap()
                     .child(widgets::row_tile(&theme, mode.icon()))
                     .child(
                         div()
                             .flex_1()
+                            .flex_basis(typography::ui_rems(220.0))
                             .min_w_0()
                             .child(widgets::row_title(&theme, label))
                             .child(widgets::meta_line(
@@ -3022,7 +3026,7 @@ impl Render for AppearancePage {
                                 ],
                             )),
                     )
-                    .child(selector)
+                    .child(selector.ml_auto().max_w_full())
                     .into_any_element(),
             );
         }
@@ -3055,16 +3059,20 @@ impl Render for AppearancePage {
         let mut settings_rows = theme_rows;
         settings_rows.push(
             widgets::card_row(&theme, false)
+                .flex_wrap()
+                .debug_selector(|| "appearance-accent-row".into())
                 .child(widgets::row_tile(&theme, icons::TUNING))
                 .child(
                     div()
                         .flex_1()
+                        .flex_basis(typography::ui_rems(220.0))
                         .min_w_0()
                         .child(widgets::row_title(&theme, "Accent color"))
                         .child(widgets::meta_line(
                             &theme,
                             vec![
                                 div()
+                                    .debug_selector(|| "appearance-accent-description".into())
                                     .child(SharedString::from(accent_helper(current_accent)))
                                     .into_any_element(),
                             ],
@@ -3072,10 +3080,14 @@ impl Render for AppearancePage {
                 )
                 .child(
                     div()
+                        .debug_selector(|| "appearance-accent-controls".into())
                         .flex_none()
-                        .ml(px(10.0))
+                        .ml_auto()
+                        .max_w_full()
                         .flex()
                         .items_center()
+                        .flex_wrap()
+                        .justify_end()
                         .gap(px(6.0))
                         .children(accent_controls),
                 )
@@ -3083,10 +3095,12 @@ impl Render for AppearancePage {
         );
         settings_rows.push(
             widgets::card_row(&theme, false)
+                .flex_wrap()
                 .child(widgets::row_tile(&theme, icons::WIDGET))
                 .child(
                     div()
                         .flex_1()
+                        .flex_basis(typography::ui_rems(220.0))
                         .min_w_0()
                         .child(widgets::row_title(&theme, "Glass"))
                         .child(widgets::meta_line(
@@ -3104,9 +3118,12 @@ impl Render for AppearancePage {
                 .child(
                     div()
                         .flex_none()
-                        .ml(px(10.0))
+                        .ml_auto()
+                        .max_w_full()
                         .flex()
                         .items_center()
+                        .flex_wrap()
+                        .justify_end()
                         .gap(px(6.0))
                         .children(surface_controls),
                 )
@@ -3158,10 +3175,12 @@ impl Render for AppearancePage {
         };
         settings_rows.push(
             widgets::card_row(&theme, false)
+                .flex_wrap()
                 .child(background_tile)
                 .child(
                     div()
                         .flex_1()
+                        .flex_basis(typography::ui_rems(220.0))
                         .min_w_0()
                         .child(widgets::row_title(&theme, "New thread composer background"))
                         .child(widgets::meta_line(&theme, background_meta)),
@@ -3169,9 +3188,12 @@ impl Render for AppearancePage {
                 .child(
                     div()
                         .flex_none()
-                        .ml(px(10.0))
+                        .ml_auto()
+                        .max_w_full()
                         .flex()
                         .items_center()
+                        .flex_wrap()
+                        .justify_end()
                         .gap(px(6.0))
                         .when(current_background.is_some(), |actions| {
                             actions
@@ -3225,16 +3247,20 @@ impl Render for AppearancePage {
                 .collect::<Vec<_>>();
             settings_rows.push(
                 widgets::card_row(&theme, false)
+                    .flex_wrap()
+                    .debug_selector(|| "appearance-effect-row".into())
                     .child(widgets::row_tile(&theme, icons::TUNING))
                     .child(
                         div()
                             .flex_1()
+                            .flex_basis(typography::ui_rems(220.0))
                             .min_w_0()
                             .child(widgets::row_title(&theme, "Background effect"))
                             .child(widgets::meta_line(
                                 &theme,
                                 vec![
                                     div()
+                                        .debug_selector(|| "appearance-effect-description".into())
                                         .child(current_background_effect.description())
                                         .into_any_element(),
                                 ],
@@ -3242,9 +3268,10 @@ impl Render for AppearancePage {
                     )
                     .child(
                         div()
+                            .debug_selector(|| "appearance-effect-controls".into())
                             .flex_none()
-                            .ml(px(10.0))
-                            .max_w(px(430.0))
+                            .ml_auto()
+                            .max_w_full()
                             .flex()
                             .flex_wrap()
                             .justify_end()
@@ -3299,6 +3326,7 @@ impl Render for AppearancePage {
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
                     .gap(px(24.0))
@@ -3306,12 +3334,16 @@ impl Render for AppearancePage {
                         div()
                             .min_w_0()
                             .flex_1()
+                            .flex_basis(typography::ui_rems(220.0))
                             .flex()
                             .flex_col()
                             .gap(px(4.0))
                             .child(widgets::field_label(&theme, kind.label()))
                             .child(
                                 div()
+                                    .debug_selector(move || {
+                                        format!("{}-font-description", kind.slug())
+                                    })
                                     .max_w(px(520.0))
                                     .text_size(typography::ui_rems(12.0))
                                     .line_height(px(18.0))
@@ -3321,8 +3353,13 @@ impl Render for AppearancePage {
                     )
                     .child(
                         div()
+                            .debug_selector(move || format!("{}-font-controls", kind.slug()))
                             .flex_none()
+                            .max_w_full()
+                            .ml_auto()
                             .flex()
+                            .flex_wrap()
+                            .justify_end()
                             .flex_row()
                             .items_center()
                             .gap(px(8.0))
@@ -3428,6 +3465,70 @@ impl Render for AppearancePage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn zoomed_appearance_descriptions_do_not_overlap_controls(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let background = dir.path().join("background.png");
+        image::RgbaImage::new(1, 1).save(&background).unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(
+                crate::settings::UiSettings {
+                    new_thread_composer_background: Some(
+                        crate::settings::NewThreadComposerBackground {
+                            path: background.to_string_lossy().into(),
+                            name: "Background".into(),
+                        },
+                    ),
+                    new_thread_background_effect:
+                        crate::settings::NewThreadBackgroundEffect::Halftone,
+                    ..Default::default()
+                },
+                dir.path(),
+                cx,
+            );
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            window.set_rem_size(px(20.0));
+            AppearancePage::new(cx)
+        });
+        for font_size in [16.0, 20.0] {
+            cx.update(|window, _| window.set_rem_size(px(font_size)));
+            for width in [500.0, 768.0] {
+                cx.simulate_resize(gpui::size(px(width), px(2200.0)));
+                cx.update(|window, cx| {
+                    window.refresh();
+                    window.draw(cx).clear();
+                });
+                for (description, controls) in [
+                    (
+                        "appearance-accent-description",
+                        "appearance-accent-controls",
+                    ),
+                    (
+                        "appearance-effect-description",
+                        "appearance-effect-controls",
+                    ),
+                    ("interface-font-description", "interface-font-controls"),
+                    ("terminal-font-description", "terminal-font-controls"),
+                    ("code-font-description", "code-font-controls"),
+                ] {
+                    let text = cx.debug_bounds(description).unwrap();
+                    let controls = cx.debug_bounds(controls).unwrap();
+                    assert!(
+                        text.right() <= controls.left() || text.bottom() <= controls.top(),
+                        "{description} overlaps its controls: {text:?}, {controls:?}"
+                    );
+                    assert!(
+                        controls.left() >= px(24.0) && controls.right() <= px(width - 24.0),
+                        "controls exceed the page at {font_size}px in {width}px: {controls:?}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn every_mode_gets_a_card() {

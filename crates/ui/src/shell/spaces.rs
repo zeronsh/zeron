@@ -3922,9 +3922,6 @@ impl Shell {
         }
 
         let selected = self.state.read(cx).selected_chat.clone();
-        // Re-checked at render so the chips drop the FRAME a popover opens,
-        // not on the next modifier event — the jumps are suppressed under it.
-        let jump_hints = self.jump_hints && !self.overlay_owns_keyboard(cx);
         let keymap = self.settings.keymap.clone();
         // Flat top-to-bottom slot across groups: the same order
         // `sidebar_visible_order` hands the jump shortcuts and cycling, so a
@@ -3968,7 +3965,7 @@ impl Shell {
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
                 let jump_slot = slot.checked_sub(if self.pinned_open { 0 } else { pinned_count });
-                let jump_label: Option<SharedString> = if jump_hints && let Some(slot) = jump_slot {
+                let jump_label: Option<SharedString> = if let Some(slot) = jump_slot {
                     let combo = keymap.get(ShortcutId::JumpSession(slot));
                     (slot < JUMP_SLOTS && !combo.is_empty()).then(|| badge_combo(combo).into())
                 } else {

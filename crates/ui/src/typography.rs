@@ -98,6 +98,15 @@ impl UiFontSize {
         self.0 as f32
     }
 
+    pub fn stepped(self, delta: i8) -> Self {
+        let current = Self::ALL
+            .iter()
+            .position(|size| *size == self.normalized())
+            .unwrap();
+        let next = (current as isize + delta as isize).clamp(0, Self::ALL.len() as isize - 1);
+        Self::ALL[next as usize]
+    }
+
     pub fn label(self) -> SharedString {
         format!("{} px", self.0).into()
     }

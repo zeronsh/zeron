@@ -845,6 +845,9 @@ pub enum ShortcutId {
     CaptureAppshot,
     SaveFile,
     BrowserReload,
+    ZoomIn,
+    ZoomOut,
+    ResetZoom,
     ToggleSidebar,
     ToggleChanges,
     ToggleTerminal,
@@ -858,10 +861,13 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 12 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 15 + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
+        ShortcutId::ZoomIn,
+        ShortcutId::ZoomOut,
+        ShortcutId::ResetZoom,
         ShortcutId::ToggleSidebar,
         ShortcutId::ToggleChanges,
         ShortcutId::ToggleTerminal,
@@ -892,6 +898,9 @@ impl ShortcutId {
             ShortcutId::CaptureAppshot => "Capture Appshot",
             ShortcutId::SaveFile => "Save file",
             ShortcutId::BrowserReload => "Reload browser page",
+            ShortcutId::ZoomIn => "Zoom in",
+            ShortcutId::ZoomOut => "Zoom out",
+            ShortcutId::ResetZoom => "Reset zoom",
             ShortcutId::ToggleSidebar => "Toggle left sidebar",
             ShortcutId::ToggleChanges => "Toggle right sidebar",
             ShortcutId::ToggleTerminal => "Toggle terminal",
@@ -918,6 +927,9 @@ impl ShortcutId {
             ShortcutId::CaptureAppshot => "mod-alt-space",
             ShortcutId::SaveFile => "mod-s",
             ShortcutId::BrowserReload => "mod-shift-r",
+            ShortcutId::ZoomIn => "mod-+",
+            ShortcutId::ZoomOut => "mod--",
+            ShortcutId::ResetZoom => "mod-0",
             ShortcutId::ToggleSidebar => "mod-b",
             ShortcutId::ToggleChanges => "mod-r",
             ShortcutId::ToggleTerminal => "mod-j",
@@ -964,6 +976,9 @@ pub struct KeymapConfig {
     pub capture_appshot: String,
     pub save_file: String,
     pub browser_reload: String,
+    pub zoom_in: String,
+    pub zoom_out: String,
+    pub reset_zoom: String,
     pub toggle_sidebar: String,
     pub toggle_changes: String,
     pub toggle_terminal: String,
@@ -1027,6 +1042,9 @@ impl Default for KeymapConfig {
             capture_appshot: ShortcutId::CaptureAppshot.default_combo().into(),
             save_file: ShortcutId::SaveFile.default_combo().into(),
             browser_reload: ShortcutId::BrowserReload.default_combo().into(),
+            zoom_in: ShortcutId::ZoomIn.default_combo().into(),
+            zoom_out: ShortcutId::ZoomOut.default_combo().into(),
+            reset_zoom: ShortcutId::ResetZoom.default_combo().into(),
             toggle_sidebar: ShortcutId::ToggleSidebar.default_combo().into(),
             toggle_changes: ShortcutId::ToggleChanges.default_combo().into(),
             toggle_terminal: ShortcutId::ToggleTerminal.default_combo().into(),
@@ -1042,11 +1060,23 @@ impl Default for KeymapConfig {
 }
 
 impl KeymapConfig {
+    pub fn zoom_in_aliases(&self) -> impl Iterator<Item = &'static str> + '_ {
+        ["mod-=", "mod-shift-=", "mod-shift-+"]
+            .into_iter()
+            .filter(|combo| {
+                self.zoom_in == ShortcutId::ZoomIn.default_combo()
+                    && !ShortcutId::ALL.iter().any(|id| self.get(*id) == *combo)
+            })
+    }
+
     pub fn get(&self, id: ShortcutId) -> &str {
         match id {
             ShortcutId::CaptureAppshot => &self.capture_appshot,
             ShortcutId::SaveFile => &self.save_file,
             ShortcutId::BrowserReload => &self.browser_reload,
+            ShortcutId::ZoomIn => &self.zoom_in,
+            ShortcutId::ZoomOut => &self.zoom_out,
+            ShortcutId::ResetZoom => &self.reset_zoom,
             ShortcutId::ToggleSidebar => &self.toggle_sidebar,
             ShortcutId::ToggleChanges => &self.toggle_changes,
             ShortcutId::ToggleTerminal => &self.toggle_terminal,
@@ -1069,6 +1099,9 @@ impl KeymapConfig {
             ShortcutId::CaptureAppshot => self.capture_appshot = combo,
             ShortcutId::SaveFile => self.save_file = combo,
             ShortcutId::BrowserReload => self.browser_reload = combo,
+            ShortcutId::ZoomIn => self.zoom_in = combo,
+            ShortcutId::ZoomOut => self.zoom_out = combo,
+            ShortcutId::ResetZoom => self.reset_zoom = combo,
             ShortcutId::ToggleSidebar => self.toggle_sidebar = combo,
             ShortcutId::ToggleChanges => self.toggle_changes = combo,
             ShortcutId::ToggleTerminal => self.toggle_terminal = combo,
@@ -1243,8 +1276,8 @@ pub fn display_combo(combo: &str) -> String {
 
 /// [`display_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
 pub fn display_combo_on(mac: bool, combo: &str) -> String {
-    combo
-        .split('-')
+    combo_parts(combo)
+        .into_iter()
         .map(|part| match part {
             "mod" => if mac { "Cmd" } else { "Ctrl" }.to_string(),
             "alt" => if mac { "Opt" } else { "Alt" }.to_string(),
@@ -1269,12 +1302,20 @@ pub fn badge_combo(combo: &str) -> String {
     badge_combo_on(cfg!(target_os = "macos"), combo)
 }
 
+fn combo_parts(combo: &str) -> Vec<&str> {
+    if let Some(modifiers) = combo.strip_suffix("--") {
+        modifiers.split('-').chain(std::iter::once("-")).collect()
+    } else {
+        combo.split('-').collect()
+    }
+}
+
 /// [`badge_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
 pub fn badge_combo_on(mac: bool, combo: &str) -> String {
     if !mac {
         return display_combo_on(false, combo);
     }
-    let mut parts: Vec<&str> = combo.split('-').collect();
+    let mut parts = combo_parts(combo);
     let key = parts.pop().unwrap_or("");
     let mut out = String::new();
     for glyph in ["ctrl", "alt", "shift", "mod"]
@@ -2700,6 +2741,23 @@ mod tests {
     }
 
     #[test]
+    fn zoom_shortcuts_round_trip_and_show_the_minus_key() {
+        let mut keymap: KeymapConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(keymap.zoom_in, "mod-+");
+        assert_eq!(keymap.zoom_out, "mod--");
+        assert_eq!(keymap.reset_zoom, "mod-0");
+        keymap.set(ShortcutId::ZoomIn, "mod-alt-z".into());
+        let mut restored: KeymapConfig =
+            serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
+        assert_eq!(restored.zoom_in, "mod-alt-z");
+        restored.reset(ShortcutId::ZoomIn);
+        assert_eq!(restored.zoom_in, "mod-+");
+        assert_eq!(display_combo_on(true, "mod--"), "Cmd+-");
+        assert_eq!(display_combo_on(false, "mod--"), "Ctrl+-");
+        assert_eq!(badge_combo_on(true, "mod--"), "⌘-");
+    }
+
+    #[test]
     fn every_shortcut_default_is_unique_and_bindable() {
         // A new shortcut must not ship in conflict with an existing one, and
         // its default must parse on this platform.
@@ -2767,7 +2825,7 @@ mod tests {
                 // Via the platform spelling, where modifier names are
                 // unambiguous, so the decode can't inherit the bug it checks.
                 let bound = platform_combo_on(mac, combo);
-                let mut parts: Vec<&str> = bound.split('-').collect();
+                let mut parts = combo_parts(&bound);
                 let key = parts.pop().expect("a combo always ends in a key");
                 let recorded = combo_from_keystroke_on(
                     mac,

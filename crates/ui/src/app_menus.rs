@@ -202,9 +202,11 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::os_action("Select All", composer::SelectAll, OsAction::SelectAll),
         ]),
     ];
-    // Appearance lives under View on every platform — it is the only View verb
-    // today, but "Appearance" as a top-level menu would read oddly next to Edit.
     menus.push(Menu::new("View").items([
+        MenuItem::action("Zoom In", shell::ZoomIn),
+        MenuItem::action("Zoom Out", shell::ZoomOut),
+        MenuItem::action("Reset Zoom", shell::ResetZoom),
+        MenuItem::separator(),
         MenuItem::action("Appearance: System", AppearanceSystem),
         MenuItem::action("Appearance: Light", AppearanceLight),
         MenuItem::action("Appearance: Dark", AppearanceDark),
@@ -305,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn view_menu_offers_all_three_appearance_modes() {
+    fn view_menu_offers_zoom_and_appearance() {
         let menus = app_menus();
         let view = menus
             .iter()
@@ -314,6 +316,9 @@ mod tests {
         assert_eq!(
             action_names(view),
             vec![
+                shell::ZoomIn.name(),
+                shell::ZoomOut.name(),
+                shell::ResetZoom.name(),
                 AppearanceSystem.name(),
                 AppearanceLight.name(),
                 AppearanceDark.name()

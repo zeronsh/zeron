@@ -367,7 +367,7 @@ pub fn meta_line(theme: &Theme, fragments: Vec<AnyElement>) -> gpui::Div {
                     .child(SharedString::from("·")),
             );
         }
-        line = line.child(fragment);
+        line = line.child(div().min_w_0().max_w_full().child(fragment));
         first = false;
     }
     line

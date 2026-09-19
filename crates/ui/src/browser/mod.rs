@@ -196,6 +196,11 @@ impl BrowserSurface {
                     .iter()
                     .filter(|id| **id != crate::settings::ShortcutId::SaveFile)
                     .map(|id| crate::settings::platform_combo(keymap.get(*id)))
+                    .chain(
+                        keymap
+                            .zoom_in_aliases()
+                            .map(crate::settings::platform_combo),
+                    )
                     .collect(),
             );
         }
