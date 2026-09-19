@@ -448,6 +448,23 @@ impl SettingsSection {
     }
 }
 
+/// Which window edge a hover-peek belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeekSide {
+    Left,
+    Right,
+}
+
+/// How wide the invisible hover target along a collapsed pane's outer edge is.
+/// Wide enough to catch a deliberate throw at the edge, narrow enough that
+/// crossing the window does not trip it.
+const PEEK_EDGE: f32 = 12.0;
+
+/// Backdrop-blur sigma for a peeked pane. Lighter than [`crate::frost::MENU_BLUR`]:
+/// the panel floats over the user's own content, which should stay
+/// recognizable underneath rather than dissolve.
+const PEEK_BLUR: f32 = 20.0;
+
 /// What the main outlet shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
@@ -1634,6 +1651,16 @@ pub struct Shell {
     debug_gate: Option<GatePhase>,
     debug_upload: Option<String>,
     sidebar_tween: Option<WidthTween>,
+    /// Pointer is inside the collapsed left edge: the sidebar floats back in
+    /// over the content until it leaves. Transient — collapsing stays the
+    /// persisted state, so a peek never survives a restart.
+    sidebar_peek: bool,
+    /// Same for the collapsed right pane.
+    right_peek: bool,
+    /// Width tweens for the two peek overlays. Separate from the collapse
+    /// tweens on purpose: a peek must not move the conversation column.
+    sidebar_peek_tween: Option<WidthTween>,
+    right_peek_tween: Option<WidthTween>,
     sidebar_edge_bounce: Option<motion::ResizeEdgeBounce>,
     /// Boundary currently held during a sidebar drag. Cleared on re-entry or
     /// release so the next genuine edge crossing can acknowledge the limit.
@@ -1967,6 +1994,10 @@ impl Shell {
             debug_gate,
             debug_upload,
             sidebar_tween: None,
+            sidebar_peek: false,
+            right_peek: false,
+            sidebar_peek_tween: None,
+            right_peek_tween: None,
             sidebar_edge_bounce: None,
             sidebar_resize_edge: None,
             pane_resize_active: None,
@@ -2447,12 +2478,59 @@ impl Shell {
         self.pane_resize_active = None;
         self.pane_resize_dragging = None;
         self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed;
+        // Expanding out from under a live peek would leave the overlay stacked
+        // on the real column for the length of one tween.
+        self.set_sidebar_peek(false, cx);
         self.sidebar_tween = Some(WidthTween::new(from, self.sidebar_target()));
         self.schedule_save(cx);
         cx.notify();
     }
 
+    // ---- edge peek (hover a collapsed pane back into view) ----
+
+    /// Width the left peek overlay is heading toward: the user's sidebar
+    /// width while the pointer holds it open, otherwise closed.
+    fn sidebar_peek_target(&self) -> f32 {
+        if self.sidebar_peek && self.settings.sidebar_collapsed {
+            self.settings.sidebar_width
+        } else {
+            0.0
+        }
+    }
+
+    fn right_peek_target(&self, cx: &App) -> f32 {
+        if self.right_peek && !self.right_pane_open(cx) {
+            self.settings.right_pane_width.min(right_pane_max_width(
+                self.viewport_width,
+                self.sidebar_now(),
+            ))
+        } else {
+            0.0
+        }
+    }
+
+    fn set_sidebar_peek(&mut self, peek: bool, cx: &mut Context<Self>) {
+        if self.sidebar_peek == peek {
+            return;
+        }
+        let from = self.eval_tween(self.sidebar_peek_tween, self.sidebar_peek_target());
+        self.sidebar_peek = peek;
+        self.sidebar_peek_tween = Some(WidthTween::new(from, self.sidebar_peek_target()));
+        cx.notify();
+    }
+
+    fn set_right_peek(&mut self, peek: bool, cx: &mut Context<Self>) {
+        if self.right_peek == peek {
+            return;
+        }
+        let from = self.eval_tween(self.right_peek_tween, self.right_peek_target(cx));
+        self.right_peek = peek;
+        self.right_peek_tween = Some(WidthTween::new(from, self.right_peek_target(cx)));
+        cx.notify();
+    }
+
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
+        self.set_right_peek(false, cx);
         // Reverse from the visible width when toggled during an animation.
         let from = self.eval_tween(self.right_tween, self.right_target(cx));
         self.right_edge_bounce = None;
@@ -3602,6 +3680,9 @@ impl Shell {
         let sample = sidebar_drag_sample(x, self.sidebar_resize_edge, self.reduced_motion);
         self.settings.sidebar_width = sample.width;
         self.settings.sidebar_collapsed = false;
+        // A drag from the collapsed edge expands the real column; the float
+        // it started under must not linger beside it.
+        self.set_sidebar_peek(false, cx);
         self.pane_resize_dragging = Some(PaneResizeKind::Sidebar);
         self.sidebar_tween = None; // live drag tracks the pointer directly
         if sample.starts_bounce {
@@ -5676,7 +5757,10 @@ impl Shell {
         out
     }
 
-    fn render_sidebar(&mut self, _cx: &mut Context<Self>) -> AnyElement {
+    /// `peek` renders the same column against the hover-peek tween instead of
+    /// the collapse tween — the content is identical, only the width clock
+    /// differs, so the two can never drift apart.
+    fn render_sidebar(&mut self, peek: bool, _cx: &mut Context<Self>) -> AnyElement {
         // The sidebar is part of the resolved theme. A second fixed-Zeron
         // palette here made imported families look split in half and froze
         // activity/glyph personality independently of the selected variant.
@@ -5686,6 +5770,11 @@ impl Shell {
                 .h_full()
                 .flex_none(),
         );
+        let width = if peek {
+            self.eval_tween(self.sidebar_peek_tween, self.sidebar_peek_target())
+        } else {
+            self.sidebar_now()
+        };
         // Transparent — the sidebar sits directly on the frost shell; the main
         // card's own border provides the separation. The content row spans the
         // full window height (the titlebar overlays it), so the column pads
@@ -5694,8 +5783,68 @@ impl Shell {
             .h_full()
             .flex_none()
             .overflow_hidden()
-            .w(px(self.sidebar_now()))
+            .w(px(width))
             .child(div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner))
+            .into_any_element()
+    }
+
+    /// The hover target and float for one collapsed edge.
+    ///
+    /// One element does both jobs: at rest it is a [`PEEK_EDGE`]-wide
+    /// invisible strip against the window edge; while open it is exactly as
+    /// wide as the floated pane, so the pointer stays inside it and the pane
+    /// holds. Leaving it closes the pane. It is absolutely positioned, so
+    /// nothing in the conversation column reflows — the cost of a peek is a
+    /// repaint, not a layout pass. It carries no mouse-down listener, so a
+    /// drag on the seam's resize handle beneath it still expands the pane.
+    ///
+    /// `pane` arrives already width-tweened; a fully closed float still
+    /// renders so the strip keeps its hover subscription.
+    fn peek_edge(
+        &self,
+        side: PeekSide,
+        width: f32,
+        glass: gpui::Hsla,
+        border: gpui::Hsla,
+        pane: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let float = div()
+            .h_full()
+            .when(width > 0.0, |float| {
+                float
+                    .bg(glass)
+                    .shadow_lg()
+                    .map(|float| match side {
+                        PeekSide::Left => float.border_r_1(),
+                        PeekSide::Right => float.border_l_1(),
+                    })
+                    .border_color(border)
+            })
+            .child(pane);
+        div()
+            .id(match side {
+                PeekSide::Left => "sidebar-peek-edge",
+                PeekSide::Right => "right-pane-peek-edge",
+            })
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .map(|zone| match side {
+                PeekSide::Left => zone.left_0(),
+                PeekSide::Right => zone.right_0(),
+            })
+            .w(px(width.max(PEEK_EDGE)))
+            .flex()
+            .map(|zone| match side {
+                PeekSide::Left => zone.justify_start(),
+                PeekSide::Right => zone.justify_end(),
+            })
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| match side {
+                PeekSide::Left => this.set_sidebar_peek(*hovered, cx),
+                PeekSide::Right => this.set_right_peek(*hovered, cx),
+            }))
+            .child(crate::frost::frosted(0.0, PEEK_BLUR, float))
             .into_any_element()
     }
 
@@ -8889,15 +9038,28 @@ impl Shell {
     /// default, drag-resizable. Content is the ACTIVE surface — the Diff
     /// page (its options row + the lazy [`Changes`] viewer), workspace Files,
     /// an embedded terminal, or the surface picker when no tabs exist.
-    fn render_right_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    /// `peek` swaps the collapse tween for the hover-peek tween. The pane is
+    /// otherwise identical — a peek shows exactly what opening it would, so
+    /// there is no second, thinner "preview" pane to keep in sync.
+    fn render_right_pane(
+        &mut self,
+        peek: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let bg = theme.bg;
-        let content: AnyElement = if self.right_pane_open(cx) || self.tween_active(self.right_tween)
-        {
+        let (tween, target) = if peek {
+            (self.right_peek_tween, self.right_peek_target(cx))
+        } else {
+            (self.right_tween, self.right_target(cx))
+        };
+        let showing = self.right_pane_open(cx) || peek;
+        let content: AnyElement = if showing || self.tween_active(tween) {
             match self.resolved_right_active(cx) {
                 // Rendering a Files surface activates its image. Keep it unmounted
                 // throughout the closing animation after suspending its resources.
-                RightSurface::Files | RightSurface::File(_) if !self.right_pane_open(cx) => {
+                RightSurface::Files | RightSurface::File(_) if !showing => {
                     gpui::Empty.into_any_element()
                 }
                 RightSurface::Files => {
@@ -8945,7 +9107,7 @@ impl Shell {
                     let panel = self.right_terminal_panel(cx);
                     // Keep the embedded panel's own active tab aligned with
                     // the resolved surface (fallbacks can move it).
-                    let resize_suspended = self.tween_active(self.right_tween);
+                    let resize_suspended = self.tween_active(tween);
                     panel.update(cx, |panel, cx| {
                         panel.set_resize_suspended(resize_suspended);
                         panel.select_tab_by_key(tab, cx);
@@ -9026,13 +9188,16 @@ impl Shell {
             // row; the panel's own chrome starts below it.
             .pt(px(Theme::TITLEBAR_HEIGHT))
             .child(content);
-        let target = self.right_target(cx);
-        let edge_offset = self.eval_resize_edge_bounce(
-            self.right_edge_bounce,
-            self.right_pane_open(cx) && !self.right_pane_expanded,
-        );
+        let edge_offset = if peek {
+            0.0
+        } else {
+            self.eval_resize_edge_bounce(
+                self.right_edge_bounce,
+                self.right_pane_open(cx) && !self.right_pane_expanded,
+            )
+        };
         self.right_pane_container(
-            self.right_tween,
+            tween,
             target,
             edge_offset,
             div().h_full().relative().child(panel).into_any_element(),
@@ -10804,7 +10969,13 @@ impl Render for Shell {
                     }
                 });
 
-                let sidebar = self.render_sidebar(cx);
+                // A settled-collapsed pane renders into the edge float instead
+                // of the row — built once either way, one parent. It stays in
+                // the row while the collapse tween runs so the conversation
+                // column still reflows against it.
+                let sidebar_floating =
+                    self.settings.sidebar_collapsed && !self.tween_active(self.sidebar_tween);
+                let sidebar = self.render_sidebar(sidebar_floating, cx);
                 let sidebar_handle = self.resize_handle(
                     "sidebar-resize",
                     PaneResizeKind::Sidebar,
@@ -10842,8 +11013,12 @@ impl Render for Shell {
                     // seam; the panel's 1px border remains the visual divider.
                     .left(px(-PANE_RESIZE_HITBOX_HALF_WIDTH))
                 });
+                // Same rule as the sidebar: float it only once the close tween
+                // has settled, and only on the chat route, where the pane
+                // exists at all.
+                let right_floating = on_chat && !right_open && !self.tween_active(self.right_tween);
                 let right: AnyElement = if on_chat {
-                    self.render_right_pane(window, cx)
+                    self.render_right_pane(right_floating, window, cx)
                 } else {
                     Empty.into_any_element()
                 };
@@ -10945,6 +11120,29 @@ impl Render for Shell {
                 // under the header and fade out at its edge. Columns that
                 // must NOT underlap (sidebar content, the changes panel,
                 // settings) pad themselves down by the titlebar height.
+                let (sidebar_row, sidebar_float) = if sidebar_floating {
+                    (Empty.into_any_element(), Some(sidebar))
+                } else {
+                    (sidebar, None)
+                };
+                let (right_row, right_float) = if right_floating {
+                    (Empty.into_any_element(), Some(right))
+                } else {
+                    (right, None)
+                };
+                let glass = Theme::of(cx).glass();
+                let peeks = [
+                    sidebar_float.map(|pane| {
+                        let width =
+                            self.eval_tween(self.sidebar_peek_tween, self.sidebar_peek_target());
+                        self.peek_edge(PeekSide::Left, width, glass, border_color, pane, cx)
+                    }),
+                    right_float.map(|pane| {
+                        let width =
+                            self.eval_tween(self.right_peek_tween, self.right_peek_target(cx));
+                        self.peek_edge(PeekSide::Right, width, glass, border_color, pane, cx)
+                    }),
+                ];
                 let page = div()
                     .size_full()
                     .relative()
@@ -10953,7 +11151,7 @@ impl Render for Shell {
                             .size_full()
                             .flex()
                             .flex_row()
-                            .child(sidebar)
+                            .child(sidebar_row)
                             .child(sidebar_seam)
                             .child(card)
                             .child(
@@ -10961,10 +11159,11 @@ impl Render for Shell {
                                     .h_full()
                                     .flex_none()
                                     .relative()
-                                    .child(right)
+                                    .child(right_row)
                                     .child(right_seam),
                             ),
                     )
+                    .children(peeks.into_iter().flatten())
                     .child(div().absolute().top_0().left_0().right_0().child(title_bar))
                     .child(self.render_titlebar_cluster(cx))
                     .children(overlays);
@@ -12223,7 +12422,7 @@ mod exit_regressions {
                     !files.read(cx).test_images_visible(),
                     "closing suspends image resources immediately"
                 );
-                let _ = shell.render_right_pane(window, cx);
+                let _ = shell.render_right_pane(false, window, cx);
                 assert!(
                     !files.read(cx).test_images_visible(),
                     "closing animation must not reactivate images"
@@ -12236,6 +12435,79 @@ mod exit_regressions {
                 assert!(!shell.tween_active(tween));
                 assert_eq!(shell.active_tween_endpoints(tween), None);
                 assert_eq!(shell.eval_tween(tween, 0.), 0.);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_peek_never_touches_the_collapse_state_and_yields_to_a_real_toggle(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                shell.reduced_motion = true;
+                shell.viewport_width = 1000.;
+                shell.settings.sidebar_width = 260.;
+                // An expanded sidebar has nothing to peek: hovering the edge
+                // is a no-op rather than a second, stacked column.
+                shell.set_sidebar_peek(true, cx);
+                assert_eq!(shell.sidebar_peek_target(), 0.);
+                shell.set_sidebar_peek(false, cx);
+                shell.settings.sidebar_collapsed = true;
+                shell.set_sidebar_peek(true, cx);
+                assert_eq!(shell.sidebar_peek_target(), 260.);
+                // The float is transient: the persisted state and the real
+                // column's width clock are untouched by it.
+                assert!(shell.settings.sidebar_collapsed);
+                assert_eq!(shell.sidebar_now(), 0.);
+                // Expanding for real drops the float so it cannot stack on
+                // the column arriving underneath it.
+                shell.toggle_sidebar(cx);
+                assert!(!shell.settings.sidebar_collapsed);
+                assert!(!shell.sidebar_peek);
+                assert_eq!(shell.sidebar_peek_target(), 0.);
+
+                shell.active_chat = "preview".into();
+                assert!(!shell.right_pane_open(cx));
+                shell.set_right_peek(true, cx);
+                let peeked = shell.right_peek_target(cx);
+                assert!(peeked > 0.);
+                assert_eq!(shell.right_target(cx), 0.);
+                shell.toggle_right_pane(cx);
+                assert!(shell.right_pane_open(cx));
+                assert!(!shell.right_peek);
+                // A peek shows exactly what opening would: same width.
+                assert_eq!(shell.right_target(cx), peeked);
             })
             .unwrap();
     }
