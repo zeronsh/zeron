@@ -303,9 +303,7 @@ impl Pickers {
         if self.harness_locked(cx) {
             self.update_chat_config(cx, |config| {
                 config.reasoning = None;
-                config
-                    .model_options
-                    .clear();
+                config.model_options.clear();
             });
         } else {
             self.config.reasoning = None;
@@ -314,9 +312,7 @@ impl Pickers {
                 self.effective_harness(cx),
                 self.selected_model(cx).map(|m| m.id.clone()),
             ) {
-                self.defaults
-                    .model_options_mut(harness, &model)
-                    .clear();
+                self.defaults.model_options_mut(harness, &model).clear();
             }
             self.save_defaults();
         }
@@ -393,11 +389,14 @@ impl Pickers {
             } else {
                 5.0 + (6.0 + options as f32 * 28.0).min(64.0)
             };
-        let target = self.model_space_below.unwrap_or(640.0).min(if self.compact_model_list {
-            302.0
-        } else {
-            panel_height
-        });
+        let target = self
+            .model_space_below
+            .unwrap_or(640.0)
+            .min(if self.compact_model_list {
+                302.0
+            } else {
+                panel_height
+            });
         let (height, moving) = ScalarTransition::sample(
             &mut self.compact_motion.height,
             target,
@@ -958,9 +957,9 @@ impl Pickers {
                             .child(popover::faded_menu_list(
                                 &self.menu_scroll,
                                 popover::menu_scroll_list("compact-options", &self.menu_scroll)
-                                    .max_h(px(
-                                        64.0_f32.min((self.model_space_below.unwrap_or(640.0) - 87.0).max(0.0))
-                                    ))
+                                    .max_h(px(64.0_f32.min(
+                                        (self.model_space_below.unwrap_or(640.0) - 87.0).max(0.0),
+                                    )))
                                     .child(options),
                             ))
                             .children(scrollbar),
