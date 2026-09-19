@@ -57,6 +57,7 @@ async fn seed_local(data_dir: &std::path::Path) -> (String, String, String) {
         device_id: device.clone(),
         status: None,
         continuation_of: None,
+        duration_ms: None,
     })
     .expect("push message");
     let bytes = doc.export_snapshot().expect("snapshot");

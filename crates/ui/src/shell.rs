@@ -2171,6 +2171,7 @@ impl Shell {
                     device_id: "local".into(),
                     status: None,
                     continuation_of: None,
+                    duration_ms: None,
                 };
                 state.update(cx, |s, cx| {
                     s.push_echo(&chat_id, echo);

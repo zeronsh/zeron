@@ -658,6 +658,7 @@ impl ChatDocHandle {
             device_id: self.device_id.clone(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            duration_ms: None,
         })
     }
 
@@ -4805,6 +4806,7 @@ mod transfer_progress_tests {
                     device_id: "remote".into(),
                     status: None,
                     continuation_of: None,
+                    duration_ms: None,
                 })
                 .unwrap();
         }

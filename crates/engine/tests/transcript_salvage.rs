@@ -35,6 +35,7 @@ fn entry(
         device_id: "lost-device".into(),
         status,
         continuation_of: None,
+        duration_ms: None,
     }
 }
 

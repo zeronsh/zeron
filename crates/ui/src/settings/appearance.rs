@@ -2974,6 +2974,7 @@ impl Render for AppearancePage {
         let ui_settings = crate::settings::current(cx);
         let current_background = ui_settings.new_thread_composer_background;
         let current_background_effect = ui_settings.new_thread_background_effect;
+        let compact_mode = ui_settings.transcript_compact_mode;
         let cards = AppearanceMode::ALL
             .into_iter()
             .map(|mode| {
@@ -3265,6 +3266,36 @@ impl Render for AppearancePage {
                     .into_any_element(),
             );
         }
+        settings_rows.push(
+            widgets::card_row(&theme, false)
+                .child(widgets::row_tile(&theme, icons::EYE_CLOSED))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Compact mode"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child(SharedString::from(
+                                        "Fold a turn's thinking, tool calls, and narration into one collapsed row — only the reply shows.",
+                                    ))
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, compact_mode)
+                        .id("transcript-compact-mode-toggle")
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::settings::set_transcript_compact_mode(!compact_mode, cx);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        );
         settings_rows.extend(self.render_theme_library_rows(&theme, cx));
         let library_warning = self
             .library_error

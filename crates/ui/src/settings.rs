@@ -422,6 +422,24 @@ pub fn code_fences_generation(cx: &App) -> u64 {
         .unwrap_or_default()
 }
 
+/// Compact transcript mode: each turn's work folds into one collapsed
+/// accordion, leaving only the reply text. Transcripts poll this during
+/// render and rebuild their row split on a flip — cheap by design (a bool
+/// field read, not a `current()` clone).
+pub fn transcript_compact_mode(cx: &App) -> bool {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.transcript_compact_mode)
+        .unwrap_or_default()
+}
+
+pub fn set_transcript_compact_mode(enabled: bool, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.transcript_compact_mode = enabled;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
 pub fn update(policy: SavePolicy, cx: &mut App, mutate: impl FnOnce(&mut UiSettings)) -> bool {
     if !cx.has_global::<SettingsStore>() {
         return false;
@@ -726,6 +744,10 @@ pub struct UiSettings {
     /// Open a normal web-link activation in the session Browser. Explicit
     /// context-menu actions remain available regardless of this preference.
     pub open_web_links_in_zeron: bool,
+    /// Compact transcript: a turn's working steps (thinking, tool calls, and
+    /// the narration between them) fold into one collapsed accordion, so only
+    /// the reply text stays visible.
+    pub transcript_compact_mode: bool,
     /// Save edited workspace files automatically after the configured delay.
     pub files_autosave_enabled: bool,
     /// Idle time before an edited workspace file is saved automatically.
@@ -804,6 +826,7 @@ impl Default for UiSettings {
             code_fences_fit_content: false,
             transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
             open_web_links_in_zeron: true,
+            transcript_compact_mode: false,
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
@@ -2059,6 +2082,7 @@ mod tests {
             code_fences_fit_content: true,
             transcript_width: 960.0,
             open_web_links_in_zeron: false,
+            transcript_compact_mode: true,
             files_autosave_enabled: true,
             files_autosave_delay_ms: 1_500,
             files_word_wrap: true,

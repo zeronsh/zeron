@@ -151,6 +151,7 @@ mod tests {
             device_id: "host".into(),
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
+            duration_ms: None,
         }
     }
 
