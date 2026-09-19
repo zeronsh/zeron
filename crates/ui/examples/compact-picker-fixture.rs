@@ -218,7 +218,8 @@ fn main() -> anyhow::Result<()> {
                     pause(cx).await;
                     window.update(cx, |view, _, cx| {
                         let state = view.pickers.read(cx).fixture_compact_state(cx);
-                        assert_eq!(state.reasoning, None);
+                        assert_eq!(state.explicit_reasoning, None);
+                        assert_eq!(state.reasoning, Some(zeron_proto::ReasoningLevel::High));
                         assert!(!state.fast);
                     })?;
                     capture(
@@ -309,7 +310,8 @@ fn main() -> anyhow::Result<()> {
                     pause(cx).await;
                     window.update(cx, |view, _, cx| {
                         let state = view.pickers.read(cx).fixture_compact_state(cx);
-                        assert_eq!(state.reasoning, None);
+                        assert_eq!(state.explicit_reasoning, None);
+                        assert_eq!(state.reasoning, Some(zeron_proto::ReasoningLevel::High));
                         assert!(!state.fast);
                     })?;
                     capture(

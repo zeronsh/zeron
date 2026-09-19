@@ -4966,6 +4966,7 @@ impl Pickers {
 #[cfg(feature = "compact-picker-fixture")]
 pub struct CompactPickerFixtureState {
     pub model_list: bool,
+    pub explicit_reasoning: Option<ReasoningLevel>,
     pub reasoning: Option<ReasoningLevel>,
     pub fast: bool,
     pub focused_model: Option<String>,
@@ -5061,6 +5062,7 @@ impl Pickers {
             .flatten();
         CompactPickerFixtureState {
             model_list: self.compact_model_list,
+            explicit_reasoning: self.config.reasoning,
             reasoning: self.effective_reasoning(cx),
             fast: self
                 .compact_fast_choice(cx)
