@@ -720,7 +720,7 @@ impl HarnessUpdateCoordinator {
             }
             lease = self.inner.registry.update_lease(harness) => lease,
         };
-        if cancel.is_cancelled() {
+        if cancel.is_cancelled() || !self.inner.registry.enabled_set().contains(&harness) {
             drop(lease);
             self.finish_cancelled(harness);
             intent.finish();
@@ -730,7 +730,7 @@ impl HarnessUpdateCoordinator {
             status.phase = HarnessUpdatePhase::Preparing
         });
         tokio::task::yield_now().await;
-        if cancel.is_cancelled() {
+        if cancel.is_cancelled() || !self.inner.registry.enabled_set().contains(&harness) {
             drop(lease);
             self.finish_cancelled(harness);
             intent.finish();
@@ -880,6 +880,14 @@ impl HarnessUpdateCoordinator {
     }
 
     pub fn refresh_enabled(&self) {
+        // Cancel before scheduling checks: checks intentionally skip a provider
+        // that already owns its operation slot while waiting for an active run.
+        let enabled = self.inner.registry.enabled_set();
+        for harness in &self.inner.order {
+            if !enabled.contains(harness) {
+                self.cancel(*harness);
+            }
+        }
         let coordinator = self.clone();
         tokio::spawn(async move {
             coordinator.check_all().await;
@@ -1162,7 +1170,7 @@ impl HarnessUpdateCoordinator {
         )
         .await?;
         validate_codex_package(&staging, version, &install.target)?;
-        if cancel.is_cancelled() {
+        if cancel.is_cancelled() || !self.inner.registry.enabled_set().contains(&harness) {
             return Err("update cancelled".into());
         }
         self.mutate(harness, |status| {
@@ -1300,9 +1308,10 @@ impl HarnessUpdateCoordinator {
     fn finish_cancelled(&self, harness: HarnessId) {
         lock(&self.inner.cancellations).remove(&harness);
         self.inner.registry.end_update(harness);
+        let enabled = self.inner.registry.enabled_set().contains(&harness);
         self.mutate(harness, |status| {
             status.progress = None;
-            status.phase = if status.policy == HarnessUpdatePolicy::Off {
+            status.phase = if !enabled || status.policy == HarnessUpdatePolicy::Off {
                 HarnessUpdatePhase::Dormant
             } else if status.latest_version.is_some() {
                 HarnessUpdatePhase::Available
@@ -1320,7 +1329,10 @@ impl HarnessUpdateCoordinator {
     }
 
     fn persist_preferences(&self) {
-        let json = match serde_json::to_string_pretty(&*lock(&self.inner.prefs)) {
+        // Keep snapshot order and replacement order identical. Every writer
+        // shares this lock and temporary path, including successful updates.
+        let prefs = lock(&self.inner.prefs);
+        let json = match serde_json::to_string_pretty(&*prefs) {
             Ok(json) => json,
             Err(error) => {
                 tracing::warn!(%error, "harness update preferences serialize failed");
@@ -1976,6 +1988,76 @@ esac
         })
         .await
         .unwrap_or_else(|_| panic!("expected {phase:?}, got {:?}", coordinator.status(harness)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disabling_an_agent_cancels_its_waiting_automatic_update() {
+        use zeron_proto::HarnessUpdatePolicy;
+        let (temp, coordinator) = automatic_fixture();
+        let registry = &coordinator.inner.registry;
+        registry.register(Arc::new(ExecutableHarness(
+            temp.path().join("agent"),
+            HarnessId::Codex,
+        )));
+        let running = registry.execution_lease(HarnessId::Grok).await;
+        coordinator.mutate(HarnessId::Grok, |status| {
+            status.policy = HarnessUpdatePolicy::AutoWhenIdle;
+            status.phase = HarnessUpdatePhase::Available;
+            status.can_apply = true;
+            status.latest_version = Some("2.0.0".into());
+        });
+        coordinator.schedule_automatic_update(HarnessId::Grok);
+        wait_for_phase(
+            &coordinator,
+            HarnessId::Grok,
+            HarnessUpdatePhase::WaitingForIdle,
+        )
+        .await;
+        registry.set_enabled(HarnessId::Grok, false).unwrap();
+        coordinator.refresh_enabled();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while registry.update_pending(HarnessId::Grok) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("disable cancels the idle wait before the active run finishes");
+        drop(running);
+        coordinator.shutdown().await;
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("version")).unwrap(),
+            "1.0.0\n"
+        );
+    }
+
+    #[test]
+    fn concurrent_preferences_persist_the_latest_complete_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let coordinator =
+            super::HarnessUpdateCoordinator::new(temp.path(), Arc::new(HarnessRegistry::new()));
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                let coordinator = &coordinator;
+                scope.spawn(move || {
+                    for revision in 0..100 {
+                        super::lock(&coordinator.inner.prefs)
+                            .dismissed_versions
+                            .insert(HarnessId::Codex, format!("{worker}.{revision}.0"));
+                        coordinator.persist_preferences();
+                        let bytes = std::fs::read(&coordinator.inner.prefs_path).unwrap();
+                        serde_json::from_slice::<super::Preferences>(&bytes)
+                            .expect("atomic complete JSON");
+                    }
+                });
+            }
+        });
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&coordinator.inner.prefs_path).unwrap()).unwrap();
+        assert_eq!(
+            saved,
+            serde_json::to_value(&*super::lock(&coordinator.inner.prefs)).unwrap()
+        );
     }
 
     #[cfg(unix)]

@@ -182,10 +182,15 @@ impl TitleGenerator {
         let model = match settings.model {
             Some(model) => Some(model),
             None => cheapest_model(
-                &tokio::time::timeout(std::time::Duration::from_secs(10), harness.models())
-                    .await
-                    .ok()?
-                    .unwrap_or_default(),
+                &tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    self.inner
+                        .registry
+                        .discover_models_with_lease(harness_id, execution_lease.clone()),
+                )
+                .await
+                .ok()?
+                .unwrap_or_default(),
             ),
         };
         let title_prompt = format!(

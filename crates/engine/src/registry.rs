@@ -151,6 +151,48 @@ impl Default for HarnessRegistry {
 }
 
 impl HarnessRegistry {
+    pub async fn discover_models(
+        &self,
+        id: HarnessId,
+    ) -> Result<Vec<zeron_proto::Model>, HarnessError> {
+        let lease = Arc::new(self.execution_lease(id).await);
+        self.discover_models_with_lease(id, lease).await
+    }
+
+    /// A caller such as titling already holds a lease. Reacquiring after an
+    /// update queues would deadlock it against its own existing reader.
+    pub(crate) async fn discover_models_with_lease(
+        &self,
+        id: HarnessId,
+        lease: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
+    ) -> Result<Vec<zeron_proto::Model>, HarnessError> {
+        let harness = self.resolve(id)?;
+        tokio::spawn(async move {
+            // An RPC cancellation must not drop the gate before the probe's
+            // own deadline and child cleanup finish.
+            let _lease = lease;
+            harness.models().await
+        })
+        .await
+        .map_err(|error| HarnessError::Protocol(format!("model discovery task failed: {error}")))?
+    }
+
+    pub async fn discover_commands(
+        &self,
+        id: HarnessId,
+    ) -> Result<Vec<zeron_proto::SlashCommand>, HarnessError> {
+        let lease = self.execution_lease(id).await;
+        let harness = self.resolve(id)?;
+        tokio::spawn(async move {
+            let _lease = lease;
+            harness.commands().await
+        })
+        .await
+        .map_err(|error| {
+            HarnessError::Protocol(format!("command discovery task failed: {error}"))
+        })?
+    }
+
     pub fn new() -> Self {
         let (update_generation, _) = tokio::sync::watch::channel(0);
         Self {
@@ -1192,6 +1234,107 @@ mod title_tests {
 #[cfg(test)]
 mod gate_tests {
     use super::*;
+
+    struct DiscoveryHarness {
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    #[async_trait::async_trait]
+    impl Harness for DiscoveryHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::Codex
+        }
+        fn display_name(&self) -> &str {
+            "Discovery fixture"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> SteeringMode {
+            SteeringMode::TurnBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<zeron_proto::Model>, HarnessError> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(vec![])
+        }
+        async fn commands(&self) -> Result<Vec<zeron_proto::SlashCommand>, HarnessError> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            _: zeron_proto::RunRequest,
+            _: zeron_harness::RunControls,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<AgentEvent, HarnessError>>,
+            HarnessError,
+        > {
+            unreachable!("discovery must not start a conversation")
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_waits_for_updates_and_keeps_lease_after_caller_cancellation() {
+        use std::time::Duration;
+        for commands in [false, true] {
+            let registry = Arc::new(HarnessRegistry::new());
+            let harness = Arc::new(DiscoveryHarness {
+                started: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            });
+            registry.register(harness.clone());
+            registry.begin_update(HarnessId::Codex);
+            let installing = registry.update_lease(HarnessId::Codex).await;
+            let caller = tokio::spawn({
+                let registry = registry.clone();
+                async move {
+                    if commands {
+                        registry
+                            .discover_commands(HarnessId::Codex)
+                            .await
+                            .map(|_| ())
+                    } else {
+                        registry.discover_models(HarnessId::Codex).await.map(|_| ())
+                    }
+                }
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), harness.started.notified())
+                    .await
+                    .is_err()
+            );
+            drop(installing);
+            registry.end_update(HarnessId::Codex);
+            tokio::time::timeout(Duration::from_secs(1), harness.started.notified())
+                .await
+                .unwrap();
+            caller.abort();
+            assert!(caller.await.unwrap_err().is_cancelled());
+            registry.begin_update(HarnessId::Codex);
+            let mut writer = tokio::spawn({
+                let registry = registry.clone();
+                async move { registry.update_lease(HarnessId::Codex).await }
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), &mut writer)
+                    .await
+                    .is_err()
+            );
+            harness.release.notify_one();
+            drop(
+                tokio::time::timeout(Duration::from_secs(1), writer)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+            registry.end_update(HarnessId::Codex);
+        }
+    }
 
     #[tokio::test]
     async fn queued_update_writer_precedes_later_dispatches() {

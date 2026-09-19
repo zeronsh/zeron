@@ -1443,12 +1443,9 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_MODELS => {
                 let p: ListModelsParams = parse_params(params)?;
-                let harness = self
+                let models = self
                     .registry
-                    .resolve(p.harness)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let models = harness
-                    .models()
+                    .discover_models(p.harness)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&models)
@@ -1461,12 +1458,9 @@ impl RpcService for EngineRpc {
                 // no listing (cursor, mock) fall through to the trait's
                 // empty default.
                 let p: ListModelsParams = parse_params(params)?;
-                let harness = self
+                let commands = self
                     .registry
-                    .resolve(p.harness)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let commands = harness
-                    .commands()
+                    .discover_commands(p.harness)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&commands)

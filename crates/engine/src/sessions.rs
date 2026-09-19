@@ -51,6 +51,8 @@ pub struct JournaledEvent {
 pub enum SteerOutcome {
     /// Delivered into the live run's steering mailbox.
     Accepted,
+    /// A live run owns the turn, but an update prevents accepting another prompt.
+    DeferredByUpdate,
     /// No live steerable run — the caller should dispatch the prompt as a new turn.
     NotSteerable,
 }
@@ -544,6 +546,16 @@ impl SessionsEngine {
         prompt: &str,
         message_id: Option<String>,
     ) -> Result<SteerOutcome, EngineError> {
+        self.steer_at(chat_id, prompt, message_id, now_ms()).await
+    }
+
+    pub(crate) async fn steer_at(
+        &self,
+        chat_id: &str,
+        prompt: &str,
+        message_id: Option<String>,
+        issued_at: i64,
+    ) -> Result<SteerOutcome, EngineError> {
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .filter(|h| h.steerable)
@@ -576,11 +588,14 @@ impl SessionsEngine {
             });
             true
         });
-        if accepted != Some(true) {
+        if accepted.is_none() {
+            return Ok(SteerOutcome::DeferredByUpdate);
+        }
+        if accepted == Some(false) {
             return Ok(SteerOutcome::NotSteerable);
         }
         let handle = self.doc_handle(chat_id)?;
-        handle.write_user_message(&user_id, prompt, now_ms())?;
+        handle.write_user_message(&user_id, prompt, issued_at.min(now_ms()))?;
         // A routed steer is a turn too. Fired here (not only on the confirmed
         // path) — a reclaim falls back to dispatch, which just re-snapshots.
         if let Some(request) = self.last_request(chat_id) {

@@ -219,6 +219,151 @@ fn assemble(dir: &std::path::Path, harness: Arc<dyn Harness>) -> EngineCore {
 }
 
 #[tokio::test]
+async fn update_deferred_steering_preserves_the_active_turn_and_queued_prompt() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct HoldsTurn {
+        events: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<AgentEvent>>>,
+        starts: AtomicUsize,
+    }
+    #[async_trait]
+    impl Harness for HoldsTurn {
+        fn id(&self) -> HarnessId {
+            HarnessId::Mock
+        }
+        fn display_name(&self) -> &str {
+            "Step-boundary fixture"
+        }
+        fn supports_steering(&self) -> bool {
+            true
+        }
+        fn steering_mode(&self) -> SteeringMode {
+            SteeringMode::StepBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            request: RunRequest,
+            controls: RunControls,
+        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            let events = self.events.lock().unwrap().take();
+            if let Some(events) = events {
+                Ok(
+                    futures::stream::unfold((events, controls), |(mut rx, controls)| async move {
+                        rx.recv().await.map(|event| (Ok(event), (rx, controls)))
+                    })
+                    .boxed(),
+                )
+            } else {
+                MockHarness {
+                    script: mock_script(),
+                }
+                .run(request, controls)
+                .await
+            }
+        }
+    }
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let harness = Arc::new(HoldsTurn {
+        events: std::sync::Mutex::new(Some(rx)),
+        starts: AtomicUsize::new(0),
+    });
+    let registry = registry_with(harness.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(dir.path(), registry.clone(), HarnessId::Mock, None).unwrap();
+    let handle = core.doc_host.open(CHAT).unwrap();
+    core.sessions
+        .dispatch(
+            CHAT,
+            HarnessId::Mock,
+            run_request("opening"),
+            Some("opening".into()),
+        )
+        .await
+        .unwrap();
+    tx.send(mock_script()[0].clone()).unwrap();
+    wait_for(
+        || harness.starts.load(Ordering::SeqCst) == 1,
+        "first turn starts",
+    )
+    .await;
+    registry.begin_update(HarnessId::Mock);
+    queue_as_viewer(
+        handle.doc(),
+        "deferred-steer",
+        SessionCommandPayload::Steer {
+            prompt: "follow up".into(),
+            message_id: Some("follow-up".into()),
+        },
+    );
+    wait_for(
+        || {
+            matches!(
+                command_status(&core, "deferred-steer"),
+                Some((SessionCommandStatus::Applied, _))
+            )
+        },
+        "steer retained",
+    )
+    .await;
+    assert_eq!(harness.starts.load(Ordering::SeqCst), 1);
+    assert!(core.sessions.turn_in_flight(CHAT));
+    assert!(
+        handle
+            .doc()
+            .read_queue()
+            .unwrap()
+            .iter()
+            .any(|row| row.id == "follow-up")
+    );
+    assert!(
+        !handle
+            .doc()
+            .read_entries()
+            .unwrap()
+            .iter()
+            .any(|row| row.id == "follow-up")
+    );
+    // Explicit queued-row steering must also preserve the row and active turn.
+    assert!(
+        core.doc_host
+            .steer_queued_now(CHAT, "follow-up")
+            .await
+            .is_err()
+    );
+    assert!(
+        handle
+            .doc()
+            .read_queue()
+            .unwrap()
+            .iter()
+            .any(|row| row.id == "follow-up")
+    );
+    tx.send(done(DoneStatus::Completed)).unwrap();
+    let installing = tokio::time::timeout(
+        Duration::from_secs(2),
+        registry.update_lease(HarnessId::Mock),
+    )
+    .await
+    .unwrap();
+    assert_eq!(harness.starts.load(Ordering::SeqCst), 1);
+    drop(installing);
+    registry.end_update(HarnessId::Mock);
+    wait_for(
+        || harness.starts.load(Ordering::SeqCst) == 2,
+        "queued prompt runs after update",
+    )
+    .await;
+    assert!(handle.doc().read_queue().unwrap().is_empty());
+    core.shutdown().await;
+}
+
+#[tokio::test]
 async fn pending_update_does_not_block_dispatch_or_other_harnesses() {
     struct RecordingHarness(HarnessId, Arc<std::sync::Mutex<Vec<String>>>);
     #[async_trait]
