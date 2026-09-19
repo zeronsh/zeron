@@ -10,3 +10,5 @@ node_modules
 .wrangler
 build/
 edge/dist/
+/result
+/result-*

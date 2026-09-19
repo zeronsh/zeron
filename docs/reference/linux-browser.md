@@ -14,6 +14,8 @@ On Fedora:
 sudo dnf install webkit2gtk4.1 json-glib
 ```
 
+On NixOS, the flake package (`nix profile install github:zeronsh/zeron`) builds the helper against WebKitGTK from nixpkgs and keeps it in the package closure, so nothing needs to be installed separately.
+
 Zeron starts its browser helper when a page is first opened. The main application does not link to GTK or WebKit, so other app features remain available if the browser runtime is missing. WebKit runs in a separate process and uses an ephemeral website-data context shared by the open tabs.
 
 The helper sends live offscreen frames to GPUI, which draws the page alongside the rest of the app. Both X11 and Wayland use this path, including clipping, sidebar transitions, tooltips, and frosted overlays. It uses CPU-addressable frames rather than embedding a separate native browser window. Animated pages therefore incur frame-copy and texture-upload work.
