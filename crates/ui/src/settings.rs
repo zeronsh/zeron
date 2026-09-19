@@ -24,6 +24,7 @@ pub mod devices;
 pub mod files;
 pub mod harnesses;
 pub mod notifications;
+pub mod profile;
 pub mod shortcuts;
 pub mod widgets;
 
@@ -606,6 +607,8 @@ impl WindowGeometry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
+    pub profile: profile::Profile,
+    pub blur_emails: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_geometry: Option<WindowGeometry>,
     /// Submit using Enter or the platform modifier plus Enter.
@@ -749,6 +752,8 @@ pub struct UiSettings {
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
+            profile: profile::Profile::default(),
+            blur_emails: false,
             window_geometry: None,
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
@@ -1967,6 +1972,8 @@ mod tests {
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
+            profile: profile::Profile::default(),
+            blur_emails: true,
             window_geometry: None,
             sidebar_width: 300.0,
             sidebar_collapsed: true,

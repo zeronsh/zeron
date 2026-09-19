@@ -199,6 +199,17 @@ pub struct AccountsPage {
 }
 
 impl AccountsPage {
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture(
+        state: Entity<AppState>,
+        snapshot: AgentAccountsSnapshot,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut page = Self::new(state, cx);
+        page.snapshot = Loadable::Ready(snapshot);
+        page
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |_, _, cx| cx.notify());
         let code_input = cx.new(|cx| ComposerInput::new("Paste the authorization code", cx));
@@ -890,7 +901,7 @@ impl AccountsPage {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(widgets::row_title(theme, email))
+                    .child(widgets::row_title(theme, "").child(crate::privacy::identity(email, cx)))
                     .map(|el| {
                         // Meters XOR the quiet fallback line — never both
                         // (zeron: `usage ? meters : "Usage unavailable"…`).

@@ -44,6 +44,7 @@ mod notice;
 pub mod notify;
 pub mod pickers;
 pub mod popover;
+pub mod privacy;
 pub mod queue;
 pub mod rail;
 pub mod settings;
@@ -159,6 +160,7 @@ pub fn run_app(config: UiConfig) {
         let data_dir = config.boot().data_dir.clone();
         let ui_settings = settings::UiSettings::load(&data_dir);
         settings::init(ui_settings.clone(), data_dir.clone(), cx);
+        settings::profile::refresh_github(cx);
         let font_availability = typography::register_fonts(cx);
         // Typography first: theme installation reads the effective family, so
         // the first frame has the final font and palette without a flash.
