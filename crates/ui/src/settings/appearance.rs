@@ -3112,6 +3112,33 @@ impl Render for AppearancePage {
                 )
                 .into_any_element(),
         );
+        settings_rows.push(
+            widgets::card_row(&theme, false)
+                .child(widgets::row_tile(&theme, icons::WIDGET))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Reveal sidebar on hover"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![div()
+                                .child("Show the collapsed sidebar when hovering over the left edge.")
+                                .into_any_element()],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, ui_settings.sidebar_hover_enabled)
+                        .id("sidebar-hover-toggle")
+                        .cursor_pointer()
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            let enabled = crate::settings::sidebar_hover_enabled(cx);
+                            crate::settings::set_sidebar_hover_enabled(!enabled, cx);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        );
         let background_available = current_background
             .as_ref()
             .is_some_and(|background| Path::new(&background.path).is_file());
