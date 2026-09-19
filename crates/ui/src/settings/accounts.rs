@@ -719,7 +719,7 @@ impl AccountsPage {
             .text_color(theme.text_muted.opacity(0.7))
             .child(
                 div()
-                    .w(px(48.0))
+                    .w(crate::typography::ui_rems(96.0))
                     .flex_none()
                     .truncate()
                     .child(SharedString::from(window.label.clone())),
@@ -747,7 +747,8 @@ impl AccountsPage {
             )
             .child(
                 div()
-                    .w(px(64.0))
+                    .w(crate::typography::ui_rems(70.0))
+                    .whitespace_nowrap()
                     .flex_none()
                     .text_right()
                     .child(SharedString::from(format!(

@@ -1452,8 +1452,8 @@ impl AgentAccounts {
             .json()
             .await
             .ok()?;
-        cursor_usage_window(&body).map(|window| UsageSnapshot {
-            windows: vec![window],
+        cursor_usage_windows(&body).map(|windows| UsageSnapshot {
+            windows,
             plan_label: None,
         })
     }
@@ -1915,15 +1915,37 @@ fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
     })
 }
 
-/// The billing-cycle window from Cursor's `GetCurrentPeriodUsage`. The blended
-/// percent is derived from spend/limit in cents: the payload's own
-/// `totalPercentUsed` disagrees with the number Cursor's UI narrates ("You've
-/// used 72% of your included usage" against `totalSpend`/`limit`, not the
-/// precomputed 11.5). proto3 JSON omits zero-valued fields, so an absent
-/// `limit` means unusable, not 0% — a synthetic 0% would render a healthy bar
-/// for an account whose usage nobody knows.
-fn cursor_usage_window(body: &serde_json::Value) -> Option<AgentUsageWindow> {
-    let plan = body.get("planUsage")?;
+/// Cursor reports separate model pools. The legacy dollar allowance does not
+/// describe their quotas, so spend/limit is only a fallback for older responses.
+fn cursor_usage_windows(body: &serde_json::Value) -> Option<Vec<AgentUsageWindow>> {
+    let plan = body.get("planUsage")?.as_object()?;
+    let resets_at = json_ms(body.get("billingCycleEnd"));
+    if plan.get("autoPercentUsed").is_some()
+        || plan.get("apiPercentUsed").is_some()
+        || body
+            .get("autoBucketModels")
+            .and_then(|v| v.as_array())
+            .is_some()
+    {
+        return [
+            ("Cursor Models", "autoPercentUsed"),
+            ("Other Models", "apiPercentUsed"),
+        ]
+        .into_iter()
+        .map(|(label, key)| {
+            // Proto3 JSON omits zero-valued percentages.
+            let used = match plan.get(key) {
+                Some(value) => value.as_f64()?,
+                None => 0.0,
+            };
+            Some(AgentUsageWindow {
+                label: label.to_string(),
+                used_fraction: (used / 100.0) as f32,
+                resets_at,
+            })
+        })
+        .collect();
+    }
     let limit = plan.get("limit").and_then(|v| v.as_f64())?;
     if limit <= 0.0 {
         return None;
@@ -1932,11 +1954,11 @@ fn cursor_usage_window(body: &serde_json::Value) -> Option<AgentUsageWindow> {
         .get("totalSpend")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
-    Some(AgentUsageWindow {
+    Some(vec![AgentUsageWindow {
         label: "Month".to_string(),
         used_fraction: (used / limit) as f32,
-        resets_at: json_ms(body.get("billingCycleEnd")),
-    })
+        resets_at,
+    }])
 }
 
 /// Unix-millis timestamp arriving as a JSON number or proto3 int64 string.
@@ -2190,7 +2212,70 @@ mod tests {
     }
 
     #[test]
-    fn cursor_usage_window_derives_percent_from_spend_not_total_percent() {
+    fn cursor_usage_windows_prefer_model_pools_over_legacy_spend() {
+        let body = serde_json::json!({
+            "billingCycleEnd": "1790935565000",
+            "planUsage": {
+                "totalSpend": 69000,
+                "includedSpend": 2000,
+                "bonusSpend": 67000,
+                "limit": 2000,
+                "autoPercentUsed": 49.57,
+                "apiPercentUsed": 85.11,
+                "totalPercentUsed": 55.25,
+            },
+            "autoBucketModels": ["composer-2.5", "grok-4.6"],
+        });
+        let windows = cursor_usage_windows(&body).expect("windows");
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label, "Cursor Models");
+        assert_eq!(windows[1].label, "Other Models");
+        assert!((windows[0].used_fraction - 0.4957).abs() < 1e-5);
+        assert!((windows[1].used_fraction - 0.8511).abs() < 1e-5);
+        for window in windows {
+            assert_eq!(
+                window.resets_at,
+                chrono::DateTime::<Utc>::from_timestamp_millis(1790935565000)
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_usage_windows_do_not_require_a_legacy_dollar_limit() {
+        let windows = cursor_usage_windows(&serde_json::json!({
+            "planUsage": { "autoPercentUsed": 25, "apiPercentUsed": 75 }
+        }))
+        .unwrap();
+        assert_eq!(windows[0].used_fraction, 0.25);
+        assert_eq!(windows[1].used_fraction, 0.75);
+    }
+
+    #[test]
+    fn cursor_usage_windows_handle_omitted_zero_percentages() {
+        for (plan, expected) in [
+            (serde_json::json!({"autoPercentUsed": 25}), [0.25, 0.0]),
+            (serde_json::json!({"apiPercentUsed": 75}), [0.0, 0.75]),
+            (serde_json::json!({}), [0.0, 0.0]),
+        ] {
+            let windows = cursor_usage_windows(&serde_json::json!({
+                "planUsage": plan,
+                "autoBucketModels": ["composer-2.5"],
+            }))
+            .unwrap();
+            assert_eq!(windows.len(), 2);
+            assert_eq!(windows[0].used_fraction, expected[0]);
+            assert_eq!(windows[1].used_fraction, expected[1]);
+        }
+        assert!(
+            cursor_usage_windows(&serde_json::json!({
+                "planUsage": {"autoPercentUsed": null, "apiPercentUsed": 75}
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn cursor_legacy_usage_derives_percent_from_spend() {
         // Real payload flavor (observed shape): proto3 JSON with string int64
         // cycle bounds. `totalPercentUsed` (11.53) contradicts the derived
         // 28846/40000 = 72.1% that Cursor's own UI narrates — derive.
@@ -2207,7 +2292,8 @@ mod tests {
             },
             "displayMessage": "You've used 72% of your included usage",
         });
-        let window = cursor_usage_window(&body).expect("window");
+        let windows = cursor_usage_windows(&body).expect("windows");
+        let window = &windows[0];
         assert_eq!(window.label, "Month");
         assert!((window.used_fraction - 0.72115).abs() < 1e-5);
         assert_eq!(
@@ -2217,21 +2303,23 @@ mod tests {
     }
 
     #[test]
-    fn cursor_usage_window_absent_limit_is_unusable_not_zero() {
+    fn cursor_legacy_usage_requires_a_positive_limit() {
         // proto3 JSON omits zero-valued fields: an account with no usage-based
         // spend simply lacks `limit` — never render a synthetic 0% bar.
-        assert!(cursor_usage_window(&serde_json::json!({ "planUsage": {} })).is_none());
-        assert!(cursor_usage_window(&serde_json::json!({ "planUsage": { "limit": 0 } })).is_none());
+        assert!(cursor_usage_windows(&serde_json::json!({ "planUsage": {} })).is_none());
+        assert!(
+            cursor_usage_windows(&serde_json::json!({ "planUsage": { "limit": 0 } })).is_none()
+        );
     }
 
     #[test]
-    fn cursor_usage_window_no_spend_is_zero_percent() {
-        let window = cursor_usage_window(&serde_json::json!({
+    fn cursor_legacy_usage_without_spend_is_zero_percent() {
+        let window = cursor_usage_windows(&serde_json::json!({
             "billingCycleEnd": 1771077734000i64,
             "planUsage": { "limit": 40000 },
         }))
         .expect("window");
-        assert_eq!(window.used_fraction, 0.0);
+        assert_eq!(window[0].used_fraction, 0.0);
     }
 
     #[test]
