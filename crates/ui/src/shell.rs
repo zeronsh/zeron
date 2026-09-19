@@ -4414,6 +4414,7 @@ impl Shell {
         self.settings.skills_in_slash_menu = current.skills_in_slash_menu;
         self.settings.reduce_motion = current.reduce_motion;
         self.settings.pause_animations_in_background = current.pause_animations_in_background;
+        self.settings.compact_model_picker = current.compact_model_picker;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
