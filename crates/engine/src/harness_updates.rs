@@ -788,6 +788,9 @@ impl HarnessUpdateCoordinator {
         drop(lease);
         lock(&self.inner.cancellations).remove(&harness);
         self.inner.registry.end_update(harness);
+        // Updated was published before the operation left the active set.
+        // Wake shutdown even if it already consumed that final status frame.
+        self.inner.status_tx.send_modify(|_| {});
         if let Err(error) = &result {
             self.fail(harness, error.clone()).ok();
         } else {
@@ -1621,8 +1624,7 @@ fn extract_version(text: &str) -> Option<String> {
     text.split(|character: char| {
         !(character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '+'))
     })
-    .filter(|candidate| version_numbers(candidate).is_some())
-    .max_by_key(|candidate| version_numbers(candidate).unwrap_or_default())
+    .find(|candidate| version_numbers(candidate).is_some())
     .map(|candidate| candidate.trim_start_matches('v').to_owned())
 }
 
@@ -1789,6 +1791,10 @@ mod tests {
 
     #[test]
     fn extracts_versions_from_vendor_output() {
+        assert_eq!(
+            extract_version("codex 0.155.1 (Node.js v22.4.0)"),
+            Some("0.155.1".into())
+        );
         assert_eq!(
             extract_version("claude 2.1.228 (stable)"),
             Some("2.1.228".into())

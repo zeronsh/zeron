@@ -138,6 +138,7 @@ final class DemoHarnessUpdates {
     }
 
     private func cancel(harness: String, deviceId: String) {
+        guard snapshot(deviceId: deviceId).first(where: { $0.harness == harness })?.cancellable == true else { return }
         let key = "\(deviceId)/\(harness)"
         applyRuns.removeValue(forKey: key)?.task.cancel()
         mutate(harness: harness, deviceId: deviceId) { row in

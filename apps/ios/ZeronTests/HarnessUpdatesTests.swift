@@ -55,6 +55,48 @@ final class HarnessUpdatesTests: XCTestCase {
                           HarnessUpdateAction.apply.pendingKey("claude-code"))
     }
 
+    func testApplyCancellationIsBenignButOtherFailuresRemainVisible() async throws {
+        final class Source: HarnessUpdatesSource {
+            let applyStarted = XCTestExpectation(description: "apply started")
+            var apply: CheckedContinuation<Void, Error>?
+            let failure: String
+            init(_ failure: String) { self.failure = failure }
+            func watchHarnessUpdates(deviceId: String) async throws -> AsyncThrowingStream<[HarnessUpdateStatus], Error> {
+                AsyncThrowingStream { $0.yield([]) }
+            }
+            func harnessUpdateAction(_ action: HarnessUpdateAction, harness: String?, deviceId: String) async throws {
+                switch action {
+                case .apply:
+                    try await withCheckedThrowingContinuation { continuation in
+                        apply = continuation
+                        applyStarted.fulfill()
+                    }
+                case .cancel:
+                    apply?.resume(throwing: RelayError.rpc(failure))
+                    apply = nil
+                case .check: break
+                }
+            }
+        }
+        for failure in ["update cancelled", "permission denied"] {
+            let source = Source(failure)
+            let model = HarnessUpdatesModel()
+            let watch = Task { await model.watch(deviceId: "host", source: source) }
+            defer { watch.cancel() }
+            for _ in 0..<100 where !model.connected {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertTrue(model.connected)
+            let apply = Task { await model.action(.apply, harness: "codex", deviceId: "host", source: source) }
+            await fulfillment(of: [source.applyStarted], timeout: 2)
+            await model.action(.cancel, harness: "codex", deviceId: "host", source: source)
+            await apply.value
+            XCTAssertTrue(model.pending.isEmpty)
+            if failure == "update cancelled" { XCTAssertNil(model.error) }
+            else { XCTAssertTrue(model.error?.contains(failure) == true) }
+        }
+    }
+
     func testDemoFixtureCoversActionableActiveFailedAndManualStates() throws {
         let demo = DemoDataset.standard()
         let device = try XCTUnwrap(demo.devices.first { $0.id == "dev-mac" })
@@ -84,7 +126,15 @@ final class HarnessUpdatesTests: XCTestCase {
         XCTAssertEqual(cancelled?.first { $0.harness == "codex" }?.phase, "available")
         try await firstApply.value
 
-        try await demo.harnessUpdateAction(.apply, harness: "codex", deviceId: "dev-mac")
+        let secondApply = Task { @MainActor in
+            try await demo.harnessUpdateAction(.apply, harness: "codex", deviceId: "dev-mac")
+        }
+        while let rows = try await iterator.next() {
+            if rows.first(where: { $0.harness == "codex" })?.phase == "installing" { break }
+        }
+        // An out-of-phase/programmatic Cancel must not strand an installation.
+        try await demo.harnessUpdateAction(.cancel, harness: "codex", deviceId: "dev-mac")
+        try await secondApply.value
         let completed = demo.harnessUpdates.snapshot(deviceId: "dev-mac")
             .first { $0.harness == "codex" }
         XCTAssertEqual(completed?.phase, "updated")

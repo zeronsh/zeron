@@ -2307,10 +2307,11 @@ impl Shell {
                     })
             })
         };
-        if has_unseen_harness_update {
+        if has_unseen_harness_update && self.harness_update_banner_task.is_none() {
             self.harness_update_banner_task = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 this.update(cx, |this, cx| {
+                    this.harness_update_banner_task = None;
                     let new: Vec<String> = {
                         let state = this.state.read(cx);
                         let device = state.local_device_id.as_deref().unwrap_or("local");
@@ -13304,6 +13305,35 @@ mod right_tab_mouse_regressions {
         let shell = host.read_with(cx, |host, _| host.shell.clone());
         cx.update(|window, cx| window.draw(cx).clear());
         (shell, cx)
+    }
+
+    #[gpui::test]
+    fn update_banner_fires_during_continuous_state_changes(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.settings.notifications_enabled = false;
+            shell.state.update(cx, |state, _| {
+                state.harness_updates = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "harness": "codex", "phase": "available", "latestVersion": "2.0.0",
+                        "policy": "notify", "source": "unknown", "canApply": true
+                    }))
+                    .unwrap(),
+                ];
+            });
+        });
+        for _ in 0..12 {
+            shell.update(cx, |shell, cx| {
+                shell.on_state_changed(&shell.state.clone(), cx)
+            });
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(100));
+        }
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.harness_update_seen.len(), 1);
+            assert!(shell.harness_update_banner_task.is_none());
+        });
     }
 
     #[gpui::test]

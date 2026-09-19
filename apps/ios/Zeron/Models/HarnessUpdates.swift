@@ -124,6 +124,9 @@ final class HarnessUpdatesModel {
             try await source.harnessUpdateAction(action, harness: harness, deviceId: deviceId)
         } catch {
             guard generation == token else { return }
+            // Apply remains in flight while Cancel is a separate RPC. The
+            // host reports that successful cancellation through Apply's error.
+            if action == .apply, case RelayError.rpc("update cancelled") = error { return }
             self.error = "\(error.localizedDescription). Reconnect to check the device’s status before retrying."
         }
     }

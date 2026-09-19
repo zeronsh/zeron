@@ -330,7 +330,8 @@ impl Shell {
     }
 
     fn open_harness_update_steps(&mut self, device: String, cx: &mut Context<Self>) {
-        let target = Some(device);
+        let target = (self.state.read(cx).local_device_id.as_deref() != Some(device.as_str()))
+            .then_some(device);
         self.set_harness_updates_expanded(false, cx);
         self.open_settings(SettingsSection::Harnesses, cx);
         let page = cx.new(|cx| HarnessesPage::new(self.state.clone(), cx));
