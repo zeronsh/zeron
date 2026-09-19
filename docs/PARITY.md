@@ -61,6 +61,7 @@ not built yet).
 | Grok (ACP) | done | Shared `AcpHarness` spec; `grok agent stdio`, turn-boundary steering. |
 | Hermes (ACP) | done | Shared `AcpHarness` spec; `hermes acp` (Nous Research's native ACP server), turn-boundary steering, no effort ladder yet. |
 | Pi (ACP) | done | Shared `AcpHarness` spec; community `pi-acp` adapter (pinned 0.0.33, npx fallback), turn-boundary steering, minimal→max thinking ladder. |
+| opencode | done | Native HTTP/SSE driver (`opencode serve`, the same wire the opencode desktop app speaks; the ACP path was retired). Three dialects detected at boot: 1.x `/global/*` (verified live against 1.18.31), early 2.x `/api/*` (verified live against 2.0.3), and current 2.x (`/api/info`, permission `decision`, command `name`). Step-boundary steering on both 2.x dialects via `delivery:"steer"` prompt admission (1.x degrades to boundary delivery); provider retries ride `session.retry.scheduled`; context window joins the model catalog; the 2.x spawn tool (`subagent`) binds child sessions to the spawn chip. **Live-verified against real 2.0.6 and 1.18.31 binaries** (2026-09-18): streamed turns with ContextUsage windows, a permission ask answered through requestInput (`{decision}` accepted, tool executed), a subagent turn rendering Subagent-tagged traffic, and a mid-turn steer entering a running turn. |
 | Mock harness | done | Scripted event replay; powers tests + the e2e smoke. |
 
 ## §5 Session doc schema

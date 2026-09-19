@@ -584,14 +584,16 @@ pub fn default_registry() -> HarnessRegistry {
     // opencode over its NATIVE HTTP/SSE protocol (the one the opencode
     // desktop app speaks — `opencode serve` + the /global/event bus), same
     // lazy pattern: the static descriptor mirrors OpencodeHarness exactly.
-    // Turn-boundary steering; the effort ladder rides model VARIANTS (the
-    // run sends the first advertised variant id for the picked level).
+    // Step-boundary steering on 2.x wires via `delivery:"steer"` prompt
+    // admission; 1.x servers degrade to boundary delivery through the same
+    // mailbox; the effort ladder rides model VARIANTS (the run sends the
+    // first advertised variant id for the picked level).
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::Opencode,
             name: "OpenCode".into(),
             supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
+            steering_mode: SteeringMode::StepBoundary,
             reasoning_levels: vec![
                 ReasoningLevel::Low,
                 ReasoningLevel::Medium,
@@ -744,7 +746,7 @@ mod tests {
         let opencode = registry.resolve(HarnessId::Opencode).unwrap();
         assert_eq!(opencode.id(), HarnessId::Opencode);
         assert_eq!(opencode.display_name(), "OpenCode");
-        assert_eq!(opencode.steering_mode(), SteeringMode::TurnBoundary);
+        assert_eq!(opencode.steering_mode(), SteeringMode::StepBoundary);
         assert_eq!(
             opencode.reasoning_levels(),
             &[
