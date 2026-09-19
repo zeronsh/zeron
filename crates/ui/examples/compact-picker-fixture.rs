@@ -235,6 +235,13 @@ fn main() -> anyhow::Result<()> {
                     window.update(cx, |view, _, cx| {
                         assert!(view.pickers.read(cx).fixture_compact_state(cx).fast);
                     })?;
+                    pause(cx).await;
+                    capture(
+                        window.into(),
+                        cx,
+                        &output,
+                        "compact-fast-keyboard.png",
+                    )?;
 
                     // Return to Model, enter the list, move by keyboard, and
                     // star the focused model without changing the selection.
