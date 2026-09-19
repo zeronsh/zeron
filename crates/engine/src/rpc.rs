@@ -839,7 +839,10 @@ impl EngineRpc {
         if is_stream_method(method) {
             // Streams are unbounded by design (a quiet WATCH_* is healthy);
             // only unary calls below get the reply deadline.
-            if method == methods::WATCH_CHECKOUT_CHANGE_REQUEST {
+            if matches!(
+                method,
+                methods::WATCH_CHECKOUT_CHANGE_REQUEST | methods::WATCH_HARNESS_UPDATES
+            ) {
                 let rx = match client.subscribe_checked(method, params).await {
                     Ok(rx) => rx,
                     Err(err) => {

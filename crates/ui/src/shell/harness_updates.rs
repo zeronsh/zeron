@@ -871,7 +871,7 @@ impl Shell {
                 loop {
                     let result = engine
                         .client()
-                        .subscribe(
+                        .subscribe_checked(
                             methods::WATCH_HARNESS_UPDATES,
                             serde_json::json!({ "targetDeviceId": device }),
                         )

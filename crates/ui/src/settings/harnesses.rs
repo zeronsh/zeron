@@ -311,7 +311,7 @@ impl HarnessesPage {
                 loop {
                     let subscribed = update_engine
                         .client()
-                        .subscribe(methods::WATCH_HARNESS_UPDATES, update_params.clone())
+                        .subscribe_checked(methods::WATCH_HARNESS_UPDATES, update_params.clone())
                         .await;
                     match subscribed {
                         Ok(mut stream) => {
