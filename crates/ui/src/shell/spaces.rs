@@ -2215,8 +2215,9 @@ impl Shell {
     /// sidebar's current project filter.
     pub(super) fn land_in_space(&mut self, space_id: String, cx: &mut Context<Self>) {
         self.cancel_pinned_session_drag(cx);
-        self.route = Route::Chat;
+        self.set_route(Route::Chat, cx);
         self.focus_composer(cx);
+        self.nav.push(NavEntry::Chat(String::new()));
         // "All" stays as-is; an explicit project filter follows the new
         // project so the first send lands in a visible session.
         if self.settings.space_filter.is_some() {
