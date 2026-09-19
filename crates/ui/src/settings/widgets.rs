@@ -155,11 +155,11 @@ pub const ROW_DESCRIPTION_SIZE: f32 = 12.0;
 pub fn page_column() -> gpui::Div {
     div()
         .w_full()
-        .max_w(px(768.0))
+        .max_w(px(720.0))
         .mx_auto()
         .px(px(24.0))
         .pt(px(32.0))
-        .pb(px(64.0))
+        .pb(px(32.0))
         .flex()
         .flex_col()
 }
@@ -215,11 +215,11 @@ pub fn field_label(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
 /// control works for a density picker, a layout picker or anything else where
 /// the choice is easier to show than to describe. Pair with [`option_card`].
 pub fn option_card_row() -> gpui::Div {
-    div().flex().flex_row().items_start().gap(px(16.0)).w_full()
+    div().flex().flex_row().items_start().gap(px(12.0)).w_full()
 }
 
 /// Default height of an [`option_card`] preview frame.
-pub const OPTION_CARD_HEIGHT: f32 = 148.0;
+pub const OPTION_CARD_HEIGHT: f32 = 88.0;
 /// Corner radius of the preview frame.
 ///
 /// Public because the preview has to round *itself* to this. gpui content masks
@@ -284,45 +284,31 @@ pub fn option_card(
         )
 }
 
-/// Section card: `mt-6 overflow-hidden rounded-xl border border-border bg-card`
-/// — the card tone, thinned to a translucent tint over glass so the card
-/// reads as frost instead of a solid slab ([`Theme::card_glass_bg`]).
-pub fn section_card(theme: &Theme) -> gpui::Div {
-    div()
-        .mt(px(24.0))
-        .rounded(px(12.0))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.card_glass_bg())
-        .overflow_hidden()
-        .flex()
-        .flex_col()
+/// Shared settings groups remain transparent over the modal's single glass
+/// layer. Quiet separators mark rows without nesting another opaque card.
+pub fn section_card(_theme: &Theme) -> gpui::Div {
+    div().mt(px(24.0)).flex().flex_col()
 }
 
-/// One card row: `border-t border-border px-5 py-3.5 first:border-t-0` with the
-/// quiet hover wash.
 pub fn card_row(theme: &Theme, first: bool) -> gpui::Div {
     div()
-        .px(px(20.0))
-        .py(px(14.0))
-        .when(!first, |el| el.border_t_1().border_color(theme.border))
-        .hover(|s| s.bg(ink(0.015)))
+        .py(px(16.0))
+        .when(!first, |el| {
+            el.border_t_1().border_color(theme.border.opacity(0.55))
+        })
         .flex()
         .flex_row()
+        .flex_wrap()
         .items_center()
-        .gap(px(14.0))
+        .gap(px(12.0))
 }
 
-/// The identity tile on a row: `size-9 rounded-[10px] border bg-white/[0.03]`
-/// around a 16px icon.
+/// Bare leading glyphs use the same weight and tint as Zeron's picker rows.
 pub fn row_tile(theme: &Theme, icon_path: &'static str) -> gpui::Div {
     div()
         .flex_none()
-        .size(px(36.0))
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(theme.border)
-        .bg(ink(0.03))
+        .w(px(24.0))
+        .h(px(32.0))
         .flex()
         .items_center()
         .justify_center()
@@ -338,7 +324,6 @@ pub fn row_tile(theme: &Theme, icon_path: &'static str) -> gpui::Div {
 pub fn row_title(theme: &Theme, title: impl Into<SharedString>) -> gpui::Div {
     div()
         .min_w_0()
-        .truncate()
         .text_size(crate::typography::ui_rems(ROW_TITLE_SIZE))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text)
@@ -357,7 +342,7 @@ pub fn meta_line(theme: &Theme, fragments: Vec<AnyElement>) -> gpui::Div {
         .gap_x(px(8.0))
         .gap_y(px(2.0))
         .text_size(crate::typography::ui_rems(ROW_DESCRIPTION_SIZE))
-        .text_color(theme.text_muted.opacity(0.65));
+        .text_color(theme.text_muted.opacity(0.9));
     let mut first = true;
     for fragment in fragments {
         if !first {
@@ -403,26 +388,191 @@ pub fn badge_active(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div 
         .child(label.into())
 }
 
-/// Display-only toggle switch (zeron branch-picker.tsx `Toggle`): an 18×32
-/// pill whose knob slides right and track flips white when on. State is owned
-/// by the parent row — the caller adds `.id(..)` and `.on_click(..)`.
+/// I/O geometry measured from drams.framer.website/drams/001, scaled to 60%:
+/// 79×40 track, 34px bevel, 32px face, 3px inset, 39px travel.
+/// The caller owns activation and accessibility; only the thumb interpolates.
 pub fn toggle_switch(theme: &Theme, on: bool) -> gpui::Div {
     div()
         .flex_none()
-        .w(px(32.0))
-        .h(px(18.0))
-        .rounded_full()
-        .bg(if on { theme.text } else { ink(0.15) })
-        .relative()
-        .child(
-            div()
-                .absolute()
-                .top(px(2.0))
-                .left(px(if on { 16.0 } else { 2.0 }))
-                .size(px(14.0))
-                .rounded_full()
-                .bg(if on { theme.on_solid } else { ink(0.7) }),
-        )
+        .w(px(48.0))
+        .h(px(36.0))
+        .child(SwitchVisual {
+            theme: theme.clone(),
+            on,
+        })
+}
+
+#[derive(IntoElement)]
+struct SwitchVisual {
+    theme: Theme,
+    on: bool,
+}
+
+struct SwitchTravel {
+    from: f32,
+    target: f32,
+    started: std::time::Instant,
+}
+
+impl SwitchTravel {
+    fn value(&self, now: std::time::Instant) -> f32 {
+        let t = (now.duration_since(self.started).as_secs_f32() / 0.18).min(1.0);
+        self.from + (self.target - self.from) * (1.0 - (1.0 - t).powi(3))
+    }
+}
+
+impl RenderOnce for SwitchVisual {
+    fn render(self, window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
+        use gpui::{BoxShadow, linear_color_stop, linear_gradient, point};
+        let now = std::time::Instant::now();
+        let target = if self.on { 1.0 } else { 0.0 };
+        let reduced = crate::motion::reduced_motion(cx);
+        let position = window.with_global_id("io-switch-travel".into(), |id, window| {
+            window.with_element_state(id, |previous: Option<SwitchTravel>, _| {
+                let mut travel = previous.unwrap_or(SwitchTravel {
+                    from: target,
+                    target,
+                    started: now,
+                });
+                let current = travel.value(now);
+                if travel.target != target {
+                    travel = SwitchTravel {
+                        from: current,
+                        target,
+                        started: now,
+                    };
+                }
+                if reduced {
+                    travel.from = target;
+                    travel.target = target;
+                }
+                (travel.value(now), travel)
+            })
+        });
+        if (position - target).abs() > 0.001 {
+            window.request_animation_frame();
+        }
+        let scale = 0.6;
+        let shadow = |y: f32, blur: f32, spread: f32, alpha: f32, inset: bool| BoxShadow {
+            color: gpui::black().opacity(alpha),
+            offset: point(px(0.0), px(y * scale)),
+            blur_radius: px(blur * scale),
+            spread_radius: px(spread * scale),
+            inset,
+        };
+        let gradient = |top, bottom| {
+            linear_gradient(
+                180.0,
+                linear_color_stop(gpui::white().opacity(top), 0.0),
+                linear_color_stop(gpui::white().opacity(bottom), 1.0),
+            )
+        };
+        let track = if self.on {
+            self.theme.accent
+        } else {
+            crate::theme::grey(if self.theme.appearance.is_dark() {
+                0x58
+            } else {
+                0xe3
+            })
+        };
+        div()
+            .relative()
+            .w(px(48.0))
+            .h(px(36.0))
+            .child(
+                div()
+                    .absolute()
+                    .top(px(6.0))
+                    .left_0()
+                    .w(px(79.0 * scale))
+                    .h(px(40.0 * scale))
+                    .rounded_full()
+                    .bg(track)
+                    .shadow(vec![shadow(1.0, 2.0, 0.0, 0.12, true)])
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(12.0 * scale))
+                            .left(px(20.0 * scale))
+                            .w(px(2.0 * scale))
+                            .h(px(16.0 * scale))
+                            .rounded_full()
+                            .bg(gpui::white())
+                            .opacity(position),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(12.0 * scale))
+                            .left(px(52.0 * scale))
+                            .size(px(16.0 * scale))
+                            .rounded_full()
+                            .border(px(3.0 * scale))
+                            .border_color(gpui::white())
+                            .opacity(1.0 - position),
+                    ),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(6.0 + 3.0 * scale))
+                    .left(px((3.0 + 39.0 * position) * scale))
+                    .size(px(34.0 * scale))
+                    .rounded_full()
+                    .bg(gradient(0.85, 0.25))
+                    .shadow(vec![
+                        shadow(1.0, 2.0, -0.5, 0.18, false),
+                        shadow(3.0, 7.0, -1.0, 0.12, false),
+                    ])
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(scale))
+                            .left(px(scale))
+                            .size(px(32.0 * scale))
+                            .rounded_full()
+                            .bg(gradient(0.55, 0.12)),
+                    ),
+            )
+    }
+}
+
+#[cfg(test)]
+mod switch_tests {
+    use super::*;
+    #[test]
+    fn switch_reversal_keeps_current_position_and_settles() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let forward = SwitchTravel {
+            from: 0.0,
+            target: 1.0,
+            started: now,
+        };
+        let halfway = now + Duration::from_millis(90);
+        let current = forward.value(halfway);
+        let reverse = SwitchTravel {
+            from: current,
+            target: 0.0,
+            started: halfway,
+        };
+        assert_eq!(reverse.value(halfway), current);
+        assert_eq!(reverse.value(halfway + Duration::from_millis(180)), 0.0);
+        assert_eq!(forward.value(now + Duration::from_millis(180)), 1.0);
+    }
+}
+
+/// Small choices reuse the selected/hover treatment of the app's picker rows.
+pub fn choice(theme: &Theme, selected: bool, key: impl Into<SharedString>) -> gpui::Div {
+    crate::popover::menu_row(theme, selected, key)
+        .min_h(px(32.0))
+        .px(px(10.0))
+        .font_weight(if selected {
+            gpui::FontWeight::MEDIUM
+        } else {
+            gpui::FontWeight::NORMAL
+        })
 }
 
 /// A small quiet ghost action (`rounded-lg px-2.5 py-1.5 text-[12px]
@@ -507,4 +657,35 @@ pub fn warning_strip(theme: &Theme, message: impl Into<SharedString>) -> gpui::D
             ),
         )
         .child(div().min_w_0().child(message.into()))
+}
+
+/// The sidebar's paint-time overflow fade, with a persistent scroll handle per
+/// settings surface. No fade is painted when the content fits or at a reached edge.
+pub fn scroll_faded(
+    key: impl Into<SharedString>,
+    area: gpui::Stateful<gpui::Div>,
+) -> impl IntoElement {
+    SettingsScroll {
+        key: key.into(),
+        area,
+    }
+}
+
+#[derive(IntoElement)]
+struct SettingsScroll {
+    key: SharedString,
+    area: gpui::Stateful<gpui::Div>,
+}
+
+impl RenderOnce for SettingsScroll {
+    fn render(self, window: &mut gpui::Window, _: &mut gpui::App) -> impl IntoElement {
+        let scroll = window.with_global_id(self.key.into(), |id, window| {
+            window.with_element_state(id, |previous: Option<gpui::ScrollHandle>, _| {
+                let scroll = previous.unwrap_or_default();
+                (scroll.clone(), scroll)
+            })
+        });
+        crate::edge_fade::edge_faded(16.0, true, true, self.area.track_scroll(&scroll))
+            .fade_overflow_y(&scroll)
+    }
 }

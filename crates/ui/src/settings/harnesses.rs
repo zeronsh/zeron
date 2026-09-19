@@ -366,6 +366,11 @@ impl HarnessesPage {
                         })
                         .when(interactive, |el| {
                             el.cursor_pointer()
+                                .tab_index(0)
+                                .role(gpui::Role::Button)
+                                .focus_visible(|s| {
+                                    s.border_2().border_color(theme.accent).opacity(1.0)
+                                })
                                 .on_click(cx.listener(move |page, _, _, cx| {
                                     page.title_menu = if page.title_menu == Some(is_model) {
                                         None
@@ -420,7 +425,12 @@ impl HarnessesPage {
                     );
                 }
                 row =
-                    row.child(
+                    row.child(widgets::scroll_faded(
+                        if is_model {
+                            "title-model-fade"
+                        } else {
+                            "title-harness-fade"
+                        },
                         div()
                             .id(if is_model {
                                 "title-model-options"
@@ -437,13 +447,18 @@ impl HarnessesPage {
                                         format!("title-choice-{is_model}-{ix}"),
                                     )
                                     .id(("title-choice", ix))
+                                    .tab_index(0)
+                                    .role(gpui::Role::Button)
+                                    .focus_visible(|s| {
+                                        s.border_2().border_color(theme.accent).opacity(1.0)
+                                    })
                                     .on_click(cx.listener(move |page, _, _, cx| {
                                         page.load_titles(Some(choice.clone()), cx)
                                     }))
                                     .child(label)
                                 },
                             )),
-                    );
+                    ));
             }
             card = card.child(row);
         }
@@ -745,6 +760,9 @@ impl HarnessesPage {
                         this.device_menu_pressed_open = this.device_menu_open;
                     }),
                 )
+                .tab_index(0)
+                .role(gpui::Role::Button)
+                .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                 .on_click(cx.listener(|this, _, _, cx| {
                     // A press that found the menu open closes it — never
                     // reopen on the same gesture.
@@ -802,6 +820,9 @@ impl HarnessesPage {
                     let pick_id = d.id.clone();
                     popover::menu_row(theme, is_active, format!("harnesses-device-row-{ix}"))
                         .id(("harnesses-device-row", ix))
+                        .tab_index(0)
+                        .role(gpui::Role::Button)
+                        .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             // Local device = no passthrough (calls stay direct).
                             let target = (!pick_local).then(|| pick_id.clone());
@@ -959,7 +980,7 @@ impl HarnessesPage {
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(160.0))
                             .flex()
                             .flex_col()
                             .child(widgets::row_title(&theme, descriptor.name.clone()))
@@ -993,6 +1014,17 @@ impl HarnessesPage {
                             .when(!interactive, |el| el.opacity(0.35))
                             .when(interactive, |el| {
                                 el.cursor_pointer()
+                                    .tab_index(0)
+                                    .role(gpui::Role::Switch)
+                                    .aria_label(descriptor.name.clone())
+                                    .aria_toggled(if enabled {
+                                        gpui::Toggled::True
+                                    } else {
+                                        gpui::Toggled::False
+                                    })
+                                    .focus_visible(|s| {
+                                        s.border_2().border_color(theme.accent).opacity(1.0)
+                                    })
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.toggle(harness, !enabled, cx);
                                     }))
@@ -1042,6 +1074,9 @@ impl Render for HarnessesPage {
                             .id("harnesses-retry")
                             .mt(px(8.0))
                             .hover(|s| widgets::ghost_hover(&theme, s))
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                             .on_click(cx.listener(|page, _, _, cx| {
                                 page.load(cx);
                                 cx.notify();
@@ -1071,7 +1106,7 @@ impl Render for HarnessesPage {
             .size_full()
             .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                div()
+                crate::edge_fade::edge_faded(16.0, true, true, div()
                     .id("harnesses-page")
                     .size_full()
                     .overflow_y_scroll()
@@ -1100,7 +1135,7 @@ impl Render for HarnessesPage {
                             .children(error)
                             .child(body)
                             .child(titles),
-                    ),
+                    )).fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
     }

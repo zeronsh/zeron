@@ -865,6 +865,12 @@ impl AppearancePage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(
+            event.keystroke.key.as_str(),
+            "up" | "down" | "left" | "right" | "home" | "end" | "enter" | "space" | "escape"
+        ) {
+            cx.stop_propagation();
+        }
         let last = kind.size_count() - 1;
         let current = self.selected_size_ix(kind);
         match event.keystroke.key.as_str() {
@@ -1257,38 +1263,14 @@ fn surface_choice(
     surface: SurfacePreference,
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(SharedString::from(format!(
-            "appearance-surface-{}",
-            surface_label(surface).to_lowercase().replace(' ', "-")
-        )))
-        .h(px(30.0))
-        .px(px(10.0))
-        .rounded(px(7.0))
-        .border_1()
-        .border_color(if selected { theme.accent } else { theme.border })
-        .bg(if selected {
-            theme.accent_wash
-        } else {
-            theme.surface_raised.opacity(0.28)
-        })
-        .text_size(crate::typography::ui_rems(11.5))
-        .font_weight(if selected {
-            gpui::FontWeight::MEDIUM
-        } else {
-            gpui::FontWeight::NORMAL
-        })
-        .text_color(if selected {
-            theme.accent
-        } else {
-            theme.text_muted
-        })
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .when(!selected, |control| {
-            control.hover(|style| style.bg(theme.surface_raised_hover))
-        })
+    let id: SharedString = format!(
+        "appearance-surface-{}",
+        surface_label(surface).to_lowercase().replace(' ', "-")
+    )
+    .into();
+    widgets::choice(theme, selected, id.clone())
+        .id(id)
+        .aria_selected(selected)
         .child(surface_label(surface))
 }
 
@@ -1297,38 +1279,14 @@ fn background_effect_choice(
     effect: crate::settings::NewThreadBackgroundEffect,
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(SharedString::from(format!(
-            "new-thread-background-effect-{}",
-            effect.label().to_lowercase()
-        )))
-        .h(px(28.0))
-        .px(px(9.0))
-        .rounded(px(7.0))
-        .border_1()
-        .border_color(if selected { theme.accent } else { theme.border })
-        .bg(if selected {
-            theme.accent_wash
-        } else {
-            theme.surface_raised.opacity(0.28)
-        })
-        .text_size(crate::typography::ui_rems(11.0))
-        .font_weight(if selected {
-            gpui::FontWeight::MEDIUM
-        } else {
-            gpui::FontWeight::NORMAL
-        })
-        .text_color(if selected {
-            theme.accent
-        } else {
-            theme.text_muted
-        })
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .when(!selected, |control| {
-            control.hover(|style| style.bg(theme.surface_raised_hover))
-        })
+    let id: SharedString = format!(
+        "new-thread-background-effect-{}",
+        effect.label().to_lowercase()
+    )
+    .into();
+    widgets::choice(theme, selected, id.clone())
+        .id(id)
+        .aria_selected(selected)
         .child(effect.label())
 }
 
@@ -1465,16 +1423,9 @@ fn compact_action(
     let id = id.into();
     popover::btn_ghost(theme, label, id.clone())
         .id(id)
-        .h(px(28.0))
-        .px(px(9.0))
-        .py(px(0.0))
-        .rounded(px(7.0))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.surface_raised.opacity(0.34))
+        .min_h(px(32.0))
         .flex()
         .items_center()
-        .text_size(crate::typography::ui_rems(11.5))
 }
 
 fn import_scene_preview(variant: &zeron_theme::ThemeVariant) -> AnyElement {
@@ -1576,7 +1527,7 @@ fn import_scene_preview(variant: &zeron_theme::ThemeVariant) -> AnyElement {
         .into_any_element()
 }
 
-fn report_panel(theme: &Theme, report: &ImportReport) -> gpui::Stateful<gpui::Div> {
+fn report_panel(theme: &Theme, report: &ImportReport) -> impl IntoElement {
     let summary = format!(
         "{} mapped · {} adjusted · {} inferred/fallback · {} unsupported · {} warnings · {} validation",
         report.mappings.len(),
@@ -1586,57 +1537,63 @@ fn report_panel(theme: &Theme, report: &ImportReport) -> gpui::Stateful<gpui::Di
         report.warnings.len(),
         report.validation.len(),
     );
-    div()
-        .id(SharedString::from(format!(
-            "theme-report-{}",
-            report.source_hash
-        )))
-        .mt(px(8.0))
-        .w_full()
-        .max_h(px(168.0))
-        .overflow_y_scroll()
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.surface_raised.opacity(0.35))
-        .p(px(10.0))
-        .text_size(crate::typography::ui_rems(11.0))
-        .line_height(px(16.0))
-        .text_color(theme.text_muted)
-        .child(div().text_color(theme.text).child(summary))
-        .children(report.adjustments.iter().map(|adjustment| {
-            div().mt(px(4.0)).child(SharedString::from(format!(
-                "Adjusted · {} {} → {} · {}",
-                adjustment.zeron_role, adjustment.original, adjustment.resolved, adjustment.reason
+    widgets::scroll_faded(
+        format!("theme-report-{}", report.source_hash),
+        div()
+            .id(SharedString::from(format!(
+                "theme-report-{}",
+                report.source_hash
             )))
-        }))
-        .children(report.fallbacks.iter().map(|message| {
-            div()
-                .mt(px(4.0))
-                .child(SharedString::from(format!("Fallback · {message}")))
-        }))
-        .children(report.warnings.iter().map(|message| {
-            div()
-                .mt(px(4.0))
-                .child(SharedString::from(format!("Warning · {message}")))
-        }))
-        .children(report.validation.iter().map(|issue| {
-            div().mt(px(4.0)).child(SharedString::from(format!(
-                "Validation {:?} {:?} · {}",
-                issue.category, issue.severity, issue.message
-            )))
-        }))
-        .children(report.dropped.iter().map(|message| {
-            div()
-                .mt(px(4.0))
-                .child(SharedString::from(format!("Unsupported · {message}")))
-        }))
-        .children(report.mappings.iter().map(|mapping| {
-            div().mt(px(4.0)).child(SharedString::from(format!(
-                "{} ← {}",
-                mapping.zeron_role, mapping.vscode_key
-            )))
-        }))
+            .mt(px(8.0))
+            .w_full()
+            .max_h(px(168.0))
+            .overflow_y_scroll()
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised.opacity(0.35))
+            .p(px(10.0))
+            .text_size(crate::typography::ui_rems(11.0))
+            .line_height(px(16.0))
+            .text_color(theme.text_muted)
+            .child(div().text_color(theme.text).child(summary))
+            .children(report.adjustments.iter().map(|adjustment| {
+                div().mt(px(4.0)).child(SharedString::from(format!(
+                    "Adjusted · {} {} → {} · {}",
+                    adjustment.zeron_role,
+                    adjustment.original,
+                    adjustment.resolved,
+                    adjustment.reason
+                )))
+            }))
+            .children(report.fallbacks.iter().map(|message| {
+                div()
+                    .mt(px(4.0))
+                    .child(SharedString::from(format!("Fallback · {message}")))
+            }))
+            .children(report.warnings.iter().map(|message| {
+                div()
+                    .mt(px(4.0))
+                    .child(SharedString::from(format!("Warning · {message}")))
+            }))
+            .children(report.validation.iter().map(|issue| {
+                div().mt(px(4.0)).child(SharedString::from(format!(
+                    "Validation {:?} {:?} · {}",
+                    issue.category, issue.severity, issue.message
+                )))
+            }))
+            .children(report.dropped.iter().map(|message| {
+                div()
+                    .mt(px(4.0))
+                    .child(SharedString::from(format!("Unsupported · {message}")))
+            }))
+            .children(report.mappings.iter().map(|mapping| {
+                div().mt(px(4.0)).child(SharedString::from(format!(
+                    "{} ← {}",
+                    mapping.zeron_role, mapping.vscode_key
+                )))
+            })),
+    )
 }
 
 fn accent_swatch(
@@ -1684,6 +1641,8 @@ fn accent_swatch(
     };
     div()
         .id(SharedString::from(format!("accent-{}", selection.label())))
+        .aria_label(selection.label())
+        .aria_selected(selected)
         .flex_none()
         .w(px(30.0))
         .h(px(34.0))
@@ -1775,11 +1734,14 @@ impl AppearancePage {
                 popover::menu_row_nav(theme, active, focused, format!("{slug}-font-option-{ix}"))
                     .id(SharedString::from(format!("{slug}-font-option-{ix}")))
                     .when(available, |row| {
-                        row.on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.set_selected_font(kind, family.clone());
-                            this.commit_font(kind, cx);
-                        }))
+                        row.tab_index(0)
+                            .role(gpui::Role::Button)
+                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.set_selected_font(kind, family.clone());
+                                this.commit_font(kind, cx);
+                            }))
                     })
                     .when(!available, |row| row.opacity(0.45))
                     .child(div().flex_1().min_w_0().truncate().child(label))
@@ -1874,12 +1836,17 @@ impl AppearancePage {
             .items_center()
             .gap(px(8.0))
             .cursor_pointer()
-            .track_focus(self.font_focus(kind))
+            .track_focus(&self.font_focus(kind).clone().tab_stop(true))
+            .tab_index(0)
+            .role(gpui::Role::Button)
+            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
             // Only the closed state: once open, the card above owns these keys
             // and stops their propagation before they reach us.
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 if !this.font_menu(kind).is_open() {
-                    this.on_font_key_down(kind, event, window, cx);
+                    if this.on_font_key_down(kind, event, window, cx) {
+                        cx.stop_propagation();
+                    }
                 }
             }))
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -1933,6 +1900,9 @@ impl AppearancePage {
                     format!("{slug}-font-size-option-{ix}"),
                 )
                 .id(SharedString::from(format!("{slug}-font-size-option-{ix}")))
+                .tab_index(0)
+                .role(gpui::Role::Button)
+                .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     this.set_selected_size_ix(kind, ix);
@@ -1981,7 +1951,10 @@ impl AppearancePage {
             .items_center()
             .gap(px(8.0))
             .cursor_pointer()
-            .track_focus(self.size_focus(kind))
+            .track_focus(&self.size_focus(kind).clone().tab_stop(true))
+            .tab_index(0)
+            .role(gpui::Role::Button)
+            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 this.on_size_key_down(kind, event, window, cx)
             }))
@@ -2068,6 +2041,9 @@ impl AppearancePage {
                     this.theme_menu_mut(appearance_kind).note_trigger_press();
                 }),
             )
+            .tab_index(0)
+            .role(gpui::Role::Button)
+            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.theme_menu_mut(appearance_kind).take_press_was_open() {
                     this.close_theme_menu(appearance_kind, cx);
@@ -2140,6 +2116,9 @@ impl AppearancePage {
                             .id(SharedString::from(format!(
                                 "appearance-theme-row-{appearance_kind:?}-{index}"
                             )))
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 appearance::set_theme(appearance_kind, id.clone(), cx);
                                 this.close_theme_menu(appearance_kind, cx);
@@ -2221,6 +2200,9 @@ impl AppearancePage {
                 .when(!active, |control| {
                     control.hover(|style| style.bg(theme.surface_raised_hover))
                 })
+                .tab_index(0)
+                .role(gpui::Role::Button)
+                .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(dialog) = this.import_dialog.as_mut() {
                         dialog.mode = value;
@@ -2304,6 +2286,9 @@ impl AppearancePage {
                             .h(px(36.0))
                             .px(px(12.0))
                             .flex_none()
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                             .on_click(cx.listener(|this, _, _, cx| this.choose_import_source(cx))),
                     ),
             )
@@ -2418,6 +2403,11 @@ impl AppearancePage {
                                                     .text_color(theme.on_accent),
                                             )
                                         })
+                                        .tab_index(0)
+                                        .role(gpui::Role::Button)
+                                        .focus_visible(|s| {
+                                            s.border_2().border_color(theme.accent).opacity(1.0)
+                                        })
                                         .on_click(cx.listener({
                                             let variant_id = variant_id.clone();
                                             move |this, _, _, cx| {
@@ -2459,6 +2449,11 @@ impl AppearancePage {
                                         },
                                         format!("theme-import-review-{variant_id}"),
                                     )
+                                    .tab_index(0)
+                                    .role(gpui::Role::Button)
+                                    .focus_visible(|s| {
+                                        s.border_2().border_color(theme.accent).opacity(1.0)
+                                    })
                                     .on_click(cx.listener({
                                         let variant_id = variant_id.clone();
                                         move |this, _, _, cx| {
@@ -2581,7 +2576,9 @@ impl AppearancePage {
                     .justify_center()
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.surface_raised_hover))
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .tab_index(0).role(gpui::Role::Button)
+.focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+.on_click(cx.listener(|this, _, _, cx| {
                         this.import_dialog = None;
                         cx.notify();
                     }))
@@ -2606,6 +2603,9 @@ impl AppearancePage {
                 compact_action(theme, "Cancel", "theme-import-cancel")
                     .h(px(34.0))
                     .px(px(13.0))
+                    .tab_index(0)
+                    .role(gpui::Role::Button)
+                    .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.import_dialog = None;
                         cx.notify();
@@ -2630,17 +2630,21 @@ impl AppearancePage {
                     button.opacity(0.45)
                 })
                 .when(compilation.is_none() || ready, |button| {
-                    button.on_click(cx.listener(move |this, _, _, cx| {
-                        if this
-                            .import_dialog
-                            .as_ref()
-                            .is_some_and(|dialog| dialog.compilation.is_some())
-                        {
-                            this.finish_import(cx);
-                        } else {
-                            this.compile_import(cx);
-                        }
-                    }))
+                    button
+                        .tab_index(0)
+                        .role(gpui::Role::Button)
+                        .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this
+                                .import_dialog
+                                .as_ref()
+                                .is_some_and(|dialog| dialog.compilation.is_some())
+                            {
+                                this.finish_import(cx);
+                            } else {
+                                this.compile_import(cx);
+                            }
+                        }))
                 }),
             );
 
@@ -2658,6 +2662,7 @@ impl AppearancePage {
                     event.keystroke.modifiers.control,
                 ) {
                     popover::MenuKey::Escape => {
+                        cx.stop_propagation();
                         this.import_dialog = None;
                         cx.notify();
                     }
@@ -2680,7 +2685,7 @@ impl AppearancePage {
                 cx.notify();
             }))
             .child(header)
-            .child(main)
+            .child(widgets::scroll_faded("theme-import-main-fade", main))
             .child(footer)
             .into_any_element();
 
@@ -2725,6 +2730,9 @@ impl AppearancePage {
             div().mt(px(16.0)).flex().justify_end().child(
                 popover::btn_primary(theme, "Done")
                     .id("theme-review-close")
+                    .tab_index(0)
+                    .role(gpui::Role::Button)
+                    .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.review_entry = None;
                         cx.notify();
@@ -2734,7 +2742,7 @@ impl AppearancePage {
         Some(popover::modal(
             "theme-review-dialog",
             viewport,
-            card.into_any_element(),
+            widgets::scroll_faded("theme-review-fade", card).into_any_element(),
         ))
     }
 
@@ -2779,7 +2787,7 @@ impl AppearancePage {
             .child(
                 div()
                     .flex_1()
-                    .min_w_0()
+                    .min_w(px(160.0))
                     .child(widgets::row_title(theme, &entry.name))
                     .child(
                         div()
@@ -2803,20 +2811,27 @@ impl AppearancePage {
                     .gap(px(2.0))
                     .when(linked, |actions| {
                         actions.child(
-                            compact_action(theme, "Reload", format!("theme-reload-{id}")).on_click(
-                                cx.listener({
+                            compact_action(theme, "Reload", format!("theme-reload-{id}"))
+                                .tab_index(0)
+                                .role(gpui::Role::Button)
+                                .focus_visible(|s| {
+                                    s.border_2().border_color(theme.accent).opacity(1.0)
+                                })
+                                .on_click(cx.listener({
                                     let id = id.clone();
                                     move |_, _, _, cx| {
                                         let _ = theme_library::reload(&id, cx);
                                         cx.notify();
                                     }
-                                }),
-                            ),
+                                })),
                         )
                     })
                     .child(
-                        compact_action(theme, "Reveal", format!("theme-reveal-{id}")).on_click(
-                            cx.listener({
+                        compact_action(theme, "Reveal", format!("theme-reveal-{id}"))
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .on_click(cx.listener({
                                 let id = id.clone();
                                 move |this, _, _, cx| {
                                     if let Err(error) = theme_library::reveal(&id, cx) {
@@ -2824,19 +2839,20 @@ impl AppearancePage {
                                     }
                                     cx.notify();
                                 }
-                            }),
-                        ),
+                            })),
                     )
                     .child(
-                        compact_action(theme, "Review", format!("theme-review-{id}")).on_click(
-                            cx.listener({
+                        compact_action(theme, "Review", format!("theme-review-{id}"))
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                            .on_click(cx.listener({
                                 let id = id.clone();
                                 move |this, _, _, cx| {
                                     this.review_entry = Some(id.clone());
                                     cx.notify();
                                 }
-                            }),
-                        ),
+                            })),
                     )
                     .child(
                         compact_action(
@@ -2844,6 +2860,9 @@ impl AppearancePage {
                             "Duplicate as editable",
                             format!("theme-duplicate-{id}"),
                         )
+                        .tab_index(0)
+                        .role(gpui::Role::Button)
+                        .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                         .on_click(cx.listener({
                             let id = id.clone();
                             move |this, _, _, cx| {
@@ -2856,8 +2875,13 @@ impl AppearancePage {
                     )
                     .when(linked, |actions| {
                         actions.child(
-                            compact_action(theme, "Unlink", format!("theme-unlink-{id}")).on_click(
-                                cx.listener({
+                            compact_action(theme, "Unlink", format!("theme-unlink-{id}"))
+                                .tab_index(0)
+                                .role(gpui::Role::Button)
+                                .focus_visible(|s| {
+                                    s.border_2().border_color(theme.accent).opacity(1.0)
+                                })
+                                .on_click(cx.listener({
                                     let id = id.clone();
                                     move |this, _, _, cx| {
                                         if let Err(error) = theme_library::unlink(&id, cx) {
@@ -2865,13 +2889,15 @@ impl AppearancePage {
                                         }
                                         cx.notify();
                                     }
-                                }),
-                            ),
+                                })),
                         )
                     })
                     .child(
                         compact_action(theme, "Remove", format!("theme-remove-{id}"))
                             .text_color(theme.danger)
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Err(error) = theme_library::remove(&id, cx) {
                                     this.library_error = Some(error.to_string().into());
@@ -2898,7 +2924,7 @@ impl AppearancePage {
                 .child(
                     div()
                         .flex_1()
-                        .min_w_0()
+                        .min_w(px(160.0))
                         .child(widgets::row_title(theme, "Theme library"))
                         .child(widgets::meta_line(
                             theme,
@@ -2912,6 +2938,9 @@ impl AppearancePage {
                 .child(
                     popover::btn_primary(theme, "Add theme")
                         .id("theme-library-add")
+                        .tab_index(0)
+                        .role(gpui::Role::Button)
+                        .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                         .on_click(cx.listener(|this, _, _, cx| this.open_import(cx))),
                 )
                 .into_any_element(),
@@ -2985,6 +3014,9 @@ impl Render for AppearancePage {
                     preview(mode, &current_themes, current_accent, current_surface),
                 )
                 .id(SharedString::from(format!("appearance-{}", mode.label())))
+                .tab_index(0)
+                .role(gpui::Role::Button)
+                .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                 .on_click(cx.listener(move |_, _, _, cx| {
                     appearance::set_mode(mode, cx);
                     cx.notify();
@@ -3009,14 +3041,14 @@ impl Render for AppearancePage {
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(160.0))
                             .child(widgets::row_title(&theme, label))
                             .child(widgets::meta_line(
                                 &theme,
                                 vec![
                                     div()
                                         .child(SharedString::from(
-                                            "Used whenever this appearance is active.",
+                                            "Applied when this color scheme is active.",
                                         ))
                                         .into_any_element(),
                                 ],
@@ -3033,23 +3065,27 @@ impl Render for AppearancePage {
             .into_iter()
             .map(|selection| {
                 let selected = selection == current_accent;
-                accent_swatch(&theme, selection, selected).on_click(cx.listener(
-                    move |_, _, _, cx| {
+                accent_swatch(&theme, selection, selected)
+                    .tab_index(0)
+                    .role(gpui::Role::Button)
+                    .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                    .on_click(cx.listener(move |_, _, _, cx| {
                         appearance::set_accent(selection, cx);
                         cx.notify();
-                    },
-                ))
+                    }))
             })
             .collect::<Vec<_>>();
         let surface_controls = SurfacePreference::ALL
             .into_iter()
             .map(|surface| {
-                surface_choice(&theme, surface, surface == current_surface).on_click(cx.listener(
-                    move |_, _, _, cx| {
+                surface_choice(&theme, surface, surface == current_surface)
+                    .tab_index(0)
+                    .role(gpui::Role::Button)
+                    .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+                    .on_click(cx.listener(move |_, _, _, cx| {
                         appearance::set_surface(surface, cx);
                         cx.notify();
-                    },
-                ))
+                    }))
             })
             .collect::<Vec<_>>();
         let mut settings_rows = theme_rows;
@@ -3059,7 +3095,7 @@ impl Render for AppearancePage {
                 .child(
                     div()
                         .flex_1()
-                        .min_w_0()
+                        .min_w(px(160.0))
                         .child(widgets::row_title(&theme, "Accent color"))
                         .child(widgets::meta_line(
                             &theme,
@@ -3072,11 +3108,12 @@ impl Render for AppearancePage {
                 )
                 .child(
                     div()
-                        .flex_none()
-                        .ml(px(10.0))
+                        .w_full()
+                        .pl(px(36.0))
                         .flex()
+                        .flex_wrap()
                         .items_center()
-                        .gap(px(6.0))
+                        .gap(px(8.0))
                         .children(accent_controls),
                 )
                 .into_any_element(),
@@ -3087,7 +3124,7 @@ impl Render for AppearancePage {
                 .child(
                     div()
                         .flex_1()
-                        .min_w_0()
+                        .min_w(px(160.0))
                         .child(widgets::row_title(&theme, "Glass"))
                         .child(widgets::meta_line(
                             &theme,
@@ -3103,11 +3140,12 @@ impl Render for AppearancePage {
                 )
                 .child(
                     div()
-                        .flex_none()
-                        .ml(px(10.0))
+                        .w_full()
+                        .pl(px(36.0))
                         .flex()
+                        .flex_wrap()
                         .items_center()
-                        .gap(px(6.0))
+                        .gap(px(8.0))
                         .children(surface_controls),
                 )
                 .into_any_element(),
@@ -3162,17 +3200,18 @@ impl Render for AppearancePage {
                 .child(
                     div()
                         .flex_1()
-                        .min_w_0()
+                        .min_w(px(160.0))
                         .child(widgets::row_title(&theme, "New thread composer background"))
                         .child(widgets::meta_line(&theme, background_meta)),
                 )
                 .child(
                     div()
-                        .flex_none()
-                        .ml(px(10.0))
+                        .w_full()
+                        .pl(px(36.0))
                         .flex()
+                        .flex_wrap()
                         .items_center()
-                        .gap(px(6.0))
+                        .gap(px(8.0))
                         .when(current_background.is_some(), |actions| {
                             actions
                                 .child(
@@ -3181,6 +3220,11 @@ impl Render for AppearancePage {
                                         "Replace image",
                                         "new-thread-background-replace",
                                     )
+                                    .tab_index(0)
+                                    .role(gpui::Role::Button)
+                                    .focus_visible(|s| {
+                                        s.border_2().border_color(theme.accent).opacity(1.0)
+                                    })
                                     .on_click(cx.listener(
                                         |this, _, _, cx| this.choose_new_thread_background(cx),
                                     )),
@@ -3192,6 +3236,11 @@ impl Render for AppearancePage {
                                         "new-thread-background-remove",
                                     )
                                     .text_color(theme.danger)
+                                    .tab_index(0)
+                                    .role(gpui::Role::Button)
+                                    .focus_visible(|s| {
+                                        s.border_2().border_color(theme.accent).opacity(1.0)
+                                    })
                                     .on_click(cx.listener(
                                         |this, _, _, cx| this.remove_new_thread_background(cx),
                                     )),
@@ -3204,6 +3253,11 @@ impl Render for AppearancePage {
                                     "Choose image",
                                     "new-thread-background-choose",
                                 )
+                                .tab_index(0)
+                                .role(gpui::Role::Button)
+                                .focus_visible(|s| {
+                                    s.border_2().border_color(theme.accent).opacity(1.0)
+                                })
                                 .on_click(cx.listener(
                                     |this, _, _, cx| this.choose_new_thread_background(cx),
                                 )),
@@ -3217,6 +3271,9 @@ impl Render for AppearancePage {
                 .into_iter()
                 .map(|effect| {
                     background_effect_choice(&theme, effect, effect == current_background_effect)
+                        .tab_index(0)
+                        .role(gpui::Role::Button)
+                        .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                         .on_click(cx.listener(move |_, _, _, cx| {
                             crate::settings::set_new_thread_background_effect(effect, cx);
                             cx.notify();
@@ -3229,7 +3286,7 @@ impl Render for AppearancePage {
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(160.0))
                             .child(widgets::row_title(&theme, "Background effect"))
                             .child(widgets::meta_line(
                                 &theme,
@@ -3382,7 +3439,7 @@ impl Render for AppearancePage {
             .size_full()
             .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                div()
+                crate::edge_fade::edge_faded(16.0, true, true, div()
                     .id("appearance-page")
                     .size_full()
                     .overflow_y_scroll()
@@ -3404,7 +3461,7 @@ impl Render for AppearancePage {
                                     .flex()
                                     .flex_col()
                                     .gap(px(12.0))
-                                    .child(widgets::field_label(&theme, "Appearance"))
+                                    .child(widgets::field_label(&theme, "Color scheme"))
                                     .child(widgets::option_card_row().children(cards)),
                             )
                             .child(widgets::section_card(&theme).children(settings_rows))
@@ -3418,7 +3475,7 @@ impl Render for AppearancePage {
                                         .child(warning),
                                 )
                             }),
-                    ),
+                    )).fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
             .children(modal)

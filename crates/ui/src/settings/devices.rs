@@ -159,6 +159,16 @@ impl DevicesPage {
         let dialog = self.rename.as_ref()?;
         let input = dialog.input.clone();
         let card = popover::dialog_card(&theme)
+            .id("rename-device-card")
+            .role(gpui::Role::Dialog)
+            .aria_label("Rename device")
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    this.rename = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+            }))
             .child(popover::dialog_title(&theme, "Rename device"))
             .child(
                 div()
@@ -175,6 +185,9 @@ impl DevicesPage {
                     .child(
                         popover::btn_ghost(&theme, "Cancel", "rename-cancel")
                             .id("rename-cancel")
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.rename = None;
                                 cx.notify();
@@ -183,6 +196,9 @@ impl DevicesPage {
                     .child(
                         popover::btn_primary(&theme, "Rename")
                             .id("rename-save")
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                             .on_click(cx.listener(|this, _, _, cx| this.submit_rename(cx))),
                     ),
             )
@@ -338,6 +354,7 @@ impl Render for DevicesPage {
                 meta.push(
                     div()
                         .id(("device-id", ix))
+                        .aria_label(format!("Copy device ID {}", device.id))
                         .font_family(theme.font_mono.clone())
                         .text_size(crate::typography::ui_rems(10.5))
                         .text_color(if id_copied {
@@ -347,6 +364,9 @@ impl Render for DevicesPage {
                         })
                         .cursor_pointer()
                         .hover(|s| s.text_color(theme.text_muted))
+                        .tab_index(0)
+                        .role(gpui::Role::Button)
+                        .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.copy_id(copy_id.clone(), cx);
                         }))
@@ -358,30 +378,45 @@ impl Render for DevicesPage {
                         .into_any_element(),
                 );
 
-                widgets::card_row(&theme, ix == 0)
-                    .child(tile)
+                div()
+                    .p(px(16.0))
+                    .rounded(px(12.0))
+                    .bg(crate::theme::wash(0.035))
+                    .border_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.0))
+                    .h_full()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(tile)
+                            .child(widgets::badge(
+                                &theme,
+                                if is_local {
+                                    "This device"
+                                } else if online {
+                                    "Online"
+                                } else {
+                                    "Offline"
+                                },
+                            )),
+                    )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, device.name.clone()))
+                            .child(
+                                widgets::row_title(&theme, device.name.clone())
+                                    .text_size(crate::typography::ui_rems(15.0)),
+                            )
                             .child(widgets::meta_line(&theme, meta)),
                     )
-                    .when(is_local, |el| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .text_size(px(10.5))
-                                .text_color(theme.text_muted)
-                                .child(if workspace_scope == Some(WorkspaceScope::Local) {
-                                    "Local only"
-                                } else {
-                                    "This device"
-                                }),
-                        )
-                    })
                     .child(
                         // `opacity-70 hover:opacity-100` (zeron: also rises on
                         // row hover — gpui has no group-hover, so the button's
@@ -394,6 +429,9 @@ impl Render for DevicesPage {
                                     .bg(crate::theme::ink(0.06))
                                     .text_color(theme.text)
                             })
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.open_rename(rename_id.clone(), rename_name.clone(), cx);
                             }))
@@ -420,7 +458,20 @@ impl Render for DevicesPage {
                     .child(SharedString::from("No devices registered")),
             )
         } else {
-            card.children(rows)
+            let two_columns = f32::from(window.viewport_size().width) >= 800.0;
+            let mut rows = rows.into_iter();
+            let mut grid = div().flex().flex_col().gap(px(16.0));
+            while let Some(first) = rows.next() {
+                let mut row = div()
+                    .flex()
+                    .gap(px(16.0))
+                    .child(div().flex_1().min_w_0().child(first));
+                if two_columns {
+                    row = row.child(div().flex_1().min_w_0().children(rows.next()));
+                }
+                grid = grid.child(row);
+            }
+            card.child(grid)
         };
 
         let scrollbar = popover::rail(self, "devices-page-scrollbar", &theme, cx);
@@ -430,35 +481,46 @@ impl Render for DevicesPage {
             .size_full()
             .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                div()
-                    .id("devices-page")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll.scroll)
-                    .child(
-                        widgets::page_column()
-                            .child(widgets::page_header(
-                                &theme,
-                                "Devices",
-                                (count > 0).then_some(count),
-                            ))
-                            .child(widgets::page_subtitle(
-                                &theme,
-                                devices_subtitle(workspace_scope),
-                            ))
-                            .when_some(self.error.clone(), |el, message| {
-                                el.child(
-                                    widgets::error_strip(&theme, message)
-                                        .id("devices-error")
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.error = None;
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                            .child(card),
-                    ),
+                crate::edge_fade::edge_faded(
+                    16.0,
+                    true,
+                    true,
+                    div()
+                        .id("devices-page")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll.scroll)
+                        .child(
+                            widgets::page_column()
+                                .child(widgets::page_header(
+                                    &theme,
+                                    "Devices",
+                                    (count > 0).then_some(count),
+                                ))
+                                .child(widgets::page_subtitle(
+                                    &theme,
+                                    devices_subtitle(workspace_scope),
+                                ))
+                                .when_some(self.error.clone(), |el, message| {
+                                    el.child(
+                                        widgets::error_strip(&theme, message)
+                                            .id("devices-error")
+                                            .cursor_pointer()
+                                            .tab_index(0)
+                                            .role(gpui::Role::Button)
+                                            .focus_visible(|s| {
+                                                s.border_2().border_color(theme.accent).opacity(1.0)
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.error = None;
+                                                cx.notify();
+                                            })),
+                                    )
+                                })
+                                .child(card),
+                        ),
+                )
+                .fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
             .when_some(dialog, |el, dialog| el.child(dialog))

@@ -152,7 +152,8 @@ impl Render for NotificationsPage {
             div()
                 .id(id)
                 .flex_none()
-                .size(px(40.0))
+                .w(px(48.0))
+                .h(px(40.0))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -175,7 +176,7 @@ impl Render for NotificationsPage {
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(160.0))
                             .flex()
                             .flex_col()
                             .child(widgets::row_title(&theme, "Session sounds"))
@@ -206,7 +207,7 @@ impl Render for NotificationsPage {
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(160.0))
                             .flex()
                             .flex_col()
                             .child(widgets::row_title(&theme, "Task completed"))
@@ -243,7 +244,7 @@ impl Render for NotificationsPage {
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(160.0))
                             .flex()
                             .flex_col()
                             .child(widgets::row_title(&theme, "Input required"))
@@ -280,7 +281,7 @@ impl Render for NotificationsPage {
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(160.0))
                             .flex()
                             .flex_col()
                             .child(widgets::row_title(&theme, "Errors and disconnections"))
@@ -316,7 +317,7 @@ impl Render for NotificationsPage {
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(160.0))
                             .flex()
                             .flex_col()
                             .child(widgets::row_title(&theme, "Desktop notifications"))
@@ -355,7 +356,7 @@ impl Render for NotificationsPage {
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(160.0))
                             .flex()
                             .flex_col()
                             .child(widgets::row_title(&theme, "Only when in the background"))
@@ -395,7 +396,7 @@ impl Render for NotificationsPage {
             .size_full()
             .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                div()
+                crate::edge_fade::edge_faded(16.0, true, true, div()
                     .id("notifications-page")
                     .size_full()
                     .overflow_y_scroll()
@@ -413,7 +414,7 @@ impl Render for NotificationsPage {
                                 .line_height(px(20.0)),
                             )
                             .child(card),
-                    ),
+                    )).fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
     }

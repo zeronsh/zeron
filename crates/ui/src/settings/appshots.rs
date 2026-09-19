@@ -279,7 +279,7 @@ impl ShortcutsPage {
             .on_hover(cx.listener(Self::on_scroll_hovered))
             .on_drag_move(cx.listener(Self::on_bar_drag_move))
             .child(
-                div()
+                crate::edge_fade::edge_faded(16.0, true, true, div()
                     .id("appshots-settings-page")
                     .size_full()
                     .overflow_y_scroll()
@@ -337,7 +337,7 @@ impl ShortcutsPage {
                                     )
                                     .child(refresh),
                             ),
-                    ),
+                    )).fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
             .into_any_element()

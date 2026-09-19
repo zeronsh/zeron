@@ -128,6 +128,9 @@ impl ShortcutsPage {
             // One scroll state serves both pages — rewind it so each opens
             // at the top instead of where the other was left.
             self.scroll.reset();
+            if appshots {
+                self.appshot_capabilities = crate::appshots::capabilities();
+            }
         }
     }
 
@@ -280,8 +283,8 @@ impl ShortcutsPage {
     ) -> gpui::Div {
         // zeron settings.shortcuts.tsx row: min-h-[72px] px-5 gap-5.
         div()
-            .min_h(px(72.0))
-            .px(px(20.0))
+            .min_h(px(56.0))
+            .px(px(0.0))
             .flex()
             .flex_row()
             .items_center()
@@ -521,7 +524,6 @@ fn description(id: ShortcutId) -> &'static str {
 
 impl Render for ShortcutsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.appshot_capabilities = crate::appshots::capabilities();
         if self.appshots_page {
             if std::mem::take(&mut self.appshots_focus_pending) {
                 window.focus(&self.focus, cx);
@@ -684,7 +686,7 @@ impl Render for ShortcutsPage {
             if name == "Appshots" {
                 continue;
             }
-            let mut card = widgets::section_card(&theme).mt(px(0.0));
+            let mut card = widgets::section_card(&theme).mt(px(4.0));
             let ids = ShortcutId::ALL.into_iter().filter(|&id| group(id) == name);
             for (gx, id) in ids.enumerate() {
                 let ix = ShortcutId::ALL.iter().position(|&a| a == id).unwrap_or(0);
@@ -694,7 +696,7 @@ impl Render for ShortcutsPage {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(8.0))
+                    .gap(px(4.0))
                     .child(widgets::field_label(&theme, name))
                     .child(card)
                     .into_any_element(),
@@ -718,7 +720,7 @@ impl Render for ShortcutsPage {
             .size_full()
             .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                div()
+                crate::edge_fade::edge_faded(16.0, true, true, div()
                     .id("shortcuts-page")
                     .size_full()
                     .overflow_y_scroll()
@@ -811,7 +813,7 @@ impl Render for ShortcutsPage {
                                     .child(helper),
                             )
                             .child(escape_behavior_row),
-                    ),
+                    )).fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
             .into_any_element()

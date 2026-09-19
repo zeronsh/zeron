@@ -124,6 +124,32 @@ pub(crate) fn restore_mounted_focus(
     }
 }
 
+/// Tab groups order their descendants but do not trap focus. The trailing
+/// non-tab-stop handle gives reverse traversal a stable end boundary even
+/// when a page adds or removes controls.
+fn move_settings_focus(
+    start: &FocusHandle,
+    end: &FocusHandle,
+    reverse: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if reverse {
+        window.focus_prev(cx);
+    } else {
+        window.focus_next(cx);
+    }
+    if !start.contains_focused(window, cx) {
+        if reverse {
+            window.focus(end, cx);
+            window.focus_prev(cx);
+        } else {
+            window.focus(start, cx);
+            window.focus_next(cx);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ChatMenuPage {
     Root,
@@ -420,14 +446,14 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     pub const ALL: [SettingsSection; 9] = [
-        SettingsSection::Devices,
-        SettingsSection::Harnesses,
-        SettingsSection::Agents,
         SettingsSection::Appearance,
-        SettingsSection::Files,
         SettingsSection::Notifications,
+        SettingsSection::Files,
         SettingsSection::Shortcuts,
         SettingsSection::Appshots,
+        SettingsSection::Harnesses,
+        SettingsSection::Agents,
+        SettingsSection::Devices,
         SettingsSection::Archived,
     ];
 
@@ -1420,10 +1446,7 @@ impl Render for SidebarPane {
         };
         let inner = shell.update(cx, |shell, cx| {
             let theme = Theme::of(cx).clone();
-            match shell.route {
-                Route::Settings(section) => shell.render_settings_nav(section, &theme, cx),
-                Route::Chat => shell.render_chat_sidebar(&theme, cx),
-            }
+            shell.render_chat_sidebar(&theme, cx)
         });
         div().size_full().child(inner).into_any_element()
     }
@@ -1518,6 +1541,12 @@ pub struct Shell {
     right_tab_scroll: gpui::ScrollHandle,
     /// Chat outlet vs settings pages.
     route: Route,
+    settings_focus: FocusHandle,
+    settings_end_focus: FocusHandle,
+    settings_nav_focus: Vec<FocusHandle>,
+    settings_return_focus: Option<FocusHandle>,
+    settings_focus_pending: bool,
+    settings_restore_pending: bool,
     /// Route history behind the titlebar back/forward buttons (§ nav history).
     nav: NavHistory,
     devices_page: Option<Entity<DevicesPage>>,
@@ -1898,6 +1927,15 @@ impl Shell {
             right_tab_drag: None,
             right_tab_scroll: gpui::ScrollHandle::new(),
             route,
+            settings_focus: cx.focus_handle(),
+            settings_end_focus: cx.focus_handle(),
+            settings_nav_focus: SettingsSection::ALL
+                .iter()
+                .map(|_| cx.focus_handle())
+                .collect(),
+            settings_return_focus: None,
+            settings_focus_pending: matches!(route, Route::Settings(_)),
+            settings_restore_pending: false,
             nav,
             devices_page: None,
             archived_page: None,
@@ -3817,8 +3855,10 @@ impl Shell {
         if section == SettingsSection::Harnesses {
             self.harnesses_page = None;
         }
+        if !matches!(self.route, Route::Settings(_)) {
+            self.settings_focus_pending = true;
+        }
         self.route = Route::Settings(section);
-        self.nav.push(NavEntry::Settings(section));
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
@@ -3826,8 +3866,7 @@ impl Shell {
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.route = Route::Chat;
-        self.focus_composer(cx);
-        self.nav.push(NavEntry::Chat(self.active_chat.clone()));
+        self.settings_restore_pending = true;
         cx.notify();
     }
 
@@ -4369,6 +4408,7 @@ impl Shell {
     /// stranding it over a session the user never picked.
     pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
         self.command_palette.is_some()
+            || matches!(self.route, Route::Settings(_))
             || self.add_space.is_some()
             || self.composer.read(cx).pickers().read(cx).is_open()
     }
@@ -5140,25 +5180,9 @@ impl Shell {
         cluster + CLUSTER_BUTTONS_WIDTH + TITLEBAR_IDENTITY_GAP
     }
 
-    /// The unified window titlebar: chat → the session tab strip; settings →
-    /// the section label. Full-width on the glass shell; the traffic lights
-    /// and control cluster overlay its left end.
+    /// The session titlebar remains mounted beneath the settings modal.
     fn render_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        match self.route {
-            Route::Chat => self.render_session_title_bar(cx),
-            Route::Settings(_) => {
-                let inner = div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .pt(px(Theme::TITLEBAR_TOP_PAD))
-                    .pl(px(self.title_bar_content_start()))
-                    .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)));
-                let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
-                self.titlebar_drag_region("settings-header-titlebar", bar, cx)
-                    .into_any_element()
-            }
-        }
+        self.render_session_title_bar(cx)
     }
 
     /// Make a titlebar strip drag the window — zed's platform-titlebar
@@ -5699,9 +5723,163 @@ impl Shell {
             .into_any_element()
     }
 
-    /// Settings-mode sidebar (zeron settings-sidebar.tsx): window-control
-    /// strip, "Settings" heading, icon section rows styled like session rows,
-    /// and a Back row pinned to the bottom.
+    /// Settings floats over the current workspace; opening a preference never
+    /// adds a route-history entry or changes the selected conversation.
+    fn render_settings_modal(
+        &mut self,
+        section: SettingsSection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        if self.settings_focus_pending {
+            self.settings_focus_pending = false;
+            self.settings_return_focus = window.focused(cx);
+            let focus = self.settings_focus.clone();
+            window.on_next_frame(move |window, cx| {
+                window.focus(&focus, cx);
+                window.focus_next(cx);
+            });
+        }
+        let viewport_width = f32::from(window.viewport_size().width);
+        let margin = if viewport_width < 680.0 { 16.0 } else { 48.0 };
+        let width = (viewport_width - margin).clamp(240.0, 1000.0);
+        let height = (f32::from(window.viewport_size().height) - 80.0).clamp(240.0, 760.0);
+        let nav = self.render_settings_nav(section, &theme, cx);
+        let outlet = self.settings_outlet(section, window, cx);
+        let card = popover::popover_card_flush(&theme)
+            .bg(theme.surface_overlay)
+            .id("settings-modal")
+            .role(gpui::Role::Dialog)
+            .aria_label("Settings")
+            .track_focus(&self.settings_focus)
+            .tab_group()
+            .tab_stop(false)
+            .w(px(width))
+            .h(px(height))
+            .rounded(px(16.0))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                let key = &event.keystroke.key;
+                if key == "escape" {
+                    this.close_settings(cx);
+                    cx.stop_propagation();
+                } else if key == "tab" {
+                    move_settings_focus(
+                        &this.settings_focus,
+                        &this.settings_end_focus,
+                        event.keystroke.modifiers.shift,
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .border_r_1()
+                            .border_color(theme.border)
+                            .bg(crate::theme::wash(0.025))
+                            .pt(px(6.0))
+                            .child(div().flex_1().min_h_0().child(nav))
+                            .child(
+                                div().p(px(6.0)).child(
+                                    settings::widgets::ghost_action(&theme)
+                                        .rounded(px(10.0))
+                                        .hover(|s| settings::widgets::ghost_hover(&theme, s))
+                                        .px(px(6.0))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(6.0))
+                                        .id("settings-back")
+                                        .role(gpui::Role::Button)
+                                        .aria_label("Back to workspace")
+                                        .tab_index(0)
+                                        .w_full()
+                                        .min_h(px(30.0))
+                                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.close_settings(cx)),
+                                        )
+                                        .child(
+                                            icon(icons::ALT_ARROW_LEFT)
+                                                .size(px(14.0))
+                                                .text_color(theme.text_muted),
+                                        )
+                                        .when(self.viewport_width >= 680.0, |el| el.child("Back")),
+                                ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .relative()
+                            .child(div().size_full().child(outlet))
+                            .child(
+                                div().absolute().top(px(10.0)).right(px(10.0)).child(
+                                    div()
+                                        .id("settings-close")
+                                        .role(gpui::Role::Button)
+                                        .aria_label("Close settings")
+                                        .tab_index(0)
+                                        .size(px(32.0))
+                                        .rounded(px(8.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme.glass_hover()))
+                                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.close_settings(cx)),
+                                        )
+                                        .child(
+                                            icon(icons::CLOSE)
+                                                .size(px(16.0))
+                                                .text_color(theme.text_muted),
+                                        ),
+                                ),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .id("settings-focus-end")
+                    .track_focus(&self.settings_end_focus)
+                    .tab_index(0)
+                    .tab_stop(false),
+            )
+            .into_any_element();
+        // Keep settings in the normal overlay plane. Deferred pickers (1) and
+        // child dialogs (2) must paint and hit-test above this surface.
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(popover::scrim_alpha(0.25))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(card)
+            .into_any_element()
+    }
+
+    /// Roving section tabs. At narrow window widths the rail keeps named
+    /// icons, leaving the available width to the preference page.
     fn render_settings_nav(
         &mut self,
         section: SettingsSection,
@@ -5719,32 +5897,21 @@ impl Shell {
             SettingsSection::Appshots => icons::MONITOR,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         };
-        // Match the user's dragged sidebar width — the pane container clips to
-        // it, so a hardcoded default here left hover washes stopping short of
-        // the sidebar's right edge (user-reported). Device identity lives on
-        // the Accounts page now — the one surface where the device matters.
-        div()
-            .w(px(self.settings.sidebar_width))
-            .h_full()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .flex_1()
-                    .px(px(Theme::SPACE_SM))
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .px(px(Theme::SPACE_SM))
-                            .pt(px(12.0))
-                            .pb(px(4.0))
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_muted.opacity(0.6))
-                            .child(SharedString::from("Settings")),
-                    )
-                    .child(
+        let compact = self.viewport_width < 680.0;
+        settings::widgets::scroll_faded(
+            "settings-nav-scroll",
+            div()
+                .id("settings-sections")
+                .role(gpui::Role::TabList)
+                .aria_label("Settings sections")
+                .w(px(if compact { 56.0 } else { 208.0 }))
+                .overflow_y_scroll()
+                .flex_none()
+                .h_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div().flex_1().px(px(6.0)).flex().flex_col().child(
                         div().flex().flex_col().gap(px(2.0)).children(
                             SettingsSection::ALL
                                 .into_iter()
@@ -5753,6 +5920,10 @@ impl Shell {
                                         || crate::appshots::is_desktop()
                                 })
                                 .map(|item| {
+                                    let index = SettingsSection::ALL
+                                        .iter()
+                                        .position(|s| *s == item)
+                                        .unwrap();
                                     let selected = item == section;
                                     div()
                                         .id(SharedString::from(format!(
@@ -5763,8 +5934,8 @@ impl Shell {
                                         .flex_row()
                                         .items_center()
                                         .gap(px(8.0))
-                                        .rounded(px(8.0))
-                                        .px(px(Theme::SPACE_SM))
+                                        .rounded(px(10.0))
+                                        .px(px(6.0))
                                         .py(px(6.0))
                                         .text_size(crate::typography::ui_rems(13.0))
                                         .when(selected, |el| {
@@ -5778,6 +5949,49 @@ impl Shell {
                                         } else {
                                             theme.text_muted
                                         })
+                                        .role(gpui::Role::Tab)
+                                        .aria_label(item.label())
+                                        .aria_selected(selected)
+                                        .track_focus(
+                                            &self.settings_nav_focus[index]
+                                                .clone()
+                                                .tab_stop(selected),
+                                        )
+                                        .tab_index(0)
+                                        .tab_stop(selected)
+                                        .on_key_down(cx.listener(
+                                            move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                                let items: Vec<_> = SettingsSection::ALL
+                                                    .into_iter()
+                                                    .filter(|s| {
+                                                        *s != SettingsSection::Appshots
+                                                            || crate::appshots::is_desktop()
+                                                    })
+                                                    .collect();
+                                                let current = items
+                                                    .iter()
+                                                    .position(|s| *s == item)
+                                                    .unwrap_or(0);
+                                                let next = match event.keystroke.key.as_str() {
+                                                    "up" | "left" => {
+                                                        (current + items.len() - 1) % items.len()
+                                                    }
+                                                    "down" | "right" => (current + 1) % items.len(),
+                                                    "home" => 0,
+                                                    "end" => items.len() - 1,
+                                                    _ => return,
+                                                };
+                                                let target = items[next];
+                                                this.open_settings(target, cx);
+                                                let index = SettingsSection::ALL
+                                                    .iter()
+                                                    .position(|s| *s == target)
+                                                    .unwrap();
+                                                window.focus(&this.settings_nav_focus[index], cx);
+                                                cx.stop_propagation();
+                                            },
+                                        ))
+                                        .focus_visible(|s| s.border_2().border_color(theme.accent))
                                         .cursor_pointer()
                                         .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
                                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -5788,39 +6002,15 @@ impl Shell {
                                                 .size(px(16.0))
                                                 .text_color(theme.text_muted),
                                         )
-                                        .child(SharedString::from(item.label()))
+                                        .when(!compact, |el| {
+                                            el.child(SharedString::from(item.label()))
+                                        })
                                 }),
                         ),
                     ),
-            )
-            // Back pinned to the bottom (zeron settings-sidebar.tsx).
-            .child(
-                div().px(px(Theme::SPACE_SM)).pb(px(12.0)).child(
-                    div()
-                        .id("settings-back")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .rounded(px(8.0))
-                        .px(px(Theme::SPACE_SM))
-                        .py(px(6.0))
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .text_color(theme.text_muted)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
-                        .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
-                        .child(
-                            // AltArrowLeft chevron (zeron settings-sidebar.tsx),
-                            // not the straight history arrow.
-                            icon(icons::ALT_ARROW_LEFT)
-                                .size(px(16.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .child(SharedString::from("Back")),
                 ),
-            )
-            .into_any_element()
+        )
+        .into_any_element()
     }
 
     /// One session row: context + status on line one, harness + title on line
@@ -7159,7 +7349,12 @@ impl Shell {
             .into();
         let mut trigger = div()
             .id("user-menu")
-            .flex_none()
+            .role(gpui::Role::Button)
+            .aria_label("Account menu")
+            .tab_index(0)
+            .focus_visible(|s| s.border_2().border_color(theme.accent))
+            .flex_1()
+            .min_w_0()
             .rounded(px(8.0))
             .px(px(Theme::SPACE_SM))
             .py(px(Theme::SPACE_SM))
@@ -7314,19 +7509,6 @@ impl Shell {
                     };
                     menu.child(row).child(popover::menu_separator())
                 })
-                .child(
-                    popover::menu_row(theme, false, "user-menu-settings")
-                        .id("user-menu-settings")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.open_settings(SettingsSection::Devices, cx)
-                        }))
-                        .child(
-                            icon(icons::SETTINGS_MINIMALISTIC)
-                                .size(px(16.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .child(SharedString::from("Settings")),
-                )
                 .into_any_element();
             trigger = trigger.child(popover::anchored_menu_above(
                 "user-menu-popover",
@@ -7334,7 +7516,48 @@ impl Shell {
                 closing,
             ));
         }
-        trigger.into_any_element()
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(trigger)
+            .child(
+                div()
+                    .id("settings-trigger")
+                    .role(gpui::Role::Button)
+                    .aria_label("Settings")
+                    .tooltip(|_, cx| {
+                        cx.new(|_| SurfaceTabTooltip {
+                            text: if cfg!(target_os = "macos") {
+                                "Settings · ⌘,"
+                            } else {
+                                "Settings · Ctrl+,"
+                            }
+                            .into(),
+                        })
+                        .into()
+                    })
+                    .tab_index(0)
+                    .size(px(28.0))
+                    .flex_none()
+                    .rounded(px(8.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .text_color(theme.text_muted)
+                    .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.open_settings(SettingsSection::Appearance, cx)
+                    }))
+                    .child(
+                        icon(icons::SETTINGS_MINIMALISTIC)
+                            .size(px(15.0))
+                            .text_color(theme.text_muted),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_sync_overlay(
@@ -7789,6 +8012,9 @@ impl Shell {
         if event.keystroke.key == "escape" && self.command_palette.is_some() {
             self.close_command_palette(window, cx);
             cx.stop_propagation();
+            return;
+        }
+        if matches!(self.route, Route::Settings(_)) {
             return;
         }
         if event.keystroke.key == "escape" && self.capture_escape_surface(cx) {
@@ -8248,22 +8474,6 @@ impl Shell {
         let theme_owned = Theme::of(cx).clone();
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
-
-        // Settings route: just the section outlet — the section label lives in
-        // the unified window titlebar now (render_title_bar). Settings never
-        // underlaps: pad below the overlaid titlebar.
-        if let Route::Settings(section) = self.route {
-            let outlet = self.settings_outlet(section, window, cx);
-            return div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .pt(px(Theme::TITLEBAR_HEIGHT))
-                .flex()
-                .flex_col()
-                .child(div().flex_1().min_h_0().child(outlet))
-                .into_any_element();
-        }
 
         let _ = (text, border);
         let has_selection = self.state.read(cx).selected_chat.is_some();
@@ -10559,16 +10769,32 @@ impl Render for Shell {
             self.focus_sub = Some(cx.on_focus_lost(window, |this: &mut Shell, window, cx| {
                 let root = this.shortcut_focus.clone();
                 let unfocused = this.unfocused.clone();
-                let preferred = this.composer.focus_handle(cx);
+                let preferred = if matches!(this.route, Route::Settings(_)) {
+                    this.settings_focus.clone()
+                } else {
+                    this.composer.focus_handle(cx)
+                };
                 window.on_next_frame(move |window, cx| {
                     restore_mounted_focus(&root, &preferred, &unfocused, window, cx);
                 });
                 cx.notify();
             }));
         }
+        if self.settings_restore_pending {
+            self.settings_restore_pending = false;
+            let target = self
+                .settings_return_focus
+                .take()
+                .unwrap_or_else(|| self.composer.focus_handle(cx));
+            window.on_next_frame(move |window, cx| window.focus(&target, cx));
+        }
         let shortcut_focus = self.shortcut_focus.clone();
         let unfocused = self.unfocused.clone();
-        let preferred_focus = self.composer.focus_handle(cx);
+        let preferred_focus = if matches!(self.route, Route::Settings(_)) {
+            self.settings_focus.clone()
+        } else {
+            self.composer.focus_handle(cx)
+        };
         window.defer(cx, move |window, cx| {
             restore_mounted_focus(&shortcut_focus, &preferred_focus, &unfocused, window, cx);
         });
@@ -10649,14 +10875,24 @@ impl Render for Shell {
                     }
                 }
             }))
-            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                if !matches!(this.route, Route::Settings(_)) {
+                    this.toggle_sidebar(cx)
+                }
+            }))
             // New session works from anywhere — `open_new_session` routes back
             // to chat itself, so Settings is not a dead spot.
-            .on_action(cx.listener(|this, _: &NewSession, _, cx| this.open_new_session(cx)))
+            .on_action(cx.listener(|this, _: &NewSession, _, cx| {
+                if !matches!(this.route, Route::Settings(_)) {
+                    this.open_new_session(cx)
+                }
+            }))
             // Native Settings menu item and the platform convention (Cmd+, on
             // macOS, Ctrl+, elsewhere) always land on the default section.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
-                this.open_settings(SettingsSection::Devices, cx)
+                if !matches!(this.route, Route::Settings(_)) {
+                    this.open_settings(SettingsSection::Appearance, cx)
+                }
             }))
             // Chat-scoped, unlike new-session — `cycle_session` holds the guard
             // and says why.
@@ -10706,6 +10942,9 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
+                if matches!(this.route, Route::Settings(_)) {
+                    return;
+                }
                 if this.add_space.is_some() {
                     this.add_space = None;
                     cx.notify();
@@ -10762,7 +11001,7 @@ impl Render for Shell {
                 // Stamped for `right_target` — the expanded changes panel
                 // sizes itself to the viewport.
                 self.viewport_width = viewport;
-                let on_chat = matches!(self.route, Route::Chat);
+                let on_chat = true;
                 let right_target_width = if on_chat { self.right_now(cx) } else { 0.0 };
                 let panel_handoff = self.composer_dock.borrow_mut().observe_pane(
                     self.state.read(cx).selected_chat.is_some(),
@@ -11007,6 +11246,12 @@ impl Render for Shell {
                 root.child(loaders::splash_overlay(&theme, true, cx.entity_id(), cx))
             }
             SplashPhase::Gone => root,
+        };
+
+        let root = if let Route::Settings(section) = self.route {
+            root.child(self.render_settings_modal(section, window, cx))
+        } else {
+            root
         };
 
         // Caption controls are shell-level chrome, not Ready-page content:
@@ -12485,12 +12730,15 @@ mod exit_regressions {
                 .unwrap();
             cx.update_window(composer_window.into(), |composer, window, cx| {
                 window.draw(cx).clear();
-                assert!(
+                // Closing a floating settings dialog restores its origin in
+                // the shell; it must not request focus in the composer.
+                assert_eq!(
                     composer
                         .downcast::<Composer>()
                         .unwrap()
                         .focus_handle(cx)
                         .is_focused(window),
+                    destination != "settings",
                     "{destination}"
                 );
                 // Subsequent renders after a click-away must not reclaim it.
@@ -13444,5 +13692,120 @@ impl Shell {
     pub fn fixture_appshots_transcript_start(&self, cx: &mut Context<Self>) {
         self.transcript
             .update(cx, |t, cx| t.fixture_appshots_start(cx));
+    }
+}
+
+#[cfg(test)]
+mod settings_modal_regressions {
+    use super::*;
+    use gpui::{AppContext, TestAppContext};
+
+    struct FocusHost {
+        background: FocusHandle,
+        start: FocusHandle,
+        first: FocusHandle,
+        last: FocusHandle,
+        end: FocusHandle,
+    }
+
+    impl Render for FocusHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .child(
+                    div()
+                        .id("background")
+                        .track_focus(&self.background)
+                        .tab_index(0),
+                )
+                .child(
+                    div()
+                        .id("modal")
+                        .track_focus(&self.start)
+                        .tab_group()
+                        .tab_stop(false)
+                        .child(div().id("first").track_focus(&self.first).tab_index(0))
+                        .child(div().id("last").track_focus(&self.last).tab_index(0))
+                        .child(
+                            div()
+                                .id("end")
+                                .track_focus(&self.end)
+                                .tab_index(0)
+                                .tab_stop(false),
+                        ),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn settings_tab_wraps_in_both_directions_without_entering_workspace(cx: &mut TestAppContext) {
+        let host = cx.add_window(|_, cx| FocusHost {
+            background: cx.focus_handle().tab_stop(true),
+            start: cx.focus_handle(),
+            first: cx.focus_handle().tab_stop(true),
+            last: cx.focus_handle().tab_stop(true),
+            end: cx.focus_handle(),
+        });
+        cx.update_window(host.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        host.update(cx, |host, window, cx| {
+            window.focus(&host.first, cx);
+            for reverse in [false, false, true, true, true, false] {
+                let was_first = host.first.is_focused(window);
+                move_settings_focus(&host.start, &host.end, reverse, window, cx);
+                assert!(host.start.contains_focused(window, cx));
+                assert_eq!(host.last.is_focused(window), was_first);
+                assert!(!host.background.is_focused(window));
+            }
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn settings_visits_preserve_conversation_and_navigation_history(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                let history = shell.nav.current().clone();
+                let selected = shell.state.read(cx).selected_chat.clone();
+                for section in SettingsSection::ALL {
+                    shell.open_settings(section, cx);
+                    assert_eq!(shell.nav.current().clone(), history);
+                    assert_eq!(shell.state.read(cx).selected_chat, selected);
+                }
+                shell.close_settings(cx);
+                assert_eq!(shell.route, Route::Chat);
+                assert_eq!(shell.nav.current().clone(), history);
+                assert!(shell.settings_restore_pending);
+            })
+            .unwrap();
     }
 }
