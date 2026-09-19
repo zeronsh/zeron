@@ -572,6 +572,251 @@ async fn diff_capture_tracked_untracked_and_checksum() {
 }
 
 #[tokio::test]
+async fn git_status_preserves_index_changes_even_when_head_diff_is_empty() {
+    use zeron_proto::GitFileState::*;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    init_repo(&root).await;
+    let repos = test_repos(&tmp.path().join("data"));
+    let original = std::fs::read(root.join("a.txt")).unwrap();
+    std::fs::write(root.join("a.txt"), "staged\n").unwrap();
+    git(&root, &["add", "a.txt"]).await;
+    std::fs::write(root.join("a.txt"), original).unwrap();
+    let capture = capture_diff(&repos, &root).await.unwrap();
+    assert!(capture.patch.is_empty());
+    let (files, complete) = capture.git_status.unwrap();
+    assert!(complete);
+    assert_eq!((files[0].index, files[0].worktree), (Modified, Modified));
+    git(&root, &["reset", "--hard", "HEAD"]).await;
+    assert!(
+        capture_diff(&repos, &root)
+            .await
+            .unwrap()
+            .git_status
+            .unwrap()
+            .0
+            .is_empty()
+    );
+
+    std::fs::create_dir_all(root.join("new/nested")).unwrap();
+    std::fs::write(root.join("new/nested/ leading name.txt"), "new\n").unwrap();
+    std::fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+    std::fs::create_dir(root.join("ignored")).unwrap();
+    std::fs::write(root.join("ignored/private"), "ignored\n").unwrap();
+    let (files, complete) = capture_diff(&repos, &root)
+        .await
+        .unwrap()
+        .git_status
+        .unwrap();
+    assert!(complete);
+    assert!(
+        files
+            .iter()
+            .any(|f| f.path == "new/nested/ leading name.txt" && f.index == Untracked)
+    );
+    assert!(!files.iter().any(|f| f.path.starts_with("ignored/")));
+    git(&root, &["mv", "a.txt", "renamed file.txt"]).await;
+    let (files, _) = capture_diff(&repos, &root)
+        .await
+        .unwrap()
+        .git_status
+        .unwrap();
+    assert!(files.iter().any(|f| f.path == "renamed file.txt"
+        && f.old_path.as_deref() == Some("a.txt")
+        && f.index == Renamed));
+    git(&root, &["add", "."]).await;
+    git(&root, &["commit", "-m", "changes"]).await;
+    assert!(
+        capture_diff(&repos, &root)
+            .await
+            .unwrap()
+            .git_status
+            .unwrap()
+            .0
+            .is_empty()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn git_status_enumerates_untracked_symlinks_without_reading_their_targets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    init_repo(&root).await;
+    std::fs::create_dir(root.join("new")).unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::write(&outside, "PRIVATE OUTSIDE CONTENT\n").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("new/link")).unwrap();
+    let snapshot = capture_diff(&test_repos(&tmp.path().join("data")), &root)
+        .await
+        .unwrap();
+    assert!(!snapshot.patch.contains("PRIVATE OUTSIDE CONTENT"));
+    assert!(
+        snapshot
+            .git_status
+            .unwrap()
+            .0
+            .iter()
+            .any(|f| f.path == "new/link")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_status_stream_is_scoped_deduplicated_and_resets_after_commit() {
+    use zeron_proto::CheckoutGitStatus;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let other = tmp.path().join("other");
+    init_repo(&root).await;
+    init_repo(&other).await;
+    std::fs::write(root.join("a.txt"), "first edit\n").unwrap();
+    std::fs::write(other.join("private.txt"), "another checkout\n").unwrap();
+    let core = assemble(&tmp.path().join("data"));
+    for (space, chat, path) in [
+        ("space", "chat", &root),
+        ("other-space", "other-chat", &other),
+    ] {
+        core.workspace
+            .create_space(space, &core.device_id, &path.to_string_lossy(), None, true)
+            .unwrap();
+        core.workspace
+            .create_chat(chat, Some(space), None, None, None)
+            .unwrap();
+    }
+    core.diff_sync.reconcile_now().await;
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let params = serde_json::json!({"chatId": "chat"});
+    let mut stream = client
+        .subscribe_checked(methods::WATCH_WORKSPACE_GIT_STATUS, params.clone())
+        .await
+        .unwrap();
+    async fn next(stream: &mut zeron_rpc::RpcSubscription) -> CheckoutGitStatus {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let value = stream.recv().await.expect("stream alive");
+                assert!(value.get("patch").is_none());
+                if let Some(status) =
+                    serde_json::from_value::<zeron_proto::WorkspaceGitStatusFrame>(value)
+                        .unwrap()
+                        .status
+                {
+                    return status;
+                }
+            }
+        })
+        .await
+        .expect("status before timeout")
+    }
+    let first = next(&mut stream).await;
+    assert!(first.complete);
+    assert_eq!(first.device_id, core.device_id);
+    assert_eq!(first.files.len(), 1);
+    assert_eq!(first.files[0].path, "a.txt");
+    let mut second = client
+        .subscribe_checked(methods::WATCH_WORKSPACE_GIT_STATUS, params.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        next(&mut second).await,
+        first,
+        "new subscribers receive the cached snapshot"
+    );
+
+    // Content changed, but neither Git status column changed: no metadata frame.
+    let mut diffs = core.diff_sync.watch_diffs();
+    let old = diffs
+        .borrow_and_update()
+        .iter()
+        .find(|d| d.checkout_id == first.checkout_id)
+        .unwrap()
+        .checksum
+        .clone();
+    std::fs::write(root.join("a.txt"), "another edit\n").unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            diffs.changed().await.unwrap();
+            if diffs
+                .borrow()
+                .iter()
+                .any(|d| d.checkout_id == first.checkout_id && d.checksum != old)
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), stream.recv())
+            .await
+            .is_err()
+    );
+
+    git(&root, &["add", "a.txt"]).await;
+    let staged = next(&mut stream).await;
+    assert_eq!(staged.files[0].index, zeron_proto::GitFileState::Modified);
+    assert_eq!(
+        staged.files[0].worktree,
+        zeron_proto::GitFileState::Unchanged
+    );
+    git(&root, &["commit", "-m", "done"]).await;
+    let clean = next(&mut stream).await;
+    assert!(clean.complete && clean.files.is_empty());
+    drop(stream);
+    let mut reconnected = client
+        .subscribe_checked(methods::WATCH_WORKSPACE_GIT_STATUS, params)
+        .await
+        .unwrap();
+    assert_eq!(next(&mut reconnected).await, clean);
+    let plain = tmp.path().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    core.workspace
+        .create_space(
+            "plain",
+            &core.device_id,
+            &plain.to_string_lossy(),
+            None,
+            false,
+        )
+        .unwrap();
+    let mut unavailable = client
+        .subscribe_checked(
+            methods::WATCH_WORKSPACE_GIT_STATUS,
+            serde_json::json!({"spaceId": "plain"}),
+        )
+        .await
+        .unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(2), unavailable.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        frame,
+        serde_json::json!({"status": null}),
+        "unknown is an explicit frame, not a missing RPC item"
+    );
+    assert!(
+        client
+            .subscribe_checked(
+                methods::WATCH_WORKSPACE_GIT_STATUS,
+                serde_json::json!({"chatId": "missing"})
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .subscribe_checked(
+                methods::WATCH_WORKSPACE_GIT_STATUS,
+                serde_json::json!({"chatId": "chat", "targetDeviceId": "offline-remote"})
+            )
+            .await
+            .is_err()
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
 async fn diff_capture_against_merge_base_shows_branch_changes() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo_dir = tmp.path().join("repo");
@@ -739,6 +984,10 @@ async fn diff_capture_truncates_at_patch_cap() {
     assert!(snapshot.truncated, "patch cap hit");
     assert!(snapshot.patch.len() <= 3 * 1024 * 1024 + 64);
     assert!(snapshot.patch.contains("# Zeron diff truncated"));
+    let (statuses, complete) = snapshot.git_status.unwrap();
+    assert!(complete, "patch truncation must not truncate Git status");
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].path, "a.txt");
 }
 
 // ---------------------------------------------------------------------------

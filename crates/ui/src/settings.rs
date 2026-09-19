@@ -32,9 +32,13 @@ pub const SIDEBAR_MIN: f32 = 224.0;
 pub const SIDEBAR_MAX: f32 = 400.0;
 pub const SIDEBAR_DEFAULT: f32 = 256.0;
 
-/// Right ("Changes") pane drag-resize floor and default (px). Its runtime
-/// maximum is the window space remaining after the left sidebar and the
-/// conversation's [`CHAT_PANEL_MIN`] reservation.
+/// Independent file explorer width preference and drag bounds (px).
+pub const FILES_PANEL_DEFAULT: f32 = 286.0;
+pub const FILES_PANEL_MIN: f32 = 220.0;
+pub const FILES_PANEL_MAX: f32 = 440.0;
+
+/// Surface pane floor and default (px). Runtime sizing also reserves space
+/// for the conversation and any docked file explorer.
 pub const RIGHT_PANE_MIN: f32 = 360.0;
 pub const RIGHT_PANE_DEFAULT: f32 = 520.0;
 /// Minimum width retained for the conversation when the right pane is open.
@@ -670,6 +674,7 @@ pub struct UiSettings {
     /// Suppress the banner while a Zeron window is focused (the chime covers
     /// the foreground case).
     pub notifications_background_only: bool,
+    pub files_panel_width: f32,
     pub right_pane_width: f32,
     /// Legacy: panel *open* flags are session-scoped in-memory state now
     /// (`shell::SessionPanels`, zeron `sessionPanels` parity). Kept for file
@@ -777,6 +782,7 @@ impl Default for UiSettings {
             sound_attention_enabled: true,
             notifications_enabled: true,
             notifications_background_only: true,
+            files_panel_width: FILES_PANEL_DEFAULT,
             right_pane_width: RIGHT_PANE_DEFAULT,
             right_pane_open: false,
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
@@ -1333,6 +1339,12 @@ impl UiSettings {
         );
         // The right pane has no persisted upper bound: its live drag clamps
         // against the current window, which is unavailable while loading.
+        self.files_panel_width = clamp_or(
+            self.files_panel_width,
+            FILES_PANEL_MIN,
+            FILES_PANEL_MAX,
+            FILES_PANEL_DEFAULT,
+        );
         self.right_pane_width = min_or(self.right_pane_width, RIGHT_PANE_MIN, RIGHT_PANE_DEFAULT);
         self.terminal_height = clamp_or(
             self.terminal_height,
@@ -2011,6 +2023,7 @@ mod tests {
             sound_attention_enabled: false,
             notifications_enabled: false,
             notifications_background_only: false,
+            files_panel_width: 310.0,
             right_pane_width: 700.0,
             right_pane_open: true,
             terminal_height: 320.0,
@@ -2465,6 +2478,32 @@ mod tests {
         assert_eq!(settings.sidebar_pins("synced:org-a:user-a"), ["a-1"]);
         assert_eq!(settings.sidebar_pins("synced:org-b:user-b"), ["b-1"]);
         assert_eq!(settings.sidebar_pins("synced:org-a:user-a"), ["a-1"]);
+    }
+
+    #[test]
+    fn files_panel_width_defaults_roundtrips_and_clamps() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(UiSettings::path(dir.path()), r#"{"sidebarWidth":256}"#).unwrap();
+        assert_eq!(
+            UiSettings::load(dir.path()).files_panel_width,
+            FILES_PANEL_DEFAULT
+        );
+        for (value, expected) in [
+            (310.0, 310.0),
+            (1.0, FILES_PANEL_MIN),
+            (900.0, FILES_PANEL_MAX),
+            (f32::NAN, FILES_PANEL_DEFAULT),
+        ] {
+            let settings = UiSettings {
+                files_panel_width: value,
+                ..Default::default()
+            }
+            .clamped();
+            assert_eq!(settings.files_panel_width, expected);
+            let encoded = serde_json::to_string(&settings).unwrap();
+            let decoded: UiSettings = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded.files_panel_width, expected);
+        }
     }
 
     #[test]

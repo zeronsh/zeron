@@ -111,7 +111,7 @@ pub async fn exercise(
     output: &std::path::Path,
     cx: &mut AsyncApp,
 ) -> anyhow::Result<()> {
-    eval(&page,"document.body.insertAdjacentHTML('afterbegin', `<div id='browser-blur-grid' style='height:140px;background:repeating-conic-gradient(#172f25 0% 25%,#f5f0df 0% 50%) 0 0/16px 16px'></div><input id='browser-input' style='height:32px;width:200px' placeholder='Browser input'><button id='browser-button' onclick='window.browserClicks=(window.browserClicks||0)+1'>Click</button>`); window.browserClicks=0; document.body.addEventListener('pointerdown',()=>window.pagePresses=(window.pagePresses||0)+1); let live=document.createElement('div');live.style='position:fixed;bottom:12px;right:12px;background:#29483b;color:white;padding:8px;border-radius:6px;font:12px monospace';document.body.append(live);window.browserFrames=0;function frame(){live.textContent='LIVE '+(++window.browserFrames);requestAnimationFrame(frame)}frame();true",cx).await?;
+    eval(&page,"document.body.style.paddingTop='0'; document.body.insertAdjacentHTML('afterbegin', `<div id='browser-blur-grid' style='height:140px;background:repeating-conic-gradient(#172f25 0% 25%,#f5f0df 0% 50%) 0 0/16px 16px'></div><input id='browser-input' style='height:32px;width:200px' placeholder='Browser input'><button id='browser-button' onclick='window.browserClicks=(window.browserClicks||0)+1'>Click</button>`); window.browserClicks=0; document.body.addEventListener('pointerdown',()=>window.pagePresses=(window.pagePresses||0)+1); let live=document.createElement('div');live.style='position:fixed;bottom:12px;right:12px;background:#29483b;color:white;padding:8px;border-radius:6px;font:12px monospace';document.body.append(live);window.browserFrames=0;function frame(){live.textContent='LIVE '+(++window.browserFrames);requestAnimationFrame(frame)}frame();true",cx).await?;
     pause(cx, 400).await;
     let bounds = page.read_with(cx, |b, _| b.fixture_linux_bounds());
     let input=eval(&page,"(()=>{let r=document.getElementById('browser-input').getBoundingClientRect();return [r.x+20,r.y+15]})()",cx).await?;
@@ -520,7 +520,9 @@ pub async fn exercise(
         AnyWindowHandle::from(window).update(cx, |_, w, _| f32::from(w.viewport_size().width))?;
     super::validate_blur(
         output,
-        (f32::from(bounds.origin.x) as f64 + 124., 42., 168., 112.),
+        // Browser and Terminal are the two permanent rows. Keep this in sync
+        // with the compact menu so the lower-right sample stays inside it.
+        (f32::from(bounds.origin.x) as f64 + 124., 42., 168., 78.),
         viewport,
     )?;
     window.update(cx, |s, _, cx| s.fixture_browser_menu(false, cx))?;

@@ -21,6 +21,7 @@ pub mod client;
 pub mod document;
 pub mod editor;
 pub mod editor_adapter;
+mod git_status;
 mod image_preview;
 pub(crate) mod markdown_media;
 mod markdown_preview;
@@ -36,6 +37,8 @@ use preview::FilePreviewState;
 use search::FileSearchState;
 
 static NEXT_REVIEW_COMMENT_FLUSH_SOURCE: AtomicU64 = AtomicU64::new(1);
+// Full titlebar width, including search, action buttons and their gutters.
+const EXPLORER_SEARCH_FULL_WIDTH: f32 = 240.0;
 use crate::surface_chrome::{
     CONTROL_RADIUS as TOOLBAR_BUTTON_RADIUS, CONTROL_SIZE as TOOLBAR_BUTTON_SIZE, toolbar,
 };
@@ -138,7 +141,9 @@ pub(crate) fn workspace_path_drag_ghost(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilesEvent {
+    SearchControlsChanged,
     OpenFile(String),
+    RevealFile(String),
     OpenWebLink(crate::markdown::render::LinkActivation),
     TitleChanged,
     FileRenamed { old_path: String, new_path: String },
@@ -157,7 +162,7 @@ pub enum FilesCloseDisposition {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FilesPresentation {
-    Browser,
+    Explorer,
     Editor,
 }
 
@@ -183,6 +188,7 @@ pub struct FilesSurface {
     editor_path: Option<String>,
     request_context: Option<FilesRequestContext>,
     target_change_pending: bool,
+    selected_editor_path: Option<String>,
     pending_request_context: Option<FilesRequestContext>,
     tree: FileTreeModel,
     tree_list: ListState,
@@ -192,8 +198,14 @@ pub struct FilesSurface {
     tree_bar: crate::popover::MenuScrollbarState,
     tree_focus: FocusHandle,
     search: Entity<ComposerInput>,
+    search_expanded: bool,
+    search_blur: Option<Subscription>,
+    search_focus_subscription: Option<Subscription>,
+    search_restore_tree_focus: bool,
     search_state: FileSearchState,
     search_list: ListState,
+    git_status: Option<Entity<git_status::GitStatusSource>>,
+    git_status_subscription: Option<Subscription>,
     watch_task: Option<Task<()>>,
     watch_sequence: Option<u64>,
     watch_error: Option<SharedString>,
@@ -208,7 +220,47 @@ pub struct FilesSurface {
 
 impl Render for FilesSurface {
     fn render(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.presentation.is_editor() {
+            self.track_search_focus(window, cx);
+        }
+        if std::mem::take(&mut self.search_restore_tree_focus) {
+            self.tree_focus.focus(window, cx);
+        }
         let theme = crate::theme::Theme::of(cx).clone();
+        let is_editor = self.presentation.is_editor();
+        let header = is_editor
+            .then(|| self.render_editor_header(&theme, cx))
+            .flatten();
+        let body = if is_editor {
+            self.render_preview(window, cx)
+        } else {
+            self.render_explorer(&theme, cx).into_any_element()
+        };
+        let editor_context_menu = self.render_editor_context_menu(&theme, cx);
+        div()
+            .id(SharedString::from(format!(
+                "files-surface-{}",
+                self.chat_id
+            )))
+            .role(gpui::Role::Group)
+            .aria_label("Workspace files")
+            .size_full()
+            .relative()
+            .flex()
+            .bg(crate::theme::ink(0.0))
+            .flex_col()
+            .children(header)
+            .child(div().flex_1().min_h_0().w_full().child(body))
+            .children(editor_context_menu)
+    }
+}
+
+impl FilesSurface {
+    fn render_explorer(
+        &mut self,
+        theme: &crate::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let phase = self.tree.node("").map(|root| root.load.clone());
         let content = if !self.search_state.query.is_empty() {
             self.render_search_results(cx)
@@ -257,15 +309,22 @@ impl Render for FilesSurface {
         } else {
             self.render_tree(cx)
         };
-        let split_editor = self.presentation.is_editor() && self.preview.has_active();
         let watch_error = self.watch_error.clone();
-        let tree_pane = div()
+        div()
             .size_full()
             .min_w_0()
             .flex()
             .flex_col()
-            .when(!split_editor, |pane| {
-                pane.child(self.render_header(&theme, cx))
+            .when_some(self.git_status_notice(cx), |element, notice| {
+                element.child(
+                    div()
+                        .flex_none()
+                        .px(px(10.0))
+                        .py(px(4.0))
+                        .text_size(px(10.0))
+                        .text_color(theme.text_faint)
+                        .child(notice),
+                )
             })
             .when_some(watch_error, |element, error| {
                 element.child(
@@ -309,134 +368,31 @@ impl Render for FilesSurface {
                         ),
                 )
             })
-            .child(content);
-        let is_editor = self.presentation.is_editor();
-        let mut header = None;
-        let mut preview_split_right = None;
-        let body = if split_editor {
-            let wide = self.preview.is_wide();
-            let tree_width = if wide {
-                self.preview.tree_width_frame(window, cx)
-            } else {
-                self.preview.narrow_tree_width()
-            };
-            let openness = self.preview.tree_sidebar_frame(window, cx);
-            if wide && self.preview.tree_sidebar_visible() {
-                preview_split_right =
-                    Some(tree_width * openness - preview::TREE_SPLIT_HITBOX_HALF_WIDTH);
-            }
-            // Same arrangement as the outer right-sidebar toggle: the trigger
-            // is outside the animated controls, in a permanently mounted slot.
-            let toggle_width =
-                crate::surface_chrome::CONTROL_SIZE + crate::surface_chrome::EDGE_INSET;
-            let tree_header = self
-                .render_header(&theme, cx)
-                .pr(px(crate::surface_chrome::CONTROL_GAP))
-                .border_l_1()
-                .border_color(theme.border);
-            header = Some(
-                div()
-                    .w_full()
-                    .h(px(crate::surface_chrome::HEADER_HEIGHT))
-                    .flex_none()
-                    .flex()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .children(self.render_editor_header(&theme, cx)),
-                    )
-                    .child(
-                        div()
-                            .w(px((tree_width * openness - toggle_width).max(0.0)))
-                            .h_full()
-                            .flex_none()
-                            .overflow_hidden()
-                            .child(
-                                div()
-                                    .w(px(tree_width - toggle_width))
-                                    .h_full()
-                                    .child(tree_header),
-                            ),
-                    )
-                    .child(self.render_tree_toggle(&theme, cx)),
-            );
-
-            div()
-                .size_full()
-                .min_w_0()
-                .flex()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(self.render_preview(window, cx)),
-                )
-                .child(
-                    div()
-                        .w(px(tree_width * openness))
-                        .h_full()
-                        .flex_none()
-                        .relative()
-                        .child(
-                            div().size_full().overflow_hidden().child(
-                                div()
-                                    .w(px(tree_width))
-                                    .h_full()
-                                    .relative()
-                                    .border_l_1()
-                                    .border_color(theme.border)
-                                    .child(tree_pane),
-                            ),
-                        ),
-                )
-                .into_any_element()
-        } else {
-            tree_pane.into_any_element()
-        };
-        let measured_width = self.preview.width_cell();
-        let entity = cx.entity();
-        let editor_context_menu = self.render_editor_context_menu(&theme, cx);
-        let preview_split_handle =
-            preview_split_right.map(|right| self.preview_split_handle(right, cx));
-        div()
-            .id(SharedString::from(format!(
-                "files-surface-{}",
-                self.chat_id
-            )))
-            .role(gpui::Role::Group)
-            .aria_label("Workspace files")
-            .size_full()
-            .relative()
-            .flex()
-            .bg(crate::theme::ink(0.0))
-            .when(is_editor, |element| {
-                element
-                    .on_drag_move(cx.listener(Self::on_preview_split_drag))
-                    .child(
-                        gpui::canvas(
-                            move |bounds, _, cx| {
-                                let width = f32::from(bounds.size.width);
-                                if (measured_width.get() - width).abs() > 1.0 {
-                                    measured_width.set(width);
-                                    entity.update(cx, |_, cx| cx.notify());
-                                }
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .inset_0(),
-                    )
-            })
-            .flex_col()
-            .children(header)
-            .child(div().flex_1().min_h_0().w_full().child(body))
-            .children(preview_split_handle)
-            .children(editor_context_menu)
+            .child(content)
     }
-}
 
-impl FilesSurface {
+    /// A persistent explorer: opening a path always delegates to the shell.
+    pub fn new_explorer(
+        state: Entity<AppState>,
+        chat_id: String,
+        show_all_files: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_presentation(
+            state,
+            chat_id,
+            FilesPresentation::Explorer,
+            None,
+            false,
+            1000,
+            13.0,
+            false,
+            show_all_files,
+            cx,
+        )
+    }
+
+    #[cfg(test)]
     pub fn new(
         state: Entity<AppState>,
         chat_id: String,
@@ -450,7 +406,7 @@ impl FilesSurface {
         Self::new_with_presentation(
             state,
             chat_id,
-            FilesPresentation::Browser,
+            FilesPresentation::Editor,
             None,
             autosave_enabled,
             autosave_delay_ms,
@@ -500,6 +456,7 @@ impl FilesSurface {
     ) -> Self {
         let search = cx.new(|cx| {
             ComposerInput::new("Search files", cx)
+                .with_single_line()
                 .with_accessibility_role(gpui::Role::SearchInput)
                 .with_text_metrics(11.0, 16.0)
         });
@@ -521,7 +478,7 @@ impl FilesSurface {
                     cx.notify();
                 }
             }
-            ComposerInputEvent::MentionDismiss => this.clear_search(cx),
+            ComposerInputEvent::MentionDismiss => this.close_titlebar_search(cx),
             ComposerInputEvent::PastedImages(_)
             | ComposerInputEvent::PastedPaths(_)
             | ComposerInputEvent::CursorMoved
@@ -552,6 +509,7 @@ impl FilesSurface {
             editor_path: editor_path.clone(),
             request_context: None,
             target_change_pending: false,
+            selected_editor_path: None,
             pending_request_context: None,
             tree: FileTreeModel::with_include_ignored(show_all_files),
             tree_list,
@@ -560,8 +518,14 @@ impl FilesSurface {
             tree_bar: crate::popover::MenuScrollbarState::default(),
             tree_focus: cx.focus_handle(),
             search,
+            search_expanded: false,
+            search_blur: None,
+            search_focus_subscription: None,
+            search_restore_tree_focus: false,
             search_state: FileSearchState::default(),
             search_list: ListState::new(0, ListAlignment::Top, px(420.0)),
+            git_status: None,
+            git_status_subscription: None,
             watch_task: None,
             watch_sequence: None,
             watch_error: None,
@@ -746,6 +710,12 @@ impl FilesSurface {
         {
             self.open_file(path, cx);
         }
+        if !self.presentation.is_editor() {
+            self.ensure_tree_loaded(cx);
+        }
+    }
+
+    fn ensure_tree_loaded(&mut self, cx: &mut Context<Self>) {
         if self.started {
             return;
         }
@@ -760,6 +730,9 @@ impl FilesSurface {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.presentation.is_editor() {
+            return;
+        }
         self.error = None;
         self.started = true;
         self.tree.invalidate_all_directories();
@@ -786,15 +759,42 @@ impl FilesSurface {
     }
 
     pub(super) fn open_tree_file(&mut self, path: String, cx: &mut Context<Self>) {
-        if self.presentation.is_editor() {
-            cx.emit(FilesEvent::OpenFile(path));
+        cx.emit(FilesEvent::OpenFile(path));
+    }
+
+    pub(crate) fn focus_explorer(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = if self.search_state.query.is_empty() {
+            self.tree_focus.clone()
+        } else {
+            use gpui::Focusable;
+            self.search.focus_handle(cx)
+        };
+        window.defer(cx, move |window, cx| focus.focus(window, cx));
+    }
+
+    /// Synchronize selection without replacing the user's current search.
+    pub(crate) fn reveal_file(&mut self, path: String, cx: &mut Context<Self>) {
+        if self.selected_editor_path.as_deref() == Some(&path) {
             return;
         }
+        if self.request_context.is_none() || self.state.read(cx).engine().is_none() {
+            return;
+        }
+        self.selected_editor_path = Some(path.clone());
+        self.reveal_path(path, search::RevealIntent::SynchronizeSelection, cx);
+    }
 
-        self.presentation = FilesPresentation::Editor;
-        self.editor_path = Some(path.clone());
-        self.open_file(path, cx);
-        cx.emit(FilesEvent::TitleChanged);
+    pub(crate) fn reveal_file_explicit(&mut self, path: String, cx: &mut Context<Self>) {
+        self.selected_editor_path = None;
+        self.search.update(cx, |search, cx| search.set_text("", cx));
+        self.reveal_file(path, cx);
+    }
+
+    pub(crate) fn is_current_target(&self, cx: &gpui::App) -> bool {
+        self.request_context.is_some()
+            && self.request_context
+                == FilesRequestContext::for_chat(self.state.read(cx), &self.chat_id)
+            && !self.target_change_pending
     }
 
     fn toggle_ignored(&mut self, cx: &mut Context<Self>) {
@@ -805,11 +805,15 @@ impl FilesSurface {
 
     fn apply_show_all_files(&mut self, show_all_files: bool, cx: &mut Context<Self>) {
         if self.tree.set_include_ignored(show_all_files) {
+            self.selected_editor_path = None;
+            self.cancel_reveal();
             self.loads.clear();
             self.error = None;
             self.sync_tree_list();
-            self.started = true;
-            self.load_directory(String::new(), None, cx);
+            self.started = false;
+            if !self.presentation.is_editor() {
+                self.ensure_tree_loaded(cx);
+            }
             if !self.search_state.query.is_empty() {
                 self.search_state.query.clear();
                 self.on_search_edited(cx);
@@ -944,6 +948,7 @@ impl FilesSurface {
     }
 
     fn apply_target(&mut self, next: Option<FilesRequestContext>, cx: &mut Context<Self>) {
+        self.release_git_status();
         self.suspend_images(cx);
         self.cancel_review_comment_flush(cx);
         self.loads.clear();
@@ -953,6 +958,15 @@ impl FilesSurface {
         self.editor_context_menu = crate::popover::Popup::default();
         self.preview.reset();
         self.tree.reset();
+        self.selected_editor_path = None;
+        self.cancel_reveal();
+        self.search_state.task = None;
+        self.search_state.generation = self.search_state.generation.wrapping_add(1);
+        self.search_state.query.clear();
+        self.search_state.results.clear();
+        self.search_state.loading = false;
+        self.search_state.error = None;
+        self.reset_search_results();
         self.sync_tree_list();
         self.error = if next.is_none() {
             Some("No workspace available for this chat.".into())
@@ -961,6 +975,9 @@ impl FilesSurface {
         };
         self.request_context = next;
         self.started = false;
+        if !self.search.read(cx).text().trim().is_empty() {
+            self.on_search_edited(cx);
+        }
     }
 
     fn tree_has_content(&self) -> bool {
@@ -984,45 +1001,369 @@ impl FilesSurface {
         self.tree_list_rows = self.tree.visible_rows().to_vec();
     }
 
-    fn render_header(&mut self, theme: &crate::theme::Theme, cx: &mut Context<Self>) -> gpui::Div {
+    pub(crate) fn search_owns_titlebar(&self, width: f32, cx: &gpui::App) -> bool {
+        width < EXPLORER_SEARCH_FULL_WIDTH
+            && (self.search_expanded || !self.search.read(cx).text().is_empty())
+    }
+
+    fn close_titlebar_search(&mut self, cx: &mut Context<Self>) {
+        self.search_expanded = false;
+        self.clear_search(cx);
+        self.search_restore_tree_focus = true;
+        cx.emit(FilesEvent::SearchControlsChanged);
+        cx.notify();
+    }
+
+    fn track_search_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui::Focusable;
+        if self.search_blur.is_none() {
+            let focus = self.search.focus_handle(cx);
+            self.search_focus_subscription = Some(cx.on_focus(&focus, window, |this, _, cx| {
+                this.search_expanded = true;
+                cx.emit(FilesEvent::SearchControlsChanged);
+                cx.notify();
+            }));
+            self.search_blur = Some(cx.on_blur(&focus, window, |this, _, cx| {
+                if this.search.read(cx).text().is_empty() {
+                    this.search_expanded = false;
+                    cx.emit(FilesEvent::SearchControlsChanged);
+                    cx.notify();
+                }
+            }));
+        }
+    }
+
+    fn focus_titlebar_search(&mut self, defer: bool, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui::Focusable;
+        self.track_search_focus(window, cx);
+        self.search_expanded = true;
+        cx.emit(FilesEvent::SearchControlsChanged);
+        cx.notify();
+        if !defer {
+            window.focus(&self.search.focus_handle(cx), cx);
+            return;
+        }
+        // The compact button must be replaced before handing focus to the input.
+        let surface = cx.entity().downgrade();
+        window.on_next_frame(move |window, cx| {
+            let _ = surface.update(cx, |this, cx| {
+                if this.search_expanded {
+                    window.focus(&this.search.focus_handle(cx), cx);
+                }
+            });
+        });
+    }
+
+    /// Mounted by the shell in the titlebar, above the explorer's tree.
+    pub(crate) fn render_explorer_controls(
+        &mut self,
+        theme: &crate::theme::Theme,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let include_ignored = self.tree.include_ignored();
-        toolbar(theme)
-            .child(
-                crate::surface_chrome::input()
-                    .child(
-                        crate::icons::icon(crate::icons::MAGNIFER)
-                            .size(px(12.0))
-                            .flex_none()
-                            .text_color(theme.text_faint),
-                    )
-                    .child(div().min_w_0().flex_1().child(self.search.clone())),
-            )
-            .child(
-                toolbar_button(
-                    "files-toggle-ignored",
-                    if include_ignored {
-                        "Hide hidden and ignored files"
-                    } else {
-                        "Show all files (even hidden)"
-                    },
+        let exclusive = self.search_owns_titlebar(width, cx);
+        let show_input = width >= EXPLORER_SEARCH_FULL_WIDTH || exclusive;
+        let show_close = self.search_expanded || !self.search.read(cx).text().is_empty();
+        div()
+            .id("files-titlebar-controls")
+            .flex_1()
+            .min_w_0()
+            .h(px(28.0))
+            .flex()
+            .items_center()
+            .gap(px(crate::surface_chrome::CONTROL_GAP))
+            // Search selection and double-clicks must never drag or zoom the window.
+            .occlude()
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    this.close_titlebar_search(cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .when(!show_input, |controls| {
+                controls.child(
+                    toolbar_button("files-open-search", "Search files")
+                        .debug_selector(|| "files-open-search".into())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.focus_titlebar_search(true, window, cx);
+                        }))
+                        .child(
+                            crate::icons::icon(crate::icons::MAGNIFER)
+                                .size(px(crate::surface_chrome::ICON_SIZE))
+                                .text_color(theme.text_muted),
+                        ),
                 )
-                .when(include_ignored, |element| {
-                    element.bg(crate::theme::wash(0.1))
-                })
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_ignored(cx)))
-                .child(
-                    crate::icons::icon(if include_ignored {
-                        crate::icons::EYE
-                    } else {
-                        crate::icons::EYE_CLOSED
+            })
+            .when(show_input, |controls| {
+                controls.child(
+                    crate::surface_chrome::input()
+                        .id("files-titlebar-search")
+                        .debug_selector(|| "files-titlebar-search".into())
+                        .overflow_hidden()
+                        .cursor_text()
+                        .hover(|style| style.bg(crate::theme::ink(0.055)))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.focus_titlebar_search(false, window, cx);
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .child(
+                            crate::icons::icon(crate::icons::MAGNIFER)
+                                .size(px(12.0))
+                                .flex_none()
+                                .text_color(theme.text_faint),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .child(self.search.clone()),
+                        ),
+                )
+            })
+            .when(show_close, |controls| {
+                controls.child(
+                    toolbar_button("files-close-search", "Close search")
+                        .debug_selector(|| "files-close-search".into())
+                        .on_click(cx.listener(|this, _, _, cx| this.close_titlebar_search(cx)))
+                        .child(
+                            crate::icons::icon(crate::icons::CLOSE)
+                                .size(px(crate::surface_chrome::ICON_SIZE))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+            })
+            .when(!exclusive && width >= 100.0, |controls| {
+                controls.child(
+                    toolbar_button(
+                        "files-toggle-ignored",
+                        if include_ignored {
+                            "Hide hidden and ignored files"
+                        } else {
+                            "Show all files (even hidden)"
+                        },
+                    )
+                    .debug_selector(|| "files-toggle-ignored".into())
+                    .ml_auto()
+                    .when(include_ignored, |element| {
+                        element.bg(crate::theme::wash(0.1))
                     })
-                    .size(px(crate::surface_chrome::ICON_SIZE))
-                    .text_color(if include_ignored {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    }),
-                ),
-            )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_ignored(cx);
+                    }))
+                    .child(
+                        crate::icons::icon(if include_ignored {
+                            crate::icons::EYE
+                        } else {
+                            crate::icons::EYE_CLOSED
+                        })
+                        .size(px(crate::surface_chrome::ICON_SIZE))
+                        .text_color(if include_ignored {
+                            theme.text
+                        } else {
+                            theme.text_muted
+                        }),
+                    ),
+                )
+            })
+    }
+}
+
+#[cfg(test)]
+mod explorer_tests {
+    use super::*;
+    use gpui::{AppContext, TestAppContext};
+    use std::{cell::RefCell, rc::Rc};
+
+    #[gpui::test]
+    fn titlebar_search_accepts_input_without_dragging_the_window(cx: &mut TestAppContext) {
+        use gpui::{Focusable, Modifiers, MouseButton};
+
+        struct TitlebarHost {
+            files: Entity<FilesSurface>,
+            width: f32,
+            titlebar_presses: usize,
+            titlebar_clicks: usize,
+        }
+        impl Render for TitlebarHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = crate::theme::Theme::of(cx).clone();
+                let controls = self.files.update(cx, |files, cx| {
+                    files.render_explorer_controls(&theme, self.width, cx)
+                });
+                div()
+                    .id("files-test-titlebar")
+                    .window_control_area(gpui::WindowControlArea::Drag)
+                    .w(px(self.width))
+                    .h(px(crate::theme::Theme::TITLEBAR_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, _| this.titlebar_presses += 1),
+                    )
+                    .on_click(cx.listener(|this, _, _, _| this.titlebar_clicks += 1))
+                    .child(controls)
+            }
+        }
+
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| TitlebarHost {
+            files: cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                FilesSurface::new_explorer(state, "chat".into(), false, cx)
+            }),
+            titlebar_presses: 0,
+            titlebar_clicks: 0,
+            width: 300.0,
+        });
+        cx.update(|window, _| window.activate_window());
+        let files = host.read_with(cx, |host, _| host.files.clone());
+        let _observe = host.update(cx, |_, cx| cx.observe(&files, |_, _, cx| cx.notify()));
+        let show_all = Rc::new(RefCell::new(None));
+        let emitted = show_all.clone();
+        let _events = cx.update(|_, cx| {
+            cx.subscribe(&files, move |_, event, _| {
+                if let FilesEvent::ShowAllFilesChanged(value) = event {
+                    *emitted.borrow_mut() = Some(*value);
+                }
+            })
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let bounds = cx.debug_bounds("files-titlebar-search").unwrap();
+        // Click the field padding, not just the input's text hitbox.
+        let padding = gpui::point(bounds.left() + px(2.0), bounds.center().y);
+        cx.simulate_click(padding, Modifiers::default());
+        cx.simulate_input("main.rs");
+        host.read_with(cx, |host, cx| {
+            assert_eq!(host.files.read(cx).search.read(cx).text(), "main.rs");
+        });
+
+        let start = bounds.center();
+        let end = start + gpui::point(px(12.0), px(0.0));
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| {
+            assert!(files.read(cx).search.focus_handle(cx).is_focused(window));
+        });
+        let ignored = cx.debug_bounds("files-toggle-ignored").unwrap().center();
+        cx.simulate_click(ignored, Modifiers::default());
+        assert_eq!(*show_all.borrow(), Some(true));
+        host.read_with(cx, |host, _| {
+            assert_eq!(host.titlebar_presses, 0);
+            assert_eq!(host.titlebar_clicks, 0);
+        });
+
+        // Shrinking preserves the existing input and query, but frees the
+        // action slots. A nonempty filter stays visible after losing focus.
+        host.update(cx, |host, cx| {
+            host.width = 150.0;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("files-titlebar-search").is_some());
+        assert!(cx.debug_bounds("files-toggle-ignored").is_none());
+        files.read_with(cx, |files, cx| {
+            assert_eq!(files.search.read(cx).text(), "main.rs")
+        });
+        let close = cx.debug_bounds("files-close-search").unwrap().center();
+        cx.simulate_click(close, Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("files-titlebar-search").is_none());
+        assert!(cx.debug_bounds("files-toggle-ignored").is_some());
+        let open = cx.debug_bounds("files-open-search").unwrap().center();
+        cx.simulate_click(open, Modifiers::default());
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear();
+        });
+        cx.run_until_parked();
+        cx.simulate_input("a very long filename\nwith another line.rs");
+        files.read_with(cx, |files, cx| {
+            assert_eq!(
+                files.search.read(cx).text(),
+                "a very long filename with another line.rs"
+            );
+        });
+        cx.update(|window, cx| {
+            assert!(files.read(cx).search.focus_handle(cx).is_focused(window));
+        });
+        host.update(cx, |host, cx| {
+            host.width = 300.0;
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear();
+            assert!(files.read(cx).search.focus_handle(cx).is_focused(window));
+        });
+        host.update(cx, |host, cx| {
+            host.width = 150.0;
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear();
+            window.blur();
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("files-titlebar-search").is_some());
+        cx.update(|window, cx| window.focus(&files.read(cx).search.focus_handle(cx), cx));
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("files-open-search").is_some());
+        files.read_with(cx, |files, cx| {
+            assert!(files.search.read(cx).text().is_empty());
+            assert!(files.search_restore_tree_focus);
+        });
+        let open = cx.debug_bounds("files-open-search").unwrap().center();
+        cx.simulate_click(open, Modifiers::default());
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear();
+        });
+        cx.update(|window, cx| {
+            assert!(files.read(cx).search.focus_handle(cx).is_focused(window));
+            window.blur();
+        });
+        // Focus listeners run after painting; paint the resulting collapsed state.
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("files-open-search").is_some());
+    }
+
+    #[gpui::test]
+    fn explorer_open_delegates_without_becoming_an_editor(cx: &mut TestAppContext) {
+        let surface = cx.new(|cx| {
+            let state = cx.new(|_| AppState::new());
+            FilesSurface::new_explorer(state, "chat".into(), false, cx)
+        });
+        let paths = Rc::new(RefCell::new(Vec::new()));
+        let emitted = paths.clone();
+        let _sub = cx.update(|cx| {
+            cx.subscribe(&surface, move |_, event, _| {
+                if let FilesEvent::OpenFile(path) = event {
+                    emitted.borrow_mut().push(path.clone());
+                }
+            })
+        });
+        surface.update(cx, |surface, cx| {
+            surface.open_tree_file("src/main.rs".into(), cx);
+            surface.open_tree_file("README.md".into(), cx);
+            assert_eq!(surface.presentation, FilesPresentation::Explorer);
+            assert!(surface.editor_path.is_none());
+            assert!(!surface.preview.has_active());
+            assert!(!surface.preview.has_unsaved_changes());
+        });
+        assert_eq!(*paths.borrow(), ["src/main.rs", "README.md"]);
     }
 }

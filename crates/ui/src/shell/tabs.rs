@@ -39,6 +39,31 @@ pub(super) fn right_pane_expand_icon(expanded: bool) -> &'static str {
     }
 }
 
+struct PanelTitlebarWidths {
+    surface_reveal: f32,
+    files_controls: f32,
+}
+
+/// The two fixed right-edge anchors: the explorer toggle and the pane toggle.
+const PANEL_TOGGLE_SLOTS: f32 = 56.0;
+
+fn panel_titlebar_widths(
+    surfaces_visible: f32,
+    files_visible: f32,
+    available: f32,
+    right_pad: f32,
+) -> PanelTitlebarWidths {
+    // Caption controls occupy the far-right panel first. Subtract their
+    // clearance once across the combined header, then split it at Files.
+    // The explorer and pane toggles keep their slots even when closed.
+    let files_controls = (files_visible - right_pad).max(PANEL_TOGGLE_SLOTS);
+    let surfaces = surfaces_visible + files_visible - right_pad - files_controls;
+    PanelTitlebarWidths {
+        surface_reveal: surfaces.min(available - files_controls).max(0.0),
+        files_controls,
+    }
+}
+
 impl Shell {
     /// Navigation requests focus once the destination composer renders.
     pub(super) fn focus_composer(&mut self, cx: &mut Context<Self>) {
@@ -227,25 +252,53 @@ impl Shell {
             content_left
         };
         let row_gap = 8.0;
+        let files_width = self.files_visible_width(cx);
         let right_pad = self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET);
-        let open_trailing_width = right_pane_open.then(|| {
-            let right_now = self.eval_tween(self.right_tween, self.right_target(cx));
-            let gap_budget = if takeover { row_gap } else { row_gap * 3.0 };
-            let avail = self.viewport_width - row_left - right_pad - gap_budget;
-            let animated_width = ((right_now - right_pad).min(avail) - 28.0).max(0.0);
-            animated_width + 28.0
-        });
+        // The title row's gaps are outside the fixed-width panel controls.
+        let gap_budget = if takeover { row_gap } else { row_gap * 3.0 };
+        let right_visible = self.right_visible_width(cx);
+        let widths = panel_titlebar_widths(
+            right_visible,
+            files_width,
+            self.viewport_width - row_left - right_pad - gap_budget,
+            right_pad,
+        );
+        // Choose the search layout using the space left after native captions
+        // and the always-mounted pane toggle. Compact search temporarily owns
+        // the explorer toggle's slot as well.
+        let explorer_width = widths.files_controls - 28.0;
+        let search_owns_titlebar = self.files_panel_open(cx)
+            && self.files.get(&self.panel_key(cx)).is_some_and(|files| {
+                files.read(cx).search_owns_titlebar(explorer_width, cx)
+            });
+        let files_controls = if self.files_panel_open(cx) && explorer_width >= 72.0 {
+            self.files.get(&self.panel_key(cx)).cloned().map(|files| {
+                files.update(cx, |files, cx| {
+                    files.render_explorer_controls(&theme, explorer_width, cx)
+                })
+            })
+        } else {
+            None
+        };
+        // The trailing strip always carries the explorer slot with its two
+        // toggles; the surface tabs reveal to their left only while the surface
+        // host is open.
         let trailing_width = if on_canvas {
             0.0
         } else {
-            open_trailing_width.unwrap_or(28.0)
+            let surface = if right_pane_open {
+                widths.surface_reveal
+            } else {
+                0.0
+            };
+            surface + widths.files_controls
         };
         let available_titlebar_width =
             (self.viewport_width - row_left - right_pad - trailing_width - row_gap * 3.0).max(0.0);
 
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
-        } else if let Some(trailing_width) = open_trailing_width {
+        } else {
             let mut controls = div()
                 .id("right-titlebar-controls")
                 .flex_none()
@@ -253,64 +306,105 @@ impl Shell {
                 .flex()
                 .flex_row()
                 .items_center();
-            let tabs = self.render_right_tab_strip(cx);
-            controls = controls.child(
-                div()
-                    .w(px((trailing_width - 28.0).max(0.0)))
-                    .h_full()
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
-                    .overflow_hidden()
-                    // 8 + the trigger's own 8px pad = the pane's 16px
-                    // text gutter. The 4px right padding is the stable
-                    // gap before the fixed toggle.
-                    .pl(px(8.0))
-                    .pr(px(4.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .overflow_hidden()
-                            .child(tabs),
-                    )
-                    .child(header_icon_button(
-                        "expand-changes",
-                        right_pane_expand_icon(self.right_pane_expanded),
-                        &theme,
-                        cx.listener(|this, _, _, cx| this.toggle_right_pane_expand(cx)),
-                    )),
-            );
-            // Keep the trigger mounted at one fixed position while the pane
-            // controls reveal to its left.
+            if right_pane_open {
+                // The right pane's SURFACE TABS (t3 RightPanelTabs) — the diff
+                // options that used to live here moved into the pane's own
+                // second row; expand stays in this band (user request).
+                let tabs = self.render_right_tab_strip(cx);
+                // The toggle is the fixed right-edge anchor, like the left
+                // sidebar control. Only the tabs + expand section reveals to
+                // its left; including the toggle in this animated width
+                // compressed both icons into the same clipped box at open.
+                controls = controls.child(
+                    div()
+                        .w(px(widths.surface_reveal))
+                        .h_full()
+                        .flex_none()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .overflow_hidden()
+                        // 8 + the trigger's own 8px pad = the pane's 16px
+                        // text gutter. The 4px right padding is the stable
+                        // gap before the fixed toggle.
+                        .pl(px(8.0))
+                        .pr(px(4.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .overflow_hidden()
+                                .child(tabs),
+                        )
+                        .child(header_icon_button(
+                            "expand-changes",
+                            right_pane_expand_icon(self.right_pane_expanded),
+                            &theme,
+                            cx.listener(|this, _, _, cx| this.toggle_right_pane_expand(cx)),
+                        )),
+                );
+            }
+            // The explorer slot sits over the explorer column: its search and
+            // eye controls, then the two fixed right-edge anchors — the
+            // explorer toggle and, outermost, the pane toggle — which stay
+            // mounted at one position while everything else reveals to
+            // their left.
             Some(
                 controls
-                    .child(header_icon_button(
-                        "toggle-changes",
-                        icons::SIDEBAR_MINIMALISTIC,
-                        &theme,
-                        cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
-                    ))
-                    .into_any_element(),
-            )
-        } else {
-            Some(
-                div()
-                    .id("right-titlebar-controls")
-                    .flex_none()
-                    .h_full()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .child(header_icon_button(
-                        "toggle-changes",
-                        icons::SIDEBAR_MINIMALISTIC,
-                        &theme,
-                        cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
-                    ))
+                    .child(
+                        div()
+                            .w(px(widths.files_controls))
+                            .h_full()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            // The shared header carries the same hairline as
+                            // the columns below it, so the pane reads as one
+                            // surface split at the explorer. Only drawn while
+                            // the slot's left edge sits exactly on that seam.
+                            .when(
+                                right_pane_open
+                                    && files_width >= right_pad + PANEL_TOGGLE_SLOTS,
+                                |slot| slot.border_l_1().border_color(theme.border),
+                            )
+                            .when_some(files_controls, |slot, controls| {
+                                slot.pl(px(crate::surface_chrome::EDGE_INSET))
+                                    .gap(px(crate::surface_chrome::CONTROL_GAP))
+                                    .child(controls)
+                            })
+                            .when(!search_owns_titlebar, |slot| {
+                                slot.child(
+                                    header_icon_button(
+                                        "toggle-files-panel",
+                                        icons::FILE_TREE,
+                                        &theme,
+                                        cx.listener(|this, _, window, cx| {
+                                            this.toggle_files_panel(window, cx)
+                                        }),
+                                    )
+                                    .role(gpui::Role::Button)
+                                    .aria_label(if self.files_panel_open(cx) {
+                                        "Hide files panel"
+                                    } else {
+                                        "Show files panel"
+                                    })
+                                    .when(self.files_panel_open(cx), |button| {
+                                        button.bg(crate::theme::wash(0.09))
+                                    }),
+                                )
+                            })
+                            .child(header_icon_button(
+                                "toggle-changes",
+                                icons::SIDEBAR_MINIMALISTIC,
+                                &theme,
+                                cx.listener(|this, _, window, cx| {
+                                    this.toggle_right_pane(cx)
+                                }),
+                            )),
+                    )
                     .into_any_element(),
             )
         };
@@ -386,6 +480,71 @@ impl Shell {
         let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
         self.titlebar_drag_region("chat-titlebar", bar, cx)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod panel_titlebar_tests {
+    use super::*;
+
+    #[test]
+    fn tabs_align_with_the_panel_for_each_caption_layout_and_files_width() {
+        let viewport = 1400.0;
+        for right_pad in [6.0, 40.0, 92.0, 114.0] {
+            for files in [0.0, 10.0, 28.0, 100.0, 220.0, 286.0, 440.0] {
+                let widths = panel_titlebar_widths(520.0, files, 1100.0, right_pad);
+                let controls_left =
+                    viewport - right_pad - widths.files_controls - widths.surface_reveal;
+                assert_eq!(
+                    controls_left,
+                    viewport - files - 520.0,
+                    "caption clearance {right_pad}, Files width {files}"
+                );
+                assert!(widths.files_controls >= PANEL_TOGGLE_SLOTS);
+                if files >= right_pad + PANEL_TOGGLE_SLOTS {
+                    assert_eq!(
+                        viewport - right_pad - widths.files_controls,
+                        viewport - files
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn expanded_tabs_clear_the_left_controls_without_reserving_captions_twice() {
+        for right_pad in [6.0, 92.0, 114.0] {
+            let viewport = 1400.0;
+            let files = 286.0;
+            // With the sidebar open, the header starts exactly at its seam.
+            // With it collapsed, leave room for the window/nav controls.
+            for (sidebar, row_left) in [(256.0, 248.0), (0.0, 180.0)] {
+                let widths = panel_titlebar_widths(
+                    viewport - sidebar - files,
+                    files,
+                    viewport - row_left - right_pad - 8.0,
+                    right_pad,
+                );
+                let controls_left =
+                    viewport - right_pad - widths.files_controls - widths.surface_reveal;
+                assert_eq!(controls_left, sidebar.max(row_left + 8.0));
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_panels_and_tight_headers_keep_nonnegative_reveal_widths() {
+        // A narrow surface and Files share a 520px header.
+        let widths = panel_titlebar_widths(234.0, 286.0, 600.0, 92.0);
+        assert_eq!(
+            1000.0 - 92.0 - widths.files_controls - widths.surface_reveal,
+            480.0
+        );
+        for available in [-20.0, 0.0, 28.0, 56.0, 100.0] {
+            let widths = panel_titlebar_widths(0.0, 0.0, available, 114.0);
+            assert_eq!(widths.surface_reveal, 0.0);
+            assert_eq!(widths.files_controls, PANEL_TOGGLE_SLOTS);
+        }
     }
 }
 

@@ -539,28 +539,33 @@ async fn unsupported_remote_change_request_watch_keeps_the_shared_device_link() 
     // The host can take a moment to attach to the room. Once attached, an old
     // host rejects only the capability added by this version.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        match client
-            .subscribe_checked(
-                methods::WATCH_CHECKOUT_CHANGE_REQUEST,
-                serde_json::json!({
-                    "cwd": "/legacy-checkout",
-                    "targetDeviceId": "legacy-device",
-                }),
-            )
-            .await
-        {
-            Err(RpcError::UnknownMethod(method)) => {
-                assert_eq!(method, methods::WATCH_CHECKOUT_CHANGE_REQUEST);
-                break;
-            }
-            Ok(_) => panic!("legacy host must reject the change-request watch"),
-            Err(error) => {
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "legacy host never came up: {error}"
-                );
-                tokio::time::sleep(Duration::from_millis(200)).await;
+    for watch_method in [
+        methods::WATCH_CHECKOUT_CHANGE_REQUEST,
+        methods::WATCH_WORKSPACE_GIT_STATUS,
+    ] {
+        loop {
+            match client
+                .subscribe_checked(
+                    watch_method,
+                    serde_json::json!({
+                        "cwd": "/legacy-checkout",
+                        "targetDeviceId": "legacy-device",
+                    }),
+                )
+                .await
+            {
+                Err(RpcError::UnknownMethod(method)) => {
+                    assert_eq!(method, watch_method);
+                    break;
+                }
+                Ok(_) => panic!("legacy host must reject the change-request watch"),
+                Err(error) => {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "legacy host never came up: {error}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
             }
         }
     }
@@ -580,6 +585,95 @@ async fn unsupported_remote_change_request_watch_keeps_the_shared_device_link() 
     );
 
     core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_status_is_computed_on_the_checkout_host_through_the_relay() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().unwrap();
+    let root = dirs.path().join("checkout");
+    init_git_repo(&root);
+    std::fs::create_dir(root.join("new")).unwrap();
+    std::fs::write(root.join("new/remote.rs"), "// host only\n").unwrap();
+    let host = assemble(&dirs.path().join("host"), "host-device");
+    host.workspace
+        .create_space(
+            "remote-space",
+            "host-device",
+            &root.to_string_lossy(),
+            None,
+            true,
+        )
+        .unwrap();
+    host.workspace
+        .create_chat("remote-chat", Some("remote-space"), None, None, None)
+        .unwrap();
+    host.diff_sync.reconcile_now().await;
+    let local_client = zeron_rpc::memory_client(host.rpc_service());
+    let mut local = local_client
+        .subscribe_checked(
+            methods::WATCH_WORKSPACE_GIT_STATUS,
+            serde_json::json!({"chatId": "remote-chat"}),
+        )
+        .await
+        .unwrap();
+    let expected = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let frame = local.recv().await.unwrap();
+            if !frame["status"].is_null() {
+                break frame;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(expected["status"]["files"][0]["path"], "new/remote.rs");
+    assert_eq!(expected["status"]["deviceId"], "host-device");
+    assert!(expected["status"].get("patch").is_none());
+
+    let _host_relay = host.start_host_relay(&relay_url);
+    let consumer = assemble(&dirs.path().join("consumer"), "consumer-device");
+    let mut config = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    config.probe_timeout = Duration::from_secs(5);
+    consumer.set_links(LinkCache::new(config));
+    let client = zeron_rpc::memory_client(consumer.rpc_service());
+    // The consumer has no corresponding space/chat: resolving locally must fail.
+    assert!(
+        client
+            .subscribe_checked(
+                methods::WATCH_WORKSPACE_GIT_STATUS,
+                serde_json::json!({"chatId": "remote-chat"})
+            )
+            .await
+            .is_err()
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut remote = loop {
+        match client
+            .subscribe_checked(
+                methods::WATCH_WORKSPACE_GIT_STATUS,
+                serde_json::json!({"chatId": "remote-chat", "targetDeviceId": "host-device"}),
+            )
+            .await
+        {
+            Ok(stream) => break stream,
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "relay unavailable: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    };
+    let actual = tokio::time::timeout(Duration::from_secs(5), remote.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(actual, expected);
+    drop(remote);
+    consumer.shutdown().await;
+    host.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

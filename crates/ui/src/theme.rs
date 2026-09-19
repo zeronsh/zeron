@@ -900,6 +900,15 @@ impl Theme {
         self.glass().a < 1.0
     }
 
+    /// Shared background for the editor host and the adjacent Files column.
+    pub fn panel_bg(&self) -> Hsla {
+        if self.is_glass() {
+            self.bg.opacity(0.4)
+        } else {
+            self.bg
+        }
+    }
+
     /// Whether FLOATING surfaces (popovers, the composer pill) paint their
     /// backdrop blur and translucent tints. Unlike [`Self::is_glass`] this is
     /// scene-level: the blur runs on in-app content inside the window, not on

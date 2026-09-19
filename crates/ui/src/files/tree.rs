@@ -16,7 +16,34 @@ use crate::{
 };
 
 pub const TREE_ROW_HEIGHT: f32 = 27.0;
-const TREE_INDENT: f32 = 14.0;
+pub(super) const TREE_INDENT: f32 = 14.0;
+
+/// Draw each ancestor's guide in the row itself so virtualized rows join
+/// seamlessly, including when the parent has scrolled out of view.
+pub(super) fn with_indent_guides(
+    row: AnyElement,
+    depth: usize,
+    height: f32,
+    theme: &Theme,
+) -> AnyElement {
+    div()
+        .relative()
+        .h(px(height))
+        .w_full()
+        .flex_none()
+        .children((0..depth).map(|level| {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                // Align with the center of the ancestor's 14px disclosure slot.
+                .left(px(8.0 + 7.0 + level as f32 * TREE_INDENT))
+                .w(px(1.0))
+                .bg(theme.border)
+        }))
+        .child(row)
+        .into_any_element()
+}
 
 /// Keep the viewport attached to a path rather than an index when rows move.
 pub(super) fn sync_list_rows(
@@ -188,7 +215,7 @@ impl FilesSurface {
         };
         let theme = Theme::of(cx).clone();
         let padding = 8.0 + row.depth as f32 * TREE_INDENT;
-        match row.kind {
+        let content = match row.kind {
             VisibleRowKind::Entry => {
                 let Some(node) = self.tree.node(&row.path).cloned() else {
                     return gpui::Empty.into_any_element();
@@ -197,9 +224,12 @@ impl FilesSurface {
                 let selected = self.tree.selected() == Some(path.as_str());
                 let focused = self.tree_focus.is_focused(window);
                 let is_directory = node.entry.kind == WorkspaceEntryKind::Directory;
+                let decoration = self.git_decoration(&row.path, is_directory, cx);
                 let drag_payload = WorkspacePathDrag::new(path.clone(), is_directory);
                 let expanded = is_directory && self.tree.is_expanded(&path);
-                let text_color = if selected {
+                let text_color = if let Some(decoration) = decoration {
+                    decoration.color(&theme)
+                } else if selected {
                     theme.text
                 } else {
                     theme.text_muted
@@ -229,7 +259,9 @@ impl FilesSurface {
                     .items_center()
                     .gap(px(4.0))
                     .cursor_pointer()
-                    .when(node.entry.ignored, |element| element.opacity(0.52))
+                    .when(node.entry.ignored && decoration.is_none(), |element| {
+                        element.opacity(0.52)
+                    })
                     .when(selected, |element| {
                         element.bg(crate::theme::wash(if focused { 0.12 } else { 0.08 }))
                     })
@@ -347,7 +379,8 @@ impl FilesSurface {
                         .child("Load more…"),
                 )
                 .into_any_element(),
-        }
+        };
+        with_indent_guides(content, row.depth, TREE_ROW_HEIGHT, &theme)
     }
 
     pub(super) fn activate_tree_path(&mut self, path: String, cx: &mut Context<Self>) {

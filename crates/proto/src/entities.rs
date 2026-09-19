@@ -702,6 +702,50 @@ pub struct DiffFileSummary {
     pub binary: bool,
 }
 
+/// Git porcelain states, independent of patch size and line counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitFileState {
+    Unchanged,
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    Unmerged,
+    Untracked,
+    TypeChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileStatus {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub index: GitFileState,
+    pub worktree: GitFileState,
+}
+
+/// Latest status only: never contains file content or a patch. `complete = false`
+/// means unavailable/partial, not clean. Revision covers only these statuses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutGitStatus {
+    pub checkout_id: String,
+    pub device_id: String,
+    pub revision: String,
+    pub complete: bool,
+    pub files: Vec<GitFileStatus>,
+}
+
+/// Keep unavailable updates inside an object: the RPC envelope uses JSON null
+/// for a missing item, so a bare optional snapshot cannot signal invalidation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGitStatusFrame {
+    pub status: Option<CheckoutGitStatus>,
+}
+
 /// Working-tree diff for a checkout — latest-only sidecar, 3MiB patch cap.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

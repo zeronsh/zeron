@@ -61,6 +61,7 @@ use crate::workspace_links::resolve_workspace_file_link;
 
 mod actions_ui;
 mod command_palette;
+mod files_panel;
 mod project_icon;
 mod sidebar_pins;
 mod spaces;
@@ -460,8 +461,8 @@ pub enum Route {
 /// floor. On unusually small windows this deliberately falls below the right
 /// pane's preferred minimum: the chat remains usable and the side surface
 /// yields the scarce space.
-fn right_pane_max_width(viewport: f32, sidebar: f32) -> f32 {
-    (viewport - sidebar - CHAT_PANEL_MIN).max(0.0)
+fn right_pane_max_width(viewport: f32, sidebar: f32, chat_floor: f32) -> f32 {
+    (viewport - sidebar - chat_floor).max(0.0)
 }
 
 /// Width used by right-pane takeover. Unlike manual resizing, takeover is
@@ -477,7 +478,6 @@ fn right_pane_takeover_width(viewport: f32, sidebar: f32) -> f32 {
 pub enum RightSurface {
     #[default]
     Picker,
-    Files,
     File(u64),
     Browser(u64),
     Diff(u64),
@@ -510,8 +510,11 @@ fn workspace_file_title(path: &str) -> SharedString {
 /// the app run; a fresh open with no surface tabs lands on the picker.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ChatPanels {
+    /// The explorer portion of the right pane is docked.
+    pub files_open: bool,
     pub terminal_open: bool,
-    /// Right pane visible (the surface host — historically the Changes pane).
+    /// The surface host portion of the right pane is visible (historically
+    /// the Changes pane). The pane itself shows when either portion does.
     pub changes_open: bool,
     /// Which surface tab renders; validated against the live tab list each
     /// frame (a closed tab falls back gracefully).
@@ -760,6 +763,7 @@ struct RightPaneResize;
 enum PaneResizeKind {
     Sidebar,
     Right,
+    Files,
     Terminal,
 }
 
@@ -1479,7 +1483,7 @@ pub struct Shell {
     /// entity from the bottom drawer's (own PTYs, own grid geometry; one
     /// panel can only size one visible grid at a time).
     right_terminal: Option<Entity<TerminalPanel>>,
-    /// The surface-tab strip's `+` menu (Files / Terminal / Diffs / History rows).
+    /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
     /// Host-owned project Actions cached per (device, space).
     project_actions: crate::project_actions::ProjectActionsController,
@@ -1490,7 +1494,7 @@ pub struct Shell {
     /// its file watcher and every in-flight workspace request.
     files: std::collections::HashMap<String, Entity<FilesSurface>>,
     files_subs: std::collections::HashMap<String, Subscription>,
-    /// One independent editor/tree per opened workspace file. IDs are global
+    /// One independent editor per opened workspace file. IDs are global
     /// while the lookup key keeps a file tab scoped to its chat panel.
     file_surfaces: std::collections::HashMap<u64, Entity<FilesSurface>>,
     file_surface_paths: std::collections::HashMap<u64, String>,
@@ -1637,6 +1641,7 @@ pub struct Shell {
     debug_gate: Option<GatePhase>,
     debug_upload: Option<String>,
     sidebar_tween: Option<WidthTween>,
+    files_tween: Option<WidthTween>,
     sidebar_edge_bounce: Option<motion::ResizeEdgeBounce>,
     /// Boundary currently held during a sidebar drag. Cleared on re-entry or
     /// release so the next genuine edge crossing can acknowledge the limit.
@@ -1983,6 +1988,7 @@ impl Shell {
             debug_gate,
             debug_upload,
             sidebar_tween: None,
+            files_tween: None,
             sidebar_edge_bounce: None,
             sidebar_resize_edge: None,
             pane_resize_active: None,
@@ -2077,6 +2083,7 @@ impl Shell {
     // ---- splash ----
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
+        self.prune_file_explorers(cx);
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.sidebar_notice = Some(notice.into());
         }
@@ -2351,6 +2358,7 @@ impl Shell {
                     self.nav.push(entry);
                 }
             }
+            self.files_tween = None;
             self.right_tween = None;
             self.right_takeover_content_tween = None;
             self.main_takeover_tween = None;
@@ -2447,11 +2455,14 @@ impl Shell {
             // tween so toggling it remains seamless.
             let sidebar_now = self.sidebar_now();
             if self.right_pane_expanded {
-                right_pane_takeover_width(self.viewport_width, sidebar_now)
+                right_pane_takeover_width(
+                    self.viewport_width - self.files_reserved_width(cx),
+                    sidebar_now,
+                )
             } else {
                 self.settings
                     .right_pane_width
-                    .min(right_pane_max_width(self.viewport_width, sidebar_now))
+                    .min(self.surface_max_width(cx))
             }
         }
     }
@@ -2468,17 +2479,45 @@ impl Shell {
         cx.notify();
     }
 
+    /// The user's pane toggle (titlebar button, keyboard). It drives only the
+    /// surface host portion of the right pane: with just the explorer docked
+    /// it opens the surface host beside it, and it never hides the explorer —
+    /// only the explorer's own toggle undocks that portion.
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
+        self.set_surfaces_open(!self.right_pane_open(cx), cx);
+    }
+
+    /// Closing the last surface tab closes the surface host; a docked
+    /// explorer keeps the pane open on its own.
+    fn collapse_surfaces_if_empty(&mut self, panel_key: &str, cx: &mut Context<Self>) {
+        if panel_key == self.panel_key(cx)
+            && self.right_tabs.get(panel_key).is_none_or(Vec::is_empty)
+        {
+            self.set_surfaces_open(false, cx);
+        }
+    }
+
+    /// Show or hide the surface host portion of the right pane. A no-op when
+    /// already in the requested state, so programmatic opens (a file, a
+    /// browser link, a subagent chip) never close a pane the user has open.
+    fn set_surfaces_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.active_chat.is_empty() || self.right_pane_open(cx) == open {
+            return;
+        }
         // Reverse from the visible width when toggled during an animation.
-        let from = self.eval_tween(self.right_tween, self.right_target(cx));
+        let from = self.right_visible_width(cx);
         self.right_edge_bounce = None;
         self.right_resize_edge = None;
         self.finish_pane_resize(PaneResizeKind::Right);
         let sidebar_now = self.sidebar_now();
-        let from_main = conversation_width(self.viewport_width, sidebar_now, from);
+        let from_main = conversation_width(
+            self.viewport_width - self.files_reserved_width(cx),
+            sidebar_now,
+            from,
+        );
         let was_expanded = self.right_pane_expanded;
         let key = self.panel_key(cx);
-        let open = self.panels.toggle_changes(&key);
+        self.panels.update(&key, |p| p.changes_open = open);
         if !open {
             self.suspend_file_images(cx);
             // Closing always leaves takeover mode — reopening at full bleed
@@ -2491,7 +2530,11 @@ impl Shell {
         self.main_takeover_tween = was_expanded.then(|| {
             WidthTween::new(
                 from_main,
-                conversation_width(self.viewport_width, sidebar_now, to),
+                conversation_width(
+                    self.viewport_width - self.files_reserved_width(cx),
+                    sidebar_now,
+                    to,
+                ),
             )
         });
         if open
@@ -2534,15 +2577,6 @@ impl Shell {
         stored
             .iter()
             .filter_map(|surface| match surface {
-                RightSurface::Files => self.files.get(&key).map(|files| {
-                    let files = files.read(cx);
-                    (
-                        *surface,
-                        files.tab_title(),
-                        files.has_unsaved_changes(),
-                        None,
-                    )
-                }),
                 RightSurface::File(id) => self.file_surfaces.get(id).map(|file| {
                     let path = self.file_surface_paths.get(id);
                     let title = path
@@ -2586,13 +2620,9 @@ impl Shell {
     fn workspace_path_for_surface(
         &self,
         surface: RightSurface,
-        cx: &App,
+        _cx: &App,
     ) -> Option<WorkspacePathDrag> {
         let path = match surface {
-            RightSurface::Files => self
-                .files
-                .get(&self.panel_key(cx))
-                .and_then(|files| files.read(cx).attachment_path().map(str::to_string))?,
             RightSurface::File(id) => self.file_surface_paths.get(&id)?.clone(),
             RightSurface::Picker
             | RightSurface::Diff(_)
@@ -2674,11 +2704,6 @@ impl Shell {
         let key = self.panel_key(cx);
         self.panels.update(&key, |p| p.right_active = surface);
         match surface {
-            RightSurface::Files => {
-                if let Some(files) = self.files.get(&key).cloned() {
-                    files.update(cx, |files, cx| files.ensure_loaded(cx));
-                }
-            }
             RightSurface::File(id) => {
                 if let Some(file) = self.file_surfaces.get(&id).cloned() {
                     file.update(cx, |file, cx| file.ensure_loaded(cx));
@@ -2703,6 +2728,7 @@ impl Shell {
             RightSurface::Subagent(_) | RightSurface::Browser(_) => {}
             RightSurface::Picker => {}
         }
+        self.sync_explorer_selection(cx);
         cx.notify();
     }
 
@@ -2718,9 +2744,7 @@ impl Shell {
             }
             return;
         }
-        let key = self.panel_key(cx);
         let files = match surface {
-            RightSurface::Files => self.files.get(&key).cloned(),
             RightSurface::File(id) => self.file_surfaces.get(&id).cloned(),
             _ => None,
         };
@@ -2741,12 +2765,7 @@ impl Shell {
         if let Some(page) = self.files_settings_page.clone() {
             page.update(cx, |page, cx| page.set_word_wrap(word_wrap, cx));
         }
-        let surfaces = self
-            .files
-            .values()
-            .chain(self.file_surfaces.values())
-            .cloned()
-            .collect::<Vec<_>>();
+        let surfaces = self.file_surfaces.values().cloned().collect::<Vec<_>>();
         for surface in surfaces {
             surface.update(cx, |surface, cx| {
                 surface.set_word_wrap(word_wrap, window, cx)
@@ -2781,9 +2800,9 @@ impl Shell {
             page.update(cx, |page, cx| page.set_show_all_files(show_all_files, cx));
         }
         let surfaces = self
-            .files
+            .file_surfaces
             .values()
-            .chain(self.file_surfaces.values())
+            .chain(self.files.values())
             .cloned()
             .collect::<Vec<_>>();
         for surface in surfaces {
@@ -2846,9 +2865,7 @@ impl Shell {
         }
         let outcome = resolved.web_outcome(cfg!(any(target_os = "macos", target_os = "linux")));
         if outcome == LinkOutcome::Internal {
-            if !self.right_pane_open(cx) {
-                self.toggle_right_pane(cx);
-            }
+            self.set_surfaces_open(true, cx);
             self.add_browser_surface(activation.target.navigation.clone().ok(), window, cx);
         }
         outcome
@@ -2923,75 +2940,12 @@ impl Shell {
         self.register_diff_surface(changes, cx);
     }
 
-    /// Files is single-instance per chat: both the picker and the `+` menu
-    /// focus the existing surface instead of creating duplicate trees and
-    /// duplicate workspace subscriptions.
-    fn add_files_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_chat.is_empty() {
-            return;
-        }
-        let key = self.panel_key(cx);
-        if !self.files.contains_key(&key) {
-            let autosave_enabled = self.settings.files_autosave_enabled;
-            let delay = self.settings.files_autosave_delay_ms;
-            let editor_font_size = crate::typography::code_font_size(cx);
-            let word_wrap = self.settings.files_word_wrap;
-            let show_all_files = self.settings.files_show_all;
-            let files = cx.new(|cx| {
-                FilesSurface::new(
-                    self.state.clone(),
-                    self.active_chat.clone(),
-                    autosave_enabled,
-                    delay,
-                    editor_font_size,
-                    word_wrap,
-                    show_all_files,
-                    cx,
-                )
-            });
-            let event_key = key.clone();
-            let sub = cx.subscribe_in(
-                &files,
-                window,
-                move |this: &mut Self, _, event, window, cx| match event {
-                    FilesEvent::OpenFile(path) => this.add_file_surface(path.clone(), window, cx),
-                    FilesEvent::OpenWebLink(activation) => {
-                        if let crate::markdown::render::LinkOutcome::External(url) =
-                            this.activate_session_link(activation, window, cx)
-                        {
-                            cx.open_url(&url);
-                        }
-                    }
-                    FilesEvent::TitleChanged => cx.notify(),
-                    FilesEvent::FileRenamed { .. } => cx.notify(),
-                    FilesEvent::WordWrapChanged(word_wrap) => {
-                        this.set_files_word_wrap(*word_wrap, window, cx)
-                    }
-                    FilesEvent::ShowAllFilesChanged(show_all_files) => {
-                        this.set_files_show_all(*show_all_files, cx)
-                    }
-                    FilesEvent::CloseReady => {
-                        this.on_file_close_ready(RightSurface::Files, &event_key, cx)
-                    }
-                    FilesEvent::CloseCancelled => this.cancel_file_close(RightSurface::Files, cx),
-                },
-            );
-            self.files.insert(key.clone(), files);
-            self.files_subs.insert(key.clone(), sub);
-        }
-        let tabs = self.right_tabs.entry(key).or_default();
-        push_unique_right_surface(tabs, RightSurface::Files);
-        self.set_right_active(RightSurface::Files, cx);
-        self.focus_right_file_editor(RightSurface::Files, window, cx);
-    }
-
-    /// Open a workspace file as a first-class right-pane tab. Every editor is
-    /// a separate FilesSurface so its tree, search, watcher and split layout
-    /// stay stable while users move among open files.
+    /// Open or focus a session-owned editor tab. The explorer is independent.
     fn add_file_surface(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.active_chat.is_empty() {
             return;
         }
+        self.set_surfaces_open(true, cx);
         let panel_key = self.panel_key(cx);
         let lookup = (panel_key.clone(), path.clone());
         if let Some(id) = self.file_surface_keys.get(&lookup).copied() {
@@ -3020,39 +2974,56 @@ impl Shell {
         let sub = cx.subscribe_in(
             &file,
             window,
-            move |this: &mut Self, _, event, window, cx| match event {
-                FilesEvent::OpenFile(path) => this.add_file_surface(path.clone(), window, cx),
-                FilesEvent::OpenWebLink(activation) => {
-                    if let crate::markdown::render::LinkOutcome::External(url) =
-                        this.activate_session_link(activation, window, cx)
-                    {
-                        cx.open_url(&url);
+            move |this: &mut Self, source, event, window, cx| {
+                if matches!(event, FilesEvent::OpenFile(_) | FilesEvent::RevealFile(_))
+                    && !this.accepts_file_navigation(&event_panel_key, &source, cx)
+                {
+                    return;
+                }
+                match event {
+                    FilesEvent::OpenFile(path) => this.add_file_surface(path.clone(), window, cx),
+                    FilesEvent::RevealFile(path) => {
+                        this.add_files_surface(window, cx);
+                        if let Some(files) = this.files.get(&this.panel_key(cx)).cloned() {
+                            files.update(cx, |files, cx| {
+                                files.reveal_file_explicit(path.clone(), cx)
+                            });
+                        }
+                    }
+                    FilesEvent::OpenWebLink(activation) => {
+                        if let crate::markdown::render::LinkOutcome::External(url) =
+                            this.activate_session_link(activation, window, cx)
+                        {
+                            cx.open_url(&url);
+                        }
+                    }
+                    FilesEvent::TitleChanged | FilesEvent::SearchControlsChanged => cx.notify(),
+                    FilesEvent::FileRenamed { old_path, new_path } => {
+                        this.rename_file_surface(id, &event_panel_key, old_path, new_path, cx)
+                    }
+                    FilesEvent::WordWrapChanged(word_wrap) => {
+                        this.set_files_word_wrap(*word_wrap, window, cx)
+                    }
+                    FilesEvent::ShowAllFilesChanged(show_all_files) => {
+                        this.set_files_show_all(*show_all_files, cx)
+                    }
+                    FilesEvent::CloseReady => {
+                        this.on_file_close_ready(RightSurface::File(id), &event_panel_key, cx)
+                    }
+                    FilesEvent::CloseCancelled => {
+                        this.cancel_file_close(RightSurface::File(id), cx)
                     }
                 }
-                FilesEvent::TitleChanged => cx.notify(),
-                FilesEvent::FileRenamed { old_path, new_path } => {
-                    this.rename_file_surface(id, &event_panel_key, old_path, new_path, cx)
-                }
-                FilesEvent::WordWrapChanged(word_wrap) => {
-                    this.set_files_word_wrap(*word_wrap, window, cx)
-                }
-                FilesEvent::ShowAllFilesChanged(show_all_files) => {
-                    this.set_files_show_all(*show_all_files, cx)
-                }
-                FilesEvent::CloseReady => {
-                    this.on_file_close_ready(RightSurface::File(id), &event_panel_key, cx)
-                }
-                FilesEvent::CloseCancelled => this.cancel_file_close(RightSurface::File(id), cx),
             },
         );
         self.file_surfaces.insert(id, file);
         self.file_surface_paths.insert(id, path);
         self.file_surface_keys.insert(lookup, id);
         self.file_surface_subs.insert(id, sub);
-        self.right_tabs
-            .entry(panel_key)
-            .or_default()
-            .push(RightSurface::File(id));
+        push_unique_right_surface(
+            self.right_tabs.entry(panel_key).or_default(),
+            RightSurface::File(id),
+        );
         self.set_right_active(RightSurface::File(id), cx);
     }
 
@@ -3203,9 +3174,7 @@ impl Shell {
     ) {
         // The chip lives in the conversation column — the pane it opens into
         // may still be closed.
-        if !self.right_pane_open(cx) {
-            self.toggle_right_pane(cx);
-        }
+        self.set_surfaces_open(true, cx);
         if let Some((&id, _)) = self
             .subagent_tabs
             .iter()
@@ -3319,7 +3288,6 @@ impl Shell {
         let was_active = self.resolved_right_active(cx) == surface;
         let key = self.panel_key(cx);
         let files = match surface {
-            RightSurface::Files => self.files.get(&key).cloned(),
             RightSurface::File(id) => self.file_surfaces.get(&id).cloned(),
             _ => None,
         };
@@ -3339,7 +3307,7 @@ impl Shell {
             tabs.retain(|s| *s != surface);
         }
         match surface {
-            RightSurface::Files | RightSurface::File(_) => {}
+            RightSurface::File(_) => {}
             RightSurface::Browser(id) => {
                 if let Some(browser) = self.browsers.remove(&id) {
                     browser.update(cx, |browser, cx| browser.close(cx));
@@ -3373,6 +3341,7 @@ impl Shell {
                 p.right_active = RightSurface::Picker;
             }
         });
+        self.collapse_surfaces_if_empty(&key, cx);
         cx.notify();
     }
 
@@ -3437,12 +3406,7 @@ impl Shell {
     }
 
     fn prepare_exit(&mut self, action: PendingExit, cx: &mut Context<Self>) -> bool {
-        let surfaces = self
-            .files
-            .values()
-            .chain(self.file_surfaces.values())
-            .cloned()
-            .collect::<Vec<_>>();
+        let surfaces = self.file_surfaces.values().cloned().collect::<Vec<_>>();
         if surfaces
             .iter()
             .all(|surface| !surface.read(cx).has_unsaved_changes())
@@ -3466,12 +3430,6 @@ impl Shell {
     }
 
     fn reveal_unsaved_file(&mut self, cx: &mut Context<Self>) {
-        let browser = self.files.iter().filter_map(|(key, files)| {
-            files
-                .read(cx)
-                .has_unsaved_changes()
-                .then(|| (key.clone(), RightSurface::Files))
-        });
         let editors = self.file_surface_keys.iter().filter_map(|((key, _), id)| {
             self.file_surfaces
                 .get(id)
@@ -3479,7 +3437,7 @@ impl Shell {
                 .map(|_| (key.clone(), RightSurface::File(*id)))
         });
         let current = self.panel_key(cx);
-        let mut dirty = browser.chain(editors).collect::<Vec<_>>();
+        let mut dirty = editors.collect::<Vec<_>>();
         dirty.sort_by_key(|(key, _)| (key != &current, key.clone()));
         if let Some((key, surface)) = dirty.into_iter().next() {
             self.panels.update(&key, |panel| {
@@ -3491,9 +3449,8 @@ impl Shell {
     }
 
     fn all_file_edits_flushed(&self, cx: &App) -> bool {
-        self.files
+        self.file_surfaces
             .values()
-            .chain(self.file_surfaces.values())
             .all(|surface| !surface.read(cx).has_unsaved_changes())
     }
 
@@ -3507,10 +3464,6 @@ impl Shell {
             tabs.retain(|candidate| *candidate != surface);
         }
         match surface {
-            RightSurface::Files => {
-                self.files.remove(panel_key);
-                self.files_subs.remove(panel_key);
-            }
             RightSurface::File(id) => {
                 self.file_surfaces.remove(&id);
                 self.file_surface_paths.remove(&id);
@@ -3525,6 +3478,7 @@ impl Shell {
                 panel.right_active = RightSurface::Picker;
             }
         });
+        self.collapse_surfaces_if_empty(panel_key, cx);
         cx.notify();
     }
 
@@ -3665,6 +3619,7 @@ impl Shell {
             PaneResizeKind::Sidebar => self.sidebar_resize_edge = None,
             PaneResizeKind::Terminal => self.terminal_drag_anchor = None,
             PaneResizeKind::Right => self.right_resize_edge = None,
+            PaneResizeKind::Files => {}
         }
     }
 
@@ -3675,10 +3630,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let viewport = f32::from(window.viewport_size().width);
-        let width = viewport - f32::from(event.event.position.x);
-        // No arbitrary percentage ceiling, but retain the chat's usable 300px
-        // floor instead of allowing the conversation to collapse to zero.
-        let max = right_pane_max_width(viewport, self.sidebar_target());
+        let width = viewport - self.files_reserved_width(cx) - f32::from(event.event.position.x);
+        // Use the same shared budget as rendering, including compact windows.
+        let max = self.surface_max_width(cx);
         let sample = if max >= RIGHT_PANE_MIN {
             motion::resize_drag_sample(
                 width,
@@ -5094,6 +5048,7 @@ impl Shell {
         &self,
         tween: Option<WidthTween>,
         target: f32,
+        visible: f32,
         edge_offset: f32,
         inner: AnyElement,
     ) -> AnyElement {
@@ -5108,7 +5063,7 @@ impl Shell {
             .flex_none()
             .relative()
             .overflow_hidden()
-            .w(px(self.eval_tween(tween, target) + edge_offset))
+            .w(px(visible))
             .child(
                 div()
                     .absolute()
@@ -8730,7 +8685,7 @@ impl Shell {
         let window_corner = Self::window_corner_radius(window) > 0.0;
         {
             let bl = window_corner && self.sidebar_now() < 0.5;
-            let br = window_corner && !self.right_pane_open(cx);
+            let br = window_corner && !self.right_pane_open(cx) && !self.files_panel_open(cx);
             panel.update(cx, |panel, cx| panel.set_window_corners(bl, br, cx));
         }
         let border = Theme::of(cx).border;
@@ -8910,23 +8865,13 @@ impl Shell {
     /// an embedded terminal, or the surface picker when no tabs exist.
     fn render_right_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let bg = theme.bg;
         let content: AnyElement = if self.right_pane_open(cx) || self.tween_active(self.right_tween)
         {
             match self.resolved_right_active(cx) {
                 // Rendering a Files surface activates its image. Keep it unmounted
                 // throughout the closing animation after suspending its resources.
-                RightSurface::Files | RightSurface::File(_) if !self.right_pane_open(cx) => {
+                RightSurface::File(_) if !self.right_pane_open(cx) => {
                     gpui::Empty.into_any_element()
-                }
-                RightSurface::Files => {
-                    let key = self.panel_key(cx);
-                    if let Some(files) = self.files.get(&key).cloned() {
-                        files.update(cx, |files, cx| files.ensure_loaded(cx));
-                        files.into_any_element()
-                    } else {
-                        self.render_surface_picker(cx)
-                    }
                 }
                 RightSurface::File(id) => {
                     if let Some(file) = self.file_surfaces.get(&id).cloned() {
@@ -8964,7 +8909,9 @@ impl Shell {
                     let panel = self.right_terminal_panel(cx);
                     // Keep the embedded panel's own active tab aligned with
                     // the resolved surface (fallbacks can move it).
-                    let resize_suspended = self.tween_active(self.right_tween);
+                    let resize_suspended = self.tween_active(self.right_tween)
+                        || self.tween_active(self.files_tween)
+                        || self.tween_active(self.sidebar_tween);
                     panel.update(cx, |panel, cx| {
                         panel.set_resize_suspended(resize_suspended);
                         panel.select_tab_by_key(tab, cx);
@@ -9016,11 +8963,7 @@ impl Shell {
         // height with a left hairline, glass-friendly like the terminal dock
         // (translucent over the frost; solid otherwise). The resize grabber
         // lives outside this clipped container, on the root layout's seam.
-        let panel_bg = if theme.is_glass() {
-            bg.opacity(0.4)
-        } else {
-            bg
-        };
+        let panel_bg = theme.panel_bg();
         let panel = div()
             .size_full()
             .flex()
@@ -9031,14 +8974,18 @@ impl Shell {
             .when(!self.right_pane_expanded, |el| {
                 el.border_l_1().border_color(theme.border)
             })
-            // The panel's right edge IS the window's right edge: it carries
-            // the CSD window's rounded corners directly (gpui cannot clip
-            // children rounded — each full-bleed layer rounds itself; see
-            // [`Self::window_corner_radius`]).
-            .when(Self::window_corner_radius(window) > 0.0, |el| {
-                let corner = Self::window_corner_radius(window);
-                el.rounded_tr(px(corner)).rounded_br(px(corner))
-            })
+            // With the explorer undocked the panel's right edge IS the
+            // window's right edge: it carries the CSD window's rounded corners
+            // directly (gpui cannot clip children rounded — each full-bleed
+            // layer rounds itself; see [`Self::window_corner_radius`]). Docked,
+            // the explorer column is the rightmost layer and rounds instead.
+            .when(
+                Self::window_corner_radius(window) > 0.0 && self.files_visible_width(cx) <= 0.0,
+                |el| {
+                    let corner = Self::window_corner_radius(window);
+                    el.rounded_tr(px(corner)).rounded_br(px(corner))
+                },
+            )
             .bg(panel_bg)
             .overflow_hidden()
             // The titlebar is a glass overlay over the full-height content
@@ -9053,6 +9000,7 @@ impl Shell {
         self.right_pane_container(
             self.right_tween,
             target,
+            self.right_visible_width(cx),
             edge_offset,
             div().h_full().relative().child(panel).into_any_element(),
         )
@@ -9105,13 +9053,6 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .child(
-                        row("surface-card-files", icons::FOLDER_WITH_FILES, "Files").on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.add_files_surface(window, cx);
-                            }),
-                        ),
-                    )
                     .child(
                         row("surface-card-browser", icons::GLOBE, "Browser").on_click(cx.listener(
                             |this, _, window, cx| this.add_browser_surface(None, window, cx),
@@ -9315,7 +9256,6 @@ impl Shell {
             let is_active = surface == active;
             let file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
             let icon_path = match surface {
-                RightSurface::Files => icons::FOLDER_WITH_FILES,
                 RightSurface::File(_) => icons::DOCUMENT,
                 RightSurface::Diff(id) => self
                     .diffs
@@ -9616,20 +9556,6 @@ impl Shell {
                         .flex_col()
                         .gap(px(2.0))
                         .child(
-                            popover::menu_row(&theme, false, "right-plus-files")
-                                .id("right-plus-files-row")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.add_files_surface(window, cx);
-                                    this.close_right_plus(cx);
-                                }))
-                                .child(
-                                    icon(icons::FOLDER_WITH_FILES)
-                                        .size(px(13.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Files")),
-                        )
-                        .child(
                             popover::menu_row(&theme, false, "right-plus-browser")
                                 .id("right-plus-browser-row")
                                 .on_click(cx.listener(|this, _, window, cx| {
@@ -9761,7 +9687,11 @@ impl Shell {
         self.right_resize_edge = None;
         self.finish_pane_resize(PaneResizeKind::Right);
         let sidebar_now = self.sidebar_now();
-        let from_main = conversation_width(self.viewport_width, sidebar_now, from);
+        let from_main = conversation_width(
+            self.viewport_width - self.files_reserved_width(cx),
+            sidebar_now,
+            from,
+        );
         self.right_pane_expanded = !self.right_pane_expanded;
         let to = self.right_target(cx);
         let right_transition = WidthTween::new(from, to);
@@ -9769,7 +9699,11 @@ impl Shell {
         self.right_takeover_content_tween = Some(right_transition);
         self.main_takeover_tween = Some(WidthTween::new(
             from_main,
-            conversation_width(self.viewport_width, sidebar_now, to),
+            conversation_width(
+                self.viewport_width - self.files_reserved_width(cx),
+                sidebar_now,
+                to,
+            ),
         ));
         cx.notify();
     }
@@ -10399,7 +10333,7 @@ fn header_icon_button(
     icon_path: &'static str,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
+) -> gpui::Stateful<gpui::Div> {
     let muted = theme.text_muted;
     let fade_key = format!("header-icon-{id}");
     div()
@@ -10459,7 +10393,14 @@ impl Render for Shell {
             });
         }
         crate::transcript::record_view_frame("shell");
-        self.viewport_width = f32::from(window.viewport_size().width);
+        let viewport = f32::from(window.viewport_size().width);
+        if (self.viewport_width - viewport).abs() > 1.0 {
+            self.files_tween = None;
+            self.right_tween = None;
+            self.right_takeover_content_tween = None;
+            self.main_takeover_tween = None;
+        }
+        self.viewport_width = viewport;
         // Appearance actions persist independently of the shell. Mirror the
         // globals before any later debounced settings save can overwrite them.
         self.settings.appearance = crate::appearance::mode(cx);
@@ -10518,6 +10459,12 @@ impl Render for Shell {
         } else {
             px(0.0)
         };
+        #[cfg(target_os = "macos")]
+        let browser_overlay_width = px(if self.files_visible_width(cx) > 0.0 {
+            self.files_visible_width(cx) + PANE_RESIZE_HITBOX_HALF_WIDTH
+        } else {
+            0.0
+        });
         let selected_surface = self.resolved_right_active(cx);
         for (id, browser) in &self.browsers {
             let presentation = crate::browser::model::presentation(
@@ -10526,7 +10473,10 @@ impl Render for Shell {
             );
             browser.update(cx, |browser, cx| {
                 #[cfg(target_os = "macos")]
-                browser.set_resize_inset(browser_resize_inset, cx);
+                {
+                    browser.set_resize_inset(browser_resize_inset, cx);
+                    browser.set_right_occlusion(browser_overlay_width, cx);
+                }
                 browser.set_shortcuts(&self.settings.keymap);
                 browser.set_presentation(presentation, cx);
             });
@@ -10646,6 +10596,7 @@ impl Render for Shell {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_drag_move(cx.listener(Self::on_sidebar_drag))
             .on_drag_move(cx.listener(Self::on_right_pane_drag))
+            .on_drag_move(cx.listener(Self::on_files_panel_drag))
             .on_drag_move(cx.listener(Self::on_terminal_drag))
             // The panel shortcuts are chat-scoped chrome: in Settings they are
             // no-ops (zeron __root.tsx gates the hotkey on `!isSettings`, and
@@ -10659,7 +10610,6 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
                 if matches!(this.route, Route::Chat) && this.right_pane_open(cx) {
                     let file = match this.resolved_right_active(cx) {
-                        RightSurface::Files => this.files.get(&this.panel_key(cx)).cloned(),
                         RightSurface::File(id) => this.file_surfaces.get(&id).cloned(),
                         _ => None,
                     };
@@ -10782,7 +10732,11 @@ impl Render for Shell {
                 // sizes itself to the viewport.
                 self.viewport_width = viewport;
                 let on_chat = matches!(self.route, Route::Chat);
-                let right_target_width = if on_chat { self.right_now(cx) } else { 0.0 };
+                let right_target_width = if on_chat {
+                    self.right_visible_width(cx)
+                } else {
+                    0.0
+                };
                 let panel_handoff = self.composer_dock.borrow_mut().observe_pane(
                     self.state.read(cx).selected_chat.is_some(),
                     right_target_width,
@@ -10792,8 +10746,11 @@ impl Render for Shell {
                 if panel_handoff {
                     self.motion_active.set(true);
                 }
-                let main_target_width =
-                    conversation_width(viewport, self.sidebar_target(), right_target_width);
+                let main_target_width = conversation_width(
+                    viewport - self.files_reserved_width(cx),
+                    self.sidebar_target(),
+                    right_target_width,
+                );
                 let main_transition = self.active_tween_endpoints(self.main_takeover_tween);
                 let main_content_width =
                     stable_panel_content_width(main_target_width, main_transition);
@@ -10866,6 +10823,7 @@ impl Render for Shell {
                 } else {
                     Empty.into_any_element()
                 };
+                let files_panel = self.render_files_panel(window, cx);
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
                 let border_color = Theme::of(cx).border;
@@ -10975,12 +10933,23 @@ impl Render for Shell {
                             .child(sidebar)
                             .child(sidebar_seam)
                             .child(card)
+                            // The right pane is ONE container: the surface
+                            // host column and the docked explorer column
+                            // sit side by side under a shared titlebar
+                            // strip; the resize seam straddles its left edge.
                             .child(
                                 div()
                                     .h_full()
                                     .flex_none()
                                     .relative()
-                                    .child(right)
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .flex()
+                                            .flex_row()
+                                            .child(right)
+                                            .child(files_panel),
+                                    )
                                     .child(right_seam),
                             ),
                     )
@@ -11217,11 +11186,11 @@ mod tests {
 
     #[test]
     fn right_pane_ceiling_preserves_the_chat_floor() {
-        assert_eq!(right_pane_max_width(1200.0, 256.0), 644.0);
+        assert_eq!(right_pane_max_width(1200.0, 256.0, CHAT_PANEL_MIN), 644.0);
         assert_eq!(1200.0 - 256.0 - 644.0, CHAT_PANEL_MIN);
         // The chat floor wins over the right pane's preferred 360px minimum
         // when the whole window is unusually narrow.
-        assert_eq!(right_pane_max_width(800.0, 256.0), 244.0);
+        assert_eq!(right_pane_max_width(800.0, 256.0, CHAT_PANEL_MIN), 244.0);
         assert_eq!(800.0 - 256.0 - 244.0, CHAT_PANEL_MIN);
     }
 
@@ -11872,21 +11841,21 @@ mod tests {
         assert_eq!(panels.get("b").right_active, RightSurface::Picker);
         panels.update("a", |p| p.right_active = RightSurface::Terminal(7));
         assert_eq!(panels.get("a").right_active, RightSurface::Terminal(7));
-        panels.update("a", |p| p.right_active = RightSurface::Files);
-        assert_eq!(panels.get("a").right_active, RightSurface::Files);
+        panels.update("a", |p| p.right_active = RightSurface::File(0));
+        assert_eq!(panels.get("a").right_active, RightSurface::File(0));
     }
 
     #[test]
-    fn files_surface_is_single_instance_per_tab_list() {
+    fn file_surface_is_single_instance_per_tab_list() {
         let mut tabs = vec![RightSurface::Terminal(1)];
-        assert!(push_unique_right_surface(&mut tabs, RightSurface::Files));
-        assert!(!push_unique_right_surface(&mut tabs, RightSurface::Files));
-        assert_eq!(tabs, vec![RightSurface::Terminal(1), RightSurface::Files]);
+        assert!(push_unique_right_surface(&mut tabs, RightSurface::File(0)));
+        assert!(!push_unique_right_surface(&mut tabs, RightSurface::File(0)));
+        assert_eq!(tabs, vec![RightSurface::Terminal(1), RightSurface::File(0)]);
     }
 
     #[test]
     fn file_editors_are_distinct_surface_tabs_with_stable_titles() {
-        let mut tabs = vec![RightSurface::Files];
+        let mut tabs = vec![RightSurface::File(0)];
         assert!(push_unique_right_surface(&mut tabs, RightSurface::File(1)));
         assert!(push_unique_right_surface(&mut tabs, RightSurface::File(2)));
         assert!(!push_unique_right_surface(&mut tabs, RightSurface::File(1)));
@@ -12230,10 +12199,13 @@ mod exit_regressions {
                     )
                 });
                 let key = shell.panel_key(cx);
-                shell.files.insert(key.clone(), files.clone());
+                shell.file_surfaces.insert(0, files.clone());
+                shell
+                    .right_tabs
+                    .insert(key.clone(), vec![RightSurface::File(0)]);
                 shell
                     .panels
-                    .update(&key, |panel| panel.right_active = RightSurface::Files);
+                    .update(&key, |panel| panel.right_active = RightSurface::File(0));
                 assert!(files.read(cx).test_images_visible());
                 shell.toggle_right_pane(cx);
                 assert!(!shell.right_pane_open(cx));
@@ -12949,17 +12921,19 @@ mod exit_regressions {
                     RightSurface::Browser(first)
                 );
 
-                // …and again for the last tab.
+                // …and again for the last tab, which also collapses the
+                // surface host (nothing left to show).
                 assert!(shell.close_active_surface(window, cx));
                 assert_eq!(shell.resolved_right_active(cx), RightSurface::Picker);
+                assert!(!shell.right_pane_open(cx));
 
-                // An open pane with nothing left to close falls through to the
-                // window-close rung instead of being consumed.
+                // A closed pane falls through to the window-close rung
+                // instead of being consumed.
                 assert!(!shell.close_active_surface(window, cx));
 
-                // So does an already-closed pane.
+                // So does an open pane with nothing left to close.
                 shell.toggle_right_pane(cx);
-                assert!(!shell.right_pane_open(cx));
+                assert!(shell.right_pane_open(cx));
                 assert!(!shell.close_active_surface(window, cx));
             })
             .unwrap();
@@ -13008,7 +12982,10 @@ mod exit_regressions {
                         files.seed_pending_exit_test_document(failed);
                         files
                     });
-                    shell.files.insert("test".into(), files);
+                    shell.file_surfaces.insert(0, files);
+                    shell
+                        .file_surface_keys
+                        .insert(("test".into(), "test.rs".into()), 0);
                 })
                 .unwrap();
             cx.update(|cx| cx.dispatch_action(&crate::app_menus::Quit));
@@ -13017,7 +12994,7 @@ mod exit_regressions {
                 .update(cx, |shell, _, cx| {
                     assert!(matches!(shell.pending_exit, Some(PendingExit::Quit)));
                     assert!(!shell.all_file_edits_flushed(cx));
-                    shell.cancel_file_close(RightSurface::Files, cx);
+                    shell.cancel_file_close(RightSurface::File(0), cx);
                     assert!(shell.pending_exit.is_none());
                 })
                 .unwrap();
@@ -13038,7 +13015,7 @@ mod exit_regressions {
                         Some(PendingExit::InstallUpdate(_))
                     ));
                     assert!(matches!(shell.update_flow, UpdateFlow::Idle));
-                    shell.cancel_file_close(RightSurface::Files, cx);
+                    shell.cancel_file_close(RightSurface::File(0), cx);
                     assert!(shell.pending_exit.is_none());
                 })
                 .unwrap();
@@ -13067,9 +13044,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (u64, Entity<crate::browser::BrowserSurface>) {
-        if !self.right_pane_open(cx) {
-            self.toggle_right_pane(cx);
-        }
+        self.set_surfaces_open(true, cx);
         // Hosted Macs can expose only a 1024px desktop. Use the app's
         // normal collapsed-sidebar layout to keep both conversation and
         // preview readable in that real window.
@@ -13106,7 +13081,8 @@ impl Shell {
     }
     pub fn fixture_toggle_sidebar(&mut self, right: bool, cx: &mut Context<Self>) {
         if right {
-            self.toggle_right_pane(cx);
+            // The fixtures drive the surface host only; the explorer stays put.
+            self.set_surfaces_open(!self.right_pane_open(cx), cx);
         } else {
             self.toggle_sidebar(cx);
         }
