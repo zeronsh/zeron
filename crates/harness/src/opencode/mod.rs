@@ -338,6 +338,9 @@ impl Harness for OpencodeHarness {
             || self.base_url.is_some()
             || resolve_opencode_executable().is_some()
     }
+    fn executable_path(&self) -> Option<PathBuf> {
+        self.resolve_executable().ok()
+    }
     /// `session.status{idle}` is a real terminal frame per turn: the engine
     /// can retire its quiesce watchdogs.
     fn deterministic_turn_end(&self) -> bool {
@@ -1190,6 +1193,7 @@ async fn run_session(session: Session) {
         known_commands,
     } = session;
     let RunControls {
+        execution_lease: _execution_lease,
         request_input,
         mut steering,
         interrupt,

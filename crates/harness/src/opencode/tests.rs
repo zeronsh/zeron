@@ -130,6 +130,7 @@ impl TurnWire {
             server: Server::attached(base),
             event_tx,
             controls: RunControls {
+                execution_lease: None,
                 request_input: Box::new(move |questions| {
                     let answer = answer.expect("fixture must not ask for input");
                     let (tx, rx) = tokio::sync::oneshot::channel();

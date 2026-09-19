@@ -7685,14 +7685,7 @@ impl Render for Composer {
 
         // A translucent cool silver/slate edge sits more naturally on frost
         // than the general-purpose white/black separator color.
-        let pill_border = if theme.is_frost() {
-            match theme.appearance {
-                crate::theme::Appearance::Dark => gpui::hsla(210.0 / 360.0, 0.18, 0.78, 0.09),
-                crate::theme::Appearance::Light => gpui::hsla(210.0 / 360.0, 0.18, 0.32, 0.10),
-            }
-        } else {
-            theme.border
-        };
+        let pill_border = crate::theme::composer_surface_border(&theme);
         // Compensate for the transcript canvas beneath the frosted surface.
         // Keep the opaque fallback when frost is disabled or unsupported.
         let pill = div()

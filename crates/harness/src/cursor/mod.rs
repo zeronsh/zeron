@@ -243,6 +243,11 @@ impl Harness for CursorHarness {
         self.executable.is_some()
             || crate::acp::find_on_paths("cursor-agent", cursor_cli_paths()).is_some()
     }
+    fn executable_path(&self) -> Option<PathBuf> {
+        self.executable
+            .clone()
+            .or_else(|| crate::acp::find_on_paths("cursor-agent", cursor_cli_paths()))
+    }
     /// Done is the SDK run's terminal result, for every turn shape.
     fn deterministic_turn_end(&self) -> bool {
         true
@@ -481,6 +486,7 @@ async fn run_session(session: Session) {
         stderr_tail,
     } = session;
     let RunControls {
+        execution_lease: _execution_lease,
         request_input: _request_input,
         mut steering,
         interrupt,

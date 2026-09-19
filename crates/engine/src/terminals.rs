@@ -40,6 +40,8 @@ const REAPER_INTERVAL: Duration = Duration::from_secs(60);
 struct LiveTerminal {
     // Keep the private action script alive until the shell exits or the tab is closed.
     initial_script: Option<tempfile::NamedTempFile>,
+    #[cfg(all(test, windows))]
+    process_id: u32,
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     writer: Option<Box<dyn Write + Send>>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
@@ -302,6 +304,8 @@ impl Terminals {
         let id = new_id();
         let session = Arc::new(Mutex::new(LiveTerminal {
             initial_script,
+            #[cfg(all(test, windows))]
+            process_id: child.process_id().expect("ConPTY child has a process id"),
             master: Some(master),
             writer: Some(writer),
             killer,
@@ -693,6 +697,7 @@ mod windows_tests {
                     let _ = reader_gate.recv_timeout(Duration::from_secs(20));
                 }));
             }
+            wait_for_shell_prompt(&terminals, &terminal.id).await;
             write_line(&terminals, &terminal.id, "exit 0");
             tokio::time::timeout(EVENT_TIMEOUT, reader_drained)
                 .await
@@ -776,6 +781,18 @@ mod windows_tests {
         }
     }
 
+    async fn wait_for_shell_prompt(terminals: &Terminals, terminal_id: &str) {
+        let mut rx = terminals
+            .subscribe(terminal_id, None)
+            .expect("subscribe to startup");
+        let mut events = Vec::new();
+        collect_until(&mut rx, &mut events, |events| {
+            let output = decoded(events);
+            output.contains("PS ") && output.contains("> ")
+        })
+        .await;
+    }
+
     fn write_line(terminals: &Terminals, terminal_id: &str, command: &str) {
         terminals
             .write(terminal_id, &BASE64.encode(format!("{command}\r")))
@@ -788,38 +805,34 @@ mod windows_tests {
         }
     }
 
-    fn pid_from(events: &[TerminalEvent]) -> Option<u32> {
-        let transcript = decoded(events);
-        transcript.rsplit("PID:").find_map(|suffix| {
-            let digits = suffix
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect::<String>();
-            (!digits.is_empty() && suffix[digits.len()..].starts_with(":END"))
-                .then(|| digits.parse().expect("numeric PowerShell pid"))
-        })
-    }
-
     async fn process_exists(pid: u32) -> bool {
-        let command = format!(
-            "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        // Launching another PowerShell for each poll measures shell startup,
+        // not cleanup. Query the OS directly and never treat access errors as exit.
+        let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if raw.is_null() {
+            let error = std::io::Error::last_os_error();
+            assert_eq!(
+                error.raw_os_error(),
+                Some(ERROR_INVALID_PARAMETER as i32),
+                "could not inspect process {pid}: {error}"
+            );
+            return false;
+        }
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut code = 0;
+        assert_ne!(
+            unsafe { GetExitCodeProcess(handle.as_raw_handle(), &mut code) },
+            0,
+            "could not read process {pid} exit status: {}",
+            std::io::Error::last_os_error()
         );
-        tokio::time::timeout(
-            Duration::from_secs(3),
-            tokio::process::Command::new(powershell())
-                .args([
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    &command,
-                ])
-                .status(),
-        )
-        .await
-        .expect("process probe completed before deadline")
-        .expect("process probe launched")
-        .success()
+        code == STILL_ACTIVE as u32
     }
 
     async fn wait_for_process_exit(pid: u32) {
@@ -844,16 +857,11 @@ mod windows_tests {
                 Some(&shell.to_string_lossy()),
             )
             .expect("open PowerShell in ConPTY");
-        let mut rx = terminals.subscribe(&session.id, None).expect("subscribe");
-        write_line(
-            &terminals,
-            &session.id,
-            "[Console]::WriteLine(('PID:{0}:END' -f $PID))",
-        );
-        let mut events = Vec::new();
-        collect_until(&mut rx, &mut events, |events| pid_from(events).is_some()).await;
-        let pid = pid_from(&events).expect("PowerShell reported its pid");
+        // Lifecycle tests identify the process through the launcher, not a
+        // command typed into PSReadLine while PowerShell is still starting.
+        let pid = super::lock(&terminals.session(&session.id).unwrap()).process_id;
         assert!(process_exists(pid).await, "PowerShell child is running");
+        wait_for_shell_prompt(&terminals, &session.id).await;
         (terminals, session.id, pid)
     }
 
@@ -876,6 +884,7 @@ mod windows_tests {
         assert_eq!(session.shell.to_ascii_lowercase(), "powershell.exe");
 
         let mut live = terminals.subscribe(&session.id, None).expect("subscribe");
+        wait_for_shell_prompt(&terminals, &session.id).await;
         write_line(
             &terminals,
             &session.id,

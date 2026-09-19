@@ -17,7 +17,7 @@ import Observation
 
 @MainActor
 @Observable
-final class WorkspaceStore {
+final class WorkspaceStore: HarnessUpdatesSource {
     static let maxSidebarPins = 200
 
     private(set) var devices: [DeviceRow] = []
@@ -606,6 +606,31 @@ final class WorkspaceStore {
             .map { HarnessInfo(id: $0.id, label: $0.name,
                                supportsSteering: $0.supportsSteering, steeringMode: $0.steeringMode) }
         }
+    }
+
+    func watchHarnessUpdates(deviceId: String) async throws
+        -> AsyncThrowingStream<[HarnessUpdateStatus], Error> {
+        guard devices.contains(where: {
+            $0.id == deviceId && $0.supports(EngineCapability.harnessUpdatesV1)
+        }) else { throw RelayError.rpc("Update Zeron on this device to manage agent updates") }
+        guard deviceOnline(deviceId) else { throw RelayError.hostOffline }
+        return try await relay(for: deviceId).stream(method: "WatchHarnessUpdates", params: [:])
+    }
+
+    func harnessUpdateAction(_ action: HarnessUpdateAction, harness: String?,
+                             deviceId: String) async throws {
+        guard devices.contains(where: {
+            $0.id == deviceId && $0.supports(EngineCapability.harnessUpdatesV1)
+        }) else { throw RelayError.rpc("This device does not support agent updates") }
+        guard deviceOnline(deviceId) else { throw RelayError.hostOffline }
+        var params: [String: Any] = [:]
+        if let harness { params["harness"] = harness }
+        // Check returns an array; mutation replies are objects. Discard using
+        // JSONValue so all reply shapes are handled without inventing a schema.
+        let _: JSONValue = try await relay(for: deviceId).call(
+            method: action.method, params: params, timeoutSeconds: action.timeout,
+            retryOnDisconnect: false
+        )
     }
 
     func listModels(deviceId: String, harness: String) async -> [ModelInfo]? {
