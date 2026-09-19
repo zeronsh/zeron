@@ -4,7 +4,8 @@
 //! Methods (feature-inventory §2):
 //! - `ListHarnesses` → `[HarnessDescriptor]`
 //! - `ListModels {harness}` → `[Model]`
-//! - `QueueCommand {chatId, command}` → `{commandId}` (durable doc command)
+//! - `QueueCommand {chatId, command}` → `{commandId}` (durable doc command),
+//!   `WatchCommand {chatId, commandId}` → current outcome then changes until terminal
 //! - `WatchDocMessages {chatId}` → stream of joined `SessionMessageEntry[]`,
 //!   re-emitted on every doc change
 //! - `WatchChats` / `WatchDevices` → streams of the workspace doc's entity rows
@@ -54,12 +55,13 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::sync::watch;
 
-use zeron_doc::{MessagePart, SessionCommandPayload};
+use zeron_doc::{MessagePart, SessionCommandPayload, SessionCommandStatus};
 use zeron_proto::{ChatConfig, EngineInfo, HarnessId, ToolCall, WorkspaceScope};
 use zeron_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
@@ -67,7 +69,7 @@ use crate::agent_accounts::AgentAccounts;
 use crate::auth::Auth;
 use crate::change_requests::CheckoutChangeRequests;
 use crate::diff_sync::CheckoutDiffSync;
-use crate::doc_host::DocHost;
+use crate::doc_host::{ChatDocHandle, DocHost};
 use crate::registry::HarnessRegistry;
 use crate::repos::{Repos, home_dir};
 use crate::sessions::SessionsEngine;
@@ -135,6 +137,21 @@ struct QueueCommandParams {
     /// durably queued — never as a gate in front of it.
     #[serde(default)]
     transfers: Vec<crate::uploads::AttachmentTransfer>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WatchCommandParams {
+    chat_id: String,
+    command_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommandOutcome {
+    command_id: String,
+    status: SessionCommandStatus,
+    resolution: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -286,7 +303,11 @@ fn tool_file_path(call: &ToolCall) -> Option<&str> {
         | ToolCall::WebFetch { .. }
         | ToolCall::WebSearch { .. }
         | ToolCall::Todo { .. }
+        | ToolCall::TodoPatch { .. }
+        | ToolCall::Goal { .. }
+        | ToolCall::Plan { .. }
         | ToolCall::Mcp { .. }
+        | ToolCall::Compaction {}
         | ToolCall::Unknown { .. } => None,
     }
 }
@@ -619,6 +640,32 @@ impl EngineRpc {
             .await
             .map(|workspace| workspace.root)
             .map_err(Into::into)
+    }
+
+    /// Catalogs also serve projectless sessions, which have no workspace space.
+    /// Keep workspace validation for project targets and use only a known local
+    /// chat's persisted cwd (or home) for a projectless conversation.
+    async fn catalog_root(&self, p: &FileSearchParams) -> Result<std::path::PathBuf, RpcError> {
+        if p.space_id.is_none() && p.path.is_none() {
+            let Some(chat_id) = &p.chat_id else {
+                return Ok(home_dir());
+            };
+            let chat = self
+                .workspace
+                .chat(chat_id)
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .ok_or_else(|| RpcError::BadParams("chat not found".into()))?;
+            if chat.device_id != self.doc_host.device_id() {
+                return Err(RpcError::BadParams("chat belongs to another device".into()));
+            }
+            if chat.space_id.is_none() {
+                return Ok(chat
+                    .cwd
+                    .map(|cwd| std::path::PathBuf::from(crate::sessions::expand_home(&cwd)))
+                    .unwrap_or_else(home_dir));
+            }
+        }
+        self.file_search_root(p).await
     }
 
     /// Accept only a checkout already named by a local chat or contained in a
@@ -954,8 +1001,10 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_TITLE_SETTINGS
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
+            | methods::LIST_SKILLS
             | methods::LIST_COMMANDS
             | methods::QUEUE_COMMAND
+            | methods::WATCH_COMMAND
             | methods::WATCH_DOC_MESSAGES
             // The queue lives on the chat doc, and only its host may send from
             // it — same addressing as the command ledger next door.
@@ -1027,7 +1076,8 @@ fn forwardable(method: &str) -> bool {
 fn is_stream_method(method: &str) -> bool {
     matches!(
         method,
-        methods::WATCH_DOC_MESSAGES
+        methods::WATCH_COMMAND
+            | methods::WATCH_DOC_MESSAGES
             | methods::WATCH_QUEUE
             | methods::SUBSCRIBE_TERMINAL
             | methods::WATCH_CHECKOUT_DIFFS
@@ -1052,6 +1102,74 @@ where
         };
         Some((value, (rx, true)))
     })
+    .boxed()
+}
+
+fn read_command_outcome(
+    handle: &ChatDocHandle,
+    command_id: &str,
+) -> Result<CommandOutcome, RpcError> {
+    let command = handle
+        .doc()
+        .read_command(command_id)
+        .map_err(|error| RpcError::Failed(format!("command ledger read failed: {error}")))?
+        .ok_or_else(|| RpcError::Failed(format!("command not found: {command_id}")))?;
+    Ok(CommandOutcome {
+        command_id: command.id,
+        status: command.status,
+        resolution: command.resolution,
+    })
+}
+
+fn command_status_is_terminal(status: SessionCommandStatus) -> bool {
+    status != SessionCommandStatus::Pending
+}
+
+/// One durable command outcome: current value first, then actual changes. A
+/// weak handle lets room cutover or viewer eviction close this stream so the
+/// client can resubscribe onto the current doc lineage.
+fn command_outcome_stream(
+    handle: Weak<ChatDocHandle>,
+    changes: watch::Receiver<u64>,
+    initial: CommandOutcome,
+) -> BoxStream<'static, serde_json::Value> {
+    futures::stream::unfold(
+        (handle, changes, initial, true, false),
+        |(handle, mut changes, previous, first, done)| async move {
+            if done {
+                return None;
+            }
+            let outcome = if first {
+                previous.clone()
+            } else {
+                loop {
+                    changes.changed().await.ok()?;
+                    let current = {
+                        // A watcher must not pin a retired room lineage. Keep
+                        // the upgrade scoped to this read and drop it before
+                        // awaiting the next general-doc change.
+                        let handle = handle.upgrade()?;
+                        read_command_outcome(&handle, &previous.command_id)
+                    };
+                    match current {
+                        Ok(current) if current != previous => break current,
+                        Ok(_) => continue,
+                        Err(error) => {
+                            tracing::warn!(
+                                command = %previous.command_id,
+                                %error,
+                                "command outcome watch ended"
+                            );
+                            return None;
+                        }
+                    }
+                }
+            };
+            let done = command_status_is_terminal(outcome.status);
+            let item = serde_json::to_value(&outcome).ok()?;
+            Some((item, (handle, changes, outcome, false, done)))
+        },
+    )
     .boxed()
 }
 
@@ -1326,20 +1444,64 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&models)
             }
+            methods::LIST_SKILLS => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    harness: HarnessId,
+                    #[serde(default)]
+                    chat_id: Option<String>,
+                    #[serde(default)]
+                    space_id: Option<String>,
+                    #[serde(default)]
+                    path: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                let root = self
+                    .catalog_root(&FileSearchParams {
+                        query: String::new(),
+                        chat_id: p.chat_id,
+                        space_id: p.space_id,
+                        path: p.path,
+                    })
+                    .await?;
+                let harness = self
+                    .registry
+                    .resolve(p.harness)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let skills = harness
+                    .skills(&root)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&skills)
+            }
             methods::LIST_COMMANDS => {
-                // Same shape as ListModels: forces a lazy resolve, then the
-                // harness's own (cached) discovery — ACP agents advertise
-                // availableCommands, claude answers the initialize control
-                // request, codex lists skills; only harnesses whose wire has
-                // no listing (cursor, mock) fall through to the trait's
-                // empty default.
-                let p: ListModelsParams = parse_params(params)?;
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    harness: HarnessId,
+                    #[serde(default)]
+                    chat_id: Option<String>,
+                    #[serde(default)]
+                    space_id: Option<String>,
+                    #[serde(default)]
+                    path: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                let root = self
+                    .catalog_root(&FileSearchParams {
+                        query: String::new(),
+                        chat_id: p.chat_id,
+                        space_id: p.space_id,
+                        path: p.path,
+                    })
+                    .await?;
                 let harness = self
                     .registry
                     .resolve(p.harness)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let commands = harness
-                    .commands()
+                    .commands_for(&root)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&commands)
@@ -1351,6 +1513,22 @@ impl RpcService for EngineRpc {
                     .queue_command_with_transfers(&p.chat_id, p.command, p.transfers)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "commandId": command_id }))
+            }
+            methods::WATCH_COMMAND => {
+                let p: WatchCommandParams = parse_params(params)?;
+                let handle = self
+                    .doc_host
+                    .open(&p.chat_id)
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                // Subscribe before the initial read so a racing local or
+                // imported outcome commit cannot fall between snapshot and tail.
+                let changes = handle.watch_changes();
+                let initial = read_command_outcome(&handle, &p.command_id)?;
+                Ok(RpcReply::Stream(command_outcome_stream(
+                    Arc::downgrade(&handle),
+                    changes,
+                    initial,
+                )))
             }
             methods::RETRY_DELIVERY => {
                 let p: ChatParams = parse_params(params)?;
@@ -2436,6 +2614,166 @@ impl RpcService for EngineRpc {
 mod tests {
     use super::*;
 
+    fn command_entry(id: &str) -> zeron_doc::SessionCommandEntry {
+        zeron_doc::SessionCommandEntry {
+            id: id.into(),
+            payload: SessionCommandPayload::Interrupt {},
+            issued_by: "composer".into(),
+            issued_at: 1,
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn command_outcome_watch_emits_initial_and_local_terminal_status() {
+        use crate::doc_host::{DocHost, DocHostConfig};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(zeron_sync::DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store,
+            DocHostConfig {
+                device_id: "viewer".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let handle = host.open("command-watch-local").unwrap();
+        handle
+            .doc()
+            .queue_command(&command_entry("cmd-local"))
+            .unwrap();
+        let changes = handle.watch_changes();
+        let initial = read_command_outcome(&handle, "cmd-local").unwrap();
+        let mut stream = command_outcome_stream(Arc::downgrade(&handle), changes, initial);
+
+        assert_eq!(
+            stream.next().await.unwrap(),
+            serde_json::json!({
+                "commandId": "cmd-local",
+                "status": "pending",
+                "resolution": null,
+            })
+        );
+        handle
+            .doc()
+            .set_command_status("cmd-local", SessionCommandStatus::Applied, None)
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap(),
+            serde_json::json!({
+                "commandId": "cmd-local",
+                "status": "applied",
+                "resolution": null,
+            })
+        );
+        assert!(stream.next().await.is_none());
+        let error = read_command_outcome(&handle, "missing").unwrap_err();
+        assert_eq!(error.to_string(), "command not found: missing");
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test]
+    async fn command_outcome_watch_observes_remote_doc_rejection() {
+        use crate::doc_host::{DocHost, DocHostConfig};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(zeron_sync::DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store,
+            DocHostConfig {
+                device_id: "viewer".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let handle = host.open("command-watch-remote").unwrap();
+        let remote = zeron_doc::SessionDoc::init("command-watch-remote").unwrap();
+        remote.queue_command(&command_entry("cmd-remote")).unwrap();
+        handle
+            .doc()
+            .doc()
+            .import(&remote.export_snapshot().unwrap())
+            .unwrap();
+
+        let changes = handle.watch_changes();
+        let initial = read_command_outcome(&handle, "cmd-remote").unwrap();
+        let mut stream = command_outcome_stream(Arc::downgrade(&handle), changes, initial);
+        assert_eq!(stream.next().await.unwrap()["status"], "pending");
+
+        let frontier = remote.doc().oplog_vv();
+        remote
+            .set_command_status(
+                "cmd-remote",
+                SessionCommandStatus::Rejected,
+                Some("host refused the command"),
+            )
+            .unwrap();
+        let update = remote
+            .doc()
+            .export(loro::ExportMode::updates(&frontier))
+            .unwrap();
+        // Import exercises the same root subscription used by chat2 remote
+        // updates, without creating a second command-specific Loro channel.
+        handle.doc().doc().import(&update).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap(),
+            serde_json::json!({
+                "commandId": "cmd-remote",
+                "status": "rejected",
+                "resolution": "host refused the command",
+            })
+        );
+        assert!(stream.next().await.is_none());
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test]
+    async fn command_outcome_watch_does_not_pin_retired_doc_handle() {
+        use crate::doc_host::{DocHost, DocHostConfig};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(zeron_sync::DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store,
+            DocHostConfig {
+                device_id: "viewer".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let handle = host.open("command-watch-retire").unwrap();
+        handle
+            .doc()
+            .queue_command(&command_entry("cmd-retire"))
+            .unwrap();
+        let changes = handle.watch_changes();
+        let initial = read_command_outcome(&handle, "cmd-retire").unwrap();
+        let weak = Arc::downgrade(&handle);
+        let mut stream = command_outcome_stream(weak.clone(), changes, initial);
+        assert_eq!(stream.next().await.unwrap()["status"], "pending");
+
+        host.purge_chat("command-watch-retire");
+        drop(handle);
+        assert!(weak.upgrade().is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        host.shutdown_workers().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn local_opening_tail_arrives_before_full_mirror_and_keeps_all_history() {
         use crate::doc_host::{DocHost, DocHostConfig};
@@ -2586,6 +2924,8 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::QUEUE_COMMAND));
+        assert!(forwardable(methods::WATCH_COMMAND));
+        assert!(is_stream_method(methods::WATCH_COMMAND));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));
         assert!(forwardable(methods::FETCH_ALL));

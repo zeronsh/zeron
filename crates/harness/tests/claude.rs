@@ -335,6 +335,94 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
 }
 
 #[tokio::test]
+async fn native_control_cancel_aborts_the_exact_question_waiter() {
+    let cwd = tempfile::tempdir().unwrap();
+    let bridge_ready = cwd.path().join(".bridge-ready");
+    let pending: Arc<Mutex<Option<oneshot::Sender<Vec<UserInputAnswer>>>>> =
+        Arc::new(Mutex::new(None));
+    let pending_for_bridge = Arc::clone(&pending);
+    let (steer_tx, steer_rx) = mpsc::channel(1);
+    let controls = RunControls {
+        request_input: Box::new(move |_| {
+            let (tx, rx) = oneshot::channel();
+            *pending_for_bridge.lock().unwrap() = Some(tx);
+            std::fs::write(&bridge_ready, b"ready").unwrap();
+            rx
+        }),
+        steering: steer_rx,
+        interrupt: CancellationToken::new(),
+    };
+    let mut req = request("scenario:askuser-cancel");
+    req.cwd = cwd.path().to_string_lossy().into_owned();
+    let mut stream = harness().run(req, controls).await.unwrap();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .expect("fixture emitted cancellation marker")
+            .expect("stream remains open")
+            .expect("valid event");
+        if matches!(event, AgentEvent::TextDelta { ref text } if text == "native control request cancelled")
+        {
+            break;
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(oneshot::Sender::is_closed)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("matching control_cancel_request closes the bridge receiver");
+    drop(steer_tx);
+}
+
+#[tokio::test]
+async fn run_teardown_aborts_unanswered_control_waiters() {
+    let cwd = tempfile::tempdir().unwrap();
+    let bridge_ready = cwd.path().join(".bridge-ready");
+    let pending: Arc<Mutex<Option<oneshot::Sender<Vec<UserInputAnswer>>>>> =
+        Arc::new(Mutex::new(None));
+    let pending_for_bridge = Arc::clone(&pending);
+    let (_steer_tx, steer_rx) = mpsc::channel(1);
+    let controls = RunControls {
+        request_input: Box::new(move |_| {
+            let (tx, rx) = oneshot::channel();
+            *pending_for_bridge.lock().unwrap() = Some(tx);
+            std::fs::write(&bridge_ready, b"ready").unwrap();
+            rx
+        }),
+        steering: steer_rx,
+        interrupt: CancellationToken::new(),
+    };
+    let mut req = request("scenario:askuser-teardown");
+    req.cwd = cwd.path().to_string_lossy().into_owned();
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        }
+    )));
+    assert!(
+        pending
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(oneshot::Sender::is_closed),
+        "run teardown must close unanswered control bridge receivers"
+    );
+}
+
+#[tokio::test]
 async fn steering_lines_are_written_to_stdin_mid_run() {
     let (controls, steer, _token) = controls("A");
     steer
@@ -688,6 +776,88 @@ async fn title_run_disables_tools_and_denies_unexpected_permissions() {
             e,
             AgentEvent::Done {
                 status: DoneStatus::Completed,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn command_discovery_tracks_project_changes() {
+    let h = harness();
+    for name in ["project-a", "project-b"] {
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::write(cwd.path().join(".command-fixture"), name).unwrap();
+        let commands = h
+            .commands_for(&cwd.path().canonicalize().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, name);
+    }
+}
+
+#[tokio::test]
+async fn claude_skills_follow_native_availability_and_dollar_selection_keeps_arguments() {
+    use zeron_proto::{
+        HarnessId,
+        invocation::{Invocation, harness_prompt},
+    };
+    let cwd = tempfile::tempdir().unwrap();
+    std::fs::create_dir(cwd.path().join(".git")).unwrap();
+    for name in ["review", "disabled-plugin"] {
+        let directory = cwd.path().join(".claude/skills").join(name);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Test\n---\nInstructions"),
+        )
+        .unwrap();
+    }
+    let skills = harness().skills(cwd.path()).await.unwrap().unwrap();
+    assert!(!skills.iter().any(|skill| skill.name == "disabled-plugin"));
+    let skill = skills
+        .into_iter()
+        .find(|skill| skill.name == "review")
+        .unwrap();
+    assert_eq!(
+        skill.command.as_ref().unwrap().harness,
+        HarnessId::ClaudeCode
+    );
+    let invocation = Invocation::Skill {
+        name: skill.name,
+        path: skill.path,
+        command: skill.command,
+    };
+    assert_eq!(
+        harness_prompt(&format!("{} 123", invocation.link()), HarnessId::ClaudeCode),
+        "/review 123"
+    );
+}
+
+#[tokio::test]
+async fn plan_mode_reaches_the_cli_and_implementation_uses_the_question_bridge() {
+    let mut req = request("scenario:plan");
+    req.model_options
+        .insert(zeron_proto::AGENT_MODE_OPTION.into(), "plan".into());
+    let (controls, _steer, _token) = controls("Implement plan");
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Done {
+                status: DoneStatus::Errored,
                 ..
             }
         )),

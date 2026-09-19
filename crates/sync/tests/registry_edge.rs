@@ -37,6 +37,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         last_message_at: None,
         created_at: ts(2_000),
         harness_session_id: None,
+        harness_session_harness: None,
         harness_session_cwd: None,
         space_id: None,
         last_seen_at: None,

@@ -17,7 +17,8 @@ pub(crate) enum Frame {
     RateLimit(RateLimitFrame),
     Result(ResultFrame),
     ControlRequest(ControlRequestFrame),
-    /// control_response / control_cancel_request / anything unknown.
+    ControlCancelRequest(ControlCancelRequestFrame),
+    /// control_response / anything unknown.
     Other,
 }
 
@@ -126,6 +127,8 @@ pub(crate) struct ContentBlock {
     #[serde(default)]
     pub tool_use_id: String,
     #[serde(default)]
+    pub content: Value,
+    #[serde(default)]
     pub is_error: Option<bool>,
 }
 
@@ -186,6 +189,13 @@ pub(crate) struct ControlRequestBody {
     pub input: Value,
 }
 
+/// CLI withdrawal of a previously emitted control request.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ControlCancelRequestFrame {
+    #[serde(default, alias = "requestId")]
+    pub request_id: String,
+}
+
 /// Parse one stdout JSONL line. `Err` = not JSON; unknown types = `Other`.
 pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
     let value: Value = serde_json::from_str(line)?;
@@ -198,6 +208,7 @@ pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
         "rate_limit_event" => Frame::RateLimit(serde_json::from_value(value)?),
         "result" => Frame::Result(serde_json::from_value(value)?),
         "control_request" => Frame::ControlRequest(serde_json::from_value(value)?),
+        "control_cancel_request" => Frame::ControlCancelRequest(serde_json::from_value(value)?),
         _ => Frame::Other,
     };
     Ok(frame)
@@ -297,6 +308,11 @@ mod tests {
         assert!(matches!(
             parse_frame(r#"{"type":"mystery_frame"}"#).expect("parses"),
             Frame::Other
+        ));
+        assert!(matches!(
+            parse_frame(r#"{"type":"control_cancel_request","request_id":"request-7"}"#)
+                .expect("parses"),
+            Frame::ControlCancelRequest(frame) if frame.request_id == "request-7"
         ));
         assert!(parse_frame("not json").is_err());
     }

@@ -20,7 +20,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use zeron_proto::{Chat, ChatConfig, Device, MAX_SIDEBAR_PINS, Session, SidebarPreferences, Space};
+use zeron_proto::{
+    Chat, ChatConfig, Device, HarnessId, MAX_SIDEBAR_PINS, Session, SidebarPreferences, Space,
+};
 
 use crate::schema::DocError;
 use crate::workspace::{DeletedSpace, WorkspaceState};
@@ -904,6 +906,12 @@ impl RegistryDoc {
                 opt_str(chat.harness_session_id.as_deref()),
             ),
             (
+                "harnessSessionHarness",
+                chat.harness_session_harness
+                    .map(|harness| json!(harness))
+                    .unwrap_or(Value::Null),
+            ),
+            (
                 "harnessSessionCwd",
                 opt_str(chat.harness_session_cwd.as_deref()),
             ),
@@ -1113,6 +1121,7 @@ impl RegistryDoc {
     pub fn set_chat_harness_session(
         &mut self,
         chat_id: &str,
+        harness: HarnessId,
         session_id: &str,
         cwd: &str,
     ) -> Result<bool, DocError> {
@@ -1125,6 +1134,7 @@ impl RegistryDoc {
             OpKind::Update,
             fields([
                 ("harnessSessionId", json!(session_id)),
+                ("harnessSessionHarness", json!(harness)),
                 ("harnessSessionCwd", json!(cwd)),
             ]),
         );
@@ -1323,6 +1333,12 @@ impl RegistryDoc {
                     (
                         "harnessSessionId",
                         opt_str(chat.harness_session_id.as_deref()),
+                    ),
+                    (
+                        "harnessSessionHarness",
+                        chat.harness_session_harness
+                            .map(|harness| json!(harness))
+                            .unwrap_or(Value::Null),
                     ),
                     (
                         "harnessSessionCwd",

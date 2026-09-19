@@ -810,9 +810,9 @@ async fn retry_reissues_a_swallowed_send() {
     .await;
     wait_for(
         || {
-            entries_now(&core)
-                .iter()
-                .any(|e| e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete))
+            entries_now(&core).iter().any(|e| {
+                e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete)
+            })
         },
         "re-issued send runs to completion",
     )
@@ -1064,6 +1064,9 @@ async fn respond_input_resolves_pending_question() {
                     header: "Pick".into(),
                     question: "Which one?".into(),
                     options: vec!["a".into(), "b".into()],
+                    option_descriptions: Vec::new(),
+                    allow_custom: false,
+                    non_blocking: false,
                     multi_select: false,
                 }])
                 .await
@@ -1135,6 +1138,28 @@ async fn respond_input_resolves_pending_question() {
             })
         })
         .unwrap();
+    for (question_id, labels) in [
+        ("q1", vec!["custom"]),
+        ("unknown", vec!["a"]),
+        ("q1", vec!["a", "b"]),
+    ] {
+        assert!(
+            core.sessions
+                .respond_input(
+                    CHAT,
+                    &request_id,
+                    vec![zeron_proto::UserInputAnswer {
+                        question_id: question_id.into(),
+                        labels: labels.into_iter().map(str::to_owned).collect(),
+                    }]
+                )
+                .is_err()
+        );
+    }
+    assert_eq!(
+        core.sessions.session_status(CHAT).unwrap().status,
+        SessionStatus::AwaitingInput
+    );
     queue_as_viewer(
         handle.doc(),
         "cmd-answer-1",
@@ -1217,6 +1242,9 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
                     header: "Pick".into(),
                     question: "Which one?".into(),
                     options: vec!["a".into(), "b".into()],
+                    option_descriptions: Vec::new(),
+                    allow_custom: true,
+                    non_blocking: false,
                     multi_select: false,
                 }])
                 .await
@@ -1408,6 +1436,9 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                         header: "Pick".into(),
                         question: "Which one?".into(),
                         options: vec!["a".into(), "b".into()],
+                        option_descriptions: Vec::new(),
+                        allow_custom: true,
+                        non_blocking: false,
                         multi_select: false,
                     }])
                     .await;
@@ -1555,6 +1586,9 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
                     header: "Pick".into(),
                     question: "Which one?".into(),
                     options: vec!["a".into(), "b".into()],
+                    option_descriptions: Vec::new(),
+                    allow_custom: true,
+                    non_blocking: false,
                     multi_select: false,
                 };
                 // The pre-fix Claude/Codex shape: surface the question under
@@ -2019,11 +2053,9 @@ async fn empty_reasoning_deltas_are_heartbeats_not_journal_noise() {
     );
     wait_for(
         || {
-            entries(&core)
-                .iter()
-                .any(|e| {
-                    e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete)
-                })
+            entries(&core).iter().any(|e| {
+                e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete)
+            })
         },
         "run completes",
     )
@@ -2588,7 +2620,9 @@ async fn generated_image_is_materialized_before_publication_and_survives_reopen(
         })
         .collect();
     assert_eq!(images.len(), 1);
-    assert!(std::path::Path::new(&images[0]).starts_with(uploads.dir()));
+    // macOS temporary roots may be spelled /var while materialization returns
+    // their canonical /private/var location.
+    assert!(std::path::Path::new(&images[0]).starts_with(uploads.dir().canonicalize().unwrap()));
     let serialized = serde_json::to_string(&journal.replay(CHAT, 0).unwrap()).unwrap();
     assert!(!serialized.contains(source.to_str().unwrap()));
     assert!(!serialized.contains("BASE64_SENTINEL"));
@@ -2693,4 +2727,569 @@ async fn real_image_generation_profile_smoke() {
             .contains("generated_images/")
     );
     core.sessions.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn parked_stream_closure_retires_outstanding_async_question() {
+    struct ClosingHarness {
+        close: Arc<tokio::sync::Notify>,
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait]
+    impl Harness for ClosingHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::Mock
+        }
+        fn display_name(&self) -> &str {
+            "Closing"
+        }
+        fn supports_steering(&self) -> bool {
+            true
+        }
+        fn steering_mode(&self) -> SteeringMode {
+            SteeringMode::StepBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            _: RunRequest,
+            controls: RunControls,
+        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+            self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let close = self.close.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                let pending = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                    id: "q-parked-close".into(),
+                    header: "Later".into(),
+                    question: "Answer later?".into(),
+                    options: vec!["Yes".into()],
+                    option_descriptions: Vec::new(),
+                    allow_custom: false,
+                    non_blocking: true,
+                    multi_select: false,
+                }]);
+                tokio::spawn(async move {
+                    let _ = pending.await;
+                });
+                let _ = tx
+                    .send(Ok(AgentEvent::TextDelta {
+                        text: "parked".into(),
+                    }))
+                    .await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
+                close.notified().await;
+                // Dropping the last stream sender closes a parked child while
+                // its asynchronous input receiver is still alive.
+            });
+            Ok(futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            })
+            .boxed())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let close = Arc::new(tokio::sync::Notify::new());
+    let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let core = assemble(
+        dir.path(),
+        Arc::new(ClosingHarness {
+            close: close.clone(),
+            runs: runs.clone(),
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-parked-close",
+        SessionCommandPayload::Run {
+            request: run_request("park then close"),
+            message_id: "m-parked-close".into(),
+        },
+    );
+    wait_for(
+        || {
+            core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle)
+                && entries_now(&core).iter().any(|entry| {
+                    entry.parts.iter().any(|part| {
+                        matches!(part, MessagePart::Input { resolved: false, questions, .. }
+                            if questions.iter().any(|q| q.id == "q-parked-close"))
+                    })
+                })
+        },
+        "parked asynchronous question",
+    )
+    .await;
+    let request_id = entries(&core)
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .find_map(|part| match part {
+            MessagePart::Input {
+                request_id,
+                questions,
+                ..
+            } if questions.iter().any(|q| q.id == "q-parked-close") => Some(request_id.clone()),
+            _ => None,
+        })
+        .unwrap();
+
+    close.notify_one();
+    wait_for(
+        || {
+            entries_now(&core).iter().flat_map(|entry| &entry.parts).any(
+                |part| matches!(part, MessagePart::Input { request_id: id, resolved: true, .. } if id == &request_id),
+            )
+        },
+        "question settled when parked stream closes",
+    )
+    .await;
+    queue_as_viewer(
+        handle.doc(),
+        "answer-after-parked-close",
+        SessionCommandPayload::RespondInput {
+            request_id,
+            answers: vec![zeron_proto::UserInputAnswer {
+                question_id: "q-parked-close".into(),
+                labels: vec!["Yes".into()],
+            }],
+        },
+    );
+    wait_for(
+        || {
+            matches!(
+                command_status(&core, "answer-after-parked-close"),
+                Some((SessionCommandStatus::Rejected, _))
+            )
+        },
+        "late answer rejection",
+    )
+    .await;
+    assert_eq!(
+        runs.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "late answer must not start an orphan fallback turn"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nonblocking_questions_and_goal_updates_survive_turn_completion() {
+    struct ActivityHarness(
+        Arc<std::sync::Mutex<Vec<zeron_proto::UserInputAnswer>>>,
+        Arc<tokio::sync::Notify>,
+    );
+    #[async_trait]
+    impl Harness for ActivityHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::Mock
+        }
+        fn display_name(&self) -> &str {
+            "Activity"
+        }
+        fn supports_steering(&self) -> bool {
+            true
+        }
+        fn steering_mode(&self) -> SteeringMode {
+            SteeringMode::StepBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            _: RunRequest,
+            controls: RunControls,
+        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+            let answers = self.0.clone();
+            let withdraw = self.1.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                let withdrawn = (controls.request_input)(vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id":"q-withdraw", "header":"Withdraw", "question":"Native request?",
+                        "options":["Yes"], "allowCustom":false, "nonBlocking":true
+                    }))
+                    .unwrap(),
+                ]);
+                tokio::spawn(async move {
+                    withdraw.notified().await;
+                    drop(withdrawn);
+                });
+                let early = (controls.request_input)(vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id":"q-early", "header":"Early", "question":"Continue?",
+                        "options":["Yes"], "allowCustom":false, "nonBlocking":true
+                    }))
+                    .unwrap(),
+                ]);
+                let overlap = (controls.request_input)(vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id":"q-overlap", "header":"Optional", "question":"Optional answer?",
+                        "options":["Yes"], "allowCustom":false, "nonBlocking":true
+                    }))
+                    .unwrap(),
+                ]);
+                let blocking = (controls.request_input)(vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id":"q-blocking", "header":"Required", "question":"Required answer?",
+                        "options":["Yes"], "allowCustom":false
+                    }))
+                    .unwrap(),
+                ]);
+                tx.send(Ok(AgentEvent::TextDelta {
+                    text: "Turn finished".into(),
+                }))
+                .await
+                .unwrap();
+                assert_eq!(blocking.await.unwrap()[0].question_id, "q-blocking");
+                assert_eq!(overlap.await.unwrap()[0].question_id, "q-overlap");
+                tx.send(Ok(done(DoneStatus::Completed))).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                tx.send(Ok(AgentEvent::ToolCall {
+                    id: zeron_proto::LIVE_GOAL_TOOL_ID.into(),
+                    call: ToolCall::Goal {
+                        objective: "Ship it".into(),
+                        status: "complete".into(),
+                        tokens_used: 42,
+                        token_budget: None,
+                    },
+                }))
+                .await
+                .unwrap();
+                tx.send(Ok(AgentEvent::ToolCall {
+                    id: zeron_proto::LIVE_PLAN_TOOL_ID.into(),
+                    call: ToolCall::Todo {
+                        items: vec![zeron_proto::TodoItem {
+                            id: Some("1".into()),
+                            text: "Verify".into(),
+                            done: false,
+                            status: None,
+                        }],
+                    },
+                }))
+                .await
+                .unwrap();
+                tx.send(Ok(AgentEvent::ToolCall {
+                    id: "late-task-update".into(),
+                    call: ToolCall::TodoPatch {
+                        task_id: "1".into(),
+                        text: None,
+                        status: Some("completed".into()),
+                    },
+                }))
+                .await
+                .unwrap();
+                tx.send(Ok(AgentEvent::ToolCall {
+                    id: "late-plan".into(),
+                    call: ToolCall::Plan {
+                        text: "Final plan".into(),
+                    },
+                }))
+                .await
+                .unwrap();
+                let response = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                    id: "q-late".into(),
+                    header: "Next".into(),
+                    question: "What next?".into(),
+                    options: vec!["Review".into()],
+                    multi_select: false,
+                    option_descriptions: Vec::new(),
+                    allow_custom: true,
+                    non_blocking: true,
+                }])
+                .await
+                .unwrap();
+                *answers.lock().unwrap() = response;
+                let early_answers = early.await.unwrap();
+                answers.lock().unwrap().extend(early_answers);
+                let _unanswered = (controls.request_input)(vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id":"q-interrupt", "header":"Later", "question":"Answer later?",
+                        "options":["Yes"], "allowCustom":false, "nonBlocking":true
+                    }))
+                    .unwrap(),
+                ]);
+                controls.interrupt.cancelled().await;
+                let late =
+                    (controls.request_input)(vec![serde_json::from_value(serde_json::json!({
+                    "id":"q-after-interrupt", "header":"Late", "question":"Already cancelled?",
+                    "options":["Yes"], "allowCustom":false
+                })).unwrap()]);
+                assert!(
+                    late.await.unwrap().is_empty(),
+                    "input bridge is closed before harness teardown"
+                );
+            });
+            Ok(futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            })
+            .boxed())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let answers = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let withdraw = Arc::new(tokio::sync::Notify::new());
+    let core = assemble(
+        dir.path(),
+        Arc::new(ActivityHarness(answers.clone(), withdraw.clone())),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "activity-run",
+        SessionCommandPayload::Run {
+            request: run_request("Work"),
+            message_id: "activity-message".into(),
+        },
+    );
+    let input_id = |id: &str| {
+        entries_now(&core)
+            .iter()
+            .flat_map(|entry| &entry.parts)
+            .find_map(|part| match part {
+                MessagePart::Input {
+                    request_id,
+                    questions,
+                    resolved: false,
+                    ..
+                } if questions.iter().any(|q| q.id == id) => Some(request_id.clone()),
+                _ => None,
+            })
+    };
+    wait_for(
+        || input_id("q-blocking").is_some() && input_id("q-overlap").is_some(),
+        "overlapping questions visible",
+    )
+    .await;
+    assert_eq!(
+        core.sessions.session_status(CHAT).unwrap().status,
+        SessionStatus::AwaitingInput
+    );
+    wait_for(
+        || input_id("q-withdraw").is_some(),
+        "withdrawable question visible",
+    )
+    .await;
+    let withdrawn_id = input_id("q-withdraw").unwrap();
+    withdraw.notify_one();
+    wait_for(
+        || input_id("q-withdraw").is_none(),
+        "native withdrawal clears the tray",
+    )
+    .await;
+    assert_eq!(
+        core.sessions.session_status(CHAT).unwrap().status,
+        SessionStatus::AwaitingInput
+    );
+    queue_as_viewer(
+        handle.doc(),
+        "answer-withdrawn",
+        SessionCommandPayload::RespondInput {
+            request_id: withdrawn_id,
+            answers: vec![zeron_proto::UserInputAnswer {
+                question_id: "q-withdraw".into(),
+                labels: vec!["Yes".into()],
+            }],
+        },
+    );
+    wait_for(
+        || {
+            matches!(
+                command_status(&core, "answer-withdrawn"),
+                Some((SessionCommandStatus::Rejected, _))
+            )
+        },
+        "withdrawn request cannot be answered as an orphaned new turn",
+    )
+    .await;
+    let (_, mut input_events) = core.sessions.subscribe(CHAT, 0).unwrap();
+    let overlap_id = input_id("q-overlap").unwrap();
+    assert!(
+        core.sessions
+            .respond_input(
+                CHAT,
+                &overlap_id,
+                vec![zeron_proto::UserInputAnswer {
+                    question_id: "q-overlap".into(),
+                    labels: vec!["Yes".into()],
+                }]
+            )
+            .unwrap()
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(event) = input_events.recv().await {
+                if matches!(event.event, AgentEvent::InputResolved { request_id } if request_id == overlap_id) { break; }
+            }
+        }
+    }).await.expect("optional resolution published");
+    wait_for(
+        || input_id("q-overlap").is_none(),
+        "optional answer resolved",
+    )
+    .await;
+    assert_eq!(
+        core.sessions.session_status(CHAT).unwrap().status,
+        SessionStatus::AwaitingInput,
+        "resolving optional input must not hide another blocking request"
+    );
+    assert!(
+        core.sessions
+            .respond_input(
+                CHAT,
+                &input_id("q-blocking").unwrap(),
+                vec![zeron_proto::UserInputAnswer {
+                    question_id: "q-blocking".into(),
+                    labels: vec!["Yes".into()],
+                }]
+            )
+            .unwrap()
+    );
+    wait_for(
+        || {
+            entries_now(&core).iter().any(|entry| {
+                entry.parts.iter().any(|part| {
+                    matches!(
+                        part, MessagePart::Input { questions, resolved: false, .. }
+                            if questions.iter().any(|q| q.id == "q-late")
+                    )
+                })
+            })
+        },
+        "late question persisted",
+    )
+    .await;
+    assert_eq!(
+        core.sessions.session_status(CHAT).unwrap().status,
+        SessionStatus::Idle
+    );
+    let entries = entries_now(&core);
+    assert!(entries.iter().any(|entry| entry.parts.iter().any(|part|
+        matches!(part, MessagePart::Tool { call: ToolCall::Goal { status, .. }, .. } if status == "complete"))));
+    assert!(
+        entries
+            .iter()
+            .flat_map(|entry| &entry.parts)
+            .any(|part| matches!(
+                part,
+                MessagePart::Tool {
+                    call: ToolCall::Todo { .. },
+                    resolved: true,
+                    ..
+                }
+            ))
+    );
+    assert!(
+        entries
+            .iter()
+            .flat_map(|entry| &entry.parts)
+            .any(|part| matches!(
+                part,
+                MessagePart::Tool {
+                    call: ToolCall::TodoPatch { .. },
+                    resolved: true,
+                    ..
+                }
+            ))
+    );
+    let early_id = entries
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .find_map(|part| match part {
+            MessagePart::Input {
+                request_id,
+                questions,
+                resolved: false,
+                ..
+            } if questions.iter().any(|q| q.id == "q-early") => Some(request_id.clone()),
+            _ => None,
+        })
+        .expect("question asked before Done remains visible and answerable");
+    assert!(
+        core.sessions
+            .respond_input(
+                CHAT,
+                &early_id,
+                vec![zeron_proto::UserInputAnswer {
+                    question_id: "q-early".into(),
+                    labels: vec!["Yes".into()],
+                }]
+            )
+            .unwrap()
+    );
+    let request_id = entries
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .find_map(|part| match part {
+            MessagePart::Input {
+                request_id,
+                questions,
+                ..
+            } if questions.iter().any(|q| q.id == "q-late") => Some(request_id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        core.sessions
+            .respond_input(
+                CHAT,
+                &request_id,
+                vec![zeron_proto::UserInputAnswer {
+                    question_id: "q-late".into(),
+                    labels: vec!["Review".into()],
+                }]
+            )
+            .unwrap()
+    );
+    queue_as_viewer(
+        handle.doc(),
+        "duplicate-late-answer",
+        SessionCommandPayload::RespondInput {
+            request_id: request_id.clone(),
+            answers: vec![zeron_proto::UserInputAnswer {
+                question_id: "q-late".into(),
+                labels: vec!["Review".into()],
+            }],
+        },
+    );
+    wait_for(
+        || {
+            matches!(
+                command_status(&core, "duplicate-late-answer"),
+                Some((SessionCommandStatus::Rejected, _))
+            )
+        },
+        "a duplicate asynchronous answer cannot become a new turn",
+    )
+    .await;
+    wait_for(
+        || answers.lock().unwrap().len() == 2,
+        "late answer reaches harness",
+    )
+    .await;
+    wait_for(|| entries_now(&core).iter().any(|entry| entry.parts.iter().any(|part|
+        matches!(part, MessagePart::Input { request_id: id, resolved: true, .. } if id == &request_id))), "late question resolved").await;
+    assert_eq!(
+        core.sessions.session_status(CHAT).unwrap().status,
+        SessionStatus::Idle
+    );
+    wait_for(
+        || input_id("q-interrupt").is_some(),
+        "unanswered parked question visible",
+    )
+    .await;
+    core.sessions.interrupt(CHAT).await.unwrap();
+    assert!(
+        input_id("q-interrupt").is_none(),
+        "interrupt expires questions from completed segments"
+    );
 }

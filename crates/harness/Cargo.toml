@@ -26,6 +26,7 @@ async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 deser-hjson.workspace = true
+serde_yaml_ng = "0.10"
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

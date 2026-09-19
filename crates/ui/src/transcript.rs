@@ -860,6 +860,14 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
             None => url.clone(),
         },
         ToolCall::WebSearch { query } => query.clone(),
+        ToolCall::TodoPatch { text, status, .. } => {
+            text.clone().or_else(|| status.clone()).unwrap_or_default()
+        }
+        ToolCall::Compaction {} => "Conversation context".into(),
+        ToolCall::Plan { text } => text.clone(),
+        ToolCall::Goal {
+            objective, status, ..
+        } => format!("{objective}\n{status}"),
         ToolCall::Todo { items } => items
             .iter()
             .map(|i| format!("{} {}", if i.done { "[x]" } else { "[ ]" }, i.text))
@@ -1342,8 +1350,9 @@ pub fn rows_for_entry(
                 let item = ToolItem {
                     part_id: part.id().to_owned(),
                     call: call.clone(),
-                    is_error: *is_error,
-                    resolved: *resolved,
+                    is_error: *is_error
+                        || (matches!(call, ToolCall::Compaction {}) && !streaming && !resolved),
+                    resolved: *resolved || (matches!(call, ToolCall::Compaction {}) && !streaming),
                     detail: tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
                         .map(Arc::new),
                     invocation: call_block(call).map(Arc::new),
@@ -1357,10 +1366,11 @@ pub fn rows_for_entry(
                 };
                 // Agent chips don't share a fold with ordinary tools: flush
                 // whenever the genus flips so each group is uniform.
-                if pending_group
-                    .first()
-                    .is_some_and(|head| is_agent_tool(head) != is_agent_tool(&item))
-                {
+                if pending_group.first().is_some_and(|head| {
+                    is_agent_tool(head) != is_agent_tool(&item)
+                        || matches!(head.call, ToolCall::Compaction {})
+                            != matches!(item.call, ToolCall::Compaction {})
+                }) {
                     flush_group(
                         &mut rows,
                         &mut pending_group,
@@ -1388,7 +1398,9 @@ pub fn rows_for_entry(
                 let item = thought_item(part_id, &tree, live);
                 // Thoughts join ordinary tool groups; agent (spawn-link)
                 // groups stay pure, exactly like the tool genus rule.
-                if pending_group.first().is_some_and(is_agent_tool) {
+                if pending_group.first().is_some_and(|tool| {
+                    is_agent_tool(tool) || matches!(tool.call, ToolCall::Compaction {})
+                }) {
                     flush_group(
                         &mut rows,
                         &mut pending_group,
@@ -6321,6 +6333,45 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if tools
+            .iter()
+            .all(|tool| matches!(tool.call, ToolCall::Compaction {}))
+        {
+            let active = tools.iter().any(|tool| !tool.resolved);
+            let failed = tools.iter().any(|tool| tool.is_error);
+            let label = if active {
+                "Compacting conversation"
+            } else if failed {
+                "Compaction stopped"
+            } else {
+                "Conversation compacted"
+            };
+            let phase = if active && !cx.reduce_motion() {
+                let now = Instant::now();
+                let start = *self
+                    .tool_group_reveals
+                    .entry(row_id.clone())
+                    .or_default()
+                    .shimmer_started_at
+                    .get_or_insert(now);
+                motion::pulse_lease(cx.entity_id(), cx);
+                Some(tool_title_shimmer_phase(start, now))
+            } else {
+                None
+            };
+            return div()
+                .w_full()
+                .h(px(32.0))
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .text_size(px(TOOL_LABEL_SIZE))
+                .text_color(theme.text_muted)
+                .child(div().flex_1().h(px(1.0)).bg(theme.border))
+                .child(tool_group_title(label.into(), phase, theme))
+                .child(div().flex_1().h(px(1.0)).bg(theme.border))
+                .into_any_element();
+        }
         let mut fold = self.folds.get(row_id).copied().unwrap_or_default();
         // Agent/spawn chips never fold: they are their own row, always open,
         // no "Called N tools" header — a running subagent stays visible.
@@ -7106,7 +7157,11 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         ToolCall::Search { .. } => crate::icons::MAGNIFER,
         ToolCall::Glob { .. } => crate::icons::FOLDER_WITH_FILES,
         ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => crate::icons::GLOBAL,
-        ToolCall::Todo { .. } => crate::icons::CHECKLIST,
+        ToolCall::Todo { .. }
+        | ToolCall::TodoPatch { .. }
+        | ToolCall::Plan { .. }
+        | ToolCall::Goal { .. }
+        | ToolCall::Compaction {} => crate::icons::CHECKLIST,
         call if is_agent_call(call) => crate::icons::BOT,
         ToolCall::Unknown { name, .. } if name == "Wait for agents" => crate::icons::BOT,
         ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => crate::icons::WIDGET,
@@ -10036,6 +10091,45 @@ mod tests {
     const MD: &str = "# Title\n\npara one\n\n```rust\nlet x = 1;\n```";
 
     #[test]
+    fn compaction_is_a_separate_line_and_stops_when_the_turn_ends() {
+        let mut compaction = tool_part("compact", "");
+        if let MessagePart::Tool { call, resolved, .. } = &mut compaction {
+            *call = ToolCall::Compaction {};
+            *resolved = false;
+        }
+        for status in [
+            MessageStatus::Streaming,
+            MessageStatus::Complete,
+            MessageStatus::Aborted,
+        ] {
+            let entry = assistant(
+                "m",
+                status,
+                vec![
+                    tool_part("before", "read"),
+                    compaction.clone(),
+                    MessagePart::Reasoning {
+                        id: "after".into(),
+                        text: "Continue".into(),
+                    },
+                ],
+            );
+            let rows = rows_for_entry(&entry, false, &mut parse);
+            assert_eq!(
+                rows.len(),
+                3,
+                "compaction must not hide in another tool fold"
+            );
+            let RowKind::ToolGroup { tools, .. } = &rows[1].kind else {
+                panic!("compaction group")
+            };
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].resolved, status != MessageStatus::Streaming);
+            assert_eq!(tools[0].is_error, status != MessageStatus::Streaming);
+        }
+    }
+
+    #[test]
     fn live_entry_splits_per_block_with_id_continuity() {
         // Live rows split per block exactly like completed ones (the list
         // virtualizes them — the fading tail is the only per-frame work).
@@ -12428,10 +12522,14 @@ mod tests {
         let todo = ToolCall::Todo {
             items: vec![
                 zeron_proto::TodoItem {
+                    id: None,
+                    status: None,
                     text: "a".into(),
                     done: true,
                 },
                 zeron_proto::TodoItem {
+                    id: None,
+                    status: None,
                     text: "b".into(),
                     done: false,
                 },
@@ -12515,10 +12613,14 @@ mod tests {
         let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Todo {
             items: vec![
                 zeron_proto::TodoItem {
+                    id: None,
+                    status: None,
                     text: "a".into(),
                     done: true,
                 },
                 zeron_proto::TodoItem {
+                    id: None,
+                    status: None,
                     text: "b".into(),
                     done: false,
                 },

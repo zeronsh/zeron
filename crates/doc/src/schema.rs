@@ -474,6 +474,41 @@ impl SessionDoc {
             .collect())
     }
 
+    /// Read one command without materializing every payload in the ledger.
+    /// IDs are expected to be unique. First-to-last matches `read_commands()`
+    /// and `set_command_status`; a malformed matching row is skipped just as
+    /// it is by `read_commands`, allowing a later valid duplicate to win.
+    pub fn read_command(&self, command_id: &str) -> Result<Option<SessionCommandEntry>, DocError> {
+        let commands = self.doc.get_list("commands");
+        for index in 0..commands.len() {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(command))) =
+                commands.get(index)
+            else {
+                continue;
+            };
+            let id_matches = matches!(
+                command.get("id"),
+                Some(loro::ValueOrContainer::Value(LoroValue::String(id)))
+                    if id.as_str() == command_id
+            );
+            if !id_matches {
+                continue;
+            }
+            let value = command.get_deep_value().to_json_value();
+            match serde_json::from_value(value) {
+                Ok(entry) => return Ok(Some(entry)),
+                Err(error) => {
+                    tracing::warn!(
+                        command = command_id,
+                        %error,
+                        "skipping malformed command entry"
+                    );
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Append a command entry (rule 1: own entries only, append-only).
     pub fn queue_command(&self, entry: &SessionCommandEntry) -> Result<(), DocError> {
         let commands = self.doc.get_list("commands");
@@ -1415,6 +1450,29 @@ mod tests {
     }
 
     #[test]
+    fn todo_native_states_survive_document_storage() {
+        let doc = SessionDoc::init("todo-state").unwrap();
+        let mut entry = user_entry("tasks", "");
+        entry.role = MessageRole::Assistant;
+        let call = zeron_proto::ToolCall::Todo {
+            items: vec![zeron_proto::TodoItem {
+                id: None,
+                text: "Work".into(),
+                done: false,
+                status: Some(zeron_proto::TodoStatus::InProgress),
+            }],
+        };
+        entry.parts = vec![
+            serde_json::from_value(
+                serde_json::json!({"kind":"tool", "id":"plan", "call":call, "resolved":true}),
+            )
+            .unwrap(),
+        ];
+        doc.push_message(&entry).unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0].parts, entry.parts);
+    }
+
+    #[test]
     fn round_trips_message_entries() {
         let doc = SessionDoc::init("chat-1").unwrap();
         doc.push_message(&user_entry("m1", "hello")).unwrap();
@@ -1898,6 +1956,30 @@ mod tests {
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].status, SessionCommandStatus::Applied);
         assert_eq!(commands[0].payload, entry.payload);
+        assert_eq!(doc.read_command("c1").unwrap(), Some(commands[0].clone()));
+        assert_eq!(doc.read_command("missing").unwrap(), None);
+
+        // A malformed matching row follows the ledger's skip policy, so a
+        // later valid duplicate remains readable.
+        let commands_list = doc.doc().get_list("commands");
+        let malformed = commands_list.push_container(LoroMap::new()).unwrap();
+        malformed.insert("id", "malformed-first").unwrap();
+        doc.doc().commit();
+        let mut replacement = entry.clone();
+        replacement.id = "malformed-first".into();
+        doc.queue_command(&replacement).unwrap();
+        assert_eq!(
+            doc.read_command("malformed-first").unwrap(),
+            Some(replacement)
+        );
+
+        // Existing ledger mutation and read semantics keep the first valid
+        // duplicate authoritative.
+        let mut latest = entry;
+        latest.status = SessionCommandStatus::Rejected;
+        latest.resolution = Some("newest outcome".into());
+        doc.queue_command(&latest).unwrap();
+        assert_eq!(doc.read_command("c1").unwrap(), Some(commands[0].clone()));
     }
 
     #[test]

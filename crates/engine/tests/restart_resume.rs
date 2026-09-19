@@ -21,13 +21,14 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 
 use zeron_doc::{
-    MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionDoc, SessionMessageEntry,
+    MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionDoc,
+    SessionMessageEntry, WorkspaceDoc,
 };
-use zeron_engine::{EngineCore, HarnessRegistry, RunJournal};
+use zeron_engine::{EngineCore, HarnessRegistry, RunJournal, WORKSPACE_DOC_ID};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SteeringMode,
+    AgentEvent, Chat, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
+    Space, SteeringMode,
 };
 use zeron_sync::DocsStore;
 
@@ -199,6 +200,13 @@ fn stored_harness_session(core: &EngineCore) -> Option<(String, Option<String>)>
         .map(|id| (id, chat.harness_session_cwd))
 }
 
+fn stored_harness_owner(core: &EngineCore) -> Option<HarnessId> {
+    core.workspace
+        .chat(CHAT)
+        .expect("read chat row")
+        .and_then(|chat| chat.harness_session_harness)
+}
+
 /// Create + name the chat row up front so the auto-titler (which runs its own
 /// harness request after a completed exchange on an UNTITLED chat) stays out
 /// of the recorded request log.
@@ -212,6 +220,86 @@ fn pre_title(core: &EngineCore) {
     core.workspace
         .rename_chat(CHAT, "Pre-titled")
         .expect("rename chat");
+}
+
+/// Seed the pre-provider-tag workspace shape. A completed journal proof is
+/// enough for resume lookup, without triggering boot recovery of an open run.
+fn seed_legacy_untagged_session(
+    dir: &std::path::Path,
+    stored_session_id: &str,
+    proof: Option<(HarnessId, &str, &str)>,
+) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("device-id"), "dev-legacy-resume").unwrap();
+    let org_dir = dir.join("orgs/dev-org/dev-user");
+    let store = DocsStore::open(&org_dir).unwrap();
+    let legacy = WorkspaceDoc::new();
+    let now = chrono::Utc::now();
+    legacy
+        .upsert_space(&Space {
+            id: "space-restart".into(),
+            device_id: "dev-legacy-resume".into(),
+            path: "/tmp".into(),
+            name: Some("Legacy resume".into()),
+            git_detected: false,
+            git_checked_at: None,
+            checkout_id: None,
+            created_at: now,
+        })
+        .unwrap();
+    legacy
+        .upsert_chat(&Chat {
+            id: CHAT.into(),
+            device_id: "dev-legacy-resume".into(),
+            title: Some("Legacy resume".into()),
+            archived: false,
+            cwd: Some("/tmp".into()),
+            branch: None,
+            checkout_id: None,
+            source_context: None,
+            config: None,
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: now,
+            harness_session_id: Some(stored_session_id.into()),
+            harness_session_harness: None,
+            harness_session_cwd: Some("/tmp".into()),
+            room_gen: None,
+            space_id: Some("space-restart".into()),
+            last_seen_at: None,
+        })
+        .unwrap();
+    store
+        .save_snapshot(WORKSPACE_DOC_ID, &legacy.export_snapshot().unwrap())
+        .unwrap();
+
+    if let Some((harness, session_id, cwd)) = proof {
+        let journal = RunJournal::open(org_dir.join("journals")).unwrap();
+        journal
+            .append(
+                CHAT,
+                &AgentEvent::SessionStarted {
+                    harness,
+                    model: "proof-model".into(),
+                    tools: vec![],
+                    cwd: cwd.into(),
+                    session_id: session_id.into(),
+                    assistant_message_id: "proof-assistant".into(),
+                },
+            )
+            .unwrap();
+        journal
+            .append(
+                CHAT,
+                &AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: Some(session_id.into()),
+                },
+            )
+            .unwrap();
+    }
 }
 
 /// One full turn in a fresh engine over `dir`, then graceful shutdown — the
@@ -315,6 +403,100 @@ async fn restart_roundtrip_restores_chats_transcript_and_resume() {
         Some(("hs-restart-2".into(), Some("/tmp".into())))
     );
     core.shutdown().await;
+}
+
+#[tokio::test]
+async fn legacy_untagged_session_resumes_only_with_matching_journal_proof_and_upgrades_owner() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    seed_legacy_untagged_session(
+        &dir,
+        "hs-legacy",
+        Some((HarnessId::Mock, "hs-legacy", "/tmp")),
+    );
+    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+    let core = assemble(
+        &dir,
+        RecordingHarness {
+            requests: requests.clone(),
+            session_id: "unused-after-failure".into(),
+            // Keep SessionStarted from masking whether legacy lookup itself
+            // upgraded the owner tag.
+            fail_starts: Arc::new(Mutex::new(u32::MAX)),
+        },
+    );
+
+    queue_run(
+        &core,
+        "continue legacy conversation",
+        "/tmp",
+        "msg-user-legacy",
+    );
+    wait_for(
+        || !requests.lock().unwrap().is_empty(),
+        "legacy dispatch to reach the harness",
+    )
+    .await;
+    assert_eq!(
+        requests.lock().unwrap()[0].resume.as_deref(),
+        Some("hs-legacy"),
+        "matching provider/id/cwd proof must authorize the legacy resume"
+    );
+    assert_eq!(
+        stored_harness_owner(&core),
+        Some(HarnessId::Mock),
+        "successful legacy proof must upgrade the workspace row with its owner"
+    );
+    assert_eq!(
+        stored_harness_session(&core),
+        Some(("hs-legacy".into(), Some("/tmp".into()))),
+        "a startup failure must not replace the proved legacy session"
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn legacy_untagged_session_refuses_mismatched_or_missing_journal_proof() {
+    let cases = [
+        (
+            "provider-mismatch",
+            Some((HarnessId::Cursor, "hs-legacy", "/tmp")),
+        ),
+        ("id-mismatch", Some((HarnessId::Mock, "hs-other", "/tmp"))),
+        (
+            "cwd-mismatch",
+            Some((HarnessId::Mock, "hs-legacy", "/elsewhere")),
+        ),
+        ("missing-proof", None),
+    ];
+
+    for (name, proof) in cases {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("data");
+        seed_legacy_untagged_session(&dir, "hs-legacy", proof);
+        let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+        let core = assemble(
+            &dir,
+            RecordingHarness {
+                requests: requests.clone(),
+                session_id: format!("fresh-{name}"),
+                fail_starts: Default::default(),
+            },
+        );
+
+        queue_run(&core, "start safely", "/tmp", "msg-user-safe");
+        wait_for(
+            || !requests.lock().unwrap().is_empty(),
+            "safe fresh dispatch to reach the harness",
+        )
+        .await;
+        assert_eq!(
+            requests.lock().unwrap()[0].resume,
+            None,
+            "{name}: ambiguous legacy state must not inject a native session id"
+        );
+        core.shutdown().await;
+    }
 }
 
 #[tokio::test]
@@ -422,6 +604,11 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
         requests.lock().unwrap()[0].resume.as_deref(),
         Some("hs-crash"),
         "journal-recovered session id must ride the next dispatch"
+    );
+    assert_eq!(
+        stored_harness_owner(&core),
+        Some(HarnessId::Mock),
+        "legacy journal recovery must upgrade the stored session with its provider"
     );
     core.shutdown().await;
 }

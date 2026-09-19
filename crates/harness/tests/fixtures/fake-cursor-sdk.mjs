@@ -35,7 +35,10 @@ const checkpoint={schemaVersion:1,rootBlobId:'retained-conversation-history'};
 function instance(store) {
   return {
     agentId:'agent-fixture',model:{id:'composer-2.5'},close(){},
-    async send(prompt,{onDelta}) {
+    async send(prompt,{onDelta,mode}) {
+      if (prompt.startsWith("verify-mode:")) {
+        if (mode !== prompt.slice("verify-mode:".length)) throw new Error("incorrect conversation mode");
+      }
       store.logPrompt(prompt);
       const doc=await store.agents.get({});
       if(doc.activeRunId) throw new Error('Agent already has active run');
@@ -84,7 +87,8 @@ function startupLimit() {
 }
 export const Agent={
   messages:{list:async(_id,{store,limit,offset,cwd,runtime})=>{if(runtime!=='local'||cwd!==(await store.agents.get({})).cwd)throw new Error('history must use the owning workspace');return store.userMessages().slice(offset,offset+limit).map((text,i)=>({type:'user',message:i%3===0?{agentConversationTurn:{user_message:{text}}}:i%3===1?{agentConversationTurn:{userMessage:{text}}}:{turn:{case:'agentConversationTurn',value:{userMessage:{text}}}}}));}},
-  async create({local}) {
+  async create({local,model}) {
+    if (model?.params?.some(p => p.id === "agentMode")) throw new Error("mode leaked into model parameters");
     startupLimit();
     await local.store.agents.create({agent:{agentId:'agent-fixture',cwd:local.cwd,status:'idle',activeRunId:null,latestCheckpoint:checkpoint,sdkMetadata:{mustKeep:true}}});
     return instance(local.store);

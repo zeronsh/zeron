@@ -3112,6 +3112,40 @@ impl Render for AppearancePage {
                 )
                 .into_any_element(),
         );
+        settings_rows.push(
+            widgets::card_row(&theme, false)
+                .child(widgets::row_tile(&theme, icons::TUNING))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Compact model picker"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![div()
+                        .child("Adjust effort with a slider, then open the model list when needed.")
+                        .into_any_element()],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, ui_settings.compact_model_picker)
+                        .id("compact-model-picker")
+                        .role(gpui::Role::Button)
+                        .aria_label("Compact model picker")
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            crate::settings::update(
+                                crate::settings::SavePolicy::Debounced,
+                                cx,
+                                |settings| {
+                                    settings.compact_model_picker = !settings.compact_model_picker;
+                                },
+                            );
+                            cx.refresh_windows();
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        );
         let background_available = current_background
             .as_ref()
             .is_some_and(|background| Path::new(&background.path).is_file());

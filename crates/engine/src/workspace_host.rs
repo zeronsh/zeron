@@ -27,7 +27,7 @@ use chrono::Utc;
 use tokio::sync::watch;
 
 use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
-use zeron_proto::{Chat, ChatConfig, Device, Session, SidebarPreferencesState, Space};
+use zeron_proto::{Chat, ChatConfig, Device, HarnessId, Session, SidebarPreferencesState, Space};
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
 use crate::doc_host::EdgeConfig;
@@ -830,8 +830,14 @@ impl WorkspaceHost {
     /// of its latest run and the cwd it was created under. An empty `session_id`
     /// tombstones the row ("do not resume" after a rejected resume). Best-effort:
     /// a missing chat row (claim happens on first command) just returns.
-    pub fn set_chat_harness_session(&self, chat_id: &str, session_id: &str, cwd: &str) {
-        match self.mutate(|doc| doc.set_chat_harness_session(chat_id, session_id, cwd)) {
+    pub fn set_chat_harness_session(
+        &self,
+        chat_id: &str,
+        harness: HarnessId,
+        session_id: &str,
+        cwd: &str,
+    ) {
+        match self.mutate(|doc| doc.set_chat_harness_session(chat_id, harness, session_id, cwd)) {
             Ok(_) => {}
             Err(err) => {
                 tracing::warn!(chat = %chat_id, error = %err, "registry harness-session write failed");
@@ -842,12 +848,15 @@ impl WorkspaceHost {
     /// The chat row's stored harness session `(session_id, cwd)`, if stamped.
     /// The empty-string tombstone passes through — callers must treat it as
     /// "explicitly no resume" (and must NOT fall back to older sources).
-    pub fn chat_harness_session(&self, chat_id: &str) -> Option<(String, Option<String>)> {
+    pub fn chat_harness_session(
+        &self,
+        chat_id: &str,
+    ) -> Option<(String, Option<HarnessId>, Option<String>)> {
         match self.read(|doc| doc.chat(chat_id)) {
             Ok(chat) => {
                 let chat = chat?;
                 let id = chat.harness_session_id?;
-                Some((id, chat.harness_session_cwd))
+                Some((id, chat.harness_session_harness, chat.harness_session_cwd))
             }
             Err(err) => {
                 tracing::warn!(chat = %chat_id, error = %err, "registry chat read failed");
@@ -917,6 +926,7 @@ impl WorkspaceHost {
                 last_message_at: None,
                 created_at: Utc::now(),
                 harness_session_id: None,
+                harness_session_harness: None,
                 // Born on chat2: a brand-new chat has an empty doc — nothing
                 // to seed, no migration race to lose. Only pre-existing chats
                 // go through the seed+flip path (the host migration sweep).

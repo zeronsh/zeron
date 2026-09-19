@@ -841,6 +841,125 @@ impl HarnessesPage {
         trigger.into_any_element()
     }
 
+    fn toggle_completion(&mut self, harness: HarnessId, dollar: bool, cx: &mut Context<Self>) {
+        super::update(super::SavePolicy::Immediate, cx, |settings| {
+            let mut preferences = settings.skill_completion(harness);
+            if dollar {
+                preferences.dollar = !preferences.dollar;
+            } else {
+                preferences.separate_from_slash = !preferences.separate_from_slash;
+            }
+            settings
+                .skill_completion_by_harness
+                .insert(harness, preferences);
+        });
+        cx.notify();
+    }
+
+    fn reset_completion(&mut self, cx: &mut Context<Self>) {
+        super::update(super::SavePolicy::Immediate, cx, |settings| {
+            settings.skill_completion_by_harness.clear();
+            settings.skills_in_slash_menu = false;
+        });
+        cx.notify();
+    }
+
+    fn render_completion(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let mut card = widgets::section_card(theme);
+        for (index, (harness, name)) in super::SKILL_COMPLETION_HARNESSES.into_iter().enumerate() {
+            let preferences = super::current(cx).skill_completion(harness);
+            let (logo, tint) = crate::pickers::harness_brand_icon(harness);
+            let mut controls = div().flex().flex_wrap().gap(px(8.0));
+            for (dollar, label, enabled) in [
+                (true, "$ for skills", preferences.dollar),
+                (
+                    false,
+                    "Separate / commands",
+                    preferences.separate_from_slash,
+                ),
+            ] {
+                controls = controls.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "completion-{harness:?}-{dollar}"
+                        )))
+                        .role(gpui::Role::Switch)
+                        .aria_label(format!(
+                            "{name}: {label}, {}",
+                            if enabled { "on" } else { "off" }
+                        ))
+                        .tab_index(0)
+                        .cursor_pointer()
+                        .min_h(px(36.0))
+                        .px(px(10.0))
+                        .py(px(6.0))
+                        .rounded(px(6.0))
+                        .bg(crate::theme::ink(0.025))
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text)
+                        .hover(|s| s.bg(crate::theme::ink(0.055)))
+                        .border_1()
+                        .border_color(gpui::transparent_black())
+                        .focus_visible(|s| s.border_color(theme.accent))
+                        .on_click(cx.listener(move |page, _, _, cx| {
+                            page.toggle_completion(harness, dollar, cx)
+                        }))
+                        .on_key_down(cx.listener(move |page, event: &gpui::KeyDownEvent, _, cx| {
+                            if !event.is_held
+                                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                            {
+                                cx.stop_propagation();
+                                page.toggle_completion(harness, dollar, cx);
+                            }
+                        }))
+                        .child(label)
+                        .child(widgets::toggle_switch(theme, enabled)),
+                );
+            }
+            card = card.child(
+                widgets::card_row(theme, index == 0)
+                    .flex_wrap()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .min_w(px(128.0))
+                            .flex_1()
+                            .child(
+                                crate::icons::icon(logo)
+                                    .size(px(20.0))
+                                    .text_color(tint.unwrap_or(theme.text)),
+                            )
+                            .child(widgets::row_title(theme, name)),
+                    )
+                    .child(controls),
+            );
+        }
+        let current = super::current(cx);
+        let customized =
+            !current.skill_completion_by_harness.is_empty() || current.skills_in_slash_menu;
+        div().mt(px(28.0)).flex().flex_col().gap(px(12.0))
+            .child(div().flex().items_center().justify_between().gap(px(12.0))
+                .child(widgets::row_title(theme, "Composer completion"))
+                .when(customized, |header| header.child(widgets::ghost_action(theme)
+                    .id("reset-completion").role(gpui::Role::Button).aria_label("Restore composer completion defaults")
+                    .tab_index(0).border_1().border_color(gpui::transparent_black())
+                    .focus_visible(|s| s.border_color(theme.accent))
+                    .on_click(cx.listener(|page, _, _, cx| page.reset_completion(cx)))
+                    .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
+                        if !event.is_held && matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            cx.stop_propagation(); page.reset_completion(cx);
+                        }
+                    })).child("Restore defaults"))))
+            .child(widgets::page_subtitle(theme, "Use $ to find skills. Separate / commands to keep skills out of the slash menu. These preferences apply across your devices.").line_height(px(20.0)))
+            .child(card).into_any_element()
+    }
+
     fn rows(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let theme = Theme::of(cx).clone();
         let Loadable::Ready(list) = &self.harnesses else {
@@ -1063,6 +1182,7 @@ impl Render for HarnessesPage {
             .map(|message| widgets::error_strip(&theme, message).into_any_element());
         let switcher = self.render_device_switcher(&theme, cx);
         let titles = self.render_titles(&theme, cx);
+        let completion = self.render_completion(&theme, cx);
         let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
 
         div()
@@ -1099,6 +1219,7 @@ impl Render for HarnessesPage {
                             )
                             .children(error)
                             .child(body)
+                            .child(completion)
                             .child(titles),
                     ),
             )
@@ -1138,5 +1259,41 @@ mod tests {
             "Enabling Antigravity…"
         );
         assert_eq!(SignInPhase::Enabling.failure_label(), "Enable failed");
+    }
+}
+
+#[cfg(feature = "appshots-fixture")]
+impl HarnessesPage {
+    pub fn fixture_completion(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        self.render_completion(&theme, cx)
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    #[gpui::test]
+    fn completion_preferences_save_locally_and_independently(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| super::super::init(Default::default(), dir.path(), cx));
+        let state = cx.new(|_| AppState::new());
+        let page = cx.new(|cx| HarnessesPage::new(state, cx));
+        page.update(cx, |page, cx| {
+            page.toggle_completion(HarnessId::ClaudeCode, true, cx);
+            page.toggle_completion(HarnessId::ClaudeCode, false, cx);
+            page.toggle_completion(HarnessId::Opencode, true, cx);
+        });
+        let loaded = super::super::UiSettings::load(dir.path());
+        let claude = loaded.skill_completion(HarnessId::ClaudeCode);
+        assert!(claude.dollar && claude.separate_from_slash);
+        let opencode = loaded.skill_completion(HarnessId::Opencode);
+        assert!(opencode.dollar && !opencode.separate_from_slash);
+        assert!(!loaded.skill_completion(HarnessId::Cursor).dollar);
+        page.update(cx, |page, cx| page.reset_completion(cx));
+        let reset = super::super::UiSettings::load(dir.path());
+        assert!(reset.skill_completion_by_harness.is_empty());
+        assert!(reset.skill_completion(HarnessId::Codex).dollar);
+        assert!(!reset.skill_completion(HarnessId::ClaudeCode).dollar);
     }
 }

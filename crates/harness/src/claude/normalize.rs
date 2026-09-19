@@ -99,6 +99,9 @@ pub(crate) fn decode_tool_use(name: &str, input: &Value) -> ToolCall {
         "WebSearch" => ToolCall::WebSearch {
             query: str_field(input, "query"),
         },
+        "ExitPlanMode" if input["plan"].as_str().is_some() => ToolCall::Plan {
+            text: str_field(input, "plan"),
+        },
         "TodoWrite" => ToolCall::Todo {
             items: input
                 .get("todos")
@@ -107,6 +110,8 @@ pub(crate) fn decode_tool_use(name: &str, input: &Value) -> ToolCall {
                 .unwrap_or_default()
                 .iter()
                 .map(|t| TodoItem {
+                    id: None,
+                    status: zeron_proto::TodoStatus::from_wire(t["status"].as_str()),
                     text: str_field(t, "content"),
                     done: t.get("status").and_then(Value::as_str) == Some("completed"),
                 })
@@ -185,6 +190,9 @@ fn is_synthetic_user_text(text: &str) -> bool {
 /// resume turns them into the done→Working→done wake.
 pub(crate) struct Normalizer {
     saw_init: bool,
+    task_patch: Option<ToolCall>,
+    task_calls: std::collections::HashMap<String, (String, Value)>,
+    tasks: std::collections::BTreeMap<String, TodoItem>,
     last_model: Option<String>,
     /// Background-agent ids (`task_started.task_id`) → the spawning Agent
     /// tool_use id. `SendMessage` steers address the AGENT id; this map
@@ -210,11 +218,134 @@ impl Normalizer {
     pub fn new() -> Self {
         Self {
             saw_init: false,
+            task_patch: None,
+            task_calls: Default::default(),
+            tasks: Default::default(),
             last_model: None,
             agent_tasks: std::collections::HashMap::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
             assistant_message_id: new_message_id(),
             session_id: None,
+        }
+    }
+
+    fn apply_task_result(&mut self, name: &str, input: &Value, content: &Value) -> bool {
+        self.task_patch = None;
+        let text = content.as_str().map(str::to_owned).unwrap_or_else(|| {
+            content
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|block| block["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        let structured = serde_json::from_str::<Value>(&text).ok();
+        let result = structured.as_ref().unwrap_or(content);
+        match name {
+            "TaskCreate" => {
+                let id = result["task"]["id"]
+                    .as_str()
+                    .or_else(|| result["id"].as_str())
+                    .or_else(|| {
+                        text.strip_prefix("Task #")
+                            .and_then(|s| s.split_once(" created successfully"))
+                            .map(|(id, _)| id)
+                    });
+                let Some(id) = id else {
+                    return false;
+                };
+                let Some(subject) = input["subject"].as_str() else {
+                    return false;
+                };
+                self.task_patch = Some(ToolCall::TodoPatch {
+                    task_id: id.into(),
+                    text: Some(subject.into()),
+                    status: Some("pending".into()),
+                });
+                self.tasks.insert(
+                    id.into(),
+                    TodoItem {
+                        id: Some(id.into()),
+                        text: subject.into(),
+                        done: false,
+                        status: None,
+                    },
+                );
+                true
+            }
+            "TaskUpdate" => {
+                let Some(id) = input["taskId"].as_str() else {
+                    return false;
+                };
+                self.task_patch = Some(ToolCall::TodoPatch {
+                    task_id: id.into(),
+                    text: input["subject"].as_str().map(str::to_owned),
+                    status: input["status"].as_str().map(str::to_owned),
+                });
+                if input["status"] == "deleted" {
+                    self.tasks.remove(id);
+                    return true;
+                }
+                let Some(task) = self.tasks.get_mut(id) else {
+                    return true;
+                };
+                if let Some(subject) = input["subject"].as_str() {
+                    task.text = subject.into();
+                }
+                if let Some(status) = input["status"].as_str() {
+                    task.done = status == "completed";
+                    task.status = zeron_proto::TodoStatus::from_wire(Some(status));
+                }
+                true
+            }
+            "TaskList" => {
+                let text_tasks: Option<Vec<Value>> = if text.trim() == "No tasks found" {
+                    Some(Vec::new())
+                } else {
+                    text.lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .map(|line| {
+                            let (id, rest) = line.trim().strip_prefix('#')?.split_once(" [")?;
+                            let (status, subject) = rest.split_once("] ")?;
+                            if !matches!(
+                                status,
+                                "pending" | "in_progress" | "completed" | "cancelled" | "blocked"
+                            ) {
+                                return None;
+                            }
+                            Some(serde_json::json!({"id":id, "subject":subject, "status":status}))
+                        })
+                        .collect()
+                };
+                let Some(tasks) = result["tasks"]
+                    .as_array()
+                    .or_else(|| result.as_array())
+                    .or(text_tasks.as_ref().filter(|_| !text.trim().is_empty()))
+                else {
+                    return false;
+                };
+                let parsed: Option<std::collections::BTreeMap<String, TodoItem>> = tasks
+                    .iter()
+                    .map(|task| {
+                        Some((
+                            task["id"].as_str()?.into(),
+                            TodoItem {
+                                id: Some(task["id"].as_str()?.into()),
+                                text: task["subject"].as_str()?.into(),
+                                done: task["status"] == "completed",
+                                status: zeron_proto::TodoStatus::from_wire(task["status"].as_str()),
+                            },
+                        ))
+                    })
+                    .collect();
+                let Some(tasks) = parsed else {
+                    return false;
+                };
+                self.tasks = tasks;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -251,9 +382,7 @@ impl Normalizer {
                         return Vec::new();
                     }
                     let status = match f.status.as_deref().unwrap_or("") {
-                        "completed" | "complete" | "succeeded" | "success" => {
-                            DoneStatus::Completed
-                        }
+                        "completed" | "complete" | "succeeded" | "success" => DoneStatus::Completed,
                         "failed" | "errored" | "error" => DoneStatus::Errored,
                         "killed" | "cancelled" | "canceled" | "stopped" | "interrupted" => {
                             DoneStatus::Interrupted
@@ -390,6 +519,12 @@ impl Normalizer {
                 // Record spawn tool ids up front: `task_notification` keys on
                 // them, and only foreground spawns ever get a `task_started`.
                 for b in f.message.blocks() {
+                    if b.kind == "tool_use"
+                        && matches!(b.name.as_str(), "TaskCreate" | "TaskUpdate" | "TaskList")
+                    {
+                        self.task_calls
+                            .insert(b.id.clone(), (b.name.clone(), b.input.clone()));
+                    }
                     if b.kind == "tool_use" && matches!(b.name.as_str(), "Agent" | "Task") {
                         self.agent_spawn_tools.insert(b.id.clone());
                     }
@@ -413,12 +548,14 @@ impl Normalizer {
                             .flatten()
                             .and_then(Value::as_str)
                             .filter(|p| !p.trim().is_empty())
-                            .map(|prompt| tag(
-                                &b.id,
-                                AgentEvent::UserMessage {
-                                    text: prompt.to_owned(),
-                                },
-                            ));
+                            .map(|prompt| {
+                                tag(
+                                    &b.id,
+                                    AgentEvent::UserMessage {
+                                        text: prompt.to_owned(),
+                                    },
+                                )
+                            });
                         // A SendMessage steer never echoes on the child feed
                         // (live-verified) — surface it from the parent's own
                         // call, re-keyed onto the spawn it addresses.
@@ -520,16 +657,39 @@ impl Normalizer {
                     );
                     return out;
                 }
-                f.message
-                    .blocks()
-                    .filter(|b: &ContentBlock| b.kind == "tool_result")
-                    .map(|b| AgentEvent::ToolResult {
+                let mut events = Vec::new();
+                for b in f.message.blocks().filter(|b| b.kind == "tool_result") {
+                    events.push(AgentEvent::ToolResult {
                         id: b.tool_use_id.clone(),
                         is_error: b.is_error.unwrap_or(false),
                         output: None,
                         diff: None,
-                    })
-                    .collect()
+                    });
+                    if let Some((name, input)) = self.task_calls.remove(&b.tool_use_id)
+                        && !b.is_error.unwrap_or(false)
+                        && self.apply_task_result(&name, &input, &b.content)
+                    {
+                        let patch = self.task_patch.take();
+                        let id = if patch.is_some() {
+                            format!("{}-tasks", b.tool_use_id)
+                        } else {
+                            zeron_proto::LIVE_PLAN_TOOL_ID.into()
+                        };
+                        events.push(AgentEvent::ToolCall {
+                            id: id.clone(),
+                            call: patch.unwrap_or_else(|| ToolCall::Todo {
+                                items: self.tasks.values().cloned().collect(),
+                            }),
+                        });
+                        events.push(AgentEvent::ToolResult {
+                            id,
+                            is_error: false,
+                            output: None,
+                            diff: None,
+                        });
+                    }
+                }
+                events
             }
 
             // A claude.ai plan window was hit. A hard `rejected` blocks the
@@ -548,6 +708,7 @@ impl Normalizer {
             }
 
             Frame::Result(f) => {
+                self.task_calls.clear();
                 let model_usage = self
                     .last_model
                     .as_ref()
@@ -648,7 +809,7 @@ impl Normalizer {
             }
 
             // Control frames are handled by the run loop, not normalized.
-            Frame::ControlRequest(_) | Frame::Other => Vec::new(),
+            Frame::ControlRequest(_) | Frame::ControlCancelRequest(_) | Frame::Other => Vec::new(),
         }
     }
 }
@@ -657,6 +818,80 @@ impl Normalizer {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn task_tools_project_successful_results_and_preserve_native_states() {
+        let mut normalizer = Normalizer::new();
+        let normalize = |n: &mut Normalizer, raw: Value| {
+            n.normalize(
+                super::super::wire::parse_frame(&raw.to_string()).unwrap(),
+                false,
+            )
+        };
+        let call = |id: &str, name: &str, input: Value| serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":name,"input":input}]}});
+        let result = |id: &str, content: Value, error: bool| serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id,"content":content,"is_error":error}]}});
+        normalize(
+            &mut normalizer,
+            call("create", "TaskCreate", json!({"subject":"Implement"})),
+        );
+        normalize(
+            &mut normalizer,
+            result(
+                "create",
+                json!("Task #1 created successfully: Implement"),
+                false,
+            ),
+        );
+        assert_eq!(normalizer.tasks.len(), 1);
+        normalize(
+            &mut normalizer,
+            call(
+                "update",
+                "TaskUpdate",
+                json!({"taskId":"1","status":"completed"}),
+            ),
+        );
+        normalize(&mut normalizer, result("update", json!("failed"), true));
+        assert!(!normalizer.tasks["1"].done);
+        normalize(
+            &mut normalizer,
+            call(
+                "running",
+                "TaskUpdate",
+                json!({"taskId":"1","status":"in_progress"}),
+            ),
+        );
+        let events = normalize(
+            &mut normalizer,
+            result("running", json!("Updated task #1"), false),
+        );
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::ToolCall { call: ToolCall::TodoPatch { status, .. }, .. } if status.as_deref() == Some("in_progress"))));
+        assert!(normalizer.apply_task_result(
+            "TaskList",
+            &Value::Null,
+            &json!("#1 [completed] Implement\n#2 [pending] Verify")
+        ));
+        assert!(normalizer.tasks["1"].done);
+        assert_eq!(normalizer.tasks.len(), 2);
+        assert!(!normalizer.apply_task_result(
+            "TaskList",
+            &Value::Null,
+            &json!("unrecognized result")
+        ));
+        assert_eq!(normalizer.tasks.len(), 2);
+        assert!(normalizer.apply_task_result("TaskList", &Value::Null, &json!({"tasks":[]})));
+        assert!(normalizer.tasks.is_empty());
+        // A new process may know no tasks yet; the durable consumer owns IDs.
+        assert!(normalizer.apply_task_result(
+            "TaskUpdate",
+            &json!({"taskId":"old-task", "status":"completed"}),
+            &json!("Updated")
+        ));
+        assert!(matches!(
+            normalizer.task_patch,
+            Some(ToolCall::TodoPatch { .. })
+        ));
+    }
 
     #[test]
     fn decodes_typed_tools() {
@@ -684,6 +919,8 @@ mod tests {
             ),
             ToolCall::Todo {
                 items: vec![TodoItem {
+                    id: None,
+                    status: None,
                     text: "t".into(),
                     done: true
                 }]
@@ -841,8 +1078,7 @@ mod tests {
         ] {
             let ev = normalize_one(frame);
             assert!(
-                !ev.iter()
-                    .any(|e| matches!(e, AgentEvent::Subagent { .. })),
+                !ev.iter().any(|e| matches!(e, AgentEvent::Subagent { .. })),
                 "{frame}: {ev:?}"
             );
         }
@@ -1018,10 +1254,12 @@ mod tests {
             r#"{"type":"system","subtype":"task_notification","tool_use_id":"toolu_agent","status":"running"}"#,
         )
         .is_empty());
-        assert!(normalize_one(
-            r#"{"type":"system","subtype":"task_notification","status":"completed"}"#,
-        )
-        .is_empty());
+        assert!(
+            normalize_one(
+                r#"{"type":"system","subtype":"task_notification","status":"completed"}"#,
+            )
+            .is_empty()
+        );
     }
 
     #[test]

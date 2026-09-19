@@ -17,7 +17,7 @@ use zeron_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel};
 pub(crate) const ULTRATHINK_PREFIX: &str = "Ultrathink:\n";
 
 pub(crate) fn apply_ultrathink(reasoning: Option<ReasoningLevel>, text: &str) -> String {
-    if reasoning == Some(ReasoningLevel::Ultrathink) {
+    if reasoning == Some(ReasoningLevel::Ultrathink) && !text.starts_with('/') {
         format!("{ULTRATHINK_PREFIX}{text}")
     } else {
         text.to_owned()
@@ -130,8 +130,11 @@ fn model(
     label: &str,
     description: &str,
     ladder: &[ReasoningLevel],
-    options: Vec<ModelOption>,
+    mut options: Vec<ModelOption>,
 ) -> Model {
+    options.extend(zeron_proto::agent_mode_option(
+        zeron_proto::HarnessId::ClaudeCode,
+    ));
     Model {
         id: id.into(),
         label: label.into(),
@@ -242,6 +245,16 @@ mod tests {
         assert!(supports_xhigh("claude-opus-4-7-20260101"));
         assert!(!supports_xhigh("claude-opus-4-5"));
         assert!(!supports_xhigh("claude-sonnet-4-5"));
+    }
+
+    #[test]
+    fn ultrathink_preserves_leading_commands_and_arguments() {
+        for command in ["/compact", "/review focus on tests"] {
+            assert_eq!(
+                apply_ultrathink(Some(ReasoningLevel::Ultrathink), command),
+                command
+            );
+        }
     }
 
     #[test]

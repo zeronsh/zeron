@@ -376,7 +376,7 @@ pub const INK_HAIRLINE_SCALE: f32 = 1.35;
 /// Paint-only syntax colors. The hues follow the Git history graph's lane
 /// palette (indigo, pink, emerald, amber, red, neutral), while light-mode
 /// variants are darkened enough to remain readable as text on white.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SyntaxPalette {
     pub comment: Hsla,
     pub keyword: Hsla,

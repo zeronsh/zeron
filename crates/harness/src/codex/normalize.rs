@@ -8,6 +8,53 @@
 use serde_json::Value;
 use zeron_proto::{AgentEvent, DoneStatus, TodoItem, ToolCall};
 
+/// Project native activity into the durable, shared composer activity stream.
+pub(crate) fn activity_events(method: &str, params: &Value) -> Vec<AgentEvent> {
+    let (id, call) = match method {
+        "turn/plan/updated" => (
+            zeron_proto::LIVE_PLAN_TOOL_ID,
+            ToolCall::Todo {
+                items: params["plan"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|step| TodoItem {
+                        id: None,
+                        status: zeron_proto::TodoStatus::from_wire(step["status"].as_str()),
+                        text: step["step"].as_str().unwrap_or_default().into(),
+                        done: step["status"].as_str() == Some("completed"),
+                    })
+                    .collect(),
+            },
+        ),
+        "thread/goal/updated" | "thread/goal/cleared" => {
+            let goal = &params["goal"];
+            (
+                zeron_proto::LIVE_GOAL_TOOL_ID,
+                ToolCall::Goal {
+                    objective: goal["objective"].as_str().unwrap_or_default().into(),
+                    status: goal["status"].as_str().unwrap_or("cleared").into(),
+                    tokens_used: goal["tokensUsed"].as_u64().unwrap_or_default(),
+                    token_budget: goal["tokenBudget"].as_u64(),
+                },
+            )
+        }
+        _ => return Vec::new(),
+    };
+    vec![
+        AgentEvent::ToolCall {
+            id: id.into(),
+            call,
+        },
+        AgentEvent::ToolResult {
+            id: id.into(),
+            is_error: false,
+            output: None,
+            diff: None,
+        },
+    ]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
     Started,
@@ -240,6 +287,20 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
     let id = str_field(item, &["id"]);
     let status = str_field(item, &["status"]);
     match item_type(item) {
+        "contextCompaction" | "context_compaction" => tool_lifecycle(
+            phase,
+            id,
+            ToolCall::Compaction {},
+            matches!(status.as_str(), "failed" | "cancelled"),
+        ),
+        "plan" => tool_lifecycle(
+            phase,
+            id,
+            ToolCall::Plan {
+                text: str_field(item, &["text"]),
+            },
+            false,
+        ),
         "imageGeneration" | "image_generation" => {
             let call = ToolCall::Unknown {
                 name: "Generate image".into(),
@@ -379,8 +440,11 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                 .unwrap_or_default()
                 .iter()
                 .map(|t| TodoItem {
+                    id: None,
+                    status: zeron_proto::TodoStatus::from_wire(t["status"].as_str()),
                     text: str_field(t, &["text"]),
-                    done: field(t, &["completed", "done"]).and_then(Value::as_bool) == Some(true),
+                    done: field(t, &["completed", "done"]).and_then(Value::as_bool) == Some(true)
+                        || t["status"] == "completed",
                 })
                 .collect();
             tool_lifecycle(phase, id, ToolCall::Todo { items }, false)
@@ -691,6 +755,8 @@ pub(crate) fn route_child_notification(method: &str) -> ChildRoute {
         | "turn/diff/updated"
         | "thread/name/updated"
         | "thread/settings/updated"
+        | "thread/goal/updated"
+        | "thread/goal/cleared"
         | "rawResponseItem/completed"
         // Child-owned thread lifecycle that maps onto PARENT state in a
         // naive passthrough (archived/compacted), plus repeat thread/started.
@@ -707,6 +773,43 @@ pub(crate) fn route_child_notification(method: &str) -> ChildRoute {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn compaction_keeps_native_identity_from_start_through_completion() {
+        let item = json!({"id":"compact-1","type":"contextCompaction"});
+        let start = map_item(Phase::Started, &item);
+        assert!(
+            matches!(&start[..], [AgentEvent::ToolCall { id, call: ToolCall::Compaction {} }] if id == "compact-1")
+        );
+        let completed = map_item(Phase::Completed, &item);
+        assert!(
+            matches!(&completed[..], [AgentEvent::ToolCall { id, .. }, AgentEvent::ToolResult { id: result_id, is_error:false, .. }] if id == "compact-1" && id == result_id)
+        );
+    }
+
+    #[test]
+    fn native_and_legacy_todos_preserve_progress_completion_and_cancellation() {
+        let events = map_item(
+            Phase::Completed,
+            &json!({"type":"todoList", "id":"list", "items":[
+                {"text":"Done", "status":"completed"}, {"text":"Working", "status":"inProgress"}, {"text":"Skipped", "status":"cancelled"}
+            ]}),
+        );
+        let AgentEvent::ToolCall {
+            call: ToolCall::Todo { items },
+            ..
+        } = &events[0]
+        else {
+            panic!("missing todo");
+        };
+        assert_eq!(items[0].state(), zeron_proto::TodoStatus::Completed);
+        assert_eq!(items[1].state(), zeron_proto::TodoStatus::InProgress);
+        assert_eq!(items[2].state(), zeron_proto::TodoStatus::Cancelled);
+        let events = activity_events("turn/plan/updated", &json!({"plan":[]}));
+        assert!(
+            matches!(&events[0], AgentEvent::ToolCall { call: ToolCall::Todo { items }, .. } if items.is_empty())
+        );
+    }
 
     #[test]
     fn reasoning_parts_preserve_chunking_and_existing_paragraph_breaks() {

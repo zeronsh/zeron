@@ -1,6 +1,10 @@
 //! A fade-through when navigation changes the conversation's horizontal frame.
 use std::time::Instant;
 
+pub(super) const DURATION: f32 = 0.320;
+/// Between the fade-out ending at 0.18 and the fade-in starting at 0.26.
+pub(super) const GEOMETRY_SWITCH: f32 = 0.22;
+
 fn ease(value: f32, start: f32, end: f32) -> f32 {
     let t = ((value - start) / (end - start)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)

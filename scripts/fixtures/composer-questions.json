@@ -1,0 +1,110 @@
+[
+  {
+    "name": "choice-only",
+    "question": {
+      "id": "choice-only",
+      "header": "Decision",
+      "question": "Which approach should we use?",
+      "options": [
+        "Use plan",
+        "Keep building"
+      ],
+      "optionDescriptions": [
+        "Preserve the current behavior while improving coverage.",
+        "Preserve the current behavior while improving coverage."
+      ],
+      "allowCustom": false,
+      "multiSelect": false,
+      "nonBlocking": false
+    }
+  },
+  {
+    "name": "options-and-text",
+    "question": {
+      "id": "options-and-text",
+      "header": "Decision",
+      "question": "Which approach should we use?",
+      "options": [
+        "Feature work",
+        "Bug fix"
+      ],
+      "optionDescriptions": [
+        "Preserve the current behavior while improving coverage.",
+        "Preserve the current behavior while improving coverage."
+      ],
+      "allowCustom": true,
+      "multiSelect": false,
+      "nonBlocking": false
+    }
+  },
+  {
+    "name": "multiple-with-text",
+    "question": {
+      "id": "multiple-with-text",
+      "header": "Decision",
+      "question": "Which approach should we use?",
+      "options": [
+        "Unit tests",
+        "Integration tests"
+      ],
+      "optionDescriptions": [
+        "Preserve the current behavior while improving coverage.",
+        "Preserve the current behavior while improving coverage."
+      ],
+      "allowCustom": true,
+      "multiSelect": true,
+      "nonBlocking": false
+    }
+  },
+  {
+    "name": "text-only",
+    "question": {
+      "id": "text-only",
+      "header": "Decision",
+      "question": "Which approach should we use?",
+      "options": [],
+      "optionDescriptions": [],
+      "allowCustom": true,
+      "multiSelect": false,
+      "nonBlocking": false
+    }
+  },
+  {
+    "name": "nonblocking",
+    "question": {
+      "id": "nonblocking",
+      "header": "Decision",
+      "question": "Which approach should we use?",
+      "options": [
+        "Review now",
+        "Later"
+      ],
+      "optionDescriptions": [
+        "Preserve the current behavior while improving coverage.",
+        "Preserve the current behavior while improving coverage."
+      ],
+      "allowCustom": true,
+      "multiSelect": false,
+      "nonBlocking": true
+    }
+  },
+  {
+    "name": "long-content",
+    "question": {
+      "id": "long-content",
+      "header": "Decision",
+      "question": "Which approach should we use? Explain the tradeoffs before proceeding.  Explain the tradeoffs before proceeding.  Explain the tradeoffs before proceeding.  Explain the tradeoffs before proceeding.  Explain the tradeoffs before proceeding.  Explain the tradeoffs before proceeding.  Explain the tradeoffs before proceeding.  Explain the tradeoffs before proceeding.  Explain the tradeoffs before proceeding.  Explain the tradeoffs before proceeding.  Explain the tradeoffs before proceeding.  Explain the tradeoffs before proceeding. ",
+      "options": [
+        "A long option explaining a deliberate tradeoff that wraps onto several lines in a narrow composer",
+        "日本語 · café · 👩🏽‍💻"
+      ],
+      "optionDescriptions": [
+        "Preserve the current behavior while improving coverage.",
+        "Preserve the current behavior while improving coverage."
+      ],
+      "allowCustom": true,
+      "multiSelect": false,
+      "nonBlocking": false
+    }
+  }
+]

@@ -1546,6 +1546,7 @@ pub struct Shell {
     /// while open.
     add_space: Option<AddSpaceFlow>,
     command_palette: Option<command_palette::CommandPalette>,
+    pending_workspace_command: Option<crate::composer::WorkspaceCommand>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
     /// Hover/drag + scroll-linger state of the dropdown's floating rail.
@@ -1733,7 +1734,11 @@ impl Shell {
         // reply's space below it (notes-app parity).
         let composer_events = cx.subscribe(&composer, {
             let transcript = transcript.clone();
-            move |_this: &mut Shell, _, event: &ComposerEvent, cx| match event {
+            move |this: &mut Shell, _, event: &ComposerEvent, cx| match event {
+                ComposerEvent::WorkspaceCommand(command) => {
+                    this.pending_workspace_command = Some(*command);
+                    cx.notify();
+                }
                 ComposerEvent::NewThreadTransitionStarted => {
                     // Route observation drives the dock once selection commits.
                     cx.notify();
@@ -1919,6 +1924,7 @@ impl Shell {
             delete_space_confirm: None,
             add_space: None,
             command_palette: None,
+            pending_workspace_command: None,
             spaces_menu: popover::Popup::default(),
             spaces_menu_bar: popover::MenuScrollbarState::default(),
             sidebar_view_menu: popover::Popup::default(),
@@ -3727,6 +3733,9 @@ impl Shell {
         self.settings.code_font_family = current.code_font_family;
         self.settings.code_font_size = current.code_font_size;
         self.settings.transcript_width = current.transcript_width;
+        self.settings.skill_completion_by_harness = current.skill_completion_by_harness;
+        self.settings.skills_in_slash_menu = current.skills_in_slash_menu;
+        self.settings.compact_model_picker = current.compact_model_picker;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
@@ -10413,6 +10422,32 @@ fn header_icon_button(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(command) = self.pending_workspace_command.take() {
+            use crate::composer::WorkspaceCommand;
+            match command {
+                WorkspaceCommand::Model => self
+                    .composer
+                    .update(cx, |c, cx| c.open_model_menu(window, cx)),
+                WorkspaceCommand::New => self.open_new_session(cx),
+                WorkspaceCommand::Resume => self.toggle_command_palette(window, cx),
+                WorkspaceCommand::Settings => self.open_settings(SettingsSection::Devices, cx),
+                WorkspaceCommand::Diff if !self.active_chat.is_empty() => self.add_diff_surface(cx),
+                WorkspaceCommand::Files if !self.active_chat.is_empty() => {
+                    self.add_files_surface(window, cx)
+                }
+                WorkspaceCommand::Terminal if !self.active_chat.is_empty() => {
+                    self.add_terminal_surface(cx)
+                }
+                WorkspaceCommand::Rename if !self.active_chat.is_empty() => {
+                    self.open_rename_chat(self.active_chat.clone(), cx)
+                }
+                WorkspaceCommand::Stop => {
+                    self.composer.update(cx, |c, cx| c.interrupt_selected(cx))
+                }
+                _ => {}
+            }
+        }
+
         self.render_time = Some(std::time::Instant::now());
         if self.all_file_edits_flushed(cx)
             && let Some(action) = self.pending_exit.take()
@@ -10754,7 +10789,7 @@ impl Render for Shell {
                 if self.debug_dialog.as_deref() == Some("model") {
                     self.debug_dialog = None;
                     self.composer
-                        .update(cx, |c, cx| c.debug_open_model_menu(window, cx));
+                        .update(cx, |c, cx| c.open_model_menu(window, cx));
                 }
                 // MessageRail width gate: hide below 48rem of main-panel width.
                 let viewport = f32::from(window.viewport_size().width);
@@ -12312,6 +12347,13 @@ mod exit_regressions {
                         settings.code_font_family = code_family.clone();
                         settings.code_font_size = code_size;
                         settings.transcript_width = transcript_width;
+                        settings.skill_completion_by_harness.insert(
+                            zeron_proto::HarnessId::ClaudeCode,
+                            settings::SkillCompletionSettings {
+                                dollar: open_links_in_zeron,
+                                separate_from_slash: true,
+                            },
+                        );
                     });
                     for step in 0..3 {
                         shell.settings.sidebar_width = 290.0 + step as f32;
@@ -12327,6 +12369,17 @@ mod exit_regressions {
                         assert_eq!(current.code_font_family, code_family);
                         assert_eq!(current.code_font_size, code_size);
                         assert_eq!(current.transcript_width, transcript_width);
+                        assert_eq!(
+                            current
+                                .skill_completion(zeron_proto::HarnessId::ClaudeCode)
+                                .dollar,
+                            open_links_in_zeron
+                        );
+                        assert!(
+                            current
+                                .skill_completion(zeron_proto::HarnessId::ClaudeCode)
+                                .separate_from_slash
+                        );
                     }
                     settings::flush(cx);
                     let loaded = settings::UiSettings::load(dir.path());
@@ -12344,6 +12397,60 @@ mod exit_regressions {
                 })
                 .unwrap();
         }
+    }
+
+    #[gpui::test]
+    fn workspace_slash_commands_open_existing_zeron_surfaces(cx: &mut TestAppContext) {
+        use crate::composer::WorkspaceCommand;
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell.pending_workspace_command = Some(WorkspaceCommand::Settings);
+                let _ = shell.render(window, cx);
+                assert!(matches!(shell.route, Route::Settings(_)));
+                shell.pending_workspace_command = Some(WorkspaceCommand::New);
+                let _ = shell.render(window, cx);
+                assert!(matches!(shell.route, Route::Chat));
+                assert!(shell.state.read(cx).selected_chat.is_none());
+                shell.pending_workspace_command = Some(WorkspaceCommand::Resume);
+                let _ = shell.render(window, cx);
+                assert!(shell.command_palette.is_some());
+                shell.close_command_palette(window, cx);
+                shell.pending_workspace_command = Some(WorkspaceCommand::Model);
+                let _ = shell.render(window, cx);
+                assert!(shell.composer.read(cx).pickers().read(cx).is_open());
+                assert!(shell.pending_workspace_command.is_none());
+            })
+            .unwrap();
     }
 
     #[gpui::test]

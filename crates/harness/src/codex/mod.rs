@@ -59,7 +59,7 @@ use zeron_proto::{
 
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::process::{Child, Command, Stdio};
-use crate::{Harness, HarnessError, RunControls};
+use crate::{Harness, HarnessError, RunControls, SteerMessage};
 use catalog::{REASONING_LEVELS, sandbox_mode, sandbox_policy_value, static_models, to_effort};
 use normalize::{
     ChildRoute, Phase, ReasoningStream, delta_text, item_id, item_type, notification_thread_id,
@@ -109,9 +109,6 @@ pub struct CodexHarness {
     interrupt_grace: Duration,
     /// Grace between SIGTERM and SIGKILL.
     kill_grace: Duration,
-    /// Command discovery cache: only a successful probe is cached, so a
-    /// broken CLI retries on the next picker open (ACP-harness parity).
-    commands: tokio::sync::OnceCell<Vec<SlashCommand>>,
 }
 
 impl Default for CodexHarness {
@@ -120,7 +117,6 @@ impl Default for CodexHarness {
             executable: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
-            commands: tokio::sync::OnceCell::new(),
         }
     }
 }
@@ -167,12 +163,15 @@ impl CodexHarness {
     /// Short-lived discovery probe: a `codex app-server` handshake followed by
     /// `skills/list` — the only invocable-listing method the 0.146.x wire has
     /// (custom `~/.codex/prompts` are NOT exposed; the TUI-only built-ins
-    /// aren't either). Skills are what the codex TUI itself surfaces as
-    /// slash-invocables, listed per-cwd and deduped by name here.
-    async fn discover_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
+    /// aren't either). Preserve each skill's path and project context;
+    /// skills are separate from the slash-command catalog.
+    async fn discover_skills(&self, cwd: Option<&std::path::Path>) -> Result<Value, HarnessError> {
         let exe = self.resolve_executable()?;
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
+        }
         crate::compose_child_path(&mut cmd, &exe);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -207,8 +206,11 @@ impl CodexHarness {
                 )
                 .await?;
             client.notify("initialized", None);
-            let skills = client.request("skills/list", json!({})).await?;
-            Ok::<Vec<SlashCommand>, HarnessError>(parse_skill_commands(&skills))
+            let params = cwd
+                .map(|cwd| json!({ "cwds": [cwd], "forceReload": true }))
+                .unwrap_or_else(|| json!({}));
+            let skills = client.request("skills/list", params).await?;
+            Ok::<Value, HarnessError>(skills)
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
         shutdown_child(&mut child, self.kill_grace).await;
@@ -288,6 +290,41 @@ impl CodexHarness {
                 cursor = Some(next);
             }
 
+            // Capability discovery is authoritative, including feature enablement.
+            // A static model fallback must not promise experimental protocol support.
+            let modes = client
+                .request("collaborationMode/list", json!({}))
+                .await
+                .ok();
+            let mut goals_enabled = false;
+            let mut cursor: Option<String> = None;
+            let mut seen = HashSet::new();
+            loop {
+                let mut params = json!({"limit": 100});
+                if let Some(value) = &cursor {
+                    params["cursor"] = Value::String(value.clone());
+                }
+                let Ok(features) = client.request("experimentalFeature/list", params).await else {
+                    break;
+                };
+                goals_enabled |= features["data"].as_array().is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|f| f["name"] == "goals" && f["enabled"] == true)
+                });
+                let Some(next) = features["nextCursor"].as_str().filter(|s| !s.is_empty()) else {
+                    break;
+                };
+                if !seen.insert(next.to_owned()) {
+                    break;
+                }
+                cursor = Some(next.to_owned());
+            }
+            let mode = advertised_mode_option(modes.as_ref(), goals_enabled);
+            for model in &mut models {
+                model.options.extend(mode.clone());
+            }
+
             if let Some(default_id) = default_model_id
                 && let Some(index) = models.iter().position(|model| model.id == default_id)
                 && index != 0
@@ -304,6 +341,27 @@ impl CodexHarness {
             Err(_) => Err(HarnessError::Protocol("model discovery timed out".into())),
         }
     }
+}
+
+fn advertised_mode_option(
+    modes: Option<&Value>,
+    goals_enabled: bool,
+) -> Option<zeron_proto::ModelOption> {
+    let has = |mode: &str| {
+        modes
+            .and_then(|m| m["data"].as_array())
+            .is_some_and(|items| items.iter().any(|item| item["mode"] == mode))
+    };
+    if !has("default") {
+        return None;
+    }
+    let mut option = zeron_proto::agent_mode_option(HarnessId::Codex)?;
+    option.choices.retain(|choice| match choice.id.as_str() {
+        "plan" => has("plan"),
+        "goal" => goals_enabled,
+        _ => true,
+    });
+    (option.choices.len() > 1).then_some(option)
 }
 
 fn reasoning_level(value: &str) -> Option<ReasoningLevel> {
@@ -469,51 +527,49 @@ fn parse_model_list_page(result: &Value) -> (Vec<(Model, bool)>, Option<String>)
     (models, next_cursor)
 }
 
-/// `skills/list` result → picker commands. `data` groups skills by cwd; the
-/// same skill appears under every root, so dedupe by name keeping first
-/// appearance order. The interface's shortDescription is picker-sized; the
-/// top-level description is a model-facing paragraph, kept only as fallback.
-fn parse_skill_commands(result: &Value) -> Vec<SlashCommand> {
-    let mut seen = std::collections::HashSet::new();
-    let mut commands = Vec::new();
-    for group in result
+/// `skills/list` result → typed skills. Keep distinct paths for duplicate names.
+/// Identical name/path pairs are deduplicated across cwd groups. The interface's
+/// shortDescription is picker-sized; the model-facing description is a fallback.
+fn parse_skills(result: &Value) -> Vec<zeron_proto::invocation::Skill> {
+    let mut seen = HashSet::new();
+    result
         .get("data")
         .and_then(Value::as_array)
-        .map(|a| a.as_slice())
-        .unwrap_or_default()
-    {
-        for skill in group
-            .get("skills")
-            .and_then(Value::as_array)
-            .map(|a| a.as_slice())
-            .unwrap_or_default()
-        {
-            let Some(name) = skill
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|n| !n.is_empty())
-            else {
-                continue;
-            };
-            if !seen.insert(name.to_owned()) {
-                continue;
+        .into_iter()
+        .flatten()
+        .flat_map(|group| {
+            group
+                .get("skills")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|skill| {
+            let name = skill.get("name")?.as_str()?;
+            let path = skill.get("path")?.as_str()?;
+            if !zeron_proto::invocation::valid_invocation_name(name)
+                || !zeron_proto::invocation::valid_skill_path(path)
+                || !seen.insert((name.to_owned(), path.to_owned()))
+            {
+                return None;
             }
-            let interface = skill.get("interface");
-            let description = interface
-                .and_then(|i| i.get("shortDescription"))
-                .and_then(Value::as_str)
-                .filter(|d| !d.is_empty())
-                .or_else(|| skill.get("description").and_then(Value::as_str))
-                .unwrap_or_default();
-            commands.push(SlashCommand {
+            Some(zeron_proto::invocation::Skill {
+                command: None,
                 name: name.to_owned(),
-                description: description.to_owned(),
-                input_hint: None,
-            });
-        }
-    }
-    commands
+                path: path.to_owned(),
+                description: skill
+                    .pointer("/interface/shortDescription")
+                    .and_then(Value::as_str)
+                    .or_else(|| skill.get("description").and_then(Value::as_str))
+                    .unwrap_or_default()
+                    .to_owned(),
+                enabled: skill
+                    .get("enabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+            })
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -545,6 +601,10 @@ impl Harness for CodexHarness {
     fn deterministic_turn_end(&self) -> bool {
         true
     }
+    fn validate_request(&self, request: &RunRequest) -> Result<(), HarnessError> {
+        let prompt = zeron_proto::invocation::harness_prompt(&request.prompt, self.id());
+        validate_request_shape(request, &prompt)
+    }
 
     /// The signed-in account's visible `model/list` is authoritative. A
     /// curated snapshot keeps the picker operational when the experimental
@@ -565,13 +625,28 @@ impl Harness for CodexHarness {
         }
     }
 
-    /// Skills from a short-lived `skills/list` probe (see
-    /// [`Self::discover_commands`]); cached on success.
-    async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        self.commands
-            .get_or_try_init(|| self.discover_commands())
+    async fn skills(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+        self.discover_skills(Some(cwd))
             .await
-            .cloned()
+            .map(|value| Some(parse_skills(&value)))
+    }
+
+    async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
+        Ok(vec![
+            SlashCommand {
+                name: "compact".into(),
+                description: "Compact this conversation's context".into(),
+                input_hint: None,
+            },
+            SlashCommand {
+                name: "review".into(),
+                description: "Review uncommitted changes, or supply review instructions".into(),
+                input_hint: Some("optional instructions".into()),
+            },
+        ])
     }
 
     async fn run(
@@ -603,6 +678,7 @@ impl CodexHarness {
         controls: RunControls,
         title_only: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        validate_request_shape(&request, &request.prompt)?;
         let exe = self.resolve_executable()?;
         // Yolo mode: danger-full-access + approvalPolicy "never" (set below) —
         // codex's --dangerously-bypass-approvals-and-sandbox equivalent.
@@ -762,9 +838,178 @@ async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, ev: AgentEven
     tx.send(Ok(ev)).await.is_ok()
 }
 
-/// `turn/start` and return the new turn id from the response.
-async fn start_turn(client: &RpcClient, params: Value) -> Result<String, HarnessError> {
-    let started = client.request("turn/start", params).await?;
+/// Preserve the selected path in the app-server's native skill input. Text
+/// stays first for command routing; repeated selections do not load a skill twice.
+fn prompt_input(text: &str) -> Value {
+    use zeron_proto::invocation::{Invocation, invocation_links, invocation_prompt};
+    let mut input = vec![json!({"type": "text", "text": invocation_prompt(text)})];
+    let mut seen = std::collections::HashSet::new();
+    for (_, invocation) in invocation_links(text) {
+        if let Invocation::Skill { name, path, .. } = invocation {
+            if !zeron_proto::invocation::native_skill_identity(&path)
+                && seen.insert((name.clone(), path.clone()))
+            {
+                input.push(json!({"type": "skill", "name": name, "path": path}));
+            }
+        }
+    }
+    Value::Array(input)
+}
+
+fn validate_agent_mode(request: &RunRequest) -> Result<(), HarnessError> {
+    let Some(value) = request.model_options.get(zeron_proto::AGENT_MODE_OPTION) else {
+        return Ok(());
+    };
+    let Some(mode) = value.as_str() else {
+        return Err(HarnessError::Protocol("Codex mode must be a string".into()));
+    };
+    if matches!(mode, "default" | "plan" | "goal") {
+        Ok(())
+    } else {
+        Err(HarnessError::Protocol(format!(
+            "Unsupported Codex mode: {mode}"
+        )))
+    }
+}
+
+fn validate_request_shape(request: &RunRequest, prompt: &str) -> Result<(), HarnessError> {
+    validate_agent_mode(request)?;
+    let native = command_request(prompt, "")?;
+    if native
+        .as_ref()
+        .is_some_and(|(method, _)| *method == "thread/compact/start")
+        && request.resume.is_none()
+    {
+        return Err(HarnessError::Protocol(
+            "/compact needs an existing Codex conversation".into(),
+        ));
+    }
+    if native.is_some() && !request.attachments.is_empty() {
+        return Err(HarnessError::Protocol(
+            "Codex commands cannot include attachments; send them in a separate prompt".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Map supported leading commands to native app-server operations.
+fn command_request(
+    text: &str,
+    thread_id: &str,
+) -> Result<Option<(&'static str, Value)>, HarnessError> {
+    let decoded = zeron_proto::invocation::invocation_prompt(text);
+    let Some((name, args)) = zeron_proto::invocation::leading_command(&decoded) else {
+        return Ok(None);
+    };
+    if matches!(name, "compact" | "review")
+        && zeron_proto::invocation::invocation_links(text)
+            .iter()
+            .any(|(_, invocation)| {
+                matches!(
+                    invocation,
+                    zeron_proto::invocation::Invocation::Skill { .. }
+                )
+            })
+    {
+        return Err(HarnessError::Protocol(
+            "Codex commands cannot include skill selections; send them in a separate prompt".into(),
+        ));
+    }
+    match name {
+        "compact" if args.is_empty() => Ok(Some((
+            "thread/compact/start",
+            json!({"threadId": thread_id}),
+        ))),
+        "compact" => Err(HarnessError::Protocol(
+            "/compact takes no arguments; send other text separately".into(),
+        )),
+        "review" => Ok(Some((
+            "review/start",
+            json!({
+                "threadId": thread_id, "delivery": "inline",
+                "target": if args.is_empty() { json!({"type":"uncommittedChanges"}) }
+                    else { json!({"type":"custom", "instructions":args}) },
+            }),
+        ))),
+        // Known client commands need explicit UI mappings. Do not silently
+        // send those to the model; unknown slash tokens and paths stay literal.
+        "model" | "permissions" | "approvals" | "new" | "clear" | "resume" | "fork" | "status"
+        | "diff" | "mention" | "mcp" | "skills" | "plan" | "fast" | "logout" | "quit" | "exit"
+        | "init" | "rename" | "feedback" | "ps" | "stop" | "clean" | "archive" | "delete" => {
+            Err(HarnessError::Protocol(format!(
+                "/{name} is not mapped in Zeron's Codex integration. Available commands: /compact and /review."
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
+async fn start_turn(client: &RpcClient, mut params: Value) -> Result<String, HarnessError> {
+    let text = params
+        .pointer("/input/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let thread_id = params["threadId"].as_str().unwrap_or_default();
+    let native = command_request(text, thread_id)?;
+    let goal_mode = params
+        .as_object_mut()
+        .and_then(|p| p.remove("zeronGoalMode"))
+        .and_then(|value| value.as_bool())
+        .filter(|_| native.is_none());
+    if goal_mode == Some(false) {
+        // Older servers lack goal APIs; ordinary build/plan turns still work.
+        let thread_id = params["threadId"].clone();
+        if let Ok(current) = client
+            .request("thread/goal/get", json!({"threadId": thread_id}))
+            .await
+        {
+            if current["goal"]["status"].as_str() == Some("active") {
+                client
+                    .request(
+                        "thread/goal/set",
+                        json!({"threadId": thread_id, "status": "paused"}),
+                    )
+                    .await?;
+            }
+        }
+    }
+    if goal_mode == Some(true) {
+        let thread_id = params["threadId"].clone();
+        let current = client
+            .request("thread/goal/get", json!({"threadId": thread_id}))
+            .await?;
+        let status = current["goal"]["status"].as_str();
+        if status.is_none() || status == Some("complete") {
+            let objective = params
+                .pointer("/input/0/text")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            client
+                .request(
+                    "thread/goal/set",
+                    json!({"threadId": thread_id, "objective": objective, "status": "active"}),
+                )
+                .await?;
+        } else if status != Some("active") {
+            client
+                .request(
+                    "thread/goal/set",
+                    json!({"threadId": thread_id, "status": "active"}),
+                )
+                .await?;
+        }
+    }
+    if native.is_some()
+        && params["input"]
+            .as_array()
+            .is_some_and(|input| input.len() > 1)
+    {
+        return Err(HarnessError::Protocol(
+            "Codex commands cannot include skill selections; send them in a separate prompt".into(),
+        ));
+    }
+    let (method, params) = native.unwrap_or(("turn/start", params));
+    let started = client.request(method, params).await?;
     Ok(started["turn"]["id"].as_str().unwrap_or("").to_owned())
 }
 
@@ -890,6 +1135,9 @@ async fn run_session(session: Session) {
                 Ok(thread) => thread,
                 // A missing/foreign rollout falls back to a fresh thread.
                 Err(e) => {
+                    if command_request(&request.prompt, resume)?.is_some() {
+                        return Err(e);
+                    }
                     tracing::debug!(
                         target: "zeron_harness::codex",
                         "thread/resume failed (starting fresh): {e}"
@@ -942,7 +1190,7 @@ async fn run_session(session: Session) {
     let turn_params = |text: &str| -> Value {
         let mut p = serde_json::Map::new();
         p.insert("threadId".into(), Value::String(thread_id.clone()));
-        p.insert("input".into(), json!([{ "type": "text", "text": text }]));
+        p.insert("input".into(), prompt_input(text));
         p.insert("approvalPolicy".into(), approval_policy.into());
         p.insert(
             "sandboxPolicy".into(),
@@ -953,6 +1201,28 @@ async fn run_session(session: Session) {
         // nothing renders and the UI's 45s staleness gate flips Working off
         // (user report: "not streaming, doesn't say it's working").
         p.insert("summary".into(), "auto".into());
+        {
+            let mode = request
+                .model_options
+                .get(zeron_proto::AGENT_MODE_OPTION)
+                .and_then(Value::as_str)
+                .unwrap_or("default");
+            if request
+                .model_options
+                .contains_key(zeron_proto::AGENT_MODE_OPTION)
+            {
+                p.insert("collaborationMode".into(), json!({
+                    "mode": if mode == "plan" { "plan" } else { "default" },
+                    "settings": { "model": request.model.as_deref(), "reasoning_effort": effort, "developer_instructions": null },
+                }));
+            }
+            if request
+                .model_options
+                .contains_key(zeron_proto::AGENT_MODE_OPTION)
+            {
+                p.insert("zeronGoalMode".into(), (mode == "goal").into());
+            }
+        }
         if let Some(model) = &request.model {
             p.insert("model".into(), Value::String(model.clone()));
         }
@@ -1004,17 +1274,31 @@ async fn run_session(session: Session) {
     // Deltas seen per agent-message item, so a model that never streams
     // (item/completed only) still emits its text exactly once.
     let mut streamed_text: HashSet<String> = HashSet::new();
+    let mut plan_text: HashMap<String, String> = HashMap::new();
+    let (answer_tx, mut answer_rx) = mpsc::unbounded_channel::<SteerMessage>();
     let mut reasoning_streams: HashMap<String, ReasoningStream> = HashMap::new();
     // Token usage is held until the turn ends, emitted just before Done.
     let mut pending_usage: Option<AgentEvent> = None;
     // Steers whose `turn/steer` lost the turn-completed race; delivered as the
     // next `turn/start` when the expected turn's end notification arrives.
     let mut queued_steers: VecDeque<String> = VecDeque::new();
+    // Native requests can expire before the user answers. Keep their bridge
+    // waiters cancellable by `serverRequest/resolved` so dropping the receiver
+    // becomes observable to the engine's pending-input cleanup.
+    let mut pending_server_requests = HashMap::<String, tokio::task::AbortHandle>::new();
+    // Assistant-message questions are not JSON-RPC requests and have no
+    // provider cancellation notification, so their bridge waits are owned by
+    // the run and must end with it.
+    let mut assistant_question_waiters = Vec::<tokio::task::AbortHandle>::new();
     let mut steering_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;
     // A Done has been emitted for the turn currently/last in flight.
     let mut done_current = false;
+    let mut current_native = command_request(&request.prompt, &thread_id)
+        .ok()
+        .flatten()
+        .is_some();
     let mut done_after_interrupt = false;
     let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -1047,7 +1331,18 @@ async fn run_session(session: Session) {
                     }
                 }
                 match method.as_str() {
-                    "turn/started" => router.note_started(turn_id(&params)),
+                    "serverRequest/resolved" => {
+                        if let Some(key) = request_id_key(params.get("requestId"))
+                            && let Some(waiter) = pending_server_requests.remove(&key)
+                        {
+                            waiter.abort();
+                        }
+                    }
+                    "turn/started" => {
+                        let id = turn_id(&params);
+                        if !router.is_completed(&id) { done_current = false; }
+                        router.note_started(id);
+                    }
 
                     "item/agentMessage/delta" => {
                         streamed_text.insert(item_id(&params));
@@ -1069,6 +1364,12 @@ async fn run_session(session: Session) {
                         }
                     }
 
+                    "item/plan/delta" => {
+                        let id = item_id(&params);
+                        let text = plan_text.entry(id.clone()).or_default();
+                        if let Some(delta) = delta_text(&params) { text.push_str(&delta); }
+                        if !send(&event_tx, AgentEvent::ToolCall { id, call: zeron_proto::ToolCall::Plan { text: text.clone() } }).await { break 'main; }
+                    }
                     "item/started" | "item/completed" => {
                         let phase = if method == "item/started" {
                             Phase::Started
@@ -1076,8 +1377,37 @@ async fn run_session(session: Session) {
                             Phase::Completed
                         };
                         let item = params.get("item").unwrap_or(&Value::Null);
+                        if phase == Phase::Completed {
+                            let output = match item_type(item) {
+                                "exitedReviewMode" => item.get("review").and_then(Value::as_str),
+                                _ => None,
+                            };
+                            if let Some(text) = output
+                                && !send(&event_tx, AgentEvent::TextDelta { text: text.into() }).await
+                            { break 'main; }
+                        }
                         if matches!(item_type(item), "agentMessage" | "agent_message") {
                             if phase == Phase::Completed {
+                                if let Some(questions) = item.get("questions").and_then(Value::as_array).filter(|questions| !questions.is_empty()) {
+                                    let questions: Vec<UserInputQuestion> = questions.iter().map(|question| UserInputQuestion {
+                                        id: new_message_id(), header: "Question".into(),
+                                        question: question["title"].as_str().unwrap_or_default().into(),
+                                        options: question["options"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect(),
+                                        multi_select: false, option_descriptions: Vec::new(), allow_custom: true, non_blocking: true,
+                                    }).collect();
+                                    let ask = Arc::clone(&request_input);
+                                    let answers = answer_tx.clone();
+                                    let waiter = tokio::spawn(async move {
+                                        let response = (ask)(questions.clone()).await.unwrap_or_default();
+                                        let lines: Vec<String> = questions.iter().filter_map(|question| response.iter()
+                                            .find(|answer| answer.question_id == question.id && !answer.labels.is_empty())
+                                            .map(|answer| format!("{}: {}", question.question, answer.labels.join(", ")))).collect();
+                                        if !lines.is_empty() {
+                                            let _ = answers.send(SteerMessage { prompt: format!("Answers to your questions:\n{}", lines.join("\n")), message_id: None });
+                                        }
+                                    });
+                                    assistant_question_waiters.push(waiter.abort_handle());
+                                }
                                 // Fallback for non-streamed messages only.
                                 let id = item.get("id").and_then(Value::as_str).unwrap_or("");
                                 let text = item.get("text").and_then(Value::as_str).unwrap_or("");
@@ -1128,6 +1458,12 @@ async fn run_session(session: Session) {
                         }
                     }
 
+                    "turn/plan/updated" | "thread/goal/updated" | "thread/goal/cleared" => {
+                        for event in normalize::activity_events(&method, &params) {
+                            if !send(&event_tx, event).await { break 'main; }
+                        }
+                    }
+
                     "thread/tokenUsage/updated" => {
                         if let Some(usage) = normalize::context_usage_event(&params)
                             && !send(&event_tx, usage).await { break 'main; }
@@ -1142,6 +1478,7 @@ async fn run_session(session: Session) {
                         // Item ids never span turns; without this the set grew
                         // one entry per message for a persistent session's life.
                         streamed_text.clear();
+                        plan_text.clear();
                         if let Some(usage) = pending_usage.take()
                             && !send(&event_tx, usage).await
                         {
@@ -1182,7 +1519,9 @@ async fn run_session(session: Session) {
                         // Persistent session: a steer that lost the race with
                         // this turn's end becomes the next turn now; otherwise
                         // stay alive for the mailbox — the caller owns teardown.
+                        current_native = false;
                         if let Some(text) = queued_steers.pop_front() {
+                            current_native = command_request(&text, &thread_id).ok().flatten().is_some();
                             if !steer_as_new_turn(
                                 &client,
                                 turn_params(&text),
@@ -1271,28 +1610,42 @@ async fn run_session(session: Session) {
                 }
 
                 Some(Incoming::Request { id, method, params }) => {
-                    handle_server_request(
+                    if let Some((key, waiter)) = handle_server_request(
                         &client,
                         id,
                         &method,
                         &params,
                         request.auto_approve,
                         &request_input,
-                    );
+                    ) {
+                        if let Some(previous) = pending_server_requests.insert(key, waiter) {
+                            previous.abort();
+                        }
+                    }
                 }
 
                 // stdout EOF or reader gone: the app server exited.
                 Some(Incoming::Eof) | None => break 'main,
             },
 
-            steer = steering.recv(), if steering_open && !interrupted => match steer {
+            steer = async {
+                tokio::select! { steer = steering.recv() => steer, answer = answer_rx.recv() => answer }
+            }, if steering_open && !interrupted => match steer {
                 Some(msg) => {
                     let text = msg.prompt;
+                    // Native operations run at a turn boundary, never as text
+                    // injected into an already running model turn. Later messages
+                    // must stay behind queued commands: Steered acknowledgments
+                    // retire the engine's accepted-message ledger in FIFO order.
+                    if !done_current && (!queued_steers.is_empty() || current_native || !matches!(command_request(&text, &thread_id), Ok(None))) {
+                        queued_steers.push_back(text);
+                        continue 'main;
+                    }
                     if let Some(expected) = router.active.clone() {
                         let steer_params = json!({
                             "threadId": thread_id,
                             "expectedTurnId": expected,
-                            "input": [{ "type": "text", "text": text }],
+                            "input": prompt_input(&text),
                         });
                         match client.request("turn/steer", steer_params).await {
                             Ok(_) => {
@@ -1324,31 +1677,21 @@ async fn run_session(session: Session) {
                                     && !router.is_completed(&expected)
                                 {
                                     queued_steers.push_back(text);
-                                } else if !steer_as_new_turn(
-                                    &client,
-                                    turn_params(&text),
-                                    &mut router,
-                                    &event_tx,
-                                    &mut assistant_message_id,
-                                    &mut done_current,
-                                )
-                                .await
-                                {
-                                    break 'main;
+                                } else {
+                                    current_native = command_request(&text, &thread_id).ok().flatten().is_some();
+                                    if !steer_as_new_turn(
+                                        &client, turn_params(&text), &mut router, &event_tx,
+                                        &mut assistant_message_id, &mut done_current,
+                                    ).await { break 'main; }
                                 }
                             }
                         }
-                    } else if !steer_as_new_turn(
-                        &client,
-                        turn_params(&text),
-                        &mut router,
-                        &event_tx,
-                        &mut assistant_message_id,
-                        &mut done_current,
-                    )
-                    .await
-                    {
-                        break 'main;
+                    } else {
+                        current_native = command_request(&text, &thread_id).ok().flatten().is_some();
+                        if !steer_as_new_turn(
+                            &client, turn_params(&text), &mut router, &event_tx,
+                            &mut assistant_message_id, &mut done_current,
+                        ).await { break 'main; }
                     }
                 }
                 None => {
@@ -1356,7 +1699,7 @@ async fn run_session(session: Session) {
                     // once nothing is in flight — mirrors codex.ts's steer loop
                     // `finish()` on a null take.
                     steering_open = false;
-                    if router.active.is_none() && queued_steers.is_empty() {
+                    if done_current && router.active.is_none() && queued_steers.is_empty() {
                         break 'main;
                     }
                 }
@@ -1398,6 +1741,15 @@ async fn run_session(session: Session) {
 
             _ = event_tx.closed() => break 'main,
         }
+    }
+
+    // Detached request waiters otherwise outlive a crashed/interrupted app
+    // server and keep the engine response channels falsely open.
+    for waiter in pending_server_requests.into_values() {
+        waiter.abort();
+    }
+    for waiter in assistant_question_waiters {
+        waiter.abort();
     }
 
     // Terminal bookkeeping: never end the stream without a Done unless the
@@ -1498,33 +1850,63 @@ fn handle_server_request(
     params: &Value,
     auto_approve: bool,
     request_input: &Arc<RequestInputFn>,
-) {
+) -> Option<(String, tokio::task::AbortHandle)> {
     // A tool's user-input request (EXPERIMENTAL, codex 0.146.x) is a CONTENT
     // question, never auto-approvable — route it to the input bridge and
     // answer keyed by question id, `{ answers: { <id>: { answers: [..] } } }`.
     if method == "item/tool/requestUserInput" {
+        if params["questions"].as_array().is_some_and(|questions| {
+            questions
+                .iter()
+                .any(|question| question["isSecret"] == true)
+        }) {
+            client.respond_error(
+                &id,
+                -32602,
+                "Secret input is not supported by this client; use an external credential flow",
+            );
+            return None;
+        }
         let questions = user_input_questions(params);
         if questions.is_empty() {
             client.respond(&id, json!({ "answers": {} }));
-            return;
+            return None;
+        }
+        if questions
+            .iter()
+            .any(|(_, question)| !question.allow_custom && question.options.is_empty())
+        {
+            // An impossible choice-only request is a native cancellation, not
+            // a free-text prompt whose answer cannot be represented faithfully.
+            client.respond(&id, json!({ "answers": {} }));
+            return None;
+        }
+        if !valid_user_input_request(&questions) {
+            client.respond_error(&id, -32602, "Invalid or ambiguous question payload");
+            return None;
         }
         let client = client.clone();
         let request_input = Arc::clone(request_input);
-        tokio::spawn(async move {
+        let key = request_id_key(Some(&id));
+        let waiter = tokio::spawn(async move {
             let asked: Vec<UserInputQuestion> = questions.iter().map(|(_, q)| q.clone()).collect();
-            let answers = (request_input)(asked).await.unwrap_or_default();
-            let mut by_id = serde_json::Map::new();
-            for (wire_id, q) in &questions {
-                let labels: Vec<Value> = answers
-                    .iter()
-                    .find(|a| a.question_id == q.id)
-                    .map(|a| a.labels.iter().cloned().map(Value::String).collect())
-                    .unwrap_or_default();
-                by_id.insert(wire_id.clone(), json!({ "answers": labels }));
+            let answers = match (request_input)(asked).await {
+                Ok(answers) => answers,
+                Err(_) => {
+                    client.respond_error(
+                        &id,
+                        -32603,
+                        "The question response channel closed before an answer was delivered",
+                    );
+                    return;
+                }
+            };
+            match user_input_response(&questions, &answers) {
+                Ok(response) => client.respond(&id, response),
+                Err(message) => client.respond_error(&id, -32602, message),
             }
-            client.respond(&id, json!({ "answers": by_id }));
         });
-        return;
+        return key.map(|key| (key, waiter.abort_handle()));
     }
     let is_approval = matches!(
         method,
@@ -1536,17 +1918,18 @@ fn handle_server_request(
             "unhandled server request: {method}"
         );
         client.respond_error(&id, -32601, &format!("unsupported method: {method}"));
-        return;
+        return None;
     }
     if auto_approve {
         client.respond(&id, json!({ "decision": "accept" }));
-        return;
+        return None;
     }
 
     let question = approval_question(method, params);
     let client = client.clone();
     let request_input = Arc::clone(request_input);
-    tokio::spawn(async move {
+    let key = request_id_key(Some(&id));
+    let waiter = tokio::spawn(async move {
         // The engine's input bridge owns the `InputRequested`/`InputResolved`
         // lifecycle (it mints the request id the resolver is parked under);
         // emitting our own copy here doubled the doc's input part with an id
@@ -1565,6 +1948,56 @@ fn handle_server_request(
             json!({ "decision": if accept { "accept" } else { "decline" } }),
         );
     });
+    key.map(|key| (key, waiter.abort_handle()))
+}
+
+/// JSON-RPC request ids may be strings or numbers. Their JSON representation
+/// is stable across the request and its `serverRequest/resolved` notification.
+fn request_id_key(id: Option<&Value>) -> Option<String> {
+    serde_json::to_string(id?).ok()
+}
+
+fn valid_user_input_request(questions: &[(String, UserInputQuestion)]) -> bool {
+    let mut wire_ids = HashSet::new();
+    questions
+        .iter()
+        .all(|(wire_id, _)| !wire_id.trim().is_empty() && wire_ids.insert(wire_id.clone()))
+        && zeron_proto::valid_input_questions(
+            &questions
+                .iter()
+                .map(|(_, question)| question.clone())
+                .collect::<Vec<_>>(),
+        )
+}
+
+/// Keep UI question identity separate from native wire identity. Never turn an
+/// unknown/missing answer into a successful empty answer for the provider.
+fn user_input_response(
+    questions: &[(String, UserInputQuestion)],
+    answers: &[zeron_proto::UserInputAnswer],
+) -> Result<Value, &'static str> {
+    let asked: Vec<_> = questions
+        .iter()
+        .map(|(_, question)| question.clone())
+        .collect();
+    if !zeron_proto::valid_input_answers(&asked, answers) {
+        return Err("Invalid answer IDs, choices, or cardinality");
+    }
+    if answers.is_empty() {
+        return Ok(json!({"answers": {}}));
+    }
+    let by_id: serde_json::Map<String, Value> = questions
+        .iter()
+        .map(|(wire_id, question)| {
+            let labels = answers
+                .iter()
+                .find(|answer| answer.question_id == question.id)
+                .map(|answer| answer.labels.clone())
+                .unwrap_or_default();
+            (wire_id.clone(), json!({"answers": labels}))
+        })
+        .collect();
+    Ok(json!({"answers":by_id}))
 }
 
 /// Parse `item/tool/requestUserInput` questions into (wire id, question)
@@ -1576,18 +2009,17 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
         .map(|a| a.as_slice())
         .unwrap_or_default()
         .iter()
-        .enumerate()
-        .map(|(ix, q)| {
+        .map(|q| {
             let field = |keys: [&str; 3]| {
                 keys.iter()
                     .find_map(|k| q.get(*k).and_then(Value::as_str))
                     .unwrap_or("")
                     .to_owned()
             };
-            let wire_id = {
-                let id = field(["id", "questionId", "question_id"]);
-                if id.is_empty() { format!("q{ix}") } else { id }
-            };
+            // Preserve a missing or blank provider id so validation rejects
+            // the malformed native request instead of inventing a key that
+            // Codex never sent and cannot match in the response.
+            let wire_id = field(["id", "questionId", "question_id"]);
             let question = UserInputQuestion {
                 id: new_message_id(),
                 header: {
@@ -1615,6 +2047,25 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
                             .into(),
                     })
                     .collect(),
+                option_descriptions: q
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(|option| {
+                        option
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned()
+                    })
+                    .collect(),
+                allow_custom: q
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .is_none_or(Vec::is_empty)
+                    || q.get("isOther").and_then(Value::as_bool).unwrap_or(true),
+                non_blocking: params.get("isBlocking").and_then(Value::as_bool) == Some(false),
                 multi_select: ["multiSelect", "multi_select"]
                     .iter()
                     .find_map(|k| q.get(*k).and_then(Value::as_bool))
@@ -1668,6 +2119,9 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
         header,
         question,
         options: vec!["Yes".into(), "No".into()],
+        option_descriptions: Vec::new(),
+        allow_custom: false,
+        non_blocking: false,
         multi_select: false,
     }
 }
@@ -1676,8 +2130,131 @@ use crate::{Signal, send_signal, shutdown_child};
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn question_answers_preserve_native_ids_and_never_silently_drop_text() {
+        let questions = user_input_questions(
+            &json!({"questions":[{"id":"native-id","question":"What next?","isOther":true,"options":[{"label":"Plan"}]}]}),
+        );
+        let answer = zeron_proto::UserInputAnswer {
+            question_id: questions[0].1.id.clone(),
+            labels: vec!["Build a feature with café 日本語".into()],
+        };
+        assert_eq!(
+            user_input_response(&questions, &[answer]).unwrap(),
+            json!({"answers":{"native-id":{"answers":["Build a feature with café 日本語"]}}})
+        );
+        assert!(
+            user_input_response(
+                &questions,
+                &[zeron_proto::UserInputAnswer {
+                    question_id: "wrong-id".into(),
+                    labels: vec!["Plan".into()]
+                }]
+            )
+            .is_err()
+        );
+        assert_eq!(
+            user_input_response(&questions, &[]).unwrap(),
+            json!({"answers":{}})
+        );
+    }
+
+    #[test]
+    fn question_payload_rejects_ambiguous_native_keys_and_labels() {
+        let duplicate_ids = user_input_questions(&json!({"questions":[
+            {"id":"same","question":"First","isOther":true},
+            {"id":"same","question":"Second","isOther":true}
+        ]}));
+        assert!(!valid_user_input_request(&duplicate_ids));
+
+        let duplicate_labels = user_input_questions(&json!({"questions":[{
+            "id":"q","question":"Choose","isOther":false,
+            "options":[{"label":"Same"},{"label":"Same"}]
+        }]}));
+        assert!(!valid_user_input_request(&duplicate_labels));
+
+        for malformed in [
+            json!({"questions":[{"id":"  ","question":"Blank","isOther":true}]}),
+            json!({"questions":[{"question":"Missing","isOther":true}]}),
+        ] {
+            let questions = user_input_questions(&malformed);
+            assert!(!valid_user_input_request(&questions));
+            assert_eq!(
+                questions[0].0,
+                malformed["questions"][0]["id"].as_str().unwrap_or("")
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_unknown_mode_is_rejected() {
+        let mut request = RunRequest {
+            prompt: "test".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: String::new(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            resume: None,
+            attachments: Vec::new(),
+            worktree: None,
+        };
+        request
+            .model_options
+            .insert(zeron_proto::AGENT_MODE_OPTION.into(), "invented".into());
+        assert!(validate_agent_mode(&request).is_err());
+    }
+
+    #[test]
+    fn question_capability_contract() {
+        let mapped = user_input_questions(
+            &serde_json::json!({"questions":[{"id":"q","question":"Choose","isOther":false,"options":[{"label":"One","description":"First option"}]}]}),
+        );
+        assert!(!mapped[0].1.allow_custom);
+        assert_eq!(mapped[0].1.option_descriptions, ["First option"]);
+        assert!(
+            !approval_question(
+                "item/commandExecution/requestApproval",
+                &serde_json::json!({})
+            )
+            .allow_custom
+        );
+    }
+
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn modes_require_live_protocol_and_enabled_goal_feature() {
+        assert!(advertised_mode_option(None, true).is_none());
+        let modes = json!({"data":[{"mode":"default"},{"mode":"plan"}]});
+        let option = advertised_mode_option(Some(&modes), false).unwrap();
+        assert_eq!(
+            option
+                .choices
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["default", "plan"]
+        );
+        assert_eq!(
+            advertised_mode_option(Some(&modes), true)
+                .unwrap()
+                .choices
+                .len(),
+            3
+        );
+        assert!(
+            advertised_mode_option(Some(&json!({"data":[{"mode":"default"}]})), false).is_none()
+        );
+        assert!(catalog::static_models().iter().all(|m| {
+            m.options
+                .iter()
+                .all(|o| o.id != zeron_proto::AGENT_MODE_OPTION)
+        }));
+    }
 
     #[test]
     fn approval_questions_are_yes_no() {
@@ -1764,5 +2341,189 @@ mod tests {
         r.note_started("t-3".into());
         assert_eq!(r.active.as_deref(), Some("t-3"));
         assert!(r.is_completed("t-2"));
+    }
+}
+
+#[cfg(test)]
+mod skill_discovery_tests {
+    use super::*;
+
+    #[test]
+    fn request_preflight_decodes_selected_commands_before_attachment_check() {
+        let command = zeron_proto::invocation::Invocation::Command {
+            name: "review".into(),
+        };
+        let request = RunRequest {
+            prompt: format!("  {} check errors", command.link()),
+            harness: Some(HarnessId::Codex),
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: String::new(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            resume: None,
+            attachments: vec!["/tmp/image.png".into()],
+            worktree: None,
+        };
+        assert_eq!(
+            CodexHarness::default()
+                .validate_request(&request)
+                .unwrap_err()
+                .to_string(),
+            "harness protocol error: Codex commands cannot include attachments; send them in a separate prompt"
+        );
+    }
+
+    #[test]
+    fn selected_skills_use_native_identity_for_initial_and_steered_inputs() {
+        use zeron_proto::invocation::Invocation;
+        let a = Invocation::Skill {
+            command: None,
+            name: "review".into(),
+            path: "/repo/a b/SKILL.md".into(),
+        };
+        let b = Invocation::Skill {
+            command: None,
+            name: "review".into(),
+            path: "/repo/other/SKILL.md".into(),
+        };
+        let raw = format!("Use {} then {} and {}", a.link(), b.link(), a.link());
+        let input = prompt_input(&raw);
+        assert_eq!(input.as_array().unwrap().len(), 3);
+        assert_eq!(
+            input[1],
+            json!({"type":"skill","name":"review","path":"/repo/a b/SKILL.md"})
+        );
+        assert_eq!(input[2]["path"], "/repo/other/SKILL.md");
+        assert!(!input[0]["text"].as_str().unwrap().contains("zeron-invoke:"));
+        for raw in [
+            "$review".into(),
+            format!("`{}`", a.link()),
+            format!("\\{}", a.link()),
+            format!("![skill example {}](example.png)", a.link()),
+            format!("    {}", a.link()),
+        ] {
+            let input = prompt_input(&raw);
+            assert_eq!(input.as_array().unwrap().len(), 1);
+            assert_eq!(input[0]["text"], raw);
+        }
+        let command = Invocation::Command {
+            name: "review".into(),
+        };
+        assert_eq!(
+            command_request(&format!("  {} check", command.link()), "t")
+                .unwrap()
+                .unwrap()
+                .0,
+            "review/start"
+        );
+        assert!(command_request(&format!("/review {}", a.link()), "t").is_err());
+    }
+
+    #[test]
+    fn backtick_labels_keep_native_skill_identity_with_repeated_selections() {
+        use zeron_proto::invocation::{Invocation, harness_prompt};
+        let skill = Invocation::Skill {
+            command: None,
+            name: "review`ui".into(),
+            path: "/repo/é skill/SKILL.md".into(),
+        };
+        let file = zeron_proto::file_mentions::local_file_link("src/a`b.rs", false);
+        let raw = format!("{} on {file} and {}", skill.link(), skill.link());
+        let input = prompt_input(&harness_prompt(&raw, HarnessId::Codex));
+        assert_eq!(input.as_array().unwrap().len(), 2);
+        assert_eq!(
+            input[1],
+            json!({"type":"skill", "name":"review`ui", "path":"/repo/é skill/SKILL.md"})
+        );
+        let text = input[0]["text"].as_str().unwrap();
+        assert!(!text.contains("zeron-invoke:"));
+        assert!(!text.contains("zeron-file:"));
+        assert_eq!(text.matches("/repo/%C3%A9%20skill/SKILL.md").count(), 2);
+    }
+
+    #[test]
+    fn commands_map_arguments_and_leave_inline_mentions_literal() {
+        assert!(
+            command_request("please /review this", "t")
+                .unwrap()
+                .is_none()
+        );
+        for code in [
+            "    /review",
+            "\t/review",
+            "\n    /compact",
+            "\u{a0}/review",
+            "`/review`",
+            "```\n/review\n```",
+        ] {
+            assert!(command_request(code, "t").unwrap().is_none());
+        }
+        assert!(command_request("/tmp/file.rs", "t").unwrap().is_none());
+        assert!(command_request("/tmp", "t").unwrap().is_none());
+        assert!(command_request("/compact extra", "t").is_err());
+        assert!(command_request("/model", "t").is_err());
+        let (method, params) = command_request("/review check errors", "t")
+            .unwrap()
+            .unwrap();
+        assert_eq!(method, "review/start");
+        assert_eq!(
+            params["target"],
+            json!({"type":"custom","instructions":"check errors"})
+        );
+        assert_eq!(params["delivery"], "inline");
+    }
+
+    #[test]
+    fn catalog_rejects_invalid_identities_without_changing_valid_names() {
+        use zeron_proto::invocation::{Invocation, invocation_links};
+        let mut entries = vec![];
+        for name in [
+            "",
+            "two words",
+            " padded",
+            "padded ",
+            "line\nbreak",
+            "tab\tname",
+            "nul\0name",
+            "non\u{a0}breaking",
+        ] {
+            entries.push(json!({"name":name,"path":"/repo/SKILL.md"}));
+        }
+        for path in ["", "/repo/line\nbreak/SKILL.md", "/repo/\0/SKILL.md"] {
+            entries.push(json!({"name":"invalid-path","path":path}));
+        }
+        for (name, path) in [
+            (r"review[ui]\draft`", "/repo/é skill/SKILL.md"),
+            ("审查-é", "harness-skill:custom:审查-é"),
+        ] {
+            entries.push(json!({"name":name,"path":path}));
+        }
+        let skills = parse_skills(&json!({"data":[{"skills":entries}]}));
+        assert_eq!(skills.len(), 2);
+        assert_eq!(skills[0].name, r"review[ui]\draft`");
+        assert_eq!(skills[1].path, "harness-skill:custom:审查-é");
+        for skill in skills {
+            let invocation = Invocation::Skill {
+                name: skill.name,
+                path: skill.path,
+                command: skill.command,
+            };
+            assert_eq!(invocation_links(&invocation.link())[0].1, invocation);
+        }
+    }
+
+    #[test]
+    fn preserves_paths_enabled_state_and_duplicate_names() {
+        let value = json!({"data": [{"skills": [
+            {"name":"review", "path":"/a/SKILL.md", "description":"A", "enabled":true},
+            {"name":"review", "path":"/b/SKILL.md", "description":"B", "enabled":false},
+            {"name":"review", "path":"/a/SKILL.md", "description":"duplicate"}
+        ]}]});
+        let skills = parse_skills(&value);
+        assert_eq!(skills.len(), 2);
+        assert_ne!(skills[0].path, skills[1].path);
+        assert!(!skills[1].enabled);
     }
 }

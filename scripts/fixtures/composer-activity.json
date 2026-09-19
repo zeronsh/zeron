@@ -1,0 +1,145 @@
+[
+  {
+    "name": "empty",
+    "calls": []
+  },
+  {
+    "name": "plan",
+    "calls": [
+      {
+        "kind": "plan",
+        "text": "# Implementation plan\n\n1. Verify native capabilities.\n2. Update the composer.\n3. Run the fixture suite."
+      }
+    ]
+  },
+  {
+    "name": "task-states",
+    "calls": [
+      {
+        "kind": "todo",
+        "items": [
+          {
+            "id": "0",
+            "text": "Inspect the existing UI",
+            "done": true,
+            "status": "completed"
+          },
+          {
+            "id": "1",
+            "text": "Refine transitions",
+            "done": false,
+            "status": "inProgress"
+          },
+          {
+            "id": "2",
+            "text": "Check narrow layouts",
+            "done": false,
+            "status": "pending"
+          },
+          {
+            "id": "3",
+            "text": "Await provider support",
+            "done": false,
+            "status": "blocked"
+          },
+          {
+            "id": "4",
+            "text": "Remove abandoned work",
+            "done": false,
+            "status": "cancelled"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "goal",
+    "calls": [
+      {
+        "kind": "goal",
+        "objective": "Verify every supported harness and preserve the current draft.",
+        "status": "active",
+        "tokensUsed": 8400,
+        "tokenBudget": 24000
+      }
+    ]
+  },
+  {
+    "name": "cleared-tasks",
+    "calls": [
+      {
+        "kind": "todo",
+        "items": [
+          {
+            "text": "Previous task",
+            "done": false
+          }
+        ]
+      },
+      {
+        "kind": "todo",
+        "items": []
+      }
+    ]
+  },
+  {
+    "name": "long-plan",
+    "calls": [
+      {
+        "kind": "plan",
+        "text": "# Long plan\n\n1. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n2. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n3. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n4. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n5. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n6. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n7. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n8. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n9. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n10. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n11. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n12. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n13. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n14. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n15. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n16. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n17. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n18. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n19. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n20. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n21. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n22. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n23. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n24. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n25. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n26. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n27. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n28. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n29. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n30. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n31. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n32. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n33. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n34. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion.\n35. Verify long, wrapping content with café and 日本語, keyboard focus, scroll fades and reduced motion."
+      }
+    ]
+  },
+  {
+    "name": "combined",
+    "calls": [
+      {
+        "kind": "plan",
+        "text": "# Implementation plan\n\n1. Verify native capabilities.\n2. Update the composer.\n3. Run the fixture suite."
+      },
+      {
+        "kind": "todo",
+        "items": [
+          {
+            "id": "0",
+            "text": "Inspect the existing UI",
+            "done": true,
+            "status": "completed"
+          },
+          {
+            "id": "1",
+            "text": "Refine transitions",
+            "done": false,
+            "status": "inProgress"
+          },
+          {
+            "id": "2",
+            "text": "Check narrow layouts",
+            "done": false,
+            "status": "pending"
+          },
+          {
+            "id": "3",
+            "text": "Await provider support",
+            "done": false,
+            "status": "blocked"
+          },
+          {
+            "id": "4",
+            "text": "Remove abandoned work",
+            "done": false,
+            "status": "cancelled"
+          }
+        ]
+      },
+      {
+        "kind": "goal",
+        "objective": "Verify every supported harness and preserve the current draft.",
+        "status": "active",
+        "tokensUsed": 8400,
+        "tokenBudget": 24000
+      }
+    ]
+  }
+]

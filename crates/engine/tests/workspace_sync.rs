@@ -710,6 +710,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 last_message_at: Some(now),
                 created_at: now,
                 harness_session_id: Some("hs-9".into()),
+                harness_session_harness: None,
                 room_gen: None,
                 harness_session_cwd: Some("/tmp/legacy".into()),
                 space_id: Some("space-legacy".into()),
@@ -738,6 +739,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
     assert_eq!(chats.len(), 1);
     assert_eq!(chats[0].title.as_deref(), Some("Migrated chat"));
     assert_eq!(chats[0].harness_session_id.as_deref(), Some("hs-9"));
+    assert_eq!(chats[0].harness_session_harness, None);
     assert_eq!(chats[0].space_id.as_deref(), Some("space-legacy"));
     let spaces = a.workspace.read_spaces().expect("spaces");
     assert_eq!(spaces.len(), 1);

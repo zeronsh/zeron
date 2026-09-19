@@ -32,9 +32,9 @@ if has "$line" '"method":"config/read"'; then
 fi
 thread_line="$line"
 if has "$line" '"method":"skills/list"'; then
-  # Command discovery probe: answer with two cwd groups sharing one skill
-  # (dedupe by name) and settle; no thread ever starts.
-  emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"cwd\":\"/w\",\"skills\":[{\"name\":\"imagegen\",\"description\":\"Model-facing paragraph about images.\",\"interface\":{\"displayName\":\"Image Gen\",\"shortDescription\":\"Generate or edit images\"}},{\"name\":\"bare\",\"description\":\"No interface block\"}]},{\"cwd\":\"/x\",\"skills\":[{\"name\":\"imagegen\",\"description\":\"dupe\",\"interface\":{\"shortDescription\":\"dupe\"}}]}]}}"
+  # Skill discovery probe: answer with two cwd groups sharing one skill
+  # (dedupe by identity) and settle; no thread ever starts.
+  emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"cwd\":\"/w\",\"skills\":[{\"name\":\"imagegen\",\"path\":\"/skills/imagegen/SKILL.md\",\"description\":\"Model-facing paragraph about images.\",\"interface\":{\"displayName\":\"Image Gen\",\"shortDescription\":\"Generate or edit images\"}},{\"name\":\"bare\",\"path\":\"/skills/bare/SKILL.md\",\"description\":\"No interface block\"}]},{\"cwd\":\"/x\",\"skills\":[{\"name\":\"imagegen\",\"path\":\"/skills/imagegen/SKILL.md\",\"description\":\"dupe\",\"interface\":{\"shortDescription\":\"dupe\"}}]}]}}"
   exec sleep 30
 fi
 if has "$line" '"method":"model/list"'; then
@@ -47,6 +47,12 @@ if has "$line" '"method":"model/list"'; then
   has "$line" '"method":"model/list"' || exit 1
   has "$line" '"cursor":"page-2"' || exit 1
   emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"id\":\"gpt-5.6-sol\",\"model\":\"gpt-5.6-sol\",\"displayName\":\"GPT-5.6-Sol\",\"description\":\"Reliable agentic workhorse for everyday tasks.\",\"hidden\":false,\"supportedReasoningEfforts\":[{\"reasoningEffort\":\"low\"},{\"reasoningEffort\":\"ultra\"}],\"additionalSpeedTiers\":[],\"serviceTiers\":[],\"defaultServiceTier\":null,\"isDefault\":false}],\"nextCursor\":null}}"
+  read -r line || exit 1
+  has "$line" '"method":"collaborationMode/list"' || exit 1
+  emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"mode\":\"default\"},{\"mode\":\"plan\"}]}}"
+  read -r line || exit 1
+  has "$line" '"method":"experimentalFeature/list"' || exit 1
+  emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"name\":\"goals\",\"enabled\":true}],\"nextCursor\":null}}"
   exec sleep 30
 fi
 if has "$line" '"method":"thread/resume"'; then
@@ -71,9 +77,168 @@ fi
 
 # ---- first turn ------------------------------------------------------------
 read -r turnline || exit 1
+if has "$turnline" '"method":"thread/goal/get"'; then
+  emit "{\"id\":$(rid "$turnline"),\"result\":{\"goal\":null}}"
+  read -r turnline || exit 1
+  if has "$turnline" '"method":"thread/goal/set"'; then
+    has "$turnline" '"objective":"scenario:goal"' || exit 1
+    emit "{\"id\":$(rid "$turnline"),\"result\":{\"goal\":{\"objective\":\"scenario:goal\",\"status\":\"active\"}}}"
+    emit '{"method":"thread/goal/updated","params":{"threadId":"th-1","goal":{"objective":"scenario:goal","status":"active","tokensUsed":0,"tokenBudget":null}}}'
+    read -r turnline || exit 1
+  fi
+fi
 tid=$(rid "$turnline")
 
+if has "$turnline" '"method":"thread/compact/start"'; then
+  emit "{\"id\":$tid,\"result\":{}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"native-1"}}}'
+  emit '{"method":"item/started","params":{"item":{"id":"compact-1","type":"contextCompaction"}}}'
+  emit '{"method":"item/completed","params":{"item":{"id":"compact-1","type":"contextCompaction"}}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"native-1","status":"completed"}}}'
+  exec sleep 30
+fi
+if has "$turnline" '"method":"review/start"'; then
+  has "$turnline" '"delivery":"inline"' || exit 1
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"native-1\"}}}"
+  emit '{"method":"item/completed","params":{"item":{"id":"review-1","type":"exitedReviewMode","review":"Review fixture result"}}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"native-1","status":"completed"}}}'
+  exec sleep 30
+fi
+
 case "$turnline" in
+*scenario:blank-question-id*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"id":106,"method":"item/tool/requestUserInput","params":{"threadId":"th-1","turnId":"t-1","itemId":"q-blank","questions":[{"id":"","question":"Malformed question","isOther":true,"options":null}]}}'
+  read -r answer || exit 1
+  has "$answer" '"id":106' || { fail_turn "$tid" "question error used the wrong request id"; exit 0; }
+  has "$answer" '"code":-32602' || { fail_turn "$tid" "blank question id was accepted"; exit 0; }
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"blank question rejected"}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+*scenario:native-question-resolved*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"id":105,"method":"item/tool/requestUserInput","params":{"threadId":"th-1","turnId":"t-1","itemId":"q-expiring","isBlocking":false,"questions":[{"id":"native-expiring","header":"Choice","question":"Answer before timeout?","isOther":true,"isSecret":false,"options":null}],"autoResolutionMs":1}}'
+  # Wait boundedly for the request_input callback to establish its receiver;
+  # this exercises native cancellation of an existing bridge wait without a
+  # scheduler-speed assumption.
+  tries=0
+  while [ ! -f .bridge-ready ] && [ "$tries" -lt 300 ]; do
+    tries=$((tries + 1))
+    sleep 0.01
+  done
+  [ -f .bridge-ready ] || { fail_turn "$tid" "bridge receiver was not established"; exit 0; }
+  emit '{"method":"serverRequest/resolved","params":{"threadId":"th-1","requestId":105}}'
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"native request resolved"}}'
+  # Keep the server alive so the test observes native-resolution cancellation,
+  # rather than teardown incidentally dropping the response receiver.
+  sleep 1
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+*scenario:typed-question*|*scenario:closed-question*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"id":104,"method":"item/tool/requestUserInput","params":{"threadId":"th-1","turnId":"t-1","itemId":"q-typed","questions":[{"id":"native-question","question":"What next?","isOther":true,"options":[{"label":"Plan"}]}]}}'
+  read -r answer || exit 1
+  if has "$turnline" 'scenario:closed-question'; then
+    has "$answer" '"code":-32603' || { fail_turn "$tid" "closed channel was disguised as an empty answer"; exit 0; }
+  else
+    has "$answer" '"native-question":{"answers":["Build a feature"]}' || { fail_turn "$tid" "typed answer was lost"; exit 0; }
+  fi
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"typed answer received"}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+*scenario:async-message-question-teardown*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"item/completed","params":{"item":{"id":"question-message","type":"agentMessage","text":"Choose next step","questions":[{"title":"What next?","options":["Review"]}]}}}'
+  tries=0
+  while [ ! -f .bridge-ready ] && [ "$tries" -lt 300 ]; do
+    tries=$((tries + 1))
+    sleep 0.01
+  done
+  [ -f .bridge-ready ] || { fail_turn "$tid" "assistant question receiver was not established"; exit 0; }
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+*scenario:async-message-question*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"item/completed","params":{"item":{"id":"question-message","type":"agentMessage","text":"Choose next step","questions":[{"title":"What next?","options":["Review"]}]}}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  read -r reply || exit 1
+  has "$reply" 'What next?: Review' || { fail_turn "$(rid "$reply")" "missing async answer"; exit 0; }
+  emit "{\"id\":$(rid "$reply"),\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"async answer received"}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-2","status":"completed"}}}'
+  ;;
+*scenario:plan*|*scenario:goal*)
+  if has "$turnline" 'scenario:plan'; then
+    has "$turnline" '"mode":"plan"' || { fail_turn "$tid" "missing native plan mode"; exit 0; }
+  else
+    has "$turnline" '"mode":"default"' || { fail_turn "$tid" "goal must use build mode"; exit 0; }
+  fi
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"method":"turn/plan/updated","params":{"threadId":"th-1","plan":[{"step":"Inspect the project","status":"completed"},{"step":"Implement changes","status":"pending"}]}}'
+  emit '{"method":"item/completed","params":{"item":{"id":"proposed-plan","type":"plan","text":"## Plan\nInspect, then implement."}}}'
+  emit '{"id":103,"method":"item/tool/requestUserInput","params":{"threadId":"th-1","turnId":"t-1","itemId":"q-1","isBlocking":false,"questions":[{"id":"choice","header":"Approach","question":"Which approach?","options":[{"label":"Yes","description":"Proceed"}]}]}}'
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"continuing while awaiting input"}}'
+  read -r answer || exit 1
+  has "$answer" '"choice":{"answers":["Yes"]}' || { fail_turn "$tid" "input answer missing"; exit 0; }
+  if has "$turnline" 'scenario:goal'; then
+    emit '{"method":"thread/goal/updated","params":{"threadId":"th-1","goal":{"objective":"scenario:goal","status":"complete","tokensUsed":42,"tokenBudget":null}}}'
+  fi
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+*scenario:native-skills*)
+  for want in '"type":"skill"' '"path":"/repo/a b/SKILL.md"' '[lib.rs](src/lib.rs)'; do
+    has "$turnline" "$want" || { fail_turn "$tid" "initial native skill or file path missing"; exit 0; }
+  done
+  if has "$turnline" 'zeron-invoke:' || has "$turnline" 'zeron-file:'; then
+    fail_turn "$tid" "private chip URI leaked"; exit 0
+  fi
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  read -r steerline || exit 1
+  sid=$(rid "$steerline")
+  for want in '"method":"turn/steer"' '"type":"skill"' '"path":"/repo/other/SKILL.md"'; do
+    has "$steerline" "$want" || { fail_turn "$sid" "steered native skill missing"; exit 0; }
+  done
+  emit "{\"id\":$sid,\"result\":{}}"
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"native skills accepted"}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
+*scenario:native-queue-order*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"working"}}'
+  sleep 0.1
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  read -r next || exit 1
+  has "$next" '"method":"review/start"' || { fail_turn "$(rid "$next")" "followup overtook queued review"; exit 0; }
+  emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
+  emit '{"method":"item/completed","params":{"item":{"id":"review-2","type":"exitedReviewMode","review":"Queued review result"}}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-2","status":"completed"}}}'
+  read -r next || exit 1
+  has "$next" '"method":"turn/start"' && has "$next" 'Follow up after review' || { fail_turn "$(rid "$next")" "followup was lost"; exit 0; }
+  emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-3\"}}}"
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"followup"}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-3","status":"completed"}}}'
+  ;;
+
+*scenario:native-queue*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"working"}}'
+  sleep 0.1
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  read -r next || exit 1
+  has "$next" '"method":"review/start"' || { fail_turn "$(rid "$next")" "native command was sent as prompt text"; exit 0; }
+  emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
+  emit '{"method":"item/completed","params":{"item":{"id":"review-2","type":"exitedReviewMode","review":"Queued review result"}}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-2","status":"completed"}}}'
+  ;;
+
 
 *scenario:image-*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
@@ -223,6 +388,10 @@ case "$turnline" in
   # The harness must fall back to a follow-up turn/start carrying the text.
   read -r followline || exit 1
   fid=$(rid "$followline")
+  if has "$steerline" '"type":"skill"'; then
+    has "$followline" '"type":"skill"' && has "$followline" '"path":"/repo/followup/SKILL.md"' ||
+      { fail_turn "$fid" "native skill lost on steer fallback"; exit 0; }
+  fi
   if has "$followline" '"method":"turn/start"' && has "$followline" 'redirect please'; then
     emit "{\"id\":$fid,\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
     emit '{"method":"turn/started","params":{"turn":{"id":"t-2"}}}'

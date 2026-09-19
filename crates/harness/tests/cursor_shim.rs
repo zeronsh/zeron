@@ -134,7 +134,7 @@ impl SessionFixture {
             .unwrap();
         let mut stdin = child.stdin.take().unwrap();
         let lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
-        let frame = serde_json::json!({"op":"run","prompt":prompt,"cwd":self.dir.path(),"resume":resume.then_some("agent-fixture")});
+        let frame = serde_json::json!({"op":"run","prompt":prompt,"cwd":self.dir.path(),"resume":resume.then_some("agent-fixture"),"modelOptions":if prompt == "verify-mode:plan" {serde_json::json!({"agentMode":"plan"})} else if prompt == "verify-mode:agent" {serde_json::json!({"agentMode":"default"})} else {serde_json::json!({})}});
         stdin
             .write_all(format!("{frame}\n").as_bytes())
             .await
@@ -158,6 +158,18 @@ async fn finish(child: &mut tokio::process::Child, stdin: tokio::process::ChildS
         .await
         .expect("bounded teardown")
         .unwrap();
+}
+
+#[tokio::test]
+async fn native_plan_mode_is_sent_on_create_and_reset_on_resume() {
+    let fixture = SessionFixture::new();
+    for (prompt, resume) in [("verify-mode:plan", false), ("verify-mode:agent", true)] {
+        let (mut child, stdin, mut lines) = fixture.start(prompt, resume).await;
+        assert_eq!(frame(&mut lines).await["ev"], "ready");
+        assert_eq!(frame(&mut lines).await["ev"], "text");
+        assert_eq!(frame(&mut lines).await["status"], "finished");
+        finish(&mut child, stdin).await;
+    }
 }
 
 #[tokio::test]

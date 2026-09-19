@@ -404,6 +404,8 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
                 .unwrap_or_default()
                 .iter()
                 .map(|e| TodoItem {
+                    id: None,
+                    status: zeron_proto::TodoStatus::from_wire(e["status"].as_str()),
                     text: str_field(e, "content"),
                     done: e.get("status").and_then(Value::as_str) == Some("completed"),
                 })
@@ -487,15 +489,23 @@ pub(crate) fn parse_commands(value: Option<&Value>) -> Vec<SlashCommand> {
 /// preferred auto-approve choice: `allow_always` > `allow_once` > first.
 pub(crate) fn preferred_allow_option(options: &[Value]) -> Option<String> {
     let by_kind = |kind: &str| {
-        options
-            .iter()
-            .find(|o| o.get("kind").and_then(Value::as_str) == Some(kind))
+        options.iter().find(|o| {
+            o.get("kind").and_then(Value::as_str) == Some(kind)
+                && o.get("optionId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.is_empty())
+        })
     };
     by_kind("allow_always")
         .or_else(|| by_kind("allow_once"))
-        .or_else(|| options.first())
+        .or_else(|| {
+            options.iter().find(|o| {
+                o.get("optionId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.is_empty())
+            })
+        })
         .map(|o| str_field(o, "optionId"))
-        .filter(|id| !id.is_empty())
 }
 
 #[cfg(test)]
@@ -660,10 +670,14 @@ mod tests {
                 call: ToolCall::Todo {
                     items: vec![
                         TodoItem {
+                            id: None,
+                            status: None,
                             text: "read code".into(),
                             done: true
                         },
                         TodoItem {
+                            id: None,
+                            status: Some(zeron_proto::TodoStatus::InProgress),
                             text: "write fix".into(),
                             done: false
                         },
@@ -734,6 +748,14 @@ mod tests {
             json!({ "optionId": "no", "name": "Reject", "kind": "reject_once" }),
         ];
         assert_eq!(preferred_allow_option(&options), Some("always".into()));
+        let malformed_preferred = vec![
+            json!({ "optionId": "", "kind": "allow_always" }),
+            json!({ "optionId": "once", "kind": "allow_once" }),
+        ];
+        assert_eq!(
+            preferred_allow_option(&malformed_preferred),
+            Some("once".into())
+        );
         let only_reject = vec![json!({ "optionId": "no", "kind": "reject_once" })];
         assert_eq!(preferred_allow_option(&only_reject), Some("no".into()));
         assert_eq!(preferred_allow_option(&[]), None);
