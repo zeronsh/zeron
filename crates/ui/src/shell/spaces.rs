@@ -844,14 +844,23 @@ mod pinned_session_tests {
         let window = pin_test_shell(cx, dir.path());
         window
             .update(cx, |shell, _, cx| {
-                shell.state.update(cx, |state, _| {
-                    state.apply_chats(vec![]);
-                    remote_pin_state(state, true, true);
-                    state.sidebar_preferences.pinned_session_ids = ids(&["live-remote"]);
-                });
-                shell.on_state_changed(&shell.state.clone(), cx);
-                assert_eq!(shell.active_sidebar_pins(cx), ids(&["live-remote"]));
-                assert!(shell.mutate_task.is_none());
+                for scope in [
+                    zeron_proto::WorkspaceScope::Synced,
+                    zeron_proto::WorkspaceScope::Private,
+                ] {
+                    shell.state.update(cx, |state, _| {
+                        state.apply_chats(vec![]);
+                        remote_pin_state(state, true, true);
+                        state.workspace_scope = Some(scope);
+                        if scope == zeron_proto::WorkspaceScope::Private {
+                            state.auth = None;
+                        }
+                        state.sidebar_preferences.pinned_session_ids = ids(&["live-remote"]);
+                    });
+                    shell.on_state_changed(&shell.state.clone(), cx);
+                    assert_eq!(shell.active_sidebar_pins(cx), ids(&["live-remote"]));
+                    assert!(shell.mutate_task.is_none());
+                }
             })
             .unwrap();
     }
@@ -4653,7 +4662,12 @@ impl Shell {
         let Some(flow) = &self.add_space else {
             return Vec::new();
         };
-        let devices = &self.state.read(cx).devices;
+        let state = self.state.read(cx);
+        let devices: Vec<_> = state
+            .devices
+            .iter()
+            .filter(|device| state.can_execute_on(&device.id))
+            .collect();
         let names: Vec<_> = devices.iter().map(|d| d.name.as_str()).collect();
         popover::filter_indices(flow.search.read(cx).text(), &names)
             .into_iter()

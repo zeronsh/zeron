@@ -19,6 +19,7 @@ struct DeviceRow: Identifiable, Hashable {
     /// Explicit feature declarations; unlike semver, these distinguish a
     /// personal integration build from upstream built at the same version.
     var capabilities: [String] = []
+    var role: String? = nil
 
     func supports(_ capability: String) -> Bool {
         capabilities.contains(capability)

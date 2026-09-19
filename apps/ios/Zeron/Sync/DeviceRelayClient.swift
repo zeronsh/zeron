@@ -225,19 +225,10 @@ actor DeviceRelayClient {
                 throw RelayError.hostOffline
             }
         }
-        guard let token = await config.currentToken() else { throw RelayError.notConnected }
-        var components = URLComponents(url: config.edgeURL.appending(path: "device/\(deviceId)/ws"),
-                                       resolvingAgainstBaseURL: false)!
-        components.scheme = components.scheme == "http" ? "ws" : "wss"
-        components.queryItems = [
-            URLQueryItem(name: "role", value: "client"),
-            // A reconnect is a new relay peer. Reusing a connId can briefly
-            // leave two tagged sockets in the hibernating DO and route the
-            // host's response to the stale predecessor.
-            URLQueryItem(name: "connId", value: UUID().uuidString.lowercased()),
-            URLQueryItem(name: "token", value: token),
-        ]
-        let task = URLSession.shared.webSocketTask(with: components.url!)
+        guard let request = await config.deviceRelayRequest(
+            deviceId: deviceId, connectionId: UUID().uuidString.lowercased()
+        ) else { throw RelayError.notConnected }
+        let task = URLSession.shared.webSocketTask(with: request)
         socket = task
         task.resume()
         connected = true

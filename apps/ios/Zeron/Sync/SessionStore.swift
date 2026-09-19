@@ -152,10 +152,10 @@ final class SessionStore {
         // Local-first: the last-synced chat2 snapshot renders instantly (even
         // when the host device is offline); the join backfills incrementally
         // from its cursor.
-        if let saved = DocDisk.loadChat2(into: doc, id: chatId) {
+        if let saved = DocDisk.loadChat2(into: doc, id: chatId, namespace: config.cacheNamespace) {
             cursor = saved
             project()
-        } else if DocDisk.legacySnapshotExists(id: chatId) {
+        } else if DocDisk.legacySnapshotExists(id: chatId, namespace: config.cacheNamespace) {
             // M3 discard-and-adopt: this device's cached doc predates the
             // chat2 lineage. Carry over OUR OWN unresolved commands as fresh
             // entries; the chat2 catch-up repopulates the transcript.
@@ -163,7 +163,7 @@ final class SessionStore {
         }
         saver = DocSaver { [weak self] in
             guard let self else { return }
-            DocDisk.saveChat2(doc: self.doc, id: self.chatId, cursor: self.cursor)
+            DocDisk.saveChat2(doc: self.doc, id: self.chatId, cursor: self.cursor, namespace: self.config.cacheNamespace)
         }
         // Subscription BEFORE any connect: every local commit lands in the
         // client when it exists; commits made earlier are covered by the
@@ -281,7 +281,7 @@ final class SessionStore {
         )
         let client = ChatRoomClient(
             chatId: chatId, device: config.deviceId,
-            urlProvider: { [config, chatId] in await config.chat2SocketURL(chatId: chatId) },
+            requestProvider: { [config, chatId] in await config.chat2SocketRequest(chatId: chatId) },
             checkpointRequest: { [config, chatId] in
                 await config.chat2CheckpointRequest(chatId: chatId)
             },
@@ -314,7 +314,7 @@ final class SessionStore {
     /// execution; basedOn is dropped, its turn ids don't exist here).
     private func adoptLegacyCommands() {
         let legacy = LoroDoc()
-        guard DocDisk.load(into: legacy, id: chatId),
+        guard DocDisk.load(into: legacy, id: chatId, namespace: config.cacheNamespace),
               let root = legacy.getDeepValue().mapValue,
               let commands = root["commands"]?.listValue, !commands.isEmpty else { return }
         let now = nowMs()
@@ -361,12 +361,15 @@ final class SessionStore {
     }
 
     func stop() {
+        started = false
         subscriptions.removeAll()
         saver?.flush()
         if let chatRoom {
             Task { await chatRoom.stop() }
         }
         chatRoom = nil
+        if let hostRelay { Task { await hostRelay.client.close() } }
+        hostRelay = nil
         connected = false
     }
 
@@ -604,7 +607,7 @@ final class SessionStore {
         // Stash bytes FIRST — before anything references them — so escorts
         // survive a relaunch and retries can re-derive their transfers.
         for transfer in transfers {
-            UploadStash.save(uploadId: transfer.uploadId, data: transfer.data)
+            UploadStash.save(uploadId: transfer.uploadId, data: transfer.data, namespace: config.cacheNamespace)
         }
         let refs = transfers.map { UploadStash.pendingRef(uploadId: $0.uploadId, name: $0.name) }
         let content = withAttachments(text: prompt, paths: refs)
@@ -710,7 +713,7 @@ final class SessionStore {
             var backoffMs = Self.transferBackoffBaseMs
             let deadline = nowMs() + Self.attachmentWaitMaxMs
             let totalBytes = max(remaining.reduce(0) { $0 + $1.data.count }, 1)
-            while let self, !pending.isEmpty, nowMs() < deadline {
+            while let self, self.started, !pending.isEmpty, nowMs() < deadline {
                 do {
                     while let transfer = pending.first {
                         let doneBytes = totalBytes - pending.reduce(0) { $0 + $1.data.count }
@@ -722,7 +725,7 @@ final class SessionStore {
                                 (Double(doneBytes) + fraction * Double(transfer.data.count))
                                     / Double(totalBytes), 0.99)
                         }
-                        UploadStash.delete(uploadId: transfer.uploadId)
+                        UploadStash.delete(uploadId: transfer.uploadId, namespace: self.config.cacheNamespace)
                         pending.removeFirst()
                     }
                     self.nudgeHost()
@@ -771,7 +774,7 @@ final class SessionStore {
             for ref in refs {
                 guard let (uploadId, name) = UploadStash.parseRef(ref),
                       seen.insert(uploadId).inserted,
-                      let data = UploadStash.load(uploadId: uploadId) else { continue }
+                      let data = UploadStash.load(uploadId: uploadId, namespace: config.cacheNamespace) else { continue }
                 transfers.append(AttachmentTransfer(uploadId: uploadId, name: name, data: data))
             }
         }

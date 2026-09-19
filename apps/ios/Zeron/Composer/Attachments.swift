@@ -302,11 +302,21 @@ final class AttachmentImageCache {
     @ObservationIgnored private var loadedBytes = 0
     @ObservationIgnored private var config: AppConfig?
     @ObservationIgnored private var relays: [String: DeviceRelayClient] = [:]
+    @ObservationIgnored private var generation = 0
+
+    func reset() {
+        generation += 1
+        entries = [:]
+        loadedBytes = 0
+        for relay in relays.values { Task { await relay.close() } }
+        relays = [:]
+        config = nil
+    }
 
     func configure(config: AppConfig) {
         if self.config !== config {
+            reset()
             self.config = config
-            relays = [:]
         }
     }
 
@@ -347,9 +357,11 @@ final class AttachmentImageCache {
             relays[deviceId] = client
             return client
         }()
+        let generation = generation
         Task { @MainActor [weak self] in
             let loaded = await Self.readImage(relay: relay, path: path, expectedMimeType: expectedMimeType)
-            guard let self, case .loading? = self.entries[key] else { return }
+            guard let self, self.generation == generation,
+                  case .loading? = self.entries[key] else { return }
             if let loaded {
                 self.store(key: key, name: loaded.name, image: loaded.image, bytes: loaded.bytes)
             } else {

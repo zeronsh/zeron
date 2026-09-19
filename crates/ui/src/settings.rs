@@ -26,6 +26,7 @@ pub mod harnesses;
 pub mod notifications;
 pub mod shortcuts;
 pub mod widgets;
+pub mod workspace;
 
 /// Sidebar drag-resize bounds (px).
 pub const SIDEBAR_MIN: f32 = 224.0;
@@ -987,9 +988,11 @@ pub fn sidebar_pin_profile_key(
     scope: Option<WorkspaceScope>,
     auth: Option<&AuthState>,
     development_org_id: Option<&str>,
+    private_workspace_id: Option<&str>,
 ) -> Option<String> {
     match scope? {
         WorkspaceScope::Local => Some("local".to_string()),
+        WorkspaceScope::Private => Some(format!("private:{}", private_workspace_id?)),
         WorkspaceScope::Synced => {
             let AuthState::SignedIn {
                 user,
@@ -2377,13 +2380,14 @@ mod tests {
     #[test]
     fn sidebar_pin_profile_keys_include_the_full_workspace_identity() {
         assert_eq!(
-            sidebar_pin_profile_key(Some(WorkspaceScope::Local), None, None).as_deref(),
+            sidebar_pin_profile_key(Some(WorkspaceScope::Local), None, None, None).as_deref(),
             Some("local")
         );
         assert_eq!(
             sidebar_pin_profile_key(
                 Some(WorkspaceScope::Synced),
                 Some(&signed_in("user-1", Some("org-1"))),
+                None,
                 None,
             )
             .as_deref(),
@@ -2394,6 +2398,7 @@ mod tests {
                 Some(WorkspaceScope::Development),
                 Some(&signed_in("dev-user@dev-org-2", None)),
                 Some("ignored-org"),
+                None,
             )
             .as_deref(),
             Some("development:dev-org-2:dev-user")
@@ -2403,6 +2408,7 @@ mod tests {
                 Some(WorkspaceScope::Development),
                 Some(&signed_in("dev-user", None)),
                 Some("configured-org"),
+                None,
             )
             .as_deref(),
             Some("development:configured-org:dev-user")
@@ -2412,7 +2418,7 @@ mod tests {
     #[test]
     fn sidebar_pin_profile_key_waits_for_a_complete_remote_identity() {
         assert_eq!(
-            sidebar_pin_profile_key(Some(WorkspaceScope::Synced), None, None),
+            sidebar_pin_profile_key(Some(WorkspaceScope::Synced), None, None, None),
             None
         );
         assert_eq!(
@@ -2420,12 +2426,39 @@ mod tests {
                 Some(WorkspaceScope::Synced),
                 Some(&signed_in("user-1", None)),
                 None,
+                None,
             ),
             None
         );
         assert_eq!(
-            sidebar_pin_profile_key(Some(WorkspaceScope::Development), None, None),
+            sidebar_pin_profile_key(Some(WorkspaceScope::Development), None, None, None),
             None
+        );
+    }
+
+    #[test]
+    fn private_sidebar_pin_profiles_wait_for_identity_and_isolate_workspaces() {
+        assert_eq!(
+            sidebar_pin_profile_key(Some(WorkspaceScope::Private), None, None, None),
+            None
+        );
+        assert_eq!(
+            sidebar_pin_profile_key(
+                Some(WorkspaceScope::Private),
+                None,
+                None,
+                Some("workspace-a")
+            ),
+            Some("private:workspace-a".into())
+        );
+        assert_eq!(
+            sidebar_pin_profile_key(
+                Some(WorkspaceScope::Private),
+                None,
+                None,
+                Some("workspace-b")
+            ),
+            Some("private:workspace-b".into())
         );
     }
 

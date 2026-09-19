@@ -7,6 +7,7 @@
 mod auth_cli;
 mod daemon;
 mod paths;
+mod private_cli;
 mod update_cli;
 
 use clap::{Parser, Subcommand};
@@ -30,6 +31,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Manage a workspace on your own Tailscale network.
+    Private {
+        #[command(subcommand)]
+        command: private_cli::Command,
+    },
     /// Run the engine without a UI (local-only unless a saved session enables sync).
     Headless,
     /// Sign in and enable sync on the next engine start.
@@ -212,6 +218,10 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Update { check }) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(update_cli::update(&edge_url_from_env(), check))
+        }
+        Some(Command::Private { command }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(private_cli::run(engine_config_from_env(), command))
         }
         Some(Command::Daemon { command }) => match command {
             DaemonCommand::Install => daemon::install(&engine_config_from_env().data_dir),

@@ -8,7 +8,7 @@ import Foundation
 import Loro
 
 enum DocDisk {
-    static var directory: URL {
+    private static var directory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory,
                                             in: .userDomainMask)[0]
             .appendingPathComponent("ZeronDocs", isDirectory: true)
@@ -16,29 +16,39 @@ enum DocDisk {
         return base
     }
 
-    static func url(for id: String) -> URL {
+    static func directory(namespace: String) -> URL {
+        let safe = namespace.filter { $0.isLetter || $0.isNumber || $0 == "-" }
+        let scoped = directory.appendingPathComponent("profiles", isDirectory: true)
+            .appendingPathComponent(safe, isDirectory: true)
+        try? FileManager.default.createDirectory(at: scoped, withIntermediateDirectories: true)
+        return scoped
+    }
+
+    static func url(for id: String, namespace: String) -> URL {
         let safe = id.replacingOccurrences(of: "/", with: "_")
-        return directory.appendingPathComponent("\(safe).loro")
+        return directory(namespace: namespace).appendingPathComponent("\(safe).loro")
     }
 
     /// Import the saved snapshot, if any. Returns whether anything loaded.
     @discardableResult
-    static func load(into doc: LoroDoc, id: String) -> Bool {
-        guard let data = try? Data(contentsOf: url(for: id)), !data.isEmpty else { return false }
+    static func load(into doc: LoroDoc, id: String, namespace: String) -> Bool {
+        guard let data = try? Data(contentsOf: url(for: id, namespace: namespace)), !data.isEmpty else { return false }
         return (try? doc.importWith(bytes: data, origin: "disk")) != nil
     }
 
     /// Atomically persist the doc's snapshot.
-    static func save(doc: LoroDoc, id: String) {
+    static func save(doc: LoroDoc, id: String, namespace: String) {
         guard let data = try? doc.export(mode: .snapshot) else { return }
-        try? data.write(to: url(for: id), options: .atomic)
+        try? data.write(to: url(for: id, namespace: namespace), options: .atomic)
     }
 
     /// The workspace registry's persisted blob ({rows, cursor, gcFloor,
     /// clock, pending} JSON — RegistryDoc.toData). Replaces the old `ws3_`
     /// Loro workspace snapshot; session docs stay Loro snapshots unchanged.
-    static func registryURL(orgId: String, userId: String) -> URL {
-        directory.appendingPathComponent("registry1_\(orgId)_\(userId).json")
+    static func registryURL(orgId: String, userId: String, namespace: String) -> URL {
+        let org = orgId.replacingOccurrences(of: "/", with: "_")
+        let user = userId.replacingOccurrences(of: "/", with: "_")
+        return directory(namespace: namespace).appendingPathComponent("registry1_\(org)_\(user).json")
     }
 
     // MARK: chat2 lineage snapshots (docs/chat2-sync.md C2)
@@ -52,19 +62,19 @@ enum DocDisk {
     /// kept on disk for rollback until LRU pruning ages them out.
     private static let chat2Magic = Data("C2SNAP01".utf8)
 
-    static func chat2URL(for id: String) -> URL {
+    static func chat2URL(for id: String, namespace: String) -> URL {
         let safe = id.replacingOccurrences(of: "/", with: "_")
-        return directory.appendingPathComponent("c2_\(safe).loro")
+        return directory(namespace: namespace).appendingPathComponent("c2_\(safe).loro")
     }
 
-    static func legacySnapshotExists(id: String) -> Bool {
-        FileManager.default.fileExists(atPath: url(for: id).path)
+    static func legacySnapshotExists(id: String, namespace: String) -> Bool {
+        FileManager.default.fileExists(atPath: url(for: id, namespace: namespace).path)
     }
 
     /// Import the chat2 snapshot; returns its cursor, or nil when absent or
     /// unreadable (caller starts fresh at cursor 0 — the room re-serves).
-    static func loadChat2(into doc: LoroDoc, id: String) -> UInt64? {
-        guard let data = try? Data(contentsOf: chat2URL(for: id)),
+    static func loadChat2(into doc: LoroDoc, id: String, namespace: String) -> UInt64? {
+        guard let data = try? Data(contentsOf: chat2URL(for: id, namespace: namespace)),
               data.count >= 16, data.prefix(8) == chat2Magic else { return nil }
         var cursor: UInt64 = 0
         for (ix, byte) in data.subdata(in: 8..<16).enumerated() {
@@ -77,20 +87,20 @@ enum DocDisk {
     }
 
     /// Atomically persist the chat2 doc snapshot + its room cursor.
-    static func saveChat2(doc: LoroDoc, id: String, cursor: UInt64) {
+    static func saveChat2(doc: LoroDoc, id: String, cursor: UInt64, namespace: String) {
         guard let snapshot = try? doc.export(mode: .snapshot) else { return }
         var data = chat2Magic
         var le = cursor.littleEndian
         withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
         data.append(snapshot)
-        try? data.write(to: chat2URL(for: id), options: .atomic)
+        try? data.write(to: chat2URL(for: id, namespace: namespace), options: .atomic)
     }
 
     /// LRU-prune session snapshots (the workspace registry blob is always
     /// kept; a leftover `ws3_` Loro snapshot is retained for rollback).
-    static func prune(keep: Int) {
+    static func prune(keep: Int, namespace: String) {
         let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(at: directory,
+        guard let files = try? fm.contentsOfDirectory(at: directory(namespace: namespace),
                                                       includingPropertiesForKeys: [.contentModificationDateKey])
         else { return }
         let sessions = files.filter {
@@ -109,10 +119,23 @@ enum DocDisk {
         }
     }
 
-    /// Sign-out hygiene: local doc state belongs to the signed-in identity.
-    static func wipeAll() {
-        try? FileManager.default.removeItem(at: directory)
+    static func wipe(namespace: String) {
+        try? FileManager.default.removeItem(at: directory(namespace: namespace))
     }
+
+    /// Called only while restoring the cloud identity that owned the old cache.
+    static func migrateLegacyCache(namespace: String) {
+        let fm = FileManager.default
+        let target = directory(namespace: namespace)
+        guard let files = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        else { return }
+        for source in files where source.lastPathComponent != "profiles" {
+            let destination = target.appendingPathComponent(source.lastPathComponent)
+            guard !fm.fileExists(atPath: destination.path) else { continue }
+            try? fm.moveItem(at: source, to: destination)
+        }
+    }
+
 }
 
 /// Debounced snapshot persistence shared by the doc stores: poke on every

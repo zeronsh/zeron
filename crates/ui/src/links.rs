@@ -15,12 +15,49 @@ pub struct HarnessConversationLink {
     pub url: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivateInvitationLink {
+    pub hub_url: String,
+    pub code: String,
+}
+
+pub fn parse_private_invitation_link(value: &str) -> Result<PrivateInvitationLink, &'static str> {
+    let url = url::Url::parse(value).map_err(|_| "Invalid private invitation")?;
+    if url.scheme() != "zeron" || url.host_str() != Some("private") || url.path() != "/join" {
+        return Err("Invalid private invitation");
+    }
+    let mut hub = None;
+    let mut code = None;
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "hub" if hub.is_none() => hub = Some(value.into_owned()),
+            "code" if code.is_none() => code = Some(value.into_owned()),
+            _ => return Err("Invalid private invitation fields"),
+        }
+    }
+    let hub_url = hub.ok_or("Missing hub address")?;
+    let hub = url::Url::parse(&hub_url).map_err(|_| "Invalid hub address")?;
+    if hub.scheme() != "https"
+        || hub.host_str().is_none()
+        || !hub.username().is_empty()
+        || hub.password().is_some()
+    {
+        return Err("The invitation needs an HTTPS hub address without embedded credentials");
+    }
+    let code = code.ok_or("Missing pairing code")?;
+    if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("Invalid pairing code");
+    }
+    Ok(PrivateInvitationLink { hub_url, code })
+}
+
 /// Opaque locator: enough to reject links for a different local/synced
 /// workspace without putting device, user, or organization ids in the URL.
 pub fn workspace_locator(
     scope: Option<WorkspaceScope>,
     auth: Option<&AuthState>,
     local_device_id: Option<&str>,
+    private_workspace_id: Option<&str>,
 ) -> Option<String> {
     let scope = scope?;
     let identity = match scope {
@@ -35,6 +72,7 @@ pub fn workspace_locator(
             )
         }
         WorkspaceScope::Local => format!("device:{}", local_device_id?),
+        WorkspaceScope::Private => format!("private:{}", private_workspace_id?),
     };
     let mut hash = Sha256::new();
     hash.update(format!("{scope:?}\0{identity}"));
@@ -118,6 +156,63 @@ fn decode_component(value: &str) -> Result<String, &'static str> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn private_invitation_requires_an_unambiguous_https_address_and_code() {
+        let invitation = parse_private_invitation_link(
+            "zeron://private/join?hub=https%3A%2F%2Fhub.example.ts.net%3A8443&code=012345",
+        )
+        .unwrap();
+        assert_eq!(invitation.hub_url, "https://hub.example.ts.net:8443");
+        assert_eq!(invitation.code, "012345");
+        assert!(
+            parse_private_invitation_link("zeron://private/join?hub=http://hub&code=012345")
+                .is_err()
+        );
+        assert!(
+            parse_private_invitation_link(
+                "zeron://private/join?hub=https://hub&code=012345&code=999999"
+            )
+            .is_err()
+        );
+        assert!(
+            parse_private_invitation_link(
+                "zeron://private/join?hub=https://user:secret@hub&code=012345"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn private_locator_is_shared_across_devices_and_isolated_between_workspaces() {
+        let first = workspace_locator(
+            Some(WorkspaceScope::Private),
+            Some(&AuthState::SignedOut),
+            Some("device-a"),
+            Some("workspace-a"),
+        );
+        let second = workspace_locator(
+            Some(WorkspaceScope::Private),
+            Some(&AuthState::SignedOut),
+            Some("device-b"),
+            Some("workspace-a"),
+        );
+        assert!(first.is_some());
+        assert_eq!(first, second);
+        assert_ne!(
+            first,
+            workspace_locator(
+                Some(WorkspaceScope::Private),
+                None,
+                Some("device-a"),
+                Some("workspace-b")
+            )
+        );
+        assert_eq!(
+            None,
+            workspace_locator(Some(WorkspaceScope::Private), None, Some("device-a"), None)
+        );
+    }
+
     fn harness_chat(harness: HarnessId) -> Chat {
         Chat {
             id: "chat".into(),
@@ -168,11 +263,11 @@ mod tests {
     #[test]
     fn local_workspace_locator_waits_for_device_identity() {
         assert_eq!(
-            workspace_locator(Some(WorkspaceScope::Local), None, None),
+            workspace_locator(Some(WorkspaceScope::Local), None, None, None),
             None
         );
-        let first = workspace_locator(Some(WorkspaceScope::Local), None, Some("device-a"));
-        let second = workspace_locator(Some(WorkspaceScope::Local), None, Some("device-b"));
+        let first = workspace_locator(Some(WorkspaceScope::Local), None, Some("device-a"), None);
+        let second = workspace_locator(Some(WorkspaceScope::Local), None, Some("device-b"), None);
         assert!(first.is_some());
         assert_ne!(first, second);
     }
@@ -180,9 +275,9 @@ mod tests {
     #[test]
     fn synced_workspace_locator_waits_for_signed_in_identity() {
         let scope = Some(WorkspaceScope::Synced);
-        assert_eq!(workspace_locator(scope, None, Some("device-a")), None);
+        assert_eq!(workspace_locator(scope, None, Some("device-a"), None), None);
         assert_eq!(
-            workspace_locator(scope, Some(&AuthState::SignedOut), Some("device-a")),
+            workspace_locator(scope, Some(&AuthState::SignedOut), Some("device-a"), None),
             None
         );
         assert_eq!(
@@ -196,6 +291,7 @@ mod tests {
                     },
                 }),
                 Some("device-a"),
+                None,
             ),
             None
         );
@@ -210,6 +306,7 @@ mod tests {
                     },
                     org_id: Some("org-a".into()),
                 }),
+                None,
                 None,
             )
             .is_some()

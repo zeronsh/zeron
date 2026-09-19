@@ -130,7 +130,23 @@ struct RoutedSteer {
     message_id: String,
 }
 
+struct Admission {
+    execution_enabled: bool,
+    paused: bool,
+    starting: usize,
+}
+
+pub(crate) struct StartPermit {
+    admission: Arc<Mutex<Admission>>,
+}
+impl Drop for StartPermit {
+    fn drop(&mut self) {
+        lock(&self.admission).starting -= 1;
+    }
+}
+
 struct Inner {
+    admission: Arc<Mutex<Admission>>,
     device_id: String,
     journal: Arc<RunJournal>,
     registry: Arc<HarnessRegistry>,
@@ -182,6 +198,11 @@ impl SessionsEngine {
         let (sessions_tx, _) = watch::channel(Vec::new());
         Self {
             inner: Arc::new(Inner {
+                admission: Arc::new(Mutex::new(Admission {
+                    execution_enabled: true,
+                    paused: false,
+                    starting: 0,
+                })),
                 device_id,
                 journal,
                 registry,
@@ -282,8 +303,35 @@ impl SessionsEngine {
             .is_some_and(is_active)
     }
 
-    /// Any run currently working or blocked on input — the auto-updater's
-    /// "don't restart from under a session" gate.
+    pub(crate) fn disable_execution(&self) {
+        lock(&self.inner.admission).execution_enabled = false;
+    }
+
+    pub(crate) fn start_permit(&self) -> Option<StartPermit> {
+        let mut admission = lock(&self.inner.admission);
+        if admission.paused || !admission.execution_enabled {
+            return None;
+        }
+        admission.starting += 1;
+        Some(StartPermit {
+            admission: self.inner.admission.clone(),
+        })
+    }
+
+    pub(crate) fn pause_if_idle(&self) -> bool {
+        let mut admission = lock(&self.inner.admission);
+        if admission.paused || admission.starting != 0 || self.any_active() {
+            return false;
+        }
+        admission.paused = true;
+        true
+    }
+
+    pub(crate) fn resume_starts(&self) {
+        lock(&self.inner.admission).paused = false;
+    }
+
+    /// Any run currently working or blocked on input.
     pub fn any_active(&self) -> bool {
         lock(&self.inner.statuses).values().any(is_active)
     }
@@ -358,6 +406,9 @@ impl SessionsEngine {
         mut message_id: Option<String>,
         startup_retry: bool,
     ) -> Result<String, EngineError> {
+        let _permit = self.start_permit().ok_or_else(|| {
+            EngineError::Other("Workspace is switching; retry after reconnecting".into())
+        })?;
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = expand_home(&request.cwd);
@@ -539,6 +590,9 @@ impl SessionsEngine {
         prompt: &str,
         message_id: Option<String>,
     ) -> Result<SteerOutcome, EngineError> {
+        let _permit = self.start_permit().ok_or_else(|| {
+            EngineError::Other("Workspace is switching; retry after reconnecting".into())
+        })?;
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .filter(|h| h.steerable)

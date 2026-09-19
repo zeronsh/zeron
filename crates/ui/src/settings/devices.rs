@@ -1,6 +1,4 @@
-//! Settings → Devices (feature-inventory §1.5): the device registry — name,
-//! platform, last-seen, presence dot, a "This device" badge, click-to-copy id,
-//! and a Rename dialog (Mutate renameDevice).
+//! Device membership and runtime metadata in Workspace settings.
 
 use chrono::{DateTime, Utc};
 use gpui::{
@@ -51,9 +49,95 @@ pub fn devices_subtitle(scope: Option<WorkspaceScope>) -> &'static str {
     match scope {
         Some(WorkspaceScope::Local) => "Manage device details stored in this local workspace.",
         Some(WorkspaceScope::Synced) => "Manage device names and inspect synced device metadata.",
+        Some(WorkspaceScope::Private) => {
+            "Registered agent servers. Manage paired devices on the workspace host."
+        }
         Some(WorkspaceScope::Development) | None => "Manage device names for this workspace.",
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum NodeRole {
+    Client,
+    Server,
+}
+
+impl NodeRole {
+    pub(super) fn wire(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Server => "server",
+        }
+    }
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Client => "Client",
+            Self::Server => "Agent server",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PairedDevice {
+    pub device_id: String,
+    pub name: String,
+    pub role: NodeRole,
+    #[serde(with = "chrono::serde::ts_milliseconds")]
+    pub paired_at: DateTime<Utc>,
+}
+
+struct WorkspaceDevice {
+    device: zeron_proto::Device,
+    registered: bool,
+    paired: bool,
+}
+
+fn workspace_devices(
+    registered: &[zeron_proto::Device],
+    paired: Option<&[PairedDevice]>,
+) -> Vec<WorkspaceDevice> {
+    match paired {
+        Some(nodes) => nodes
+            .iter()
+            .map(|node| {
+                let existing = registered.iter().find(|device| device.id == node.device_id);
+                let mut device = existing.cloned().unwrap_or_else(|| zeron_proto::Device {
+                    id: node.device_id.clone(),
+                    name: node.name.clone(),
+                    platform: String::new(),
+                    role: None,
+                    last_seen_at: None,
+                    created_at: Some(node.paired_at),
+                    version: None,
+                    cursor_sdk_version: None,
+                    capabilities: Vec::new(),
+                });
+                device.role = Some(node.role.wire().into());
+                WorkspaceDevice {
+                    device,
+                    registered: existing.is_some(),
+                    paired: true,
+                }
+            })
+            .collect(),
+        None => registered
+            .iter()
+            .cloned()
+            .map(|device| WorkspaceDevice {
+                device,
+                registered: true,
+                paired: false,
+            })
+            .collect(),
+    }
+}
+
+pub(super) enum DeviceEvent {
+    Revoke(String),
+}
+impl gpui::EventEmitter<DeviceEvent> for DevicesSection {}
 
 struct RenameDialog {
     device_id: String,
@@ -61,9 +145,11 @@ struct RenameDialog {
     _events: Subscription,
 }
 
-pub struct DevicesPage {
+pub struct DevicesSection {
     state: Entity<AppState>,
-    scroll: widgets::PageScroll,
+    paired: Option<Vec<PairedDevice>>,
+    revoke: Option<String>,
+    access_busy: bool,
     rename: Option<RenameDialog>,
     /// Device id whose id-chip shows "Copied" right now.
     copied: Option<String>,
@@ -73,12 +159,14 @@ pub struct DevicesPage {
     _observe: Subscription,
 }
 
-impl DevicesPage {
+impl DevicesSection {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |_, _, cx| cx.notify());
         Self {
             state,
-            scroll: widgets::PageScroll::default(),
+            paired: None,
+            revoke: None,
+            access_busy: false,
             rename: None,
             copied: None,
             error: None,
@@ -150,7 +238,7 @@ impl DevicesPage {
         cx.notify();
     }
 
-    fn render_rename_dialog(
+    pub(super) fn render_rename_dialog(
         &mut self,
         viewport: gpui::Size<gpui::Pixels>,
         cx: &mut Context<Self>,
@@ -190,20 +278,17 @@ impl DevicesPage {
         Some(popover::modal("rename-device-dialog", viewport, card))
     }
 
-    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
-        if self.scroll.set_list_hovered(*hovered) {
+    pub(super) fn set_membership(
+        &mut self,
+        nodes: Option<Vec<PairedDevice>>,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.paired != nodes || self.access_busy != busy {
+            self.paired = nodes;
+            self.access_busy = busy;
             cx.notify();
         }
-    }
-}
-
-impl popover::ScrollRailHost for DevicesPage {
-    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
-        self.scroll.rail_bar()
-    }
-
-    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
-        self.scroll.rail_scroll()
     }
 }
 
@@ -229,8 +314,8 @@ pub fn short_id(id: &str) -> String {
     }
 }
 
-impl Render for DevicesPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl Render for DevicesSection {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let now = Utc::now();
         let (devices, local_id, workspace_scope) = {
@@ -241,15 +326,16 @@ impl Render for DevicesPage {
                 state.workspace_scope,
             )
         };
+        let devices = workspace_devices(&devices, self.paired.as_deref());
         let copied = self.copied.clone();
-        let dialog = self.render_rename_dialog(window.viewport_size(), cx);
         let emerald = theme.success; // emerald-400
         let count = devices.len();
 
         let rows: Vec<AnyElement> = devices
             .into_iter()
             .enumerate()
-            .map(|(ix, device)| {
+            .map(|(ix, entry)| {
+                let device = entry.device;
                 let online = device_online(device.last_seen_at, now);
                 let is_local = local_id.as_deref() == Some(device.id.as_str());
                 let id_copied = copied.as_deref() == Some(device.id.as_str());
@@ -260,6 +346,7 @@ impl Render for DevicesPage {
                     "macos" | "darwin" => crate::icons::LAPTOP,
                     "web" => crate::icons::GLOBAL,
                     "ios" | "android" => crate::icons::SMARTPHONE,
+                    "" if device.role.as_deref() == Some("client") => crate::icons::SMARTPHONE,
                     _ => crate::icons::MONITOR,
                 };
                 // Presence lives ON the identity tile: a corner dot (emerald
@@ -267,35 +354,57 @@ impl Render for DevicesPage {
                 // tone so it "cuts" the tile — zeron settings.devices.tsx
                 // `border-2 border-[var(--card)]` +
                 // `shadow-[0_0_6px_rgba(52,211,153,0.55)]`.
-                let tile = widgets::row_tile(&theme, platform_icon).relative().child(
-                    div()
-                        .absolute()
-                        .bottom(px(-3.0))
-                        .right(px(-3.0))
-                        .size(px(9.0))
-                        .rounded_full()
-                        .border_2()
-                        .border_color(theme.surface)
-                        .when(online, |el| {
-                            el.bg(emerald).shadow(vec![gpui::BoxShadow {
-                                color: emerald.opacity(0.55),
-                                offset: gpui::point(px(0.0), px(0.0)),
-                                blur_radius: px(6.0),
-                                spread_radius: px(0.0),
-                                inset: false,
-                            }])
-                        })
-                        .when(!online, |el| el.bg(crate::theme::ink(0.22))),
+                let tile = widgets::row_tile(&theme, platform_icon).relative().when(
+                    device.last_seen_at.is_some(),
+                    |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .bottom(px(-3.0))
+                                .right(px(-3.0))
+                                .size(px(9.0))
+                                .rounded_full()
+                                .border_2()
+                                .border_color(theme.surface)
+                                .when(online, |el| {
+                                    el.bg(emerald).shadow(vec![gpui::BoxShadow {
+                                        color: emerald.opacity(0.55),
+                                        offset: gpui::point(px(0.0), px(0.0)),
+                                        blur_radius: px(6.0),
+                                        spread_radius: px(0.0),
+                                        inset: false,
+                                    }])
+                                })
+                                .when(!online, |el| el.bg(crate::theme::ink(0.22))),
+                        )
+                    },
                 );
                 // One quiet meta line: platform · version · (offline: last
                 // seen) · id chip.
-                let mut meta: Vec<AnyElement> = vec![
-                    div()
-                        .child(SharedString::from(
-                            platform_label(&device.platform).to_string(),
-                        ))
-                        .into_any_element(),
-                ];
+                let mut meta: Vec<AnyElement> = Vec::new();
+                if let Some(role) = device.role.as_deref() {
+                    meta.push(
+                        div()
+                            .child(match role {
+                                "client" => "Client",
+                                "server" => "Agent server",
+                                _ => "Device",
+                            })
+                            .into_any_element(),
+                    );
+                }
+                if !device.platform.is_empty() {
+                    meta.push(
+                        div()
+                            .child(SharedString::from(
+                                platform_label(&device.platform).to_string(),
+                            ))
+                            .into_any_element(),
+                    );
+                }
+                if entry.paired && device.last_seen_at.is_none() {
+                    meta.push(div().child("Paired").into_any_element());
+                }
                 if let Some(version) = device.version.as_deref().filter(|v| !v.is_empty()) {
                     meta.push(
                         div()
@@ -314,7 +423,7 @@ impl Render for DevicesPage {
                         )))
                         .into_any_element(),
                 );
-                if !online {
+                if !online && device.last_seen_at.is_some() {
                     meta.push(
                         div()
                             .child(SharedString::from(format!(
@@ -325,7 +434,9 @@ impl Render for DevicesPage {
                     );
                 }
                 // "Added {time ago}" — always present (zeron settings.devices.tsx).
-                if let Some(created) = device.created_at {
+                if !entry.paired
+                    && let Some(created) = device.created_at
+                {
                     meta.push(
                         div()
                             .child(SharedString::from(format!(
@@ -382,33 +493,59 @@ impl Render for DevicesPage {
                                 }),
                         )
                     })
-                    .child(
-                        // `opacity-70 hover:opacity-100` (zeron: also rises on
-                        // row hover — gpui has no group-hover, so the button's
-                        // own hover carries the reveal).
-                        widgets::ghost_action(&theme)
-                            .id(("device-rename", ix))
-                            .opacity(0.7)
-                            .hover(|s| {
-                                s.opacity(1.0)
-                                    .bg(crate::theme::ink(0.06))
-                                    .text_color(theme.text)
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_rename(rename_id.clone(), rename_name.clone(), cx);
-                            }))
-                            .child(
-                                crate::icons::icon(crate::icons::PEN)
-                                    .size(px(14.0))
-                                    .text_color(theme.text_muted),
-                            )
-                            .child(SharedString::from("Rename")),
-                    )
+                    .when(entry.registered, |el| {
+                        el.child(
+                            // `opacity-70 hover:opacity-100` (zeron: also rises on
+                            // row hover — gpui has no group-hover, so the button's
+                            // own hover carries the reveal).
+                            widgets::ghost_action(&theme)
+                                .id(("device-rename", ix))
+                                .opacity(0.7)
+                                .hover(|s| {
+                                    s.opacity(1.0)
+                                        .bg(crate::theme::ink(0.06))
+                                        .text_color(theme.text)
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_rename(rename_id.clone(), rename_name.clone(), cx);
+                                }))
+                                .child(
+                                    crate::icons::icon(crate::icons::PEN)
+                                        .size(px(14.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from("Rename")),
+                        )
+                    })
+                    .when(entry.paired && !is_local, |el| {
+                        let id = device.id.clone();
+                        let confirm = self.revoke.as_ref() == Some(&id);
+                        el.child(
+                            widgets::ghost_action(&theme)
+                                .id(("device-revoke", ix))
+                                .text_color(theme.danger)
+                                .opacity(if self.access_busy { 0.45 } else { 1.0 })
+                                .hover(|el| el.bg(theme.danger.opacity(0.08)))
+                                .child(if confirm { "Confirm revoke" } else { "Revoke" })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if this.access_busy {
+                                        return;
+                                    }
+                                    if this.revoke.as_ref() == Some(&id) {
+                                        this.revoke = None;
+                                        cx.emit(DeviceEvent::Revoke(id.clone()));
+                                    } else {
+                                        this.revoke = Some(id.clone());
+                                        cx.notify();
+                                    }
+                                })),
+                        )
+                    })
                     .into_any_element()
             })
             .collect();
 
-        let card = widgets::section_card(&theme);
+        let card = widgets::section_card(&theme).mt(px(12.0));
         let card = if rows.is_empty() {
             card.child(
                 div()
@@ -423,45 +560,21 @@ impl Render for DevicesPage {
             card.children(rows)
         };
 
-        let scrollbar = popover::rail(self, "devices-page-scrollbar", &theme, cx);
         div()
-            .id("devices-page-host")
-            .relative()
-            .size_full()
-            .on_hover(cx.listener(Self::on_scroll_hovered))
-            .child(
-                div()
-                    .id("devices-page")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll.scroll)
-                    .child(
-                        widgets::page_column()
-                            .child(widgets::page_header(
-                                &theme,
-                                "Devices",
-                                (count > 0).then_some(count),
-                            ))
-                            .child(widgets::page_subtitle(
-                                &theme,
-                                devices_subtitle(workspace_scope),
-                            ))
-                            .when_some(self.error.clone(), |el, message| {
-                                el.child(
-                                    widgets::error_strip(&theme, message)
-                                        .id("devices-error")
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.error = None;
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                            .child(card),
-                    ),
-            )
-            .children(scrollbar)
-            .when_some(dialog, |el, dialog| el.child(dialog))
+            .mt(px(24.0))
+            .child(widgets::page_header(&theme, "Devices", Some(count)))
+            .child(widgets::page_subtitle(
+                &theme,
+                if self.paired.is_some() {
+                    "All paired devices. Agent servers run agents; clients control them."
+                } else {
+                    devices_subtitle(workspace_scope)
+                },
+            ))
+            .when_some(self.error.clone(), |el, message| {
+                el.child(widgets::error_strip(&theme, message))
+            })
+            .child(card)
     }
 }
 
@@ -469,6 +582,71 @@ impl Render for DevicesPage {
 mod tests {
     use super::*;
     use chrono::TimeDelta;
+
+    fn registered_server() -> zeron_proto::Device {
+        zeron_proto::Device {
+            id: "server".into(),
+            name: "Renamed workstation".into(),
+            platform: "linux".into(),
+            role: Some("server".into()),
+            last_seen_at: Some(DateTime::from_timestamp(1_700_000_000, 0).unwrap()),
+            created_at: None,
+            version: Some("0.2.71".into()),
+            cursor_sdk_version: Some("1.0.31".into()),
+            capabilities: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn private_devices_include_clients_and_preserve_server_metadata() {
+        let server = registered_server();
+        let nodes = vec![
+            PairedDevice {
+                device_id: "server".into(),
+                name: "Old name".into(),
+                role: NodeRole::Server,
+                paired_at: server.last_seen_at.unwrap(),
+            },
+            PairedDevice {
+                device_id: "client".into(),
+                name: "Mobile".into(),
+                role: NodeRole::Client,
+                paired_at: server.last_seen_at.unwrap(),
+            },
+        ];
+        let rows = workspace_devices(&[server], Some(&nodes));
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.device.id.as_str())
+                .collect::<Vec<_>>(),
+            ["server", "client"]
+        );
+        assert_eq!(rows[0].device.name, "Renamed workstation");
+        assert_eq!(rows[0].device.version.as_deref(), Some("0.2.71"));
+        assert_eq!(rows[0].device.cursor_sdk_version.as_deref(), Some("1.0.31"));
+        assert_eq!(rows[0].device.platform, "linux");
+        assert!(rows[0].registered && rows[0].paired);
+        assert_eq!(rows[1].device.name, "Mobile");
+        assert_eq!(rows[1].device.role.as_deref(), Some("client"));
+        assert_eq!(rows[1].device.last_seen_at, None);
+        assert_eq!(rows[1].device.cursor_sdk_version, None);
+        assert!(!rows[1].registered && rows[1].paired);
+    }
+
+    #[test]
+    fn private_devices_exclude_revoked_registry_entries() {
+        assert!(workspace_devices(&[registered_server()], Some(&[])).is_empty());
+    }
+
+    #[test]
+    fn private_membership_absence_preserves_local_and_cloud_devices() {
+        let server = registered_server();
+        let rows = workspace_devices(&[server.clone()], None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].device, server);
+        assert!(rows[0].registered);
+        assert!(!rows[0].paired);
+    }
 
     #[test]
     fn presence_window() {

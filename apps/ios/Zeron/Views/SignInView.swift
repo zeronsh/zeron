@@ -2,8 +2,7 @@
 // the secret-bearing exchange delegated to the edge (`POST /auth/exchange`).
 // The zeron mark on black, one white button — the old mobile app's Gate.
 //
-// Endpoints are fixed to production (the old app's rule: mobile always talks
-// to prod; a stale override once broke sign-in in the worst ghost way).
+// Cloud sign-in uses production endpoints; private pairing uses its own hub.
 
 import AuthenticationServices
 import SwiftUI
@@ -76,6 +75,19 @@ struct SignInView: View {
                     .buttonStyle(.plain)
                     .disabled(busy)
                     .opacity(busy ? 0.6 : 1)
+
+                    Button {
+                        model.privateInvitation = PrivateInvitation()
+                    } label: {
+                        Text("Private via Tailscale")
+                            .font(Theme.sans(15, weight: .medium))
+                            .foregroundStyle(Theme.text)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 50)
+                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(busy)
 
                     if let error {
                         Text(error)

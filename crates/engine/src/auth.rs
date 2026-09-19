@@ -241,6 +241,7 @@ struct AuthInner {
     /// Whether construction loaded a parseable WorkOS session. This is an
     /// immutable startup fact: refresh or sign-out must not rewrite it.
     loaded_workos_session: bool,
+    private_workspace: bool,
     http: reqwest::Client,
     state_tx: watch::Sender<AuthState>,
     token_tx: watch::Sender<u64>,
@@ -276,10 +277,22 @@ pub struct Auth {
 impl Auth {
     /// Build from config: dev mode unless a WorkOS client id is configured.
     pub fn new(config: AuthConfig) -> Self {
+        Self::with_private(config, false)
+    }
+
+    pub fn private(config: AuthConfig) -> Self {
+        Self::with_private(config, true)
+    }
+
+    pub fn is_private(&self) -> bool {
+        self.inner.private_workspace
+    }
+
+    fn with_private(config: AuthConfig, private_workspace: bool) -> Self {
         let workos = config
             .workos_client_id
             .clone()
-            .filter(|s| !s.trim().is_empty());
+            .filter(|s| !private_workspace && !s.trim().is_empty());
         let session_file = config.data_dir.join("session.json");
         let stored: Option<StoredSession> = if workos.is_some() {
             std::fs::read_to_string(&session_file)
@@ -289,6 +302,7 @@ impl Auth {
             None
         };
         let initial = match (&workos, &stored) {
+            _ if private_workspace => AuthState::SignedOut,
             (None, _) => AuthState::SignedIn {
                 user: AuthUser {
                     id: config.dev_user_id.clone(),
@@ -313,6 +327,7 @@ impl Auth {
                 config,
                 workos,
                 loaded_workos_session,
+                private_workspace,
                 http,
                 state_tx,
                 token_tx,
@@ -383,6 +398,9 @@ impl Auth {
     /// Dev mode mirrors the edge's dev-bearer parsing (`user@org` → `user`,
     /// a bare token IS the user id). `None` = signed out (WorkOS only).
     pub fn user_id(&self) -> Option<String> {
+        if self.is_private() {
+            return None;
+        }
         if self.inner.workos.is_none() {
             let dev = &self.inner.config.dev_user_id;
             return Some(dev.split('@').next().unwrap_or(dev).to_string());
@@ -395,6 +413,9 @@ impl Auth {
     /// Dev mode: the configured user id. WorkOS: cached access token, refreshed when
     /// it has under 30s left.
     pub async fn access_token(&self) -> Result<String, TokenError> {
+        if self.is_private() {
+            return Err(TokenError::SignedOut);
+        }
         if self.inner.workos.is_none() {
             return Ok(self.inner.config.dev_user_id.clone());
         }

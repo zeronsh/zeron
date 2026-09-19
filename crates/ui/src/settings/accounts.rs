@@ -200,6 +200,10 @@ pub struct AccountsPage {
 
 impl AccountsPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let target_device = (state.read(cx).workspace_scope
+            == Some(zeron_proto::WorkspaceScope::Private))
+        .then(|| state.read(cx).effective_device_id())
+        .flatten();
         let observe = cx.observe(&state, |_, _, cx| cx.notify());
         let code_input = cx.new(|cx| ComposerInput::new("Paste the authorization code", cx));
         let code_events = cx.subscribe(&code_input, |this: &mut Self, _, event, cx| {
@@ -210,7 +214,7 @@ impl AccountsPage {
         let mut page = Self {
             state,
             scroll: widgets::PageScroll::default(),
-            target_device: None,
+            target_device,
             device_menu: popover::Popup::default(),
             snapshot: Loadable::Idle,
             busy_account: None,
@@ -280,7 +284,14 @@ impl AccountsPage {
         use crate::icons::{self, icon};
         let (mut devices, local_id) = {
             let s = self.state.read(cx);
-            (s.devices.clone(), s.local_device_id.clone())
+            (
+                s.devices
+                    .iter()
+                    .filter(|device| s.can_execute_on(&device.id))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                s.local_device_id.clone(),
+            )
         };
         // Stable row order (registration time, then id) — zeron's switcher
         // sorts the same way so rows never reshuffle on heartbeats.

@@ -4,7 +4,7 @@
 // transfers after a retry, a relaunch, or a tapped "retry" — the command in
 // the doc names the ref; the stash holds the bytes it points at.
 //
-// Lives under DocDisk's directory so sign-out hygiene (wipeAll) covers it.
+// Lives under the owning profile's DocDisk directory for sign-out cleanup.
 // Entries are deleted when the host commits the upload; anything older than
 // the command TTL (24h) is swept on demand.
 
@@ -13,8 +13,8 @@ import Foundation
 enum UploadStash {
     static let pendingRefPrefix = "pending://"
 
-    static var directory: URL {
-        let base = DocDisk.directory.appendingPathComponent("uploads", isDirectory: true)
+    static func directory(namespace: String) -> URL {
+        let base = DocDisk.directory(namespace: namespace).appendingPathComponent("uploads", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
     }
@@ -36,29 +36,29 @@ enum UploadStash {
         return (id, name)
     }
 
-    private static func url(uploadId: String) -> URL {
+    private static func url(uploadId: String, namespace: String) -> URL {
         let safe = uploadId.filter { $0.isLetter || $0.isNumber || $0 == "-" }
-        return directory.appendingPathComponent("\(safe).bin")
+        return directory(namespace: namespace).appendingPathComponent("\(safe).bin")
     }
 
-    static func save(uploadId: String, data: Data) {
-        try? data.write(to: url(uploadId: uploadId), options: .atomic)
+    static func save(uploadId: String, data: Data, namespace: String) {
+        try? data.write(to: url(uploadId: uploadId, namespace: namespace), options: .atomic)
     }
 
-    static func load(uploadId: String) -> Data? {
-        try? Data(contentsOf: url(uploadId: uploadId))
+    static func load(uploadId: String, namespace: String) -> Data? {
+        try? Data(contentsOf: url(uploadId: uploadId, namespace: namespace))
     }
 
-    static func delete(uploadId: String) {
-        try? FileManager.default.removeItem(at: url(uploadId: uploadId))
+    static func delete(uploadId: String, namespace: String) {
+        try? FileManager.default.removeItem(at: url(uploadId: uploadId, namespace: namespace))
     }
 
     /// Drop entries older than the command TTL — their commands have expired,
     /// so no escort will ever want the bytes again.
-    static func sweep(ttlMs: Int64 = commandDefaultTtlMs) {
+    static func sweep(ttlMs: Int64 = commandDefaultTtlMs, namespace: String) {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+            at: directory(namespace: namespace), includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
         let cutoff = Date(timeIntervalSinceNow: -Double(ttlMs) / 1000)
         for file in files {
             let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey])

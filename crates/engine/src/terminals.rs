@@ -87,6 +87,7 @@ impl LiveTerminal {
 }
 
 struct TerminalsInner {
+    paused: Mutex<bool>,
     sessions: Mutex<HashMap<String, Arc<Mutex<LiveTerminal>>>>,
 }
 
@@ -151,11 +152,25 @@ impl Terminals {
     pub fn new() -> Self {
         let terminals = Self {
             inner: Arc::new(TerminalsInner {
+                paused: Mutex::new(false),
                 sessions: Mutex::new(HashMap::new()),
             }),
         };
         tokio::spawn(reaper_task(Arc::downgrade(&terminals.inner)));
         terminals
+    }
+
+    pub(crate) fn pause_if_idle(&self) -> bool {
+        let mut paused = lock(&self.inner.paused);
+        if self.any_open() {
+            return false;
+        }
+        *paused = true;
+        true
+    }
+
+    pub(crate) fn resume_starts(&self) {
+        *lock(&self.inner.paused) = false;
     }
 
     /// Open a login shell in `cwd`. The PTY outlives every subscriber; it dies on
@@ -172,6 +187,12 @@ impl Terminals {
         rows: u16,
         shell: Option<&str>,
     ) -> Result<TerminalSession, EngineError> {
+        let paused = lock(&self.inner.paused);
+        if *paused {
+            return Err(EngineError::Other(
+                "Workspace is switching; retry after reconnecting".into(),
+            ));
+        }
         if lock(&self.inner.sessions).len() >= MAX_TERMINALS {
             return Err(EngineError::Other(format!(
                 "Too many open terminals (maximum {MAX_TERMINALS})"

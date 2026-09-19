@@ -41,6 +41,11 @@ fn account_status(scope: WorkspaceScope, auth: &AuthState) -> AccountStatus {
                 healthy: true,
             },
         },
+        WorkspaceScope::Private => AccountStatus {
+            mode: "private",
+            auth: "paired to a private workspace (no Zeron Cloud account)".into(),
+            healthy: true,
+        },
         WorkspaceScope::Development => AccountStatus {
             mode: "development",
             auth: "dev mode (bearer = user id)".into(),
@@ -82,6 +87,10 @@ pub async fn login(config: EngineConfig) -> anyhow::Result<()> {
     std::fs::create_dir_all(&config.data_dir)?;
     let _lock = engine_lock(&config, "sign in")?;
     let auth = Engine::build_auth(&config).await;
+    anyhow::ensure!(
+        !auth.is_private(),
+        "Use `zeron private leave` before changing Zeron Cloud authentication"
+    );
     if !auth.workos_enabled() {
         println!("Auth is in dev mode (no WorkOS client id) — there is nothing to sign in to.");
         return Ok(());
@@ -126,6 +135,10 @@ pub async fn logout(config: EngineConfig) -> anyhow::Result<()> {
     std::fs::create_dir_all(&config.data_dir)?;
     let _lock = engine_lock(&config, "sign out")?;
     let auth = Engine::build_auth(&config).await;
+    anyhow::ensure!(
+        !auth.is_private(),
+        "Use `zeron private leave` before changing Zeron Cloud authentication"
+    );
     if !auth.workos_enabled() {
         // Dev mode has no live session, but clear any stale session.json from a
         // previous WorkOS-mode run so the next real run starts signed out.
@@ -166,7 +179,11 @@ pub async fn status(config: EngineConfig) -> anyhow::Result<()> {
         .unwrap_or(next_scope);
     let account = account_status(scope, &auth.state());
     println!("Data dir: {}", config.data_dir.display());
-    println!("Edge:     {}", config.edge_url);
+    if let Some(private) = zeron_private::PrivateConfig::load(&config.data_dir)? {
+        println!("Hub:      {}", private.hub_url);
+    } else {
+        println!("Edge:     {}", config.edge_url);
+    }
     println!("Mode:     {}", account.mode);
     println!("Auth:     {}", account.auth);
     match InstanceLock::holder(&config.data_dir) {

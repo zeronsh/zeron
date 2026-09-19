@@ -6845,6 +6845,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11738,6 +11744,7 @@ dependencies = [
  "tracing-subscriber",
  "windows-sys 0.61.2",
  "zeron-engine",
+ "zeron-private",
  "zeron-rpc",
  "zeron-ui",
  "zeron-update",
@@ -11789,6 +11796,7 @@ dependencies = [
  "zeron-doc",
  "zeron-harness",
  "zeron-preview",
+ "zeron-private",
  "zeron-proto",
  "zeron-rpc",
  "zeron-sync",
@@ -11846,6 +11854,34 @@ dependencies = [
  "uuid",
  "webrtc",
  "zeron-proto",
+]
+
+[[package]]
+name = "zeron-private"
+version = "0.2.79"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+ "zeron-doc",
+ "zeron-rpc",
+ "zeron-sync",
 ]
 
 [[package]]
@@ -11983,6 +12019,7 @@ dependencies = [
  "objc2-web-kit",
  "png 0.18.1",
  "pulldown-cmark",
+ "qrcode",
  "raw-window-handle",
  "reqwest",
  "roxmltree 0.21.1",

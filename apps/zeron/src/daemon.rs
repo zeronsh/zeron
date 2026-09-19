@@ -69,9 +69,7 @@ pub fn install(data_dir: &Path) -> anyhow::Result<()> {
     } else {
         bail!("zeron daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
-    println!(
-        "Without a saved account the engine stays local-only; sign-in and restart are optional for sync."
-    );
+    println!("The service uses this machine's saved workspace configuration.");
     println!(
         "Logs: {}",
         if cfg!(target_os = "macos") {

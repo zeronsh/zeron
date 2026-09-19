@@ -62,6 +62,8 @@ pub struct Device {
     pub id: String,
     pub name: String,
     pub platform: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     pub last_seen_at: Option<DateTime<Utc>>,
     /// First registration time (zeron devices.created_at — the Devices page
     /// "Added …" fragment). Optional so pre-existing docs stay readable.

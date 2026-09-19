@@ -51,10 +51,11 @@ final class NetworkReliabilityTests: XCTestCase {
     func testStashSaveLoadDelete() {
         let id = "test-\(UUID().uuidString.lowercased())"
         let bytes = Data([1, 2, 3, 4])
-        UploadStash.save(uploadId: id, data: bytes)
-        XCTAssertEqual(UploadStash.load(uploadId: id), bytes)
-        UploadStash.delete(uploadId: id)
-        XCTAssertNil(UploadStash.load(uploadId: id))
+        defer { DocDisk.wipe(namespace: id) }
+        UploadStash.save(uploadId: id, data: bytes, namespace: id)
+        XCTAssertEqual(UploadStash.load(uploadId: id, namespace: id), bytes)
+        UploadStash.delete(uploadId: id, namespace: id)
+        XCTAssertNil(UploadStash.load(uploadId: id, namespace: id))
     }
 
     // MARK: upload chunk plan (attachments.rs PR #164 invariants)

@@ -138,6 +138,7 @@ pub(crate) fn join_retry_jitter() -> std::time::Duration {
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceHostConfig {
+    pub role: Option<zeron_private::NodeRole>,
     pub device_id: String,
     /// Human name for this device's registry row (hostname by default).
     pub device_name: String,
@@ -153,6 +154,8 @@ pub struct WorkspaceHostConfig {
 }
 
 struct WorkspaceHostInner {
+    edge_stop: tokio_util::sync::CancellationToken,
+    edge_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     store: Arc<DocsStore>,
     config: WorkspaceHostConfig,
     reg: Arc<Mutex<RegistryDoc>>,
@@ -258,6 +261,7 @@ impl WorkspaceHost {
             .into_iter()
             .find(|d| d.id == config.device_id);
         doc.upsert_device(&Device {
+            role: config.role.map(|role| role.to_string()),
             id: config.device_id.clone(),
             name: device_name_on_boot(
                 existing.as_ref().map(|device| device.name.as_str()),
@@ -293,6 +297,8 @@ impl WorkspaceHost {
 
         let host = Self {
             inner: Arc::new(WorkspaceHostInner {
+                edge_stop: tokio_util::sync::CancellationToken::new(),
+                edge_tasks: Mutex::new(Vec::new()),
                 store,
                 config,
                 reg: Arc::new(Mutex::new(doc)),
@@ -350,133 +356,163 @@ impl WorkspaceHost {
         let reg = self.inner.reg.clone();
         let device_id = self.inner.config.device_id.clone();
         let weak = Arc::downgrade(&self.inner);
-        tokio::spawn(async move {
-            let mut wake = zeron_sync::wake::subscribe();
-            let mut online = zeron_sync::wake::subscribe_online();
-            // `RegistryClient` only self-reconnects AFTER a first successful
-            // join; an INITIAL failure (a 500 from an overloaded DO, a token
-            // racing a refresh, an edge deploy) must not end this task and
-            // leave the device offline until an app restart. Retry the first
-            // join on a capped, jittered backoff so a transient blip self-heals.
-            let mut backoff = JOIN_RETRY_BASE;
-            loop {
-                if weak.upgrade().is_none() {
-                    return; // host dropped
-                }
-                let tuning = RegistryTuning {
-                    probe_quiet: REGISTRY_PROBE_QUIET,
-                };
-                // Production path (token present): dual transport — the WS
-                // dials as before, and a plain-HTTPS pull/push seam derived
-                // from the same URL provider bootstraps the doc in ~1 RTT
-                // and keeps syncing at backoff cadence when the socket can't
-                // connect (airplane-wifi networks strip WS upgrades).
-                let result = if token.is_some() {
-                    RegistryClient::connect_via_transport(
-                        url.clone(),
-                        reg.clone(),
-                        &device_id,
-                        tuning,
-                        Arc::new(WsDerivedRegistryTransport::new(url.clone())),
-                    )
-                    .await
-                } else {
-                    RegistryClient::connect_via_tuned(url.clone(), reg.clone(), &device_id, tuning)
+        let stop = self.inner.edge_stop.clone();
+        let private = token.as_ref().is_some_and(|t| t.header_auth());
+        let task = tokio::spawn(async move {
+            let work = async move {
+                let mut wake = zeron_sync::wake::subscribe();
+                let mut online = zeron_sync::wake::subscribe_online();
+                // `RegistryClient` only self-reconnects AFTER a first successful
+                // join; an INITIAL failure (a 500 from an overloaded DO, a token
+                // racing a refresh, an edge deploy) must not end this task and
+                // leave the device offline until an app restart. Retry the first
+                // join on a capped, jittered backoff so a transient blip self-heals.
+                let mut backoff = JOIN_RETRY_BASE;
+                loop {
+                    if weak.upgrade().is_none() {
+                        return; // host dropped
+                    }
+                    if private && token_revoked(&token).await {
+                        token_changed(&mut token_changes).await;
+                        continue;
+                    }
+                    let tuning = RegistryTuning {
+                        probe_quiet: REGISTRY_PROBE_QUIET,
+                    };
+                    // Production path (token present): dual transport — the WS
+                    // dials as before, and a plain-HTTPS pull/push seam derived
+                    // from the same URL provider bootstraps the doc in ~1 RTT
+                    // and keeps syncing at backoff cadence when the socket can't
+                    // connect (airplane-wifi networks strip WS upgrades).
+                    let result = if token.is_some() {
+                        RegistryClient::connect_via_transport(
+                            url.clone(),
+                            reg.clone(),
+                            &device_id,
+                            tuning,
+                            Arc::new(WsDerivedRegistryTransport::new(url.clone())),
+                        )
                         .await
-                };
-                match result {
-                    Ok(client) => {
-                        let client = Arc::new(client);
-                        client.set_presence(now_ms());
-                        let mut events = client.events();
-                        if token_revoked(&token).await {
-                            return;
-                        }
-                        let Some(inner) = weak.upgrade() else { return };
-                        *lock(&inner.room) = Some(client.clone());
-                        inner
-                            .room_joined_at
-                            .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
-                        inner.bump_changed();
-                        tracing::info!(org = %org_id, "registry room joined");
-                        drop(inner);
-                        // The slot is the sole owner. This lets engine-level
-                        // revocation close the socket synchronously by taking it.
-                        drop(client);
-                        // The event pump lives for the client's whole life
-                        // (across its self-reconnects); it ends only when the
-                        // client is dropped at host teardown.
-                        loop {
-                            tokio::select! {
-                                event = events.recv() => match event {
-                                    Ok(zeron_sync::RegistryEvent::Connected) => {
-                                        let Some(inner) = weak.upgrade() else { return };
-                                        // Re-join: restart the dial gate's
-                                        // warm-up clock (presence map is empty
-                                        // again; silence isn't evidence yet).
-                                        inner
-                                            .room_joined_at
-                                            .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
-                                        inner.bump_changed();
-                                    }
-                                    Ok(zeron_sync::RegistryEvent::Applied) => {
-                                        let Some(inner) = weak.upgrade() else { return };
-                                        inner.bump_changed();
-                                    }
-                                    Ok(zeron_sync::RegistryEvent::Presence) => {
-                                        let Some(inner) = weak.upgrade() else { return };
-                                        inner.publish();
-                                    }
-                                    Ok(zeron_sync::RegistryEvent::Disconnected) => {}
-                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                                },
-                                _ = token_changed(&mut token_changes) => {
-                                    if token_revoked(&token).await {
-                                        tracing::info!(org = %org_id,
-                                            "registry credentials removed; leaving room");
-                                        break;
+                    } else {
+                        RegistryClient::connect_via_tuned(
+                            url.clone(),
+                            reg.clone(),
+                            &device_id,
+                            tuning,
+                        )
+                        .await
+                    };
+                    match result {
+                        Ok(client) => {
+                            let client = Arc::new(client);
+                            client.set_presence(now_ms());
+                            let mut events = client.events();
+                            if token_revoked(&token).await {
+                                if private {
+                                    continue;
+                                }
+                                return;
+                            }
+                            let Some(inner) = weak.upgrade() else { return };
+                            *lock(&inner.room) = Some(client.clone());
+                            inner
+                                .room_joined_at
+                                .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+                            inner.bump_changed();
+                            tracing::info!(org = %org_id, "registry room joined");
+                            drop(inner);
+                            // The slot is the sole owner. This lets engine-level
+                            // revocation close the socket synchronously by taking it.
+                            drop(client);
+                            // The event pump lives for the client's whole life
+                            // (across its self-reconnects); it ends only when the
+                            // client is dropped at host teardown.
+                            loop {
+                                tokio::select! {
+                                    event = events.recv() => match event {
+                                        Ok(zeron_sync::RegistryEvent::Connected) => {
+                                            let Some(inner) = weak.upgrade() else { return };
+                                            // Re-join: restart the dial gate's
+                                            // warm-up clock (presence map is empty
+                                            // again; silence isn't evidence yet).
+                                            inner
+                                                .room_joined_at
+                                                .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+                                            inner.bump_changed();
+                                        }
+                                        Ok(zeron_sync::RegistryEvent::Applied) => {
+                                            let Some(inner) = weak.upgrade() else { return };
+                                            inner.bump_changed();
+                                        }
+                                        Ok(zeron_sync::RegistryEvent::Presence) => {
+                                            let Some(inner) = weak.upgrade() else { return };
+                                            inner.publish();
+                                        }
+                                        Ok(zeron_sync::RegistryEvent::Disconnected) => {}
+                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                                    },
+                                    _ = token_changed(&mut token_changes) => {
+                                        if token_revoked(&token).await {
+                                            tracing::info!(org = %org_id,
+                                                "registry credentials removed; leaving room");
+                                            break;
+                                        }
                                     }
                                 }
                             }
-                        }
-                        if let Some(inner) = weak.upgrade() {
-                            *lock(&inner.room) = None;
-                        }
-                        return;
-                    }
-                    Err(err) => {
-                        tracing::warn!(org = %org_id, error = %err, backoff_ms = backoff.as_millis() as u64,
-                            "registry room join failed; retrying");
-                    }
-                }
-                // Drain stale online events so only successes DURING this
-                // wait cut it short (our own failed dial doesn't count).
-                while online.try_recv().is_ok() {}
-                tokio::select! {
-                    _ = tokio::time::sleep(backoff + join_retry_jitter()) => {
-                        backoff = (backoff * 2).min(JOIN_RETRY_CAP);
-                    }
-                    _ = wake.recv() => {
-                        backoff = JOIN_RETRY_BASE;
-                    }
-                    _ = online.recv() => {
-                        backoff = JOIN_RETRY_BASE;
-                    }
-                    _ = token_changed(&mut token_changes) => {
-                        if token_revoked(&token).await {
+                            if let Some(inner) = weak.upgrade() {
+                                *lock(&inner.room) = None;
+                            }
+                            if private {
+                                continue;
+                            }
                             return;
                         }
-                        backoff = JOIN_RETRY_BASE;
+                        Err(err) => {
+                            tracing::warn!(org = %org_id, error = %err, backoff_ms = backoff.as_millis() as u64,
+                            "registry room join failed; retrying");
+                        }
+                    }
+                    // Drain stale online events so only successes DURING this
+                    // wait cut it short (our own failed dial doesn't count).
+                    while online.try_recv().is_ok() {}
+                    tokio::select! {
+                        _ = tokio::time::sleep(backoff + join_retry_jitter()) => {
+                            backoff = (backoff * 2).min(JOIN_RETRY_CAP);
+                        }
+                        _ = wake.recv() => {
+                            backoff = JOIN_RETRY_BASE;
+                        }
+                        _ = online.recv() => {
+                            backoff = JOIN_RETRY_BASE;
+                        }
+                        _ = token_changed(&mut token_changes) => {
+                            if token_revoked(&token).await && !private {
+                                return;
+                            }
+                            backoff = JOIN_RETRY_BASE;
+                        }
                     }
                 }
-            }
+            };
+            tokio::select! { biased; _ = stop.cancelled() => {}, _ = work => {} }
         });
+        lock(&self.inner.edge_tasks).push(task);
+    }
+
+    pub async fn shutdown_edge(&self) {
+        self.disconnect_edge();
+        let tasks = std::mem::take(&mut *lock(&self.inner.edge_tasks));
+        for task in tasks {
+            let _ = task.await;
+        }
     }
 
     /// Close the current registry membership before account-scoped state is
     /// drained. The auth signal prevents an in-flight join from replacing it.
     pub fn disconnect_edge(&self) {
+        self.inner.edge_stop.cancel();
         lock(&self.inner.room).take();
     }
 
@@ -1571,10 +1607,11 @@ impl WsDerivedRegistryTransport {
         // Move the WS URL's ?token= into a bearer header (HTTP supports
         // headers; query strings can reach request logs). Other params
         // (device) stay.
-        let token = u
+        let query_token = u
             .query_pairs()
             .find(|(k, _)| k == "token")
             .map(|(_, v)| v.into_owned());
+        let token = provider.authorization().await.or(query_token);
         let kept: Vec<(String, String)> = u
             .query_pairs()
             .filter(|(k, _)| k != "token")
@@ -1686,6 +1723,7 @@ mod tests {
         let host = WorkspaceHost::open(
             Arc::new(DocsStore::open(dir.path()).unwrap()),
             WorkspaceHostConfig {
+                role: None,
                 device_id: "test-device".into(),
                 device_name: "Test device".into(),
                 platform: "macos".into(),
@@ -1742,6 +1780,7 @@ mod tests {
         let host = WorkspaceHost::open(
             Arc::new(DocsStore::open(dir.path()).unwrap()),
             WorkspaceHostConfig {
+                role: None,
                 device_id: "test-device".into(),
                 device_name: "Test device".into(),
                 platform: "macos".into(),

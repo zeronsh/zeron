@@ -166,7 +166,9 @@ pub fn gate_phase(
         ConnectionStatus::Connecting => GatePhase::Loading,
         ConnectionStatus::Failed(err) => GatePhase::Failed(err.clone()),
         ConnectionStatus::Ready => match workspace_scope.unwrap_or(WorkspaceScope::Synced) {
-            WorkspaceScope::Local | WorkspaceScope::Development => GatePhase::Ready,
+            WorkspaceScope::Local | WorkspaceScope::Private | WorkspaceScope::Development => {
+                GatePhase::Ready
+            }
             WorkspaceScope::Synced => match auth {
                 Some(AuthState::NeedsOrganization { .. }) => GatePhase::OrgGate,
                 Some(AuthState::SignedIn { .. }) => GatePhase::Ready,

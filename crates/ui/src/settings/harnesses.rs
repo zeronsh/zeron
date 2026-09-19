@@ -148,6 +148,10 @@ fn signs_in_on_enable(harness: HarnessId) -> bool {
 
 impl HarnessesPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let target_device = (state.read(cx).workspace_scope
+            == Some(zeron_proto::WorkspaceScope::Private))
+        .then(|| state.read(cx).effective_device_id())
+        .flatten();
         let mut page = Self {
             title_settings: Loadable::Idle,
             title_models: Loadable::Idle,
@@ -157,7 +161,7 @@ impl HarnessesPage {
             state,
             scroll: widgets::PageScroll::default(),
             harnesses: Loadable::Idle,
-            target_device: None,
+            target_device,
             device_menu_open: false,
             device_menu_pressed_open: false,
             error: None,
@@ -691,7 +695,14 @@ impl HarnessesPage {
         use crate::icons::{self, icon};
         let (mut devices, local_id) = {
             let s = self.state.read(cx);
-            (s.devices.clone(), s.local_device_id.clone())
+            (
+                s.devices
+                    .iter()
+                    .filter(|device| s.can_execute_on(&device.id))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                s.local_device_id.clone(),
+            )
         };
         devices.sort_by(|a, b| {
             a.created_at

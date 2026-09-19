@@ -190,13 +190,29 @@ impl zeron_sync::UrlProvider for EdgeRoomUrl {
         let token = self.token.clone();
         let base = self.base.clone();
         let device = self.device_id.clone();
+        let header_auth = self.token.header_auth();
         Box::pin(async move {
             let token = token.token().await.map_err(zeron_sync::SyncError::from)?;
-            let mut url = format!("{base}?token={token}");
+            let mut url = if header_auth {
+                format!("{base}?")
+            } else {
+                format!("{base}?token={token}")
+            };
             if !device.is_empty() {
                 url.push_str(&format!("&device={device}"));
             }
             Ok(url)
+        })
+    }
+
+    fn authorization(&self) -> futures::future::BoxFuture<'static, Option<String>> {
+        let token = self.token.clone();
+        Box::pin(async move {
+            if token.header_auth() {
+                token.token().await.ok()
+            } else {
+                None
+            }
         })
     }
 }
@@ -929,7 +945,10 @@ impl DocHost {
             lock(&self.inner.handles).values().cloned().collect();
         for handle in handles {
             let host = self.clone();
-            self.spawn_worker(async move { host.drain_commands(&handle).await });
+            self.spawn_worker(async move {
+                host.drain_commands(&handle).await;
+                host.drain_queue(&handle).await;
+            });
         }
     }
 
@@ -1468,9 +1487,15 @@ impl DocHost {
             // user report, reproduced on two networks).
             let mut online = zeron_sync::wake::subscribe_online();
             let mut backoff = crate::workspace_host::JOIN_RETRY_BASE;
-            loop {
+            'rejoin: loop {
                 if weak.upgrade().is_none() {
                     return; // evicted or purged while dialing
+                }
+                if edge.token.header_auth()
+                    && matches!(edge.bearer().await, Err(zeron_rpc::TokenError::SignedOut))
+                {
+                    crate::workspace_host::token_changed(&mut token_changes).await;
+                    continue;
                 }
                 // Dual transport: WS dial + a plain-HTTPS pull/push seam
                 // (rows GET / POST on the same bearer auth as the checkpoint
@@ -1498,6 +1523,7 @@ impl DocHost {
                 match dial {
                     Ok(Ok(client)) => {
                         if matches!(edge.bearer().await, Err(zeron_rpc::TokenError::SignedOut)) {
+                            if edge.token.header_auth() { continue; }
                             return;
                         }
                         let Some(handle) = weak.upgrade() else {
@@ -1631,6 +1657,7 @@ impl DocHost {
                                         }
                                         tracing::info!(chat = %chat,
                                             "chat2 credentials removed; leaving room");
+                                        if edge.token.header_auth() { continue 'rejoin; }
                                         return;
                                     }
                                 }
@@ -3070,6 +3097,9 @@ impl DocHost {
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet; the set_sessions kick re-drains
         };
+        let Some(_permit) = sessions.start_permit() else {
+            return;
+        };
         if !self.is_host(&handle.chat_id) {
             return;
         }
@@ -3637,6 +3667,9 @@ impl DocHost {
         let sessions = self
             .sessions()
             .ok_or_else(|| EngineError::Other("executor unavailable".into()))?;
+        let _permit = sessions.start_permit().ok_or_else(|| {
+            EngineError::Other("Workspace is switching; retry after reconnecting".into())
+        })?;
         let commands = handle.doc.read_commands()?;
         let messages = handle.doc.read_entries().unwrap_or_default();
         let current_turn_id = messages.last().map(|m| m.id.clone());
@@ -3920,6 +3953,9 @@ impl DocHost {
     pub async fn drain_commands(&self, handle: &Arc<ChatDocHandle>) {
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet (or retired); the set_sessions kick re-drains
+        };
+        let Some(_permit) = sessions.start_permit() else {
+            return;
         };
         if !self.is_host(&handle.chat_id) {
             return;

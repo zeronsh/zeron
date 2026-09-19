@@ -239,6 +239,7 @@ fn wire_shapes_match_the_edge() {
 
 fn device(id: &str, name: &str) -> Device {
     Device {
+        role: None,
         id: id.into(),
         name: name.into(),
         platform: "linux".into(),

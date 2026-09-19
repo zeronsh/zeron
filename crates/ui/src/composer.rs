@@ -3997,6 +3997,13 @@ fn slash_error_message(err: &RpcError) -> SharedString {
     }
 }
 
+#[derive(Default)]
+struct WorkspaceDrafts {
+    text: HashMap<String, String>,
+    attachments: HashMap<String, Vec<StagedAttachment>>,
+    appshots: HashMap<String, Vec<CapturedAppshot>>,
+}
+
 pub struct Composer {
     pub(crate) state: Entity<AppState>,
     pub(crate) input: Entity<ComposerInput>,
@@ -4007,6 +4014,8 @@ pub struct Composer {
     pickers: Entity<Pickers>,
     /// Draft text per chat key ("" = new-chat canvas), surviving navigation.
     drafts: HashMap<String, String>,
+    workspace_key: Option<String>,
+    workspace_drafts: HashMap<String, WorkspaceDrafts>,
     /// Staged-but-unsent attachments per chat key (use-attachments.ts `stash`):
     /// navigating away and back restores them; memory-only, like the original.
     pub(crate) attachments: HashMap<String, Vec<StagedAttachment>>,
@@ -4265,12 +4274,15 @@ impl Composer {
             ComposerInputEvent::PastedPaths(paths) => this.add_paths(paths.clone(), cx),
         });
         let current_key = state.read(cx).selected_chat.clone().unwrap_or_default();
+        let workspace_key = state.read(cx).workspace_locator();
         let mut composer = Self {
             state,
             input,
             queue_edit_draft: None,
             pickers,
             drafts: HashMap::new(),
+            workspace_key,
+            workspace_drafts: HashMap::new(),
             attachments: HashMap::new(),
             appshots: HashMap::new(),
             appshot_entrances: HashMap::new(),
@@ -5690,7 +5702,59 @@ impl Composer {
         }
     }
 
+    fn switch_workspace_drafts(&mut self, workspace: String, cx: &mut Context<Self>) {
+        if self.workspace_key.as_ref() == Some(&workspace) {
+            return;
+        }
+        let Some(previous) = self.workspace_key.replace(workspace.clone()) else {
+            return;
+        };
+        self.clear_queue_edit(cx);
+        let text = self.input.read(cx).text().to_owned();
+        if text.is_empty() {
+            self.drafts.remove(&self.current_key);
+        } else {
+            self.drafts.insert(self.current_key.clone(), text);
+        }
+        self.workspace_drafts.insert(
+            previous,
+            WorkspaceDrafts {
+                text: std::mem::take(&mut self.drafts),
+                attachments: std::mem::take(&mut self.attachments),
+                appshots: std::mem::take(&mut self.appshots),
+            },
+        );
+        let restored = self.workspace_drafts.remove(&workspace).unwrap_or_default();
+        self.drafts = restored.text;
+        self.attachments = restored.attachments;
+        self.appshots = restored.appshots;
+        self.current_key = self
+            .state
+            .read(cx)
+            .selected_chat
+            .clone()
+            .unwrap_or_default();
+        let text = self
+            .drafts
+            .get(&self.current_key)
+            .cloned()
+            .unwrap_or_default();
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+        self.preview = None;
+        self.wizard = None;
+        self.failure = None;
+        self.failure_key = None;
+        self.queue_previews.clear();
+        self.slash_cache.clear();
+        self.slash_task = None;
+        self.reset_mention(None, cx);
+    }
+
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
+        let workspace = self.state.read(cx).workspace_locator();
+        if let Some(workspace) = workspace {
+            self.switch_workspace_drafts(workspace, cx);
+        }
         {
             let state = self.state.read(cx);
             let now = chrono::Utc::now();
@@ -8011,6 +8075,28 @@ mod tests {
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
         (dir, window)
+    }
+
+    #[gpui::test]
+    fn private_workspace_switch_preserves_separate_new_chat_drafts(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.switch_workspace_drafts("local".into(), cx);
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("Local draft", cx));
+                composer.switch_workspace_drafts("private".into(), cx);
+                assert_eq!(composer.input.read(cx).text(), "");
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("Private draft", cx));
+                composer.switch_workspace_drafts("local".into(), cx);
+                assert_eq!(composer.input.read(cx).text(), "Local draft");
+                composer.switch_workspace_drafts("private".into(), cx);
+                assert_eq!(composer.input.read(cx).text(), "Private draft");
+            })
+            .unwrap();
     }
 
     #[gpui::test]

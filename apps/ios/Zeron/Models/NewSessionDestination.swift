@@ -24,5 +24,7 @@ enum NewSessionDestination: Hashable {
 }
 
 extension DeviceRow {
-    var canHostSessions: Bool { platform != "ios" && !id.isEmpty }
+    var canHostSessions: Bool {
+        platform != "ios" && !id.isEmpty && (role == nil || role == "server")
+    }
 }

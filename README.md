@@ -29,6 +29,52 @@ zeron daemon start|stop|restart|status
 
 ## Optional multi-device sync
 
+Use a private workspace through Tailscale or sign in to Zeron Cloud.
+
+### Private workspaces through Tailscale
+
+A private workspace synchronizes through a hub you run on your own computer. Connect all devices to the same Tailscale network and enable MagicDNS and HTTPS before setup. No Zeron Cloud account is required.
+
+Open **Settings → Workspace** to create or join a private workspace, invite devices, and manage access. An **agent server** runs agents against its repositories. A **client** controls agents on other computers. The hub can also run agents.
+
+To create a hub from the command line, close the desktop app and stop the daemon first:
+
+```bash
+zeron daemon stop
+zeron private create "Team workspace" --role server
+zeron daemon install
+zeron private pair --role client
+zeron private status
+```
+
+The invitation works once and expires after five minutes. Open its QR link in the desktop or iOS app, or enter the hub address and code in **Join private workspace**.
+
+To join from another computer, close its desktop app and stop its daemon, then run:
+
+```bash
+zeron private join https://hub.example.ts.net:8443 --code 123456 --name "Laptop" --role client
+zeron daemon install
+```
+
+Replace the example address and code with the invitation values. Use `--role server` when the invited computer will run agents. Create an invitation with the same role on the hub.
+
+```bash
+zeron private status             # Show the workspace and paired devices
+zeron private pair --role server # Invite another agent server from the hub
+zeron private revoke DEVICE_ID   # Revoke a paired device from the hub
+zeron private disable           # Disconnect this device, or disable hub access
+zeron private enable            # Restore private access
+zeron private leave             # Select Local mode for the next engine start
+```
+
+Restart the engine after creating, joining, or leaving a workspace through the CLI. The desktop setup flow handles the restart. **Run in background** keeps the host available after you close its window.
+
+Private sync uses Tailscale Serve on HTTPS port `8443`, with the hub bound to `127.0.0.1:27655`. It does not fall back to Zeron Cloud. Agent providers still receive requests, and paired devices can access the workspace's files and agent controls. Local, private, and cloud work use separate profiles.
+
+See [private workspace setup and access management](docs/private-workspaces.md) for details.
+
+### Zeron Cloud
+
 Sign in only when you want to open your account's synced workspace. Authentication changes the profile selected by the next engine start, so stop the daemon before changing it:
 
 ```bash

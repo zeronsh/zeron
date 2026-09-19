@@ -33,6 +33,9 @@ pub enum SyncError {
 /// out); the reconnect loop backs off and retries.
 pub trait UrlProvider: Send + Sync + 'static {
     fn url(&self) -> BoxFuture<'static, Result<String, SyncError>>;
+    fn authorization(&self) -> BoxFuture<'static, Option<String>> {
+        Box::pin(async { None })
+    }
 }
 
 /// Fixed URL (dev bearers and tests — tokens that never expire).

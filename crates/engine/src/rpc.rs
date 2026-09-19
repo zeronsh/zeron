@@ -495,6 +495,20 @@ enum MutateParams {
     },
 }
 
+struct WorkspaceTransition<'a> {
+    rpc: &'a EngineRpc,
+    committed: bool,
+}
+impl Drop for WorkspaceTransition<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.rpc.sessions.resume_starts();
+            self.rpc.terminals.resume_starts();
+            self.rpc.doc_host.kick_drains();
+        }
+    }
+}
+
 pub struct EngineRpc {
     sessions: SessionsEngine,
     doc_host: DocHost,
@@ -513,6 +527,8 @@ pub struct EngineRpc {
     updater: Option<zeron_update::Updater>,
     local_import: Option<crate::local_import::LocalImporter>,
     engine_info: EngineInfo,
+    private_access: Option<std::sync::Arc<crate::private_access::PrivateAccess>>,
+    remote_access: bool,
 }
 
 impl EngineRpc {
@@ -532,6 +548,7 @@ impl EngineRpc {
         workspace_scope: WorkspaceScope,
     ) -> Self {
         let engine_info = EngineInfo {
+            private_workspace_id: None,
             device_id: doc_host.device_id().to_string(),
             workspace_scope,
             cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
@@ -555,7 +572,30 @@ impl EngineRpc {
             updater: None,
             local_import: None,
             engine_info,
+            private_access: None,
+            remote_access: false,
         }
+    }
+
+    pub fn with_private_access(
+        mut self,
+        access: std::sync::Arc<crate::private_access::PrivateAccess>,
+    ) -> Self {
+        self.engine_info.private_workspace_id = access.config().map(|c| c.workspace_id);
+        self.private_access = Some(access);
+        self
+    }
+
+    pub fn with_remote_access(mut self, remote: bool) -> Self {
+        self.remote_access = remote;
+        self
+    }
+
+    fn is_private_client(&self) -> bool {
+        self.private_access
+            .as_ref()
+            .and_then(|a| a.config())
+            .is_some_and(|c| c.role == zeron_private::NodeRole::Client)
     }
 
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
@@ -805,6 +845,24 @@ impl EngineRpc {
                 branch,
                 cwd,
             } => {
+                if self.is_private_client() {
+                    let host = match space_id.as_deref() {
+                        Some(id) => self
+                            .workspace
+                            .space(id)
+                            .map_err(failed)?
+                            .map(|space| space.device_id),
+                        None => device_id.clone(),
+                    };
+                    if host
+                        .as_deref()
+                        .is_none_or(|id| id == self.doc_host.device_id())
+                    {
+                        return Err(RpcError::Failed(
+                            "Choose an agent server to run this chat".into(),
+                        ));
+                    }
+                }
                 self.workspace
                     .create_chat(
                         &chat_id,
@@ -1204,6 +1262,11 @@ impl AuthRpc {
 #[async_trait]
 impl RpcService for AuthRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if self.auth.is_private() && method != methods::AUTH_STATUS {
+            return Err(RpcError::Failed(
+                "Leave the private workspace before configuring Zeron Cloud".into(),
+            ));
+        }
         match method {
             methods::AUTH_STATUS => Ok(RpcReply::Stream(watch_stream(self.auth.watch_state()))),
             methods::SIGN_IN => {
@@ -1275,6 +1338,92 @@ impl RpcService for AuthRpc {
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        let private_method = crate::private_access::PrivateAccess::handles(method);
+        if self.remote_access
+            && (private_method
+                || method == methods::PREPARE_PRIVATE_BACKGROUND
+                || AuthRpc::handles(method)
+                || matches!(
+                    method,
+                    methods::IMPORT_LOCAL_WORKSPACE
+                        | methods::LOCAL_IMPORT_STATUS
+                        | methods::APPLY_UPDATE
+                        | methods::UPDATE_STATUS
+                ))
+        {
+            return Err(RpcError::Failed(
+                "This operation is only available on the local control interface".into(),
+            ));
+        }
+        let changes_workspace = crate::private_access::PrivateAccess::changes_workspace(method);
+        if private_method || method == methods::PREPARE_PRIVATE_BACKGROUND {
+            if method == methods::PREPARE_PRIVATE_BACKGROUND
+                && self.engine_info.workspace_scope != WorkspaceScope::Private
+            {
+                return Err(RpcError::Failed(
+                    "Background private setup requires a private workspace".into(),
+                ));
+            }
+            let access = self
+                .private_access
+                .as_ref()
+                .ok_or_else(|| RpcError::Failed("Private workspace setup unavailable".into()))?;
+            let freeze = changes_workspace || method == methods::PREPARE_PRIVATE_BACKGROUND;
+            if freeze {
+                if !self.sessions.pause_if_idle() {
+                    return Err(RpcError::Failed(
+                        "Finish active turns before switching workspaces".into(),
+                    ));
+                }
+                if !self.terminals.pause_if_idle() {
+                    self.sessions.resume_starts();
+                    self.doc_host.kick_drains();
+                    return Err(RpcError::Failed(
+                        "Close terminals before switching workspaces".into(),
+                    ));
+                }
+            }
+            let mut transition = freeze.then_some(WorkspaceTransition {
+                rpc: self,
+                committed: false,
+            });
+            if method == methods::PREPARE_PRIVATE_BACKGROUND {
+                if let Some(transition) = &mut transition {
+                    transition.committed = true;
+                }
+                self.doc_host.pause_all_queues();
+                self.doc_host.disconnect_edge();
+                self.workspace.disconnect_edge();
+                if let Some(links) = &self.links {
+                    links.disconnect_all();
+                }
+                return RpcReply::value(&serde_json::json!({"ready":true}));
+            }
+            let reply = access
+                .handle(method, params, self.doc_host.device_id())
+                .await?;
+            if let Some(transition) = &mut transition {
+                transition.committed = true;
+            }
+            if crate::private_access::PrivateAccess::changes_workspace(method) {
+                // A prior cloud session must not silently select cloud when private mode is left.
+                if let Some(auth) = &self.auth {
+                    auth.sign_out();
+                }
+                self.doc_host.disconnect_edge();
+                self.workspace.disconnect_edge();
+                if let Some(links) = &self.links {
+                    links.disconnect_all();
+                }
+            } else if method == methods::SET_PRIVATE_ACCESS_ENABLED
+                && access.config().is_some_and(|c| !c.enabled)
+            {
+                if let Some(links) = &self.links {
+                    links.disconnect_all();
+                }
+            }
+            return Ok(reply);
+        }
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)
@@ -1283,6 +1432,28 @@ impl RpcService for EngineRpc {
         {
             let target = target.to_string();
             return self.forward(&target, method, params).await;
+        }
+        if self.is_private_client()
+            && matches!(
+                method,
+                methods::OPEN_TERMINAL
+                    | methods::ADD_REPO
+                    | methods::CLONE_REPO
+                    | methods::CREATE_REPO
+                    | methods::START_AGENT_LOGIN
+                    | methods::RELAY_COMMAND
+            )
+        {
+            return Err(RpcError::Failed(
+                "This device is a client; choose an agent server".into(),
+            ));
+        }
+        if self.engine_info.workspace_scope == WorkspaceScope::Private
+            && matches!(method, methods::WATCH_PREVIEWS)
+        {
+            return Err(RpcError::Failed(
+                "Preview tunnels are unavailable in private workspaces".into(),
+            ));
         }
         if AuthRpc::handles(method) {
             return AuthRpc::new(self.auth()?.clone())

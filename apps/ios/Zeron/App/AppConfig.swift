@@ -1,13 +1,13 @@
-// Session-wide connection config: edge base URL, identity, token minting for
-// room sockets (WS auth rides the URL query — sockets can't set headers), and
-// the durable-nudge POST. Thread-safe (rooms call in from their actors).
+// Session-wide connection identity and authentication for HTTP and room sockets.
 
+import CryptoKit
 import Foundation
 
 final class AppConfig: @unchecked Sendable {
     enum Mode: String {
         case workos
         case dev
+        case privateWorkspace = "private"
     }
 
     let edgeURL: URL
@@ -20,6 +20,8 @@ final class AppConfig: @unchecked Sendable {
     private let lock = NSLock()
     private var tokens: AuthTokens?
     private var devBearer: String?
+    private var privateBearer: String?
+    private var invalidated = false
     /// In-flight refresh shared by every caller (single-flight). WorkOS
     /// refresh tokens are SINGLE-USE (rotated per use, desktop auth.rs
     /// refresh_gate): without this, a cold launch's N room dials raced N
@@ -31,7 +33,7 @@ final class AppConfig: @unchecked Sendable {
 
     init(edgeURL: URL, mode: Mode, userId: String, orgId: String,
          deviceId: String, deviceName: String,
-         tokens: AuthTokens? = nil, devBearer: String? = nil) {
+         tokens: AuthTokens? = nil, devBearer: String? = nil, privateBearer: String? = nil) {
         self.edgeURL = edgeURL
         self.mode = mode
         self.userId = userId
@@ -40,6 +42,23 @@ final class AppConfig: @unchecked Sendable {
         self.deviceName = deviceName
         self.tokens = tokens
         self.devBearer = devBearer
+        self.privateBearer = privateBearer
+    }
+
+    var cacheNamespace: String {
+        let identity = [mode.rawValue, edgeURL.absoluteString, orgId, userId, deviceId]
+        let bytes = (try? JSONEncoder().encode(identity)) ?? Data()
+        return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    }
+
+    func invalidate() {
+        lock.withLock {
+            invalidated = true
+            tokens = nil
+            devBearer = nil
+            privateBearer = nil
+            refreshTask?.cancel()
+        }
     }
 
     func updateTokens(_ new: AuthTokens) {
@@ -50,7 +69,10 @@ final class AppConfig: @unchecked Sendable {
 
     /// Current bearer, refreshing the WorkOS access token when needed.
     func currentToken() async -> String? {
+        guard !lock.withLock({ invalidated }) else { return nil }
         switch mode {
+        case .privateWorkspace:
+            return lock.withLock { privateBearer }
         case .dev:
             return lock.withLock { devBearer }
         case .workos:
@@ -76,6 +98,7 @@ final class AppConfig: @unchecked Sendable {
                 let client = AuthClient(baseURL: edgeURL)
                 let refreshed = try? await client.refresh(refreshToken: current.refreshToken,
                                                           organizationId: orgId)
+                guard !Task.isCancelled, !self.lock.withLock({ self.invalidated }) else { return nil }
                 if let refreshed {
                     self.updateTokens(refreshed)
                     Keychain.save(refreshed.accessToken, key: "accessToken")
@@ -104,23 +127,39 @@ final class AppConfig: @unchecked Sendable {
 
     /// The workspace registry room (docs/registry-sync.md) — the row-table
     /// replacement for the old ws Loro workspace doc.
-    func registrySocketURL() async -> URL? {
-        guard let token = await currentToken() else { return nil }
-        var url = wsBase.appending(path: "registry/\(orgId)/ws")
-        url.append(queryItems: [URLQueryItem(name: "token", value: token),
-                                URLQueryItem(name: "device", value: deviceId)])
-        return url
+    func registrySocketRequest() async -> URLRequest? {
+        await socketRequest(path: "registry/\(orgId)/ws",
+                            query: [URLQueryItem(name: "device", value: deviceId)])
     }
 
     /// The chat2 log-relay room (docs/chat2-sync.md B) — replaces the s2
     /// session rooms, which mobile no longer dials at all. `device` rides the
     /// URL so the DO can attribute sockets and honor excludeOwn backfills.
-    func chat2SocketURL(chatId: String) async -> URL? {
+    func chat2SocketRequest(chatId: String) async -> URLRequest? {
+        await socketRequest(path: "chat2/\(chatId)/ws",
+                            query: [URLQueryItem(name: "device", value: deviceId)])
+    }
+
+    func deviceRelayRequest(deviceId: String, connectionId: String) async -> URLRequest? {
+        await socketRequest(path: "device/\(deviceId)/ws", query: [
+            URLQueryItem(name: "role", value: "client"),
+            URLQueryItem(name: "connId", value: connectionId),
+        ])
+    }
+
+    private func socketRequest(path: String, query: [URLQueryItem]) async -> URLRequest? {
         guard let token = await currentToken() else { return nil }
-        var url = wsBase.appending(path: "chat2/\(chatId)/ws")
-        url.append(queryItems: [URLQueryItem(name: "token", value: token),
-                                URLQueryItem(name: "device", value: deviceId)])
-        return url
+        var url = wsBase.appending(path: path)
+        var items = query
+        if mode != .privateWorkspace {
+            items.append(URLQueryItem(name: "token", value: token))
+        }
+        url.append(queryItems: items)
+        var request = URLRequest(url: url)
+        if mode == .privateWorkspace {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        return request
     }
 
     /// GET /chat2/{chatId}/checkpoint — the Range-resumable doc snapshot
@@ -167,8 +206,6 @@ final class AppConfig: @unchecked Sendable {
                      URLQueryItem(name: "beat", value: "1")]
         if let since { items.append(URLQueryItem(name: "since", value: String(since))) }
         url.append(queryItems: items)
-        // Bearer header, never ?token=: HTTP supports headers (unlike WS
-        // upgrades), and query strings can reach request logs.
         var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         return request

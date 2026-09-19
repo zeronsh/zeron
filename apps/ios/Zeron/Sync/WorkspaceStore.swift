@@ -67,7 +67,7 @@ final class WorkspaceStore {
         // sidebar renders immediately and the hello backfills from our
         // cursor. First run after the update: no blob → cursor null → the
         // server's full state (the engines already seeded everything).
-        let blobURL = DocDisk.registryURL(orgId: config.orgId, userId: config.userId)
+        let blobURL = DocDisk.registryURL(orgId: config.orgId, userId: config.userId, namespace: config.cacheNamespace)
         if let data = try? Data(contentsOf: blobURL),
            let loaded = try? RegistryDoc.from(data: data, deviceId: config.deviceId) {
             doc = loaded
@@ -83,7 +83,7 @@ final class WorkspaceStore {
             event: { [weak self] event in self?.handle(event) }
         )
         let client = RegistryClient(device: config.deviceId,
-                                    urlProvider: { [config] in await config.registrySocketURL() },
+                                    requestProvider: { [config] in await config.registrySocketRequest() },
                                     delegate: delegate)
         self.client = client
         Task { await client.start() }
@@ -342,7 +342,8 @@ final class WorkspaceStore {
                              createdAt: f["createdAt"]?.int64Value,
                              version: f["version"]?.stringValue,
                              capabilities: (f["capabilities"]?.arrayValue ?? [])
-                                .compactMap(\.stringValue))
+                                .compactMap(\.stringValue),
+                             role: f["role"]?.stringValue ?? (config.mode == .privateWorkspace ? "client" : nil))
         }.sorted { $0.name < $1.name }
 
         spaces = doc.overlayRows(kind: "spaces").compactMap { row in

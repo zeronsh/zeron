@@ -19,6 +19,11 @@ struct ZeronApp: App {
                 // for status/markdown, never chrome.
                 .tint(Theme.text)
                 .background(Theme.bg)
+                .onOpenURL { url in
+                    if let invitation = PrivateInvitation(url: url) {
+                        model.privateInvitation = invitation
+                    }
+                }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .background {
                         model.flushDocs()
@@ -39,6 +44,7 @@ struct RootView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        @Bindable var model = model
         Group {
             switch model.phase {
             case .signedOut:
@@ -50,5 +56,8 @@ struct RootView: View {
             }
         }
         .task { model.restore() }
+        .sheet(item: $model.privateInvitation) { invitation in
+            PrivateJoinView(invitation: invitation)
+        }
     }
 }

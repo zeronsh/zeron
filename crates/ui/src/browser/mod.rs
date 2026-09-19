@@ -251,6 +251,19 @@ impl BrowserSurface {
         cx: &mut Context<Self>,
     ) {
         self.previews_task = Some(cx.spawn(async move |this, cx| {
+            if handle.engine_info().workspace_scope == zeron_proto::WorkspaceScope::Private {
+                this.update(cx, |this, cx| {
+                    this.previews.services.clear();
+                    this.previews.error = Some(
+                        "Application-preview tunnels are not available in private workspaces."
+                            .into(),
+                    );
+                    this.previews_loading = false;
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
             loop {
                 let subscription = handle
                     .client()

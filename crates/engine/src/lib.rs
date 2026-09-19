@@ -25,6 +25,7 @@ pub mod doc_host;
 mod http_error;
 pub mod instance_lock;
 pub mod local_import;
+pub mod private_access;
 pub mod profile;
 pub mod registry;
 pub mod repos;
@@ -139,6 +140,7 @@ pub struct EngineCore {
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
     workspace_scope: WorkspaceScope,
+    private_access: Option<Arc<private_access::PrivateAccess>>,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
     /// Peer link cache for `targetDeviceId` routing (attached when edge+auth are ready).
@@ -211,6 +213,12 @@ impl EngineCore {
         std::fs::create_dir_all(data_dir)?;
         let legacy_uploads_root = profile.claim_legacy_uploads_root()?;
         let device_id = load_or_create_device_id(data_dir)?;
+        let private_config = if profile.scope() == WorkspaceScope::Private {
+            zeron_private::PrivateConfig::load(data_dir)
+                .map_err(|e| EngineError::Other(e.to_string()))?
+        } else {
+            None
+        };
         // This device's harness enablement (Settings → Agents) rides the
         // engine data dir — per-device, like the CLI installs it gates.
         registry.load_prefs(data_dir);
@@ -229,6 +237,7 @@ impl EngineCore {
         let workspace = WorkspaceHost::open(
             store,
             WorkspaceHostConfig {
+                role: private_config.as_ref().map(|c| c.role),
                 device_id: device_id.clone(),
                 device_name: local_device_name(&device_id),
                 platform: std::env::consts::OS.to_string(),
@@ -238,12 +247,21 @@ impl EngineCore {
             },
         )?;
         doc_host.set_workspace(workspace.clone());
-        doc_host.set_sessions(sessions.clone());
+        let executes = private_config
+            .as_ref()
+            .is_none_or(|c| c.role == zeron_private::NodeRole::Server);
+        if executes {
+            doc_host.set_sessions(sessions.clone());
+        } else {
+            sessions.disable_execution();
+        }
         sessions.set_doc_host(doc_host.clone());
-        match sessions.recover_stale() {
-            Ok(0) => {}
-            Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
-            Err(err) => tracing::error!(error = %err, "stale-session recovery failed"),
+        if executes {
+            match sessions.recover_stale() {
+                Ok(0) => {}
+                Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
+                Err(err) => tracing::error!(error = %err, "stale-session recovery failed"),
+            }
         }
         doc_host.spawn_transcript_salvage(profile.store_root().join("journals"));
         let repos = Repos::new(data_dir, &device_id);
@@ -279,7 +297,11 @@ impl EngineCore {
             uploads.clone(),
             agent_accounts_config.codex_home.join("generated_images"),
         );
-        let local_import = (profile.scope() == WorkspaceScope::Synced).then(|| {
+        let local_import = matches!(
+            profile.scope(),
+            WorkspaceScope::Synced | WorkspaceScope::Private
+        )
+        .then(|| {
             local_import::LocalImporter::new(
                 data_dir,
                 &device_id,
@@ -321,6 +343,7 @@ impl EngineCore {
             device_id,
             local_import,
             workspace_scope: profile.scope(),
+            private_access: None,
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
             updater: std::sync::Mutex::new(None),
@@ -418,9 +441,15 @@ impl EngineCore {
     /// warm-open chat docs on nudges (§7 cold-chat command delivery). The token source
     /// re-reads auth on every (re)dial, so token refreshes take effect at reconnect.
     pub fn start_host_relay(&self, edge_url: &str) -> zeron_rpc::HostRelay {
-        let auth = self.auth();
-        let config =
-            zeron_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth));
+        self.start_host_relay_with_token(edge_url, Arc::new(self.auth()))
+    }
+
+    fn start_host_relay_with_token(
+        &self,
+        edge_url: &str,
+        token: Arc<dyn zeron_rpc::TokenSource>,
+    ) -> zeron_rpc::HostRelay {
+        let config = zeron_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), token);
         let doc_host = self.doc_host.clone();
         let on_nudge: zeron_rpc::NudgeHandler = Arc::new(move |chat_id: String| {
             // Opening the doc joins its room + syncs; drain fires on the change
@@ -432,10 +461,14 @@ impl EngineCore {
                 }
             }
         });
-        zeron_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
+        zeron_rpc::HostRelay::spawn(config, self.make_rpc_service(true), on_nudge)
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
+        self.make_rpc_service(false)
+    }
+
+    fn make_rpc_service(&self, remote: bool) -> Arc<EngineRpc> {
         let mut rpc = EngineRpc::new(
             self.sessions.clone(),
             self.doc_host.clone(),
@@ -452,6 +485,10 @@ impl EngineCore {
         )
         .with_auth(self.auth())
         .with_previews(self.previews.clone());
+        if let Some(access) = &self.private_access {
+            rpc = rpc.with_private_access(access.clone());
+        }
+        rpc = rpc.with_remote_access(remote);
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
@@ -480,6 +517,7 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        self.workspace.shutdown_edge().await;
         self.previews.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally
         // releases the next queued row. Freeze first so quitting never starts
@@ -531,6 +569,7 @@ pub struct Engine {
 pub struct EngineRuntime {
     core: EngineCore,
     host_relay: std::sync::Mutex<Option<zeron_rpc::HostRelay>>,
+    private_hub: Option<zeron_private::HubHandle>,
 }
 
 /// IPC-only lifecycle control owned by `zeron headless`. The regular
@@ -577,11 +616,17 @@ impl EngineRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         self.core.disconnect_edge();
+        if let Some(hub) = &self.private_hub {
+            hub.shutdown();
+        }
     }
 
     pub async fn shutdown(&self) {
         self.disconnect_edge();
         self.core.shutdown().await;
+        if let Some(hub) = &self.private_hub {
+            hub.wait_stopped().await;
+        }
     }
 }
 
@@ -619,12 +664,18 @@ impl Engine {
         if let Some(token) = &config.edge_token {
             auth_config.dev_user_id = token.clone();
         }
-        Auth::new(auth_config)
+        if zeron_private::PrivateConfig::path(&config.data_dir).exists() {
+            Auth::private(auth_config)
+        } else {
+            Auth::new(auth_config)
+        }
     }
 
     /// Capture the workspace boundary once, before refresh or sign-in can mutate auth.
     pub fn initial_workspace_scope(auth: &Auth) -> WorkspaceScope {
-        if !auth.workos_enabled() {
+        if auth.is_private() {
+            WorkspaceScope::Private
+        } else if !auth.workos_enabled() {
             WorkspaceScope::Development
         } else if auth.loaded_workos_session() {
             WorkspaceScope::Synced
@@ -643,6 +694,18 @@ impl Engine {
     ) -> Result<Option<EngineProfile>, EngineError> {
         match scope {
             WorkspaceScope::Local => EngineProfile::local(&config.data_dir).map(Some),
+            WorkspaceScope::Private => {
+                let private = zeron_private::PrivateConfig::load(&config.data_dir)
+                    .map_err(|e| EngineError::Other(e.to_string()))?
+                    .ok_or_else(|| {
+                        EngineError::Other("Private workspace credentials are missing".into())
+                    })?;
+                Ok(Some(EngineProfile::private(
+                    &config.data_dir,
+                    &private.workspace_id,
+                    &private.user_id,
+                )))
+            }
             WorkspaceScope::Development => {
                 let dev_token_org = config
                     .edge_token
@@ -688,6 +751,13 @@ impl Engine {
     ) -> Result<EngineInfo, EngineError> {
         std::fs::create_dir_all(&config.data_dir)?;
         Ok(EngineInfo {
+            private_workspace_id: if workspace_scope == WorkspaceScope::Private {
+                zeron_private::PrivateConfig::load(&config.data_dir)
+                    .map_err(|e| EngineError::Other(e.to_string()))?
+                    .map(|c| c.workspace_id)
+            } else {
+                None
+            },
             device_id: load_or_create_device_id(&config.data_dir)?,
             workspace_scope,
             cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
@@ -724,7 +794,19 @@ impl Engine {
         profile: EngineProfile,
         lock: Option<InstanceLock>,
     ) -> anyhow::Result<EngineRuntime> {
+        let lock = Some(match lock {
+            Some(lock) => lock,
+            None => InstanceLock::acquire(&config.data_dir)?,
+        });
+        let private_access = private_access::PrivateAccess::open(&config.data_dir)?;
+        let private = private_access.config();
+        let is_private = profile.scope() == WorkspaceScope::Private;
+        anyhow::ensure!(
+            !is_private || private.is_some(),
+            "Private workspace credentials are missing"
+        );
         let edge_enabled = match profile.scope() {
+            WorkspaceScope::Private => true,
             WorkspaceScope::Local => false,
             WorkspaceScope::Synced => {
                 // Validate the persisted session in the BACKGROUND: the probe
@@ -756,12 +838,42 @@ impl Engine {
             zeron_sync::net_path::spawn_path_monitor();
         }
         let device_id = load_or_create_device_id(profile.device_root())?;
+        if let Some(private) = &private {
+            anyhow::ensure!(
+                private.device_id == device_id,
+                "Private credential belongs to another device"
+            );
+        }
+        let private_hub = match private_access.hub() {
+            Some(hub) => {
+                if let Some(config) = private
+                    .as_ref()
+                    .filter(|c| c.enabled && c.hub_url.starts_with("https://"))
+                {
+                    zeron_private::tailscale::verify(config).await?;
+                }
+                Some(hub.clone().start().await?)
+            }
+            None => None,
+        };
         let edge = edge_enabled.then(|| {
-            EdgeConfig::new(config.edge_url.clone(), Arc::new(auth.clone())).with_device(device_id)
+            match &private {
+                Some(private) => {
+                    // The co-located engine does not depend on an external TLS route to reach its hub.
+                    let url = if private.host_hub {
+                        format!("http://127.0.0.1:{}", private.listen_port)
+                    } else {
+                        private.hub_url.clone()
+                    };
+                    EdgeConfig::new(url, private_access.clone()).with_device(device_id)
+                }
+                None => EdgeConfig::new(config.edge_url.clone(), Arc::new(auth.clone()))
+                    .with_device(device_id),
+            }
         });
 
         let preview_org = profile.org_id().to_string();
-        let core = match lock {
+        let mut core = match lock {
             Some(lock) => EngineCore::assemble_with_profile_locked(
                 profile,
                 Arc::new(default_registry()),
@@ -776,6 +888,7 @@ impl Engine {
                 edge.clone(),
             )?,
         };
+        core.private_access = Some(private_access);
         core.set_auth(auth.clone());
         let preview_workspace = core.workspace.clone();
         let preview_device = core.device_id.clone();
@@ -788,21 +901,23 @@ impl Engine {
                 .filter_map(|chat| chat.cwd.map(std::path::PathBuf::from))
                 .collect()
         });
-        let preview_signaling = edge_enabled.then(|| zeron_preview::signaling::Config {
-            edge_url: config.edge_url.clone(),
-            org_id: preview_org,
-            tokens: Arc::new(auth.clone()),
-        });
+        let preview_signaling =
+            (edge_enabled && !is_private).then(|| zeron_preview::signaling::Config {
+                edge_url: config.edge_url.clone(),
+                org_id: preview_org,
+                tokens: Arc::new(auth.clone()),
+            });
         core.previews.start(projects, preview_signaling).await;
         // Portable Windows packages explicitly configure an update feed; users
         // should not need to enable workspace sync to receive application updates.
-        let check_updates = edge_enabled;
+        let check_updates = edge_enabled && !is_private;
         #[cfg(windows)]
-        let check_updates = check_updates
-            || matches!(
-                zeron_update::detect_install(),
-                zeron_update::InstallKind::WindowsPortable { .. }
-            );
+        let check_updates = !is_private
+            && (check_updates
+                || matches!(
+                    zeron_update::detect_install(),
+                    zeron_update::InstallKind::WindowsPortable { .. }
+                ));
         if check_updates {
             // Release checker: polls {edge}/releases on a 6h cadence; headless
             // installs with ZERON_AUTO_UPDATE=1 apply + restart themselves — gated
@@ -830,9 +945,9 @@ impl Engine {
         // never waits on — or dies inside — an npm run.
         zeron_harness::acp::prewarm_managed_adapters();
 
-        let host_relay = edge.as_ref().map(|edge| {
+        let host_relay = edge.as_ref().and_then(|edge| {
             let mut link_config =
-                zeron_rpc::LinkCacheConfig::new(edge.url.clone(), Arc::new(auth.clone()));
+                zeron_rpc::LinkCacheConfig::new(edge.url.clone(), edge.token.clone());
             // Registry-dark dial gate: devices with no recent presence fail
             // fast with zero dials; presence returning un-parks them (the
             // peer-alive hook below clears any cooldown at the same moment).
@@ -847,12 +962,20 @@ impl Engine {
                     links_for_presence.reset_cooldown(device_id);
                 }));
             core.set_links(links);
-            core.start_host_relay(&edge.url)
+            if private
+                .as_ref()
+                .is_some_and(|c| c.role == zeron_private::NodeRole::Client)
+            {
+                None
+            } else {
+                Some(core.start_host_relay_with_token(&edge.url, edge.token.clone()))
+            }
         });
 
         Ok(EngineRuntime {
             core,
             host_relay: std::sync::Mutex::new(host_relay),
+            private_hub,
         })
     }
 

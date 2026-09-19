@@ -33,6 +33,14 @@ pub use server::{serve_connection, serve_ws_listener};
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
 pub mod methods {
+    pub const PREPARE_PRIVATE_BACKGROUND: &str = "PreparePrivateBackground";
+    pub const PRIVATE_STATUS: &str = "PrivateStatus";
+    pub const CREATE_PRIVATE_WORKSPACE: &str = "CreatePrivateWorkspace";
+    pub const JOIN_PRIVATE_WORKSPACE: &str = "JoinPrivateWorkspace";
+    pub const CREATE_PRIVATE_INVITATION: &str = "CreatePrivateInvitation";
+    pub const REVOKE_PRIVATE_NODE: &str = "RevokePrivateNode";
+    pub const SET_PRIVATE_ACCESS_ENABLED: &str = "SetPrivateAccessEnabled";
+    pub const LEAVE_PRIVATE_WORKSPACE: &str = "LeavePrivateWorkspace";
     pub const WATCH_PREVIEWS: &str = "WatchPreviews";
     pub const LIST_HARNESSES: &str = "ListHarnesses";
     /// Flip a harness's enablement on the target device (Settings → Agents);

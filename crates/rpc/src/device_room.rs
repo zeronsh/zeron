@@ -215,7 +215,12 @@ pub fn device_room_ws_url(
     let ws_base = edge_url.replacen("http", "ws", 1);
     let ws_base = ws_base.trim_end_matches('/');
     let conn = conn_id.map(|c| format!("&connId={c}")).unwrap_or_default();
-    format!("{ws_base}/device/{device_id}/ws?role={role}{conn}&token={token}")
+    let auth = if token.is_empty() {
+        String::new()
+    } else {
+        format!("&token={token}")
+    };
+    format!("{ws_base}/device/{device_id}/ws?role={role}{conn}{auth}")
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +250,10 @@ impl From<TokenError> for zeron_sync::SyncError {
 #[async_trait]
 pub trait TokenSource: Send + Sync + 'static {
     async fn token(&self) -> Result<String, TokenError>;
+
+    fn header_auth(&self) -> bool {
+        false
+    }
 
     /// Changes whenever credentials become available or are replaced. Long-lived
     /// supervisors use this to retry immediately instead of waiting for backoff.
@@ -338,11 +347,20 @@ impl HostRelay {
                             &config.device_id,
                             "host",
                             None,
-                            &token,
+                            if config.token.header_auth() {
+                                ""
+                            } else {
+                                &token
+                            },
                         );
                         let started = tokio::time::Instant::now();
                         let outcome = {
-                            let session = host_session(&url, &service, &on_nudge);
+                            let session = host_session(
+                                &url,
+                                config.token.header_auth().then_some(token.as_str()),
+                                &service,
+                                &on_nudge,
+                            );
                             tokio::pin!(session);
                             loop {
                                 tokio::select! {
@@ -467,10 +485,11 @@ fn make_virtual_conn(
 /// One relay session: connect as host, serve RPC per client conn, until the socket drops.
 async fn host_session(
     url: &str,
+    bearer: Option<&str>,
     service: &Arc<dyn RpcService>,
     on_nudge: &NudgeHandler,
 ) -> Result<(), RpcError> {
-    let ws = zeron_sync::dial::connect_ws(url)
+    let ws = zeron_sync::dial::connect_ws_with_bearer(url, bearer)
         .await
         .map_err(|e| RpcError::Transport(format!("device room unreachable: {e}")))?;
     tracing::info!("device-room: host connected");
@@ -592,7 +611,11 @@ pub struct DeviceLink {
 
 impl DeviceLink {
     pub async fn connect(url: &str) -> Result<Self, RpcError> {
-        let ws = zeron_sync::dial::connect_ws(url)
+        Self::connect_with_bearer(url, None).await
+    }
+
+    pub async fn connect_with_bearer(url: &str, bearer: Option<&str>) -> Result<Self, RpcError> {
+        let ws = zeron_sync::dial::connect_ws_with_bearer(url, bearer)
             .await
             .map_err(|e| RpcError::Transport(format!("device room unreachable: {e}")))?;
         Ok(Self::from_socket(ws))
@@ -1038,16 +1061,26 @@ impl LinkCache {
             device_id,
             "client",
             Some(&conn_id),
-            &token,
+            if self.config.token.header_auth() {
+                ""
+            } else {
+                &token
+            },
         );
         tracing::info!(device = %device_id, "peer: dialing via device room");
         // Bounded connect: `DeviceLink::connect` was the one unbounded await
         // under `forward()` — a wedged edge socket hung callers indefinitely
         // and only the UI's own per-call timers saved them (silently).
         const DIAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-        let link = tokio::time::timeout(DIAL_CONNECT_TIMEOUT, DeviceLink::connect(&url))
-            .await
-            .map_err(|_| RpcError::Transport(format!("peer {device_id}: connect timed out")))?;
+        let link = tokio::time::timeout(
+            DIAL_CONNECT_TIMEOUT,
+            DeviceLink::connect_with_bearer(
+                &url,
+                self.config.token.header_auth().then_some(token.as_str()),
+            ),
+        )
+        .await
+        .map_err(|_| RpcError::Transport(format!("peer {device_id}: connect timed out")))?;
         let link = Arc::new(link?);
         // Readiness probe: prove the host answers before caching (an offline host bounces
         // host_offline, which closes the link and fails this call fast).

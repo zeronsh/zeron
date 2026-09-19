@@ -49,6 +49,21 @@ impl EngineProfile {
         Self::account_scoped(data_dir, org_id, user_id, WorkspaceScope::Synced)
     }
 
+    pub fn private(data_dir: &Path, workspace_id: &str, user_id: &str) -> Self {
+        let store_root = data_dir
+            .join("profiles")
+            .join("private")
+            .join(sanitize_path_id(workspace_id));
+        Self {
+            scope: WorkspaceScope::Private,
+            device_root: data_dir.to_path_buf(),
+            uploads_root: store_root.join("uploads"),
+            store_root,
+            org_id: workspace_id.to_string(),
+            user_id: user_id.to_string(),
+        }
+    }
+
     /// Resolve the explicit development profile under its account-specific storage root.
     pub fn development(data_dir: &Path, org_id: &str, user_id: &str) -> Self {
         Self::account_scoped(data_dir, org_id, user_id, WorkspaceScope::Development)
@@ -101,7 +116,7 @@ impl EngineProfile {
     /// fallback. New writes always use [`Self::uploads_root`], and other accounts
     /// never receive the fallback root.
     pub(crate) fn claim_legacy_uploads_root(&self) -> Result<Option<PathBuf>, EngineError> {
-        if self.scope == WorkspaceScope::Local {
+        if matches!(self.scope, WorkspaceScope::Local | WorkspaceScope::Private) {
             return Ok(None);
         }
 

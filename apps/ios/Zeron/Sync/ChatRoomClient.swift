@@ -85,7 +85,7 @@ actor ChatRoomClient {
 
     private let chatId: String
     private let device: String
-    private let urlProvider: @Sendable () async -> URL?
+    private let requestProvider: @Sendable () async -> URLRequest?
     private let checkpointRequest: @Sendable () async -> URLRequest?
     /// GET /chat2/{id}/rows?after= — the HTTPS pull twin of the backfill.
     private let rowsRequest: @Sendable (UInt64) async -> URLRequest?
@@ -151,14 +151,14 @@ actor ChatRoomClient {
 
     init(chatId: String,
          device: String,
-         urlProvider: @escaping @Sendable () async -> URL?,
+         requestProvider: @escaping @Sendable () async -> URLRequest?,
          checkpointRequest: @escaping @Sendable () async -> URLRequest?,
          rowsRequest: @escaping @Sendable (UInt64) async -> URLRequest?,
          pushRequest: @escaping @Sendable (String) async -> URLRequest?,
          delegate: Delegate) {
         self.chatId = chatId
         self.device = device
-        self.urlProvider = urlProvider
+        self.requestProvider = requestProvider
         self.checkpointRequest = checkpointRequest
         self.rowsRequest = rowsRequest
         self.pushRequest = pushRequest
@@ -386,7 +386,7 @@ actor ChatRoomClient {
         }
 
         Task {
-            guard let url = await urlProvider() else {
+            guard let request = await requestProvider() else {
                 // No URL = no token (refresh failed or signed out) — the most
                 // confusing silent failure: everything cached renders,
                 // nothing syncs. Say so and back off.
@@ -394,13 +394,13 @@ actor ChatRoomClient {
                 self.scheduleReconnect(gen: gen)
                 return
             }
-            await self.openSocket(url: url, gen: gen)
+            await self.openSocket(request: request, gen: gen)
         }
     }
 
-    private func openSocket(url: URL, gen: Int) async {
+    private func openSocket(request: URLRequest, gen: Int) async {
         guard gen == generation, !closed else { return }
-        let task = URLSession.shared.webSocketTask(with: url)
+        let task = URLSession.shared.webSocketTask(with: request)
         socket = task
         task.resume()
         lastInbound = .now()

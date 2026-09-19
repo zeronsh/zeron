@@ -165,7 +165,8 @@ impl TextConnector for WsTextConnector {
         let provider = self.url.clone();
         Box::pin(async move {
             let url = provider.url().await?;
-            let ws = crate::dial::connect_ws(&url)
+            let bearer = provider.authorization().await;
+            let ws = crate::dial::connect_ws_with_bearer(&url, bearer.as_deref())
                 .await
                 .map_err(|e| SyncError::WebSocket(e.to_string()))?;
             let (out_tx, out_rx) = mpsc::channel(64);

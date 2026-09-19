@@ -2001,6 +2001,7 @@ impl Pickers {
         let state = self.state.read(cx);
         let local = state.local_device_id.clone();
         let mut devices: Vec<zeron_proto::Device> = state.devices.clone();
+        devices.retain(|device| state.can_execute_on(&device.id));
         devices.sort_by_key(|d| {
             (
                 local.as_deref() != Some(d.id.as_str()),

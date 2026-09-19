@@ -10,6 +10,7 @@ name = "zeron"
 path = "src/main.rs"
 
 [dependencies]
+zeron-private.workspace = true
 zeron-engine.workspace = true
 zeron-rpc.workspace = true
 zeron-ui.workspace = true

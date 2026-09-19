@@ -6,6 +6,7 @@
 //   supplies a fake org claim.
 
 import Foundation
+import Security
 
 struct AuthUser: Codable, Equatable {
     var id: String
@@ -89,6 +90,11 @@ enum Keychain {
     private static let service = "sh.zeron.ios"
 
     static func save(_ value: String, key: String) {
+        _ = saveChecked(value, key: key)
+    }
+
+    @discardableResult
+    static func saveChecked(_ value: String, key: String, deviceOnly: Bool = false) -> Bool {
         let data = Data(value.utf8)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -98,8 +104,9 @@ enum Keychain {
         SecItemDelete(query as CFDictionary)
         var add = query
         add[kSecValueData as String] = data
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        SecItemAdd(add as CFDictionary, nil)
+        add[kSecAttrAccessible as String] = deviceOnly
+            ? kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly : kSecAttrAccessibleAfterFirstUnlock
+        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
     }
 
     static func load(key: String) -> String? {

@@ -34,6 +34,7 @@ pub mod capabilities {
 #[serde(rename_all = "camelCase")]
 pub enum WorkspaceScope {
     Local,
+    Private,
     Synced,
     Development,
 }
@@ -44,6 +45,8 @@ pub enum WorkspaceScope {
 pub struct EngineInfo {
     pub device_id: String,
     pub workspace_scope: WorkspaceScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_workspace_id: Option<String>,
     /// SDK selected by the owning engine, absent on older versions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_sdk_version: Option<String>,
@@ -80,6 +83,7 @@ mod tests {
     #[test]
     fn engine_info_uses_camel_case_fields() {
         let info = EngineInfo {
+            private_workspace_id: None,
             device_id: "device-1".into(),
             workspace_scope: WorkspaceScope::Local,
             cursor_sdk_version: Some("1.0.31".into()),

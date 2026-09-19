@@ -35,6 +35,22 @@ final class AppModel {
     @ObservationIgnored @AppStorage("userId") var storedUserId = ""
     @ObservationIgnored @AppStorage("orgId") var storedOrgId = ""
     @ObservationIgnored @AppStorage("deviceId") var storedDeviceId = ""
+    @ObservationIgnored @AppStorage("privateWorkspace") private var storedPrivateWorkspace = Data()
+    var privateInvitation: PrivateInvitation?
+
+    private var privateProfile: PrivateWorkspaceProfile? {
+        try? JSONDecoder().decode(PrivateWorkspaceProfile.self, from: storedPrivateWorkspace)
+    }
+
+    var connectionLabel: String {
+        config?.mode == .privateWorkspace ? "Private via Tailscale" : "Zeron Cloud"
+    }
+
+    var privateWorkspaceName: String? {
+        config?.mode == .privateWorkspace ? privateProfile?.name : nil
+    }
+
+    var isPrivateWorkspace: Bool { config?.mode == .privateWorkspace }
 
     var deviceId: String {
         if storedDeviceId.isEmpty {
@@ -60,7 +76,6 @@ final class AppModel {
 
     func restore() {
         if demo != nil { return }
-        DocDisk.prune(keep: 80)
         let args = ProcessInfo.processInfo.arguments
         // Debug-rig config overrides (cfprefsd caching defeats external
         // defaults writes; the app applying them itself always sticks).
@@ -177,23 +192,46 @@ final class AppModel {
             return
         }
         startPathMonitor()
+        guard let mode = AppConfig.Mode(rawValue: authModeRaw) else { return }
+        if mode == .privateWorkspace {
+            guard let profile = privateProfile,
+                  (try? PrivateWorkspaceClient.hubURL(profile.hubURL.absoluteString)) == profile.hubURL,
+                  let token = Keychain.load(key: profile.tokenKey) else { return }
+            connect(config: profile.config(token: token))
+            return
+        }
         guard let url = URL(string: edgeURLString), !storedUserId.isEmpty, !storedOrgId.isEmpty else {
             return
         }
-        let mode = AppConfig.Mode(rawValue: authModeRaw) ?? .workos
         switch mode {
+        case .privateWorkspace:
+            return
         case .dev:
             connect(url: url, mode: .dev, userId: storedUserId, orgId: storedOrgId,
-                    tokens: nil, devBearer: devBearer(userId: storedUserId, orgId: storedOrgId))
+                    tokens: nil, devBearer: devBearer(userId: storedUserId, orgId: storedOrgId), restoring: true)
         case .workos:
             guard let access = Keychain.load(key: "accessToken"),
                   let refresh = Keychain.load(key: "refreshToken") else { return }
             connect(url: url, mode: .workos, userId: storedUserId, orgId: storedOrgId,
-                    tokens: AuthTokens(accessToken: access, refreshToken: refresh), devBearer: nil)
+                    tokens: AuthTokens(accessToken: access, refreshToken: refresh), devBearer: nil, restoring: true)
         }
     }
 
     // MARK: Sign-in flows
+
+    func joinPrivateWorkspace(hubURL: String, code: String, name: String) async throws {
+        let url = try PrivateWorkspaceClient.hubURL(hubURL)
+        let client = PrivateWorkspaceClient(hubURL: url)
+        let nodeId = "ios-" + UUID().uuidString.lowercased()
+        let (profile, token) = try await client.pair(code: code, name: name, deviceId: nodeId)
+        let persisted = try JSONEncoder().encode(profile)
+        guard Keychain.saveChecked(token, key: profile.tokenKey, deviceOnly: true)
+        else { throw PrivateWorkspaceError.keychain }
+        storedPrivateWorkspace = persisted
+        authModeRaw = AppConfig.Mode.privateWorkspace.rawValue
+        connect(config: profile.config(token: token))
+        privateInvitation = nil
+    }
 
     /// WorkOS paste-code exchange. Returns the org list for the picker (or
     /// connects straight away when exactly one org exists).
@@ -243,19 +281,32 @@ final class AppModel {
     }
 
     func signOut() {
+        let departingConfig = config
+        let wasPrivate = authModeRaw == AppConfig.Mode.privateWorkspace.rawValue
+        disconnect()
+        if wasPrivate {
+            if let profile = privateProfile { Keychain.delete(key: profile.tokenKey) }
+            storedPrivateWorkspace = Data()
+        } else {
+            Keychain.delete(key: "accessToken")
+            Keychain.delete(key: "refreshToken")
+            storedUserId = ""
+            storedOrgId = ""
+        }
+        if let departingConfig { DocDisk.wipe(namespace: departingConfig.cacheNamespace) }
+        phase = .signedOut
+    }
+
+    private func disconnect() {
+        config?.invalidate()
         workspace?.stop()
         workspace = nil
         sessionStores.values.forEach { $0.stop() }
         sessionStores.removeAll()
         config = nil
         demo = nil
+        AttachmentImageCache.shared.reset()
         demoPinnedSessionIds = []
-        Keychain.delete(key: "accessToken")
-        Keychain.delete(key: "refreshToken")
-        DocDisk.wipeAll()  // local doc state belongs to the signed-in identity
-        storedUserId = ""
-        storedOrgId = ""
-        phase = .signedOut
     }
 
     private func devBearer(userId: String, orgId: String) -> String {
@@ -263,11 +314,19 @@ final class AppModel {
     }
 
     private func connect(url: URL, mode: AppConfig.Mode, userId: String, orgId: String,
-                         tokens: AuthTokens?, devBearer: String?) {
+                         tokens: AuthTokens?, devBearer: String?, restoring: Bool = false) {
         let config = AppConfig(edgeURL: url, mode: mode, userId: userId, orgId: orgId,
                                deviceId: deviceId, deviceName: deviceName,
                                tokens: tokens, devBearer: devBearer)
+        if restoring { DocDisk.migrateLegacyCache(namespace: config.cacheNamespace) }
+        connect(config: config)
+    }
+
+    private func connect(config: AppConfig) {
+        disconnect()
         self.config = config
+        DocDisk.prune(keep: 80, namespace: config.cacheNamespace)
+        AttachmentImageCache.shared.configure(config: config)
         let store = WorkspaceStore(config: config)
         workspace = store
         store.start()
@@ -605,7 +664,8 @@ final class AppModel {
     private func probeEdgeHealth() {
         guard let config, demo == nil else { return }
         Task.detached {
-            var request = URLRequest(url: config.edgeURL.appending(path: "health"))
+            let path = config.mode == .privateWorkspace ? "private/info" : "health"
+            var request = URLRequest(url: config.edgeURL.appending(path: path))
             request.timeoutInterval = 3
             guard let (_, response) = try? await URLSession.shared.data(for: request),
                   (response as? HTTPURLResponse)?.statusCode == 200 else { return }

@@ -58,7 +58,7 @@ actor RegistryClient {
     }
 
     private let device: String
-    private let urlProvider: @Sendable () async -> URL?
+    private let requestProvider: @Sendable () async -> URLRequest?
     private let delegate: Delegate
 
     private var socket: URLSessionWebSocketTask?
@@ -80,10 +80,10 @@ actor RegistryClient {
     private var probeSentAt: DispatchTime?
 
     init(device: String,
-         urlProvider: @escaping @Sendable () async -> URL?,
+         requestProvider: @escaping @Sendable () async -> URLRequest?,
          delegate: Delegate) {
         self.device = device
-        self.urlProvider = urlProvider
+        self.requestProvider = requestProvider
         self.delegate = delegate
     }
 
@@ -154,7 +154,7 @@ actor RegistryClient {
         lastProtocolRx = .now()
 
         Task {
-            guard let url = await urlProvider() else {
+            guard let request = await requestProvider() else {
                 // No URL = no token (refresh failed or signed out) — the most
                 // confusing silent failure: everything cached renders, nothing
                 // syncs. Say so and back off.
@@ -162,13 +162,13 @@ actor RegistryClient {
                 self.scheduleReconnect(gen: gen)
                 return
             }
-            await self.openSocket(url: url, gen: gen)
+            await self.openSocket(request: request, gen: gen)
         }
     }
 
-    private func openSocket(url: URL, gen: Int) async {
+    private func openSocket(request: URLRequest, gen: Int) async {
         guard gen == generation, !closed else { return }
-        let task = URLSession.shared.webSocketTask(with: url)
+        let task = URLSession.shared.webSocketTask(with: request)
         socket = task
         task.resume()
         lastInbound = .now()

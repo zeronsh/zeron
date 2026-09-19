@@ -105,8 +105,12 @@ struct HomeView: View {
                     Menu {
                         if model.demo != nil {
                             Text("Demo mode")
+                        } else {
+                            Text(model.connectionLabel)
+                            if let name = model.privateWorkspaceName { Text(name) }
                         }
-                        Button("Sign out", role: .destructive) { model.signOut() }
+                        Button(model.isPrivateWorkspace ? "Disconnect private workspace" : "Sign out",
+                               role: .destructive) { model.signOut() }
                     } label: {
                         Image(systemName: "person.circle")
                     }
