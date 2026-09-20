@@ -1075,6 +1075,7 @@ async fn pull_request_list_dispatch_returns_provider_items() {
         core.repos.clone(),
         core.workspace_files.clone(),
         core.terminals.clone(),
+        core.project_actions.clone(),
         core.change_requests.clone(),
         core.diff_sync.clone(),
         core.uploads.clone(),

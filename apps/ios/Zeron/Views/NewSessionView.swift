@@ -74,7 +74,9 @@ struct NewSessionView: View {
     }
 
     private var selectedModel: ModelInfo {
-        models.first { $0.id == storedModel } ?? models[0]
+        HarnessCatalog.resolveExisting(modelId: storedModel, in: models)
+            ?? models.first
+            ?? HarnessCatalog.defaultModel(for: harness)
     }
 
     private var reasoning: String? {
@@ -661,7 +663,7 @@ struct ModelPickerSheet: View {
     }
 
     private var selectedModel: ModelInfo? {
-        models(for: harness).first { $0.id == modelId }
+        HarnessCatalog.resolveExisting(modelId: modelId, in: models(for: harness))
     }
 
     /// t3's collapsible ProviderHeader: brand mark + tracked-out uppercase

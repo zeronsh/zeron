@@ -69,6 +69,7 @@ final class SessionStore {
     /// Persisted WITH the snapshot in one atomic file (DocDisk.saveChat2, the
     /// C2 rule), so content and cursor can never diverge.
     @ObservationIgnored private var cursor: UInt64 = 0
+    @ObservationIgnored private var cursorVerified = false
     private var chatRoom: ChatRoomClient?
     private var subscriptions: [Subscription] = []
     private let config: AppConfig
@@ -153,7 +154,8 @@ final class SessionStore {
         // when the host device is offline); the join backfills incrementally
         // from its cursor.
         if let saved = DocDisk.loadChat2(into: doc, id: chatId) {
-            cursor = saved
+            cursor = saved.cursor
+            cursorVerified = saved.verified
             project()
         } else if DocDisk.legacySnapshotExists(id: chatId) {
             // M3 discard-and-adopt: this device's cached doc predates the
@@ -163,7 +165,8 @@ final class SessionStore {
         }
         saver = DocSaver { [weak self] in
             guard let self else { return }
-            DocDisk.saveChat2(doc: self.doc, id: self.chatId, cursor: self.cursor)
+            DocDisk.saveChat2(doc: self.doc, id: self.chatId, cursor: self.cursor,
+                              verified: self.cursorVerified)
         }
         // Subscription BEFORE any connect: every local commit lands in the
         // client when it exists; commits made earlier are covered by the
@@ -270,11 +273,21 @@ final class SessionStore {
                 // converts any lying cursor into a true one.
                 roomLog.info("chat2 \(self.chatId, privacy: .public): cursor amnesty \(self.cursor) → \(seq)")
                 self.cursor = seq
+                self.cursorVerified = false
                 self.saver?.poke()
             },
             setCursor: { [weak self] seq in
                 guard let self, self.cursor != seq else { return }
+                if seq < self.cursor {
+                    self.cursorVerified = false
+                }
                 self.cursor = seq
+                self.saver?.poke()
+            },
+            cursorVerified: { [weak self] in self?.cursorVerified ?? false },
+            setCursorVerified: { [weak self] verified in
+                guard let self, self.cursorVerified != verified else { return }
+                self.cursorVerified = verified
                 self.saver?.poke()
             },
             event: { [weak self] event in self?.handle(event) }

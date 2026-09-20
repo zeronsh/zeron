@@ -187,6 +187,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
             verticalScrollIndicatorInsets.top = topInset
             let target = min(max(-topInset, logicalOffset - topInset),
                              max(-topInset, contentSize.height - bounds.height))
+            animatingFollow = false
             setContentOffset(CGPoint(x: 0, y: target), animated: false)
             layoutIfNeeded()
             if let anchor { restore(anchor) }
@@ -226,6 +227,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
     }
 
     func update(_ input: NativeTranscriptTable) {
+        reconcileGesture()
         render = input.render
         let previous = rows
         let previousIDs = previous.map(\.id)
@@ -266,7 +268,11 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
             }
             layoutIfNeeded()
             updateRunway()
-            if let anchor, hasPositioned,
+            // Appended rows land below the viewport, so the anchor already
+            // holds. Rewriting the offset here would kill a live flick or the
+            // send animation (UIKit ends both silently, without a delegate call).
+            let momentum = isDragging || isDecelerating || animatingFollow
+            if let anchor, hasPositioned, !(appending && momentum),
                previousIDs != nextIDs || (presentationChanged && !follow.pinned) {
                 restore(anchor)
             }
@@ -307,18 +313,40 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         isTracking || isDragging || isDecelerating || follow.userScrolling
     }
 
-    private func visibleAnchor() -> (id: String, offset: CGFloat)? {
+    /// A programmatic offset write during deceleration stops the scroll
+    /// without `scrollViewDidEndDecelerating`. Without this the gesture flag
+    /// would pin the transcript in user-owned state and follow would never
+    /// resume.
+    private func reconcileGesture() {
+        guard follow.userScrolling, !isTracking, !isDragging, !isDecelerating else { return }
+        finishGesture()
+    }
+
+    private struct Anchor {
+        let id: String
+        let offset: CGFloat
+        let height: CGFloat
+    }
+
+    private func visibleAnchor() -> Anchor? {
         let top = contentOffset.y + contentInset.top
         guard let index = indexPathsForVisibleRows?.sorted().first(where: { rectForRow(at: $0).maxY > top }),
               index.row < rows.count else { return nil }
-        return (rows[index.row].id, rectForRow(at: index).minY - top)
+        let rect = rectForRow(at: index)
+        return Anchor(id: rows[index.row].id, offset: rect.minY - top, height: rect.height)
     }
 
-    private func restore(_ anchor: (id: String, offset: CGFloat)) {
+    private func restore(_ anchor: Anchor) {
         guard let index = rows.firstIndex(where: { $0.id == anchor.id }) else { return }
         let rect = rectForRow(at: IndexPath(row: index, section: 0))
-        let visibleOffset = max(anchor.offset, -max(0, rect.height - 44))
+        // An unchanged row stays exactly where it was, however far it
+        // straddles the top edge. Only a row that collapsed keeps a 44pt
+        // handle in view so the fold stays reachable.
+        let shrank = rect.height < anchor.height - 0.5
+        let visibleOffset = shrank ? max(anchor.offset, -max(0, rect.height - 44)) : anchor.offset
         let target = min(max(-contentInset.top, rect.minY - visibleOffset - contentInset.top), max(-contentInset.top, contentSize.height - bounds.height))
+        guard abs(contentOffset.y - target) > 0.5 else { return }
+        animatingFollow = false
         setContentOffset(CGPoint(x: 0, y: target), animated: false)
     }
 
@@ -341,7 +369,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
             animatingFollow = false
             return
         }
-        if animated { animatingFollow = true }
+        animatingFollow = animated
         setContentOffset(CGPoint(x: 0, y: target), animated: animated)
     }
 
@@ -380,6 +408,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
             guard let self else { return }
             self.resizeScheduled = false
             guard self.window != nil else { return }
+            self.reconcileGesture()
             self.updating = true
             UIView.performWithoutAnimation {
                 self.beginUpdates()

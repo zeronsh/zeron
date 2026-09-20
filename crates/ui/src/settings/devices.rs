@@ -303,17 +303,6 @@ impl Render for DevicesPage {
                             .into_any_element(),
                     );
                 }
-                meta.push(
-                    div()
-                        .child(SharedString::from(format!(
-                            "Cursor SDK {}",
-                            device
-                                .cursor_sdk_version
-                                .as_deref()
-                                .unwrap_or("unknown (older engine)")
-                        )))
-                        .into_any_element(),
-                );
                 if !online {
                     meta.push(
                         div()

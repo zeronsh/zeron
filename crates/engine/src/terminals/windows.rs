@@ -289,6 +289,7 @@ pub(super) fn open(
     shell: &str,
     cwd: &str,
     size: PtySize,
+    overrides: &std::collections::HashMap<String, String>,
 ) -> anyhow::Result<(Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>)> {
     // Only an executable name is accepted, matching Terminals::open_with_shell.
     // Quotes cannot occur in a Windows file name; reject instead of interpreting.
@@ -321,6 +322,12 @@ pub(super) fn open(
         ("TERM_PROGRAM", "Zeron"),
     ] {
         environment.insert(env_key(OsStr::new(key)), (key.into(), value.into()));
+    }
+    for (key, value) in overrides {
+        environment.insert(
+            env_key(OsStr::new(key)),
+            (key.as_str().into(), value.as_str().into()),
+        );
     }
     let mut block = Vec::new();
     for (_, (key, value)) in environment {

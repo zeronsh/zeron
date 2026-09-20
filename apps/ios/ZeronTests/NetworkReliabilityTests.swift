@@ -7,6 +7,33 @@ import XCTest
 @testable import Zeron
 
 final class NetworkReliabilityTests: XCTestCase {
+    func testChat2SnapshotRoundTripsVerifiedFlag() throws {
+        let id = "verified-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(at: DocDisk.chat2URL(for: id)) }
+        let doc = LoroDoc()
+        DocDisk.saveChat2(doc: doc, id: id, cursor: 42, verified: true)
+
+        let loaded = DocDisk.loadChat2(into: LoroDoc(), id: id)
+        XCTAssertEqual(loaded?.cursor, 42)
+        XCTAssertEqual(loaded?.verified, true)
+    }
+
+    func testChat2SnapshotReadsLegacyUnverifiedFormat() throws {
+        let id = "legacy-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(at: DocDisk.chat2URL(for: id)) }
+        let doc = LoroDoc()
+        let snapshot = try doc.export(mode: .snapshot)
+        var data = Data("C2SNAP01".utf8)
+        var cursor = UInt64(17).littleEndian
+        withUnsafeBytes(of: &cursor) { data.append(contentsOf: $0) }
+        data.append(snapshot)
+        try data.write(to: DocDisk.chat2URL(for: id), options: .atomic)
+
+        let loaded = DocDisk.loadChat2(into: LoroDoc(), id: id)
+        XCTAssertEqual(loaded?.cursor, 17)
+        XCTAssertEqual(loaded?.verified, false)
+    }
+
     // MARK: versionTriple (proto version_triple port)
 
     func testVersionTripleParsesPlainAndSuffixed() {

@@ -268,9 +268,7 @@ struct ComposerView: View {
     }
 
     private var currentModel: ModelInfo {
-        models.first { $0.id == chat.config?.model }
-            ?? models.first
-            ?? HarnessCatalog.defaultModel(for: harness)
+        HarnessCatalog.resolve(modelId: chat.config?.model, in: models, harness: harness)
     }
 
     private var currentReasoning: String? {

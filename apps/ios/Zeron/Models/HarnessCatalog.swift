@@ -175,20 +175,51 @@ enum HarnessCatalog {
             ]
         default:  // claude-code (mock shares it)
             return [
+                ModelInfo(id: "claude-fable-5-1", label: "Fable 5.1",
+                          description: "Most intelligent model for building agents", reasoningLevels: fullLadder,
+                          options: [claudeContextWindow]),
                 ModelInfo(id: "claude-fable-5", label: "Fable 5",
-                          description: "Most intelligent model for building agents", reasoningLevels: fullLadder),
+                          description: "Previous generation Fable", reasoningLevels: fullLadder,
+                          options: [claudeContextWindow]),
                 ModelInfo(id: "claude-opus-5", label: "Opus 5",
-                          description: "Powerful model for complex work", reasoningLevels: fullLadder),
+                          description: "Powerful model for complex work", reasoningLevels: fullLadder,
+                          options: [claudeContextWindow, toggle(id: "fastMode", label: "Fast Mode")]),
                 ModelInfo(id: "claude-opus-4-8", label: "Opus 4.8",
-                          description: "Previous generation Opus", reasoningLevels: fullLadder),
+                          description: "Previous generation Opus", reasoningLevels: fullLadder,
+                          options: [toggle(id: "fastMode", label: "Fast Mode")]),
                 ModelInfo(id: "claude-opus-4-7", label: "Opus 4.7",
-                          description: "Older generation Opus", reasoningLevels: claudeXhighLadder),
+                          description: "Older generation Opus", reasoningLevels: claudeXhighLadder,
+                          options: [toggle(id: "fastMode", label: "Fast Mode")]),
                 ModelInfo(id: "claude-sonnet-5", label: "Sonnet 5",
-                          description: "Balanced speed and intelligence", reasoningLevels: claudeXhighLadder),
+                          description: "Balanced speed and intelligence", reasoningLevels: claudeXhighLadder,
+                          options: [claudeContextWindow]),
                 ModelInfo(id: "claude-haiku-4-5", label: "Haiku 4.5",
-                          description: "Fastest model for everyday tasks", reasoningLevels: []),
+                          description: "Fastest model for everyday tasks", reasoningLevels: [],
+                          options: [toggle(id: "thinking", label: "Thinking")]),
             ]
         }
+    }
+
+    private static let claudeContextWindow = ModelOptionInfo(
+        id: "contextWindow",
+        label: "Context Window",
+        choices: [
+            ModelOptionChoiceInfo(id: "200k", label: "200K"),
+            ModelOptionChoiceInfo(id: "1m", label: "1M"),
+        ],
+        defaultChoice: "200k"
+    )
+
+    private static func toggle(id: String, label: String) -> ModelOptionInfo {
+        ModelOptionInfo(
+            id: id,
+            label: label,
+            choices: [
+                ModelOptionChoiceInfo(id: "off", label: "Off"),
+                ModelOptionChoiceInfo(id: "on", label: "On"),
+            ],
+            defaultChoice: "off"
+        )
     }
 
     static func defaultModel(for harness: String) -> ModelInfo {
@@ -211,6 +242,96 @@ enum HarnessCatalog {
             ?? ModelOptionChoiceInfo(id: option.defaultChoice, label: option.defaultChoice)
     }
 
+    private static func stripped1M(_ id: String) -> String? {
+        id.hasSuffix("[1m]") ? String(id.dropLast(4))
+            : id.hasSuffix("-1m") ? String(id.dropLast(3))
+            : nil
+    }
+
+    private static func norm(_ id: String) -> String {
+        String(id.unicodeScalars.filter {
+            ($0.value >= 48 && $0.value <= 57) || ($0.value >= 65 && $0.value <= 90) ||
+                ($0.value >= 97 && $0.value <= 122)
+        }).lowercased()
+    }
+
+    private static func curatedLabel(_ id: String, catalog: [ModelInfo]) -> String? {
+        let idNorm = norm(id)
+        if let exact = catalog.first(where: { norm($0.id) == idNorm }) {
+            return exact.label
+        }
+        guard !idNorm.isEmpty, idNorm.unicodeScalars.allSatisfy({
+            ($0.value >= 65 && $0.value <= 90) || ($0.value >= 97 && $0.value <= 122)
+        }) else { return nil }
+        return catalog.first(where: { norm($0.id).contains(idNorm) })?.label
+    }
+
+    private static func curatedLabel(_ id: String, harness: String) -> String? {
+        let catalog = (harness == "claude-code" || harness == "mock")
+            ? HarnessCatalog.models(for: harness) : []
+        return curatedLabel(id, catalog: catalog)
+    }
+
+    static func normalize(harness: String, models: [ModelInfo]) -> [ModelInfo] {
+        let catalog = (harness == "claude-code" || harness == "mock")
+            ? HarnessCatalog.models(for: harness) : []
+        let ids = models.map(\.id)
+        let hasReal = ids.contains(where: { $0.lowercased() != "default" })
+        return models.compactMap { row in
+            if hasReal && row.id.lowercased() == "default" {
+                return nil
+            }
+            var id = row.id
+            var label = row.label
+            var options = row.options
+            if let base = stripped1M(id) {
+                if ids.contains(base) {
+                    return nil
+                }
+                id = base
+                if let suffixStart = label.lastIndex(of: "("),
+                   label.hasSuffix(")"),
+                   suffixStart > label.startIndex {
+                    label = String(label[..<suffixStart]).trimmingCharacters(in: .whitespaces)
+                }
+                if !options.contains(where: { $0.id == "contextWindow" }) {
+                    options.append(ModelOptionInfo(
+                        id: "contextWindow",
+                        label: "Context Window",
+                        choices: [
+                            ModelOptionChoiceInfo(id: "200k", label: "200K"),
+                            ModelOptionChoiceInfo(id: "1m", label: "1M"),
+                        ],
+                        defaultChoice: "1m"
+                    ))
+                }
+            }
+            if let curated = curatedLabel(id, catalog: catalog) {
+                label = curated
+            }
+            return ModelInfo(id: id, label: label, description: row.description,
+                             reasoningLevels: row.reasoningLevels, options: options)
+        }
+    }
+
+    static func resolveExisting(modelId: String?, in models: [ModelInfo]) -> ModelInfo? {
+        guard let modelId else { return nil }
+        if let exact = models.first(where: { $0.id == modelId }) {
+            return exact
+        }
+        guard let base = stripped1M(modelId) else { return nil }
+        return models.first(where: { $0.id == base })
+    }
+
+    static func resolve(modelId: String?, in models: [ModelInfo], harness: String) -> ModelInfo {
+        guard let modelId else { return models.first ?? defaultModel(for: harness) }
+        if let existing = resolveExisting(modelId: modelId, in: models) {
+            return existing
+        }
+        return ModelInfo(id: modelId, label: curatedLabel(modelId, harness: harness) ?? modelId,
+                         description: nil, reasoningLevels: [], options: [])
+    }
+
     static func reasoningLabel(_ level: String) -> String {
         switch level {
         case "minimal": return "Minimal"
@@ -227,7 +348,6 @@ enum HarnessCatalog {
     }
 
     static func modelLabel(harness: String, modelId: String?) -> String {
-        guard let modelId else { return defaultModel(for: harness).label }
-        return models(for: harness).first { $0.id == modelId }?.label ?? modelId
+        resolve(modelId: modelId, in: models(for: harness), harness: harness).label
     }
 }
