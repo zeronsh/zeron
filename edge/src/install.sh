@@ -38,6 +38,12 @@ case "$arch" in
     exit 1
     ;;
 esac
+if [ -e /etc/NIXOS ] && [ -z "${ZERON_INSTALL_FORCE:-}" ]; then
+  echo "zeron install: NixOS cannot run the prebuilt binary; install from the flake instead:" >&2
+  echo "  nix profile install github:zeronsh/zeron" >&2
+  echo "(set ZERON_INSTALL_FORCE=1 to install anyway, e.g. with nix-ld configured)" >&2
+  exit 1
+fi
 
 # --- download ----------------------------------------------------------------
 ver="$(curl -fsSL "$BASE/releases/latest.txt" | tr -d '[:space:]')"
