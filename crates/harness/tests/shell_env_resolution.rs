@@ -24,6 +24,7 @@ async fn cli_on_login_shell_path_only_is_resolved() {
     write_executable(&shell_bin.join("devin"), "#!/bin/sh\nexit 0\n");
     write_executable(&shell_bin.join("hermes"), "#!/bin/sh\nexit 0\n");
     write_executable(&shell_bin.join("pi-acp"), "#!/bin/sh\nexit 0\n");
+    write_executable(&shell_bin.join("omp"), "#!/bin/sh\nexit 0\n");
     write_executable(&shell_bin.join("claude"), "#!/bin/sh\nexit 0\n");
 
     // A $SHELL whose init shapes PATH — the shape resolution must survive.
@@ -50,6 +51,7 @@ async fn cli_on_login_shell_path_only_is_resolved() {
         std::env::remove_var("DEVIN_EXECUTABLE");
         std::env::remove_var("HERMES_EXECUTABLE");
         std::env::remove_var("PI_ACP_EXECUTABLE");
+        std::env::remove_var("OMP_EXECUTABLE");
         std::env::remove_var("CLAUDE_CODE_EXECUTABLE");
         std::env::remove_var("ZERON_NO_LOGIN_SHELL");
     }
@@ -81,4 +83,8 @@ async fn cli_on_login_shell_path_only_is_resolved() {
         .launch_program()
         .expect("pi-acp resolves via login-shell PATH");
     assert_eq!(pi, shell_bin.join("pi-acp"), "{pi:?}");
+    let omp = AcpHarness::omp()
+        .launch_program()
+        .expect("omp resolves via login-shell PATH");
+    assert_eq!(omp, shell_bin.join("omp"), "{omp:?}");
 }

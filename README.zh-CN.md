@@ -1,6 +1,6 @@
 # Zeron
 
-在本地管理你的编码 agent（Claude Code、Codex、Cursor、Grok、Hermes、Pi、Antigravity），也可以打开多设备同步。
+在本地管理你的编码 agent（Claude Code、Codex、Cursor、Grok、Hermes、Pi、Antigravity、Omp），也可以打开多设备同步。
 
 *[English](README.md) | 简体中文*
 

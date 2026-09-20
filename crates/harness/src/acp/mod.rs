@@ -2,11 +2,13 @@
 //! stdio, protocol v1) and maps its session updates onto [`AgentEvent`]s.
 //!
 //! KEPT ONLY for agents built ground-up on ACP: Grok ([`AcpHarness::grok`],
-//! `grok agent stdio`), Devin ([`AcpHarness::devin`], `devin acp`) and Hermes
-//! ([`AcpHarness::hermes`], `hermes acp`) and Antigravity
+//! `grok agent stdio`), Devin ([`AcpHarness::devin`], `devin acp`), Hermes
+//! ([`AcpHarness::hermes`], `hermes acp`), Antigravity
 //! ([`AcpHarness::antigravity`], Google's `agy_acp_server`, installed from its
-//! pinned release archive) — plus pi ([`AcpHarness::pi`]) via the community
-//! `pi-acp` adapter until a native driver exists. Claude, Codex and Cursor moved to native drivers
+//! pinned release archive) and Omp ([`AcpHarness::omp`],
+//! `omp acp` — Oh My Pi's native server) — plus pi ([`AcpHarness::pi`])
+//! via the community `pi-acp` adapter until a native driver exists.
+//! Claude, Codex and Cursor moved to native drivers
 //! ([`crate::ClaudeHarness`], [`crate::CodexHarness`], [`crate::CursorHarness`])
 //! after adapter-mediated ACP kept manufacturing done-status bugs the native
 //! wires don't have (turn-hold bookkeeping vs the CLI's own eager result).
@@ -126,6 +128,11 @@ struct AcpAgentSpec {
     /// `…-high`) instead of a `thought_level` option: discovered variants fold
     /// into one row with a ladder, and a run sends the variant for its level.
     effort_in_model_id: bool,
+    /// the agent's `thinking` options (and reset value) depend on the current
+    /// model: switching models rewrites the `thought_level` config option, so
+    /// a run must apply the model switch FIRST and resolve reasoning against
+    /// the returned configuration. Omp 18.2.5 verified live.
+    refresh_thinking_on_model_switch: bool,
     /// auth method to sign in with when `session/new` answers auth_required —
     /// for agents that expect the client to pick one before the first session.
     auth_method: Option<&'static str>,
@@ -256,6 +263,7 @@ fn grok_spec() -> AcpAgentSpec {
              process or a hung startup check; zeron launches it with --no-leader \
              and --no-auto-update to avoid both.",
         effort_in_model_id: false,
+        refresh_thinking_on_model_switch: false,
         auth_method: None,
         skill_dirs: Vec::new,
         hidden_commands: &[],
@@ -332,6 +340,7 @@ fn devin_spec() -> AcpAgentSpec {
         prompt_stall: None,
         stall_hint: "The agent process is likely wedged.",
         effort_in_model_id: false,
+        refresh_thinking_on_model_switch: false,
         auth_method: None,
         skill_dirs: Vec::new,
         hidden_commands: &[],
@@ -402,10 +411,23 @@ fn hermes_spec() -> AcpAgentSpec {
         prompt_stall: None,
         stall_hint: "The agent process is likely wedged.",
         effort_in_model_id: false,
+        refresh_thinking_on_model_switch: false,
         auth_method: None,
         skill_dirs: Vec::new,
         hidden_commands: &[],
     }
+}
+
+fn omp_install_paths() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = crate::executable::home_dir() {
+        dirs.push(home.join(".local").join("bin").join("omp"));
+        dirs.push(home.join(".omp").join("bin").join("omp"));
+        dirs.push(home.join(".npm-global").join("bin").join("omp"));
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin/omp"));
+    dirs.push(PathBuf::from("/usr/local/bin/omp"));
+    dirs
 }
 
 fn pi_spec() -> AcpAgentSpec {
@@ -463,6 +485,7 @@ fn pi_spec() -> AcpAgentSpec {
         prompt_stall: None,
         stall_hint: "The agent process is likely wedged.",
         effort_in_model_id: false,
+        refresh_thinking_on_model_switch: false,
         auth_method: None,
         skill_dirs: Vec::new,
         hidden_commands: &[],
@@ -741,13 +764,104 @@ fn antigravity_spec() -> AcpAgentSpec {
         prompt_stall: None,
         stall_hint: "The agent process is likely wedged.",
         effort_in_model_id: true,
+        refresh_thinking_on_model_switch: false,
         // the personal oauth method is only the first-run default; sign-in
-        // preserves any method already selected in antigravity's settings.
         auth_method: Some("oauth-personal"),
         skill_dirs: antigravity_skill_dirs,
         // signing out belongs to the Settings toggle, which keeps enablement
         // and the stored login in step
         hidden_commands: &["logout"],
+    }
+}
+
+fn omp_spec() -> AcpAgentSpec {
+    AcpAgentSpec {
+        id: HarnessId::Omp,
+        display_name: "Omp",
+        executable: "omp",
+        env_override: "OMP_EXECUTABLE",
+        // Native ACP server (verified live, 18.2.5): `omp acp` == `omp --mode
+        // acp`. No managed npm adapter — the installer (omp.sh/install,
+        // brew can1357/tap/omp, bun -g @oh-my-pi/pi-coding-agent) owns the
+        // binary, so resolution is PATH + install dirs.
+        args: &["acp"],
+        npm_package: None,
+        archive: None,
+        extra_paths: omp_install_paths,
+        cli_executable: "omp",
+        cli_extra_paths: omp_install_paths,
+        install_hint: "omp (searched PATH, the login shell's PATH, ~/.local/bin, \
+             ~/.npm-global/bin, /opt/homebrew/bin, /usr/local/bin, and \
+             fnm/nvm/volta/pnpm/bun install dirs; install with \
+             `curl -fsSL https://omp.sh/install | sh` or \
+             `bun install -g @oh-my-pi/pi-coding-agent`; set OMP_EXECUTABLE to override)",
+        // Verified live (18.2.5): session/new advertises a `model` config
+        // option (the user's full provider catalog, current = their omp
+        // default) plus a `thinking` thought_level select whose options AND
+        // reset value depend on the current model (switching models can
+        // shrink the ladder and reset current, e.g. xhigh→high). Static
+        // fallback is the session default when the probe cannot run;
+        // discovery takes over with the live rows whenever the CLI answers.
+        models: || {
+            vec![Model {
+                id: "default".into(),
+                label: "omp default".into(),
+                description: Some("Runs the model configured in omp (`omp` settings)".into()),
+                reasoning_levels: vec![
+                    ReasoningLevel::Minimal,
+                    ReasoningLevel::Low,
+                    ReasoningLevel::Medium,
+                    ReasoningLevel::High,
+                    ReasoningLevel::XHigh,
+                    ReasoningLevel::Max,
+                ],
+                options: Vec::new(),
+            }]
+        },
+        // No `_session/steering` extension advertised: turn boundaries.
+        steering_mode: SteeringMode::TurnBoundary,
+        // omp's thinking ladder (off/auto have no zeron equivalent and are
+        // left to the agent default — "off" maps to no effort row).
+        reasoning_levels: &[
+            ReasoningLevel::Minimal,
+            ReasoningLevel::Low,
+            ReasoningLevel::Medium,
+            ReasoningLevel::High,
+            ReasoningLevel::XHigh,
+            ReasoningLevel::Max,
+        ],
+        prompt_transform: identity_transform,
+        effort_values: omp_effort_values,
+        ladder_extras: &[],
+        prompt_complete_extension: false,
+        prompt_stall: None,
+        stall_hint: "The agent process is likely wedged.",
+        effort_in_model_id: false,
+        refresh_thinking_on_model_switch: true,
+        auth_method: None,
+        skill_dirs: Vec::new,
+        hidden_commands: &[],
+    }
+}
+/// omp's `thinking` ladder values, in preference order for the run's
+/// reasoning: its `off` (no thinking) and `auto` (per-prompt detect) tiers
+/// have no zeron equivalent, so an explicit level maps to its own value
+/// first and degrades down the generic ladder; no level leaves the agent
+/// default in place.
+fn omp_effort_values(reasoning: Option<ReasoningLevel>, _model: Option<&str>) -> Vec<&'static str> {
+    let Some(level) = reasoning else {
+        return Vec::new();
+    };
+    match level {
+        ReasoningLevel::Minimal => vec!["minimal", "low"],
+        ReasoningLevel::Low => vec!["low", "minimal"],
+        ReasoningLevel::Medium => vec!["medium"],
+        ReasoningLevel::High => vec!["high"],
+        ReasoningLevel::XHigh => vec!["xhigh", "high"],
+        ReasoningLevel::Max => vec!["max", "xhigh", "high"],
+        ReasoningLevel::Ultra | ReasoningLevel::Ultracode | ReasoningLevel::Ultrathink => {
+            vec!["max", "high"]
+        }
     }
 }
 
@@ -1034,6 +1148,11 @@ impl AcpHarness {
                 SIGN_IN_TIMEOUT.as_secs() / 60
             ))),
         }
+    }
+
+    /// Oh My Pi over ACP — its native `omp acp` server.
+    pub fn omp() -> Self {
+        Self::with_spec(omp_spec())
     }
 
     /// Use a fixed agent binary instead of PATH/known-location resolution.
@@ -1750,6 +1869,7 @@ impl Harness for AcpHarness {
             prompt_stall: self.spec.prompt_stall,
             stall_hint: self.spec.stall_hint,
             effort_in_model_id: self.spec.effort_in_model_id,
+            refresh_thinking_on_model_switch: self.spec.refresh_thinking_on_model_switch,
             auth_method: self.spec.auth_method,
             sessions_root: self.sessions_root.clone(),
             interrupt_grace: self.interrupt_grace,
@@ -1782,6 +1902,7 @@ struct Session {
     prompt_stall: Option<Duration>,
     stall_hint: &'static str,
     effort_in_model_id: bool,
+    refresh_thinking_on_model_switch: bool,
     auth_method: Option<&'static str>,
     /// Sessions-root override for the subagent transcript tail (tests).
     sessions_root: Option<PathBuf>,
@@ -2684,6 +2805,7 @@ async fn run_session(session: Session) {
         prompt_stall,
         stall_hint,
         effort_in_model_id,
+        refresh_thinking_on_model_switch,
         auth_method,
         sessions_root,
         prompt_transform,
@@ -2812,15 +2934,77 @@ async fn run_session(session: Session) {
         // Apply the run's model + effort + model options through the
         // session's advertised config options. Best-effort for effort and
         // traits: a rejected auxiliary set is logged and the agent default
-        // runs.
+        // runs. Agents whose `thinking` options depend on the current model
+        // (Omp: switching models rewrites the `thought_level` ladder AND its
+        // reset value) apply the model switch FIRST, then resolve reasoning
+        // against the RETURNED configuration — resolving both from the
+        // initial response can silently skip or downgrade the request (e.g.
+        // xhigh computed against the old model is dropped when the new
+        // model's ladder tops out at high, even though the switch response
+        // already carries the ladder that would accept it).
         let efforts = effort_values(request.reasoning, request.model.as_deref());
-        let options_snapshot = session_response;
-        for (config_id, payload) in config_option_sets(
+        let mut options_snapshot = session_response;
+        let mut pending: Vec<(String, Value)> = config_option_sets(
             &options_snapshot,
             requested_model.as_deref(),
             &efforts,
             &request.model_options,
-        ) {
+        );
+        let model_set_index = pending
+            .iter()
+            .position(|(config_id, _)| is_model_config_option(&options_snapshot, config_id));
+        if refresh_thinking_on_model_switch && let Some(model_set_index) = model_set_index {
+            let (config_id, payload) = pending.remove(model_set_index);
+            let mut params = serde_json::Map::new();
+            params.insert("sessionId".into(), session_id.clone().into());
+            params.insert("configId".into(), config_id.clone().into());
+            if let Some(payload) = payload.as_object() {
+                for (k, v) in payload {
+                    params.insert(k.clone(), v.clone());
+                }
+            }
+            match request_draining(
+                &client,
+                &mut incoming,
+                "session/set_config_option",
+                Value::Object(params),
+            )
+            .await
+            {
+                Ok(response) => {
+                    // The model switch rewrites the thinking ladder: resolve
+                    // the remaining sets (effort + traits) against the fresh
+                    // configuration, never the stale initial one.
+                    options_snapshot = response;
+                    pending = config_option_sets(
+                        &options_snapshot,
+                        None,
+                        &efforts,
+                        &request.model_options,
+                    )
+                    .into_iter()
+                    .filter(|(config_id, _)| !is_model_config_option(&options_snapshot, config_id))
+                    .collect();
+                }
+                Err(e) => {
+                    if matches!(
+                        harness,
+                        HarnessId::Antigravity | HarnessId::Devin | HarnessId::Omp
+                    ) && requested_model.is_some()
+                    {
+                        return Err(HarnessError::Protocol(format!(
+                            "agent rejected requested model {}: {e}",
+                            requested_model.as_deref().unwrap_or_default()
+                        )));
+                    }
+                    tracing::debug!(
+                        target: "zeron_harness::acp",
+                        "session/set_config_option {config_id}={payload} rejected (agent default runs): {e}"
+                    );
+                }
+            }
+        }
+        for (config_id, payload) in pending {
             let mut params = serde_json::Map::new();
             params.insert("sessionId".into(), session_id.clone().into());
             params.insert("configId".into(), config_id.clone().into());
@@ -4747,5 +4931,147 @@ mod tests {
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].name, "compact");
         assert!(scan_available_commands(&json!({ "protocolVersion": 1 })).is_empty());
+    }
+
+    #[test]
+    fn omp_thinking_and_model_config_options_map_to_wire_ids() {
+        // Live shape from `omp acp` 18.2.5: `thinking` is the thought_level
+        // select (off/auto have no zeron tier), `model` carries the ids.
+        // The set payload uses the driver's `{configId, value}` shape.
+        let response = json!({
+            "sessionId": "s-1",
+            "configOptions": [
+                {
+                    "id": "thinking",
+                    "name": "Thinking",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "xhigh",
+                    "options": [
+                        { "value": "off", "name": "Off" },
+                        { "value": "auto", "name": "Auto" },
+                        { "value": "minimal", "name": "minimal" },
+                        { "value": "low", "name": "low" },
+                        { "value": "medium", "name": "medium" },
+                        { "value": "high", "name": "high" },
+                        { "value": "xhigh", "name": "xhigh" },
+                        { "value": "max", "name": "max" },
+                    ],
+                },
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "model-a",
+                    "options": [
+                        { "value": "model-a", "name": "Model A" },
+                        { "value": "model-b", "name": "Model B" },
+                    ],
+                },
+            ],
+        });
+        let no_opts = serde_json::Map::new();
+        assert_eq!(
+            config_option_sets(
+                &response,
+                Some("model-b"),
+                &omp_effort_values(Some(ReasoningLevel::Low), None),
+                &no_opts,
+            ),
+            vec![
+                ("thinking".to_owned(), json!({ "value": "low" })),
+                ("model".to_owned(), json!({ "value": "model-b" })),
+            ]
+        );
+        // No reasoning leaves the agent's thinking default alone.
+        assert_eq!(
+            config_option_sets(&response, None, &omp_effort_values(None, None), &no_opts),
+            Vec::new(),
+        );
+    }
+
+    #[test]
+    fn omp_thinking_resolves_against_the_post_switch_ladder() {
+        // Omp 18.2.5 verified live: switching models rewrites the `thinking`
+        // ladder AND its reset value, so the run applies the model switch
+        // first and resolves reasoning against the RETURNED config. Here the
+        // initial model advertises through high only, while the target
+        // re-advertises xhigh — resolving xhigh against the stale initial
+        // ladder would silently skip the set (the exact downgrade in P2).
+        let initial = json!({
+            "sessionId": "s-1",
+            "configOptions": [
+                {
+                    "id": "thinking",
+                    "name": "Thinking",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "high",
+                    "options": [
+                        { "value": "off", "name": "Off" },
+                        { "value": "auto", "name": "Auto" },
+                        { "value": "minimal", "name": "minimal" },
+                        { "value": "low", "name": "low" },
+                        { "value": "medium", "name": "medium" },
+                        { "value": "high", "name": "high" },
+                    ],
+                },
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "model-a",
+                    "options": [
+                        { "value": "model-a", "name": "Model A" },
+                        { "value": "model-b", "name": "Model B" },
+                    ],
+                },
+            ],
+        });
+        let after_switch = json!({
+            "sessionId": "s-1",
+            "configOptions": [
+                {
+                    "id": "thinking",
+                    "name": "Thinking",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "high",
+                    "options": [
+                        { "value": "off", "name": "Off" },
+                        { "value": "auto", "name": "Auto" },
+                        { "value": "minimal", "name": "minimal" },
+                        { "value": "low", "name": "low" },
+                        { "value": "medium", "name": "medium" },
+                        { "value": "high", "name": "high" },
+                        { "value": "xhigh", "name": "xhigh" },
+                        { "value": "max", "name": "max" },
+                    ],
+                },
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "model-b",
+                    "options": [
+                        { "value": "model-a", "name": "Model A" },
+                        { "value": "model-b", "name": "Model B" },
+                    ],
+                },
+            ],
+        });
+        let no_opts = serde_json::Map::new();
+        let efforts = omp_effort_values(Some(ReasoningLevel::XHigh), None);
+        // Stale resolution: xhigh is absent from the initial ladder, so the
+        // set is skipped even though the target model supports it.
+        assert!(config_option_sets(&initial, None, &efforts, &no_opts).is_empty());
+        // Fresh resolution against the switch response keeps the request.
+        assert_eq!(
+            config_option_sets(&after_switch, None, &efforts, &no_opts),
+            vec![("thinking".to_owned(), json!({ "value": "xhigh" }))],
+        );
     }
 }

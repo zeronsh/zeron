@@ -68,6 +68,7 @@ enum HarnessCatalog {
         "grok": "Grok",
         "hermes": "Hermes",
         "pi": "Pi",
+        "omp": "Omp",
         "cursor": "Cursor",
         "opencode": "OpenCode",
         "antigravity": "Antigravity",
@@ -118,6 +119,12 @@ enum HarnessCatalog {
             return [
                 ModelInfo(id: "default", label: "pi default",
                           description: "Runs the model configured in pi (`pi` settings)",
+                          reasoningLevels: ["minimal", "low", "medium", "high", "xhigh", "max"]),
+            ]
+        case "omp":
+            return [
+                ModelInfo(id: "default", label: "omp default",
+                          description: "Runs the model configured in omp (`omp` settings)",
                           reasoningLevels: ["minimal", "low", "medium", "high", "xhigh", "max"]),
             ]
         case "opencode":
