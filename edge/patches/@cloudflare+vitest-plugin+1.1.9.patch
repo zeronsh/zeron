@@ -1,0 +1,15 @@
+diff --git a/node_modules/@cloudflare/vitest-plugin/dist/worker/lib/cloudflare/test-internal.mjs b/node_modules/@cloudflare/vitest-plugin/dist/worker/lib/cloudflare/test-internal.mjs
+index 08771fe..fe7c0f5 100644
+--- a/node_modules/@cloudflare/vitest-plugin/dist/worker/lib/cloudflare/test-internal.mjs
++++ b/node_modules/@cloudflare/vitest-plugin/dist/worker/lib/cloudflare/test-internal.mjs
+@@ -474,6 +474,10 @@ function createWorkerEntrypointWrapper(entrypoint) {
+ 		return getRPCPropertyCallableThenable(key, getWorkerEntrypointRPCProperty(this, entrypoint, key), this);
+ 	});
+ 	for (const key of WORKER_ENTRYPOINT_KEYS) Wrapper.prototype[key] = async function(thing) {
++		if (typeof __vitest_worker__ !== "object") {
++			if (key === "fetch") return new Response("Worker test runner is initializing", { status: 503 });
++			throw new Error("Worker event received before the Vitest runner initialized");
++		}
+ 		const { mainPath, entrypointValue } = await getWorkerEntrypointExport(this.env, entrypoint);
+ 		return patchAndRunWithHandlerContext(this.ctx, () => {
+ 			if (typeof entrypointValue === "object" && entrypointValue !== null) {

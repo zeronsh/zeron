@@ -16,6 +16,14 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+#[cfg(any(target_arch = "wasm32", feature = "web-input-tests"))]
+#[path = "input.rs"]
+mod input;
+
+#[cfg(all(test, feature = "web-input-tests"))]
+#[path = "input_tests.rs"]
+mod input_tests;
+
 use base64::Engine as _;
 use gpui::{
     App, Context, Entity, FocusHandle, IntoElement, KeyBinding, KeyDownEvent, MouseButton,

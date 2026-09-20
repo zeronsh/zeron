@@ -30,7 +30,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use gpui::{
     AnyElement, BorderStyle, Bounds, ClipboardItem, ContentMask, Context, Entity, ListAlignment,
@@ -3245,6 +3249,24 @@ impl Transcript {
 
     pub(crate) fn state_entity(&self) -> &Entity<AppState> {
         &self.state
+    }
+
+    pub(crate) fn with_entries<R>(
+        &self,
+        cx: &gpui::App,
+        read: impl FnOnce(&[SessionMessageEntry], &[SessionMessageEntry]) -> R,
+    ) -> R {
+        let state = self.state.read(cx);
+        let entries = match &self.doc_override {
+            Some(doc_id) => state.sub_transcript(doc_id),
+            None => state.transcript.as_slice(),
+        };
+        if self.doc_override.is_none() {
+            let echoes = state.pending_echoes();
+            read(entries, echoes)
+        } else {
+            read(entries, &[])
+        }
     }
 
     /// Hand viewport ownership to explicit rail/navigation input before its

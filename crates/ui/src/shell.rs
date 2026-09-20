@@ -13,6 +13,10 @@
 
 use std::path::PathBuf;
 use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use chrono::Utc;
 use gpui::{
@@ -22,10 +26,109 @@ use gpui::{
     WindowControlArea, actions, div, prelude::*, px,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+
 use gpui_tokio::Tokio;
+#[cfg(not(target_arch = "wasm32"))]
+
 use zeron_engine::InstanceLock;
 use zeron_proto::{AuthState, WorkspaceScope};
 use zeron_rpc::methods;
+
+
+#[cfg(not(target_arch = "wasm32"))]
+type InstallKind = zeron_update::InstallKind;
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+enum InstallKind { Unavailable }
+#[cfg(not(target_arch = "wasm32"))]
+fn detect_install() -> InstallKind { zeron_update::detect_install() }
+#[cfg(target_arch = "wasm32")]
+fn detect_install() -> InstallKind { InstallKind::Unavailable }
+
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_mac_app(install: &InstallKind) -> bool {
+    matches!(install, zeron_update::InstallKind::MacApp { .. })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn is_mac_app(_install: &InstallKind) -> bool {
+    false
+}
+
+
+
+#[cfg(target_arch = "wasm32")]
+impl InstallKind {
+    fn supports_desktop_update(&self) -> bool { false }
+}
+
+
+/// A browser root may take ownership of account lifecycle actions without
+/// teaching the shared Shell about cookies or remote-device transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalLifecycleAction {
+    SignOut,
+    Retry,
+}
+
+pub type ExternalLifecycleHandler = std::rc::Rc<dyn Fn(ExternalLifecycleAction)>;
+
+#[derive(Default)]
+struct ExternalLifecycleRelay {
+    handler: Option<ExternalLifecycleHandler>,
+}
+
+impl ExternalLifecycleRelay {
+    fn set(&mut self, handler: Option<ExternalLifecycleHandler>) {
+        self.handler = handler;
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn is_installed(&self) -> bool {
+        self.handler.is_some()
+    }
+
+    fn dispatch(&self, action: ExternalLifecycleAction) -> bool {
+        let Some(handler) = &self.handler else {
+            return false;
+        };
+        handler(action);
+        true
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+std::thread_local! {
+    static EXTERNAL_LIFECYCLE_RELAY: std::cell::RefCell<ExternalLifecycleRelay> = Default::default();
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn set_external_lifecycle_handler(handler: Option<ExternalLifecycleHandler>) {
+    EXTERNAL_LIFECYCLE_RELAY.with(|relay| relay.borrow_mut().set(handler));
+}
+
+#[cfg(target_arch = "wasm32")]
+fn dispatch_external_lifecycle_action(action: ExternalLifecycleAction) -> bool {
+    EXTERNAL_LIFECYCLE_RELAY.with(|relay| relay.borrow().dispatch(action))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn has_external_lifecycle_handler() -> bool {
+    EXTERNAL_LIFECYCLE_RELAY.with(|relay| relay.borrow().is_installed())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn dispatch_external_lifecycle_action(_action: ExternalLifecycleAction) -> bool {
+    false
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn has_external_lifecycle_handler() -> bool {
+    false
+}
+
 
 use crate::changes::{Changes, ChangesEvent};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
@@ -146,7 +249,7 @@ pub(super) struct SidebarDisclosureMotion {
     pub(super) epoch: u64,
     pub(super) from: f32,
     pub(super) to: f32,
-    started: std::time::Instant,
+    started: Instant,
 }
 
 impl SidebarDisclosureMotion {
@@ -155,7 +258,7 @@ impl SidebarDisclosureMotion {
             epoch,
             from,
             to,
-            started: std::time::Instant::now(),
+            started: Instant::now(),
         }
     }
 
@@ -454,6 +557,35 @@ impl SettingsSection {
 pub enum Route {
     Chat,
     Settings(SettingsSection),
+}
+
+
+/// Narrow viewports use transient drawers instead of reserving dock space.
+const MOBILE_BREAKPOINT: f32 = 768.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MobileDrawer {
+    Sidebar,
+    RightPane,
+}
+
+fn is_mobile_width(viewport: f32) -> bool {
+    viewport < MOBILE_BREAKPOINT
+}
+
+fn mobile_drawer_width(viewport: f32, drawer: MobileDrawer) -> f32 {
+    let (fraction, max_width) = match drawer {
+        MobileDrawer::Sidebar => (0.75, 280.0),
+        MobileDrawer::RightPane => (0.90, 380.0),
+    };
+    (viewport.max(0.0) * fraction).min(max_width)
+}
+
+fn toggle_mobile_drawer(
+    current: Option<MobileDrawer>,
+    requested: MobileDrawer,
+) -> Option<MobileDrawer> {
+    (current != Some(requested)).then_some(requested)
 }
 
 /// Maximum width the right pane may occupy while retaining the conversation
@@ -843,7 +975,7 @@ struct SidebarSessionSlide {
     from: f32,
     to: f32,
     epoch: u64,
-    started: std::time::Instant,
+    started: Instant,
 }
 
 impl SidebarSessionSlide {
@@ -860,14 +992,14 @@ impl SidebarSessionSlide {
         self.from = self.current();
         self.to = target;
         self.epoch = self.epoch.wrapping_add(1);
-        self.started = std::time::Instant::now();
+        self.started = Instant::now();
     }
 }
 
 struct SidebarSessionReturn {
     transfer: SidebarSessionTransfer,
     epoch: u64,
-    started: std::time::Instant,
+    started: Instant,
 }
 
 /// Live destination for a pinned-session drag. The real row remains clipped
@@ -967,7 +1099,7 @@ impl Render for DragGhost {
 struct WidthTween {
     from: f32,
     to: f32,
-    started: std::time::Instant,
+    started: Instant,
 }
 
 impl WidthTween {
@@ -975,7 +1107,7 @@ impl WidthTween {
         Self {
             from,
             to,
-            started: std::time::Instant::now(),
+            started: Instant::now(),
         }
     }
 }
@@ -1217,6 +1349,8 @@ enum AccountMenuAction {
 const RUNTIME_CHANGE_TIMEOUT: Duration = Duration::from_secs(10);
 const RUNTIME_CHANGE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+#[cfg(not(target_arch = "wasm32"))]
+
 /// Wait until a stopped daemon can no longer win the next bootstrap probe and
 /// has released the data directory for the replacement runtime.
 async fn wait_for_remote_engine_shutdown(
@@ -1246,6 +1380,8 @@ async fn wait_for_remote_engine_shutdown(
         tokio::time::sleep(RUNTIME_CHANGE_POLL_INTERVAL).await;
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
 
 /// Stop the engine that owns the synced profile and wait until a local runtime
 /// can safely acquire both its IPC port and data-directory lock.
@@ -1597,7 +1733,7 @@ pub struct Shell {
     update_dismissed: Option<String>,
     /// How this binary was installed — decides the strip's click behavior.
     /// Cached: `detect_install` stats `current_exe` and this renders per frame.
-    install: zeron_update::InstallKind,
+    install: InstallKind,
     org: Option<OrgGateUi>,
     sync_flow: SyncFlow,
     mutate_task: Option<Task<()>>,
@@ -1631,6 +1767,9 @@ pub struct Shell {
     /// Last observed `window.is_window_active()` — rising edge fires a
     /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
     was_window_active: bool,
+
+    /// Mobile drawer state is transient and does not mutate desktop settings.
+    mobile_drawer: Option<MobileDrawer>,
     /// Dev/testing knobs (`ZERON_OPEN_DIALOG`, `ZERON_FORCE_GATE`,
     /// `ZERON_DEMO_UPLOAD`) — see [`Shell::new`].
     debug_dialog: Option<String>,
@@ -1696,7 +1835,7 @@ pub struct Shell {
     motion_active: std::cell::Cell<bool>,
     /// All pane masks and chrome evaluate animation at the same frame time.
     /// A slow render must not give the native page and its titlebar different widths.
-    render_time: Option<std::time::Instant>,
+    render_time: Option<Instant>,
     splash: SplashPhase,
     splash_task: Option<Task<()>>,
     /// Focus fallback (registered on first paint — [`Shell::new`] has no
@@ -1959,7 +2098,7 @@ impl Shell {
             update_flow: UpdateFlow::Idle,
             update_task: None,
             update_dismissed: None,
-            install: zeron_update::detect_install(),
+            install: detect_install(),
             org: None,
             sync_flow: SyncFlow::Idle,
             mutate_task: None,
@@ -1979,6 +2118,8 @@ impl Shell {
             sidebar_new_keys: std::collections::HashSet::new(),
             resort_epoch: 0,
             was_window_active: false,
+
+            mobile_drawer: None,
             debug_dialog,
             debug_gate,
             debug_upload,
@@ -2231,7 +2372,7 @@ impl Shell {
                         let should_play = sound != crate::sound::Sound::Attention
                             || self
                                 .attention_sound_gate
-                                .should_play(std::time::Instant::now());
+                                .should_play(Instant::now());
                         if should_play {
                             crate::sound::play(sound);
                         }
@@ -2252,12 +2393,12 @@ impl Shell {
             if let Some(sound) = self.connectivity_notifications.update(
                 connectivity,
                 connectivity_observed,
-                std::time::Instant::now(),
+                Instant::now(),
             ) {
                 if self.settings.session_sound_enabled(sound)
                     && self
                         .attention_sound_gate
-                        .should_play(std::time::Instant::now())
+                        .should_play(Instant::now())
                 {
                     crate::sound::play(sound);
                 }
@@ -2391,8 +2532,23 @@ impl Shell {
     // ---- layout state ----
 
     fn sidebar_target(&self) -> f32 {
-        if self.settings.sidebar_collapsed {
+        if is_mobile_width(self.viewport_width) {
             0.0
+        } else if self.settings.sidebar_collapsed {
+            0.0
+        } else {
+            self.settings.sidebar_width
+        }
+    }
+
+
+    /// The mobile drawer supplies its own width without changing a user's
+    /// persisted desktop sidebar width.
+    fn effective_sidebar_width(&self) -> f32 {
+        if is_mobile_width(self.viewport_width)
+            && self.mobile_drawer == Some(MobileDrawer::Sidebar)
+        {
+            mobile_drawer_width(self.viewport_width, MobileDrawer::Sidebar)
         } else {
             self.settings.sidebar_width
         }
@@ -2433,6 +2589,15 @@ impl Shell {
         !self.active_chat.is_empty() && self.panels.get(&self.panel_key(cx)).changes_open
     }
 
+
+    fn right_pane_content_visible(&self, cx: &App) -> bool {
+        if is_mobile_width(self.viewport_width) {
+            !self.active_chat.is_empty() && self.mobile_drawer == Some(MobileDrawer::RightPane)
+        } else {
+            self.right_pane_open(cx)
+        }
+    }
+
     /// The current chat's terminal flag (per-session, in-memory).
     fn terminal_open(&self, cx: &App) -> bool {
         self.panels.get(&self.panel_key(cx)).terminal_open
@@ -2457,6 +2622,11 @@ impl Shell {
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        if is_mobile_width(self.viewport_width) {
+            self.mobile_drawer = toggle_mobile_drawer(self.mobile_drawer, MobileDrawer::Sidebar);
+            cx.notify();
+            return;
+        }
         let from = self.sidebar_now();
         self.sidebar_edge_bounce = None;
         self.sidebar_resize_edge = None;
@@ -2469,6 +2639,15 @@ impl Shell {
     }
 
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
+
+        if is_mobile_width(self.viewport_width) {
+            if self.active_chat.is_empty() {
+                return;
+            }
+            self.mobile_drawer = toggle_mobile_drawer(self.mobile_drawer, MobileDrawer::RightPane);
+            cx.notify();
+            return;
+        }
         // Reverse from the visible width when toggled during an animation.
         let from = self.eval_tween(self.right_tween, self.right_target(cx));
         self.right_edge_bounce = None;
@@ -2502,6 +2681,13 @@ impl Shell {
             changes.update(cx, |changes, cx| changes.ensure_content(cx));
         }
         cx.notify();
+    }
+
+
+    fn close_mobile_drawer(&mut self, cx: &mut Context<Self>) {
+        if self.mobile_drawer.take().is_some() {
+            cx.notify();
+        }
     }
 
     fn right_terminal_panel(&mut self, cx: &mut Context<Self>) -> Entity<TerminalPanel> {
@@ -4448,6 +4634,10 @@ impl Shell {
 
     fn request_sign_out(&mut self, cx: &mut Context<Self>) {
         self.close_user_menu(cx);
+
+        if dispatch_external_lifecycle_action(ExternalLifecycleAction::SignOut) {
+            return;
+        }
         if self.state.read(cx).workspace_scope != Some(WorkspaceScope::Synced) {
             return;
         }
@@ -4458,6 +4648,8 @@ impl Shell {
     fn confirm_sign_out(&mut self, cx: &mut Context<Self>) {
         self.start_local_runtime_transition(true, cx);
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
 
     fn start_local_runtime_transition(&mut self, sign_out: bool, cx: &mut Context<Self>) {
         if self.runtime_change_task.is_some() {
@@ -4599,6 +4791,8 @@ impl Shell {
     /// [`Self::drive_sync_switch`] run the import once the runtime is ready.
     /// Failure falls back to the quit-and-reopen dialog — the local profile is
     /// untouched, so the old path is always a safe exit.
+    #[cfg(not(target_arch = "wasm32"))]
+
     fn start_synced_switch(&mut self, import: bool, cx: &mut Context<Self>) {
         if self.runtime_change_task.is_some() {
             return;
@@ -4696,6 +4890,8 @@ impl Shell {
 
     /// Subscribe to the engine's one-time import stream and mirror its
     /// progress into the wizard.
+    #[cfg(not(target_arch = "wasm32"))]
+
     fn spawn_local_import(&mut self, cx: &mut Context<Self>) {
         if self.import_task.is_some() {
             return;
@@ -4761,6 +4957,34 @@ impl Shell {
         cx.notify();
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn unavailable_host_effect(&mut self, action: &str, cx: &mut Context<Self>) {
+        self.sidebar_notice =
+            Some(format!("{action} is unavailable in the browser fixture.").into());
+        cx.notify();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn start_local_runtime_transition(&mut self, _sign_out: bool, cx: &mut Context<Self>) {
+        self.unavailable_host_effect("Runtime transitions", cx);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn start_synced_switch(&mut self, _import: bool, cx: &mut Context<Self>) {
+        self.unavailable_host_effect("Runtime transitions", cx);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn spawn_local_import(&mut self, cx: &mut Context<Self>) {
+        self.unavailable_host_effect("Local workspace import", cx);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn quit_for_runtime_change(&mut self, cx: &mut Context<Self>) {
+        self.unavailable_host_effect("Stopping a runtime", cx);
+    }
+
+
     fn apply_import_event(&mut self, item: &serde_json::Value, cx: &mut Context<Self>) {
         match item.get("kind").and_then(|k| k.as_str()) {
             Some("start") => {
@@ -4796,6 +5020,8 @@ impl Shell {
         }
         cx.notify();
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
 
     fn quit_for_runtime_change(&mut self, cx: &mut Context<Self>) {
         if !self.prepare_exit(PendingExit::RuntimeChange, cx) {
@@ -5007,9 +5233,9 @@ impl Shell {
 
     // ---- render pieces ----
 
-    fn tween_elapsed(&self, started: std::time::Instant) -> Duration {
+    fn tween_elapsed(&self, started: Instant) -> Duration {
         self.render_time
-            .unwrap_or_else(std::time::Instant::now)
+            .unwrap_or_else(Instant::now)
             .saturating_duration_since(started)
     }
 
@@ -5046,7 +5272,10 @@ impl Shell {
         }
         let total =
             Duration::from_millis(motion::RESIZE_EDGE_BOUNCE_MS).mul_f32(motion::speed_scale());
-        let raw = self.tween_elapsed(bounce.started).as_secs_f32() / total.as_secs_f32();
+        let raw = Instant::now()
+            .saturating_duration_since(bounce.started)
+            .as_secs_f32()
+            / total.as_secs_f32();
         if raw >= 1.0 {
             return 0.0;
         }
@@ -5698,7 +5927,7 @@ impl Shell {
         // activity/glyph personality independently of the selected variant.
         let inner = self.sidebar_pane.clone().cached(
             gpui::StyleRefinement::default()
-                .w(px(self.settings.sidebar_width))
+                .w(px(self.effective_sidebar_width()))
                 .h_full()
                 .flex_none(),
         );
@@ -5713,6 +5942,88 @@ impl Shell {
             .w(px(self.sidebar_now()))
             .child(div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner))
             .into_any_element()
+    }
+
+
+    fn render_mobile_sidebar(&self, width: f32) -> AnyElement {
+        let inner = self.sidebar_pane.clone().cached(
+            gpui::StyleRefinement::default()
+                .w(px(width))
+                .h_full()
+                .flex_none(),
+        );
+        div()
+            .h_full()
+            .w(px(width))
+            .overflow_hidden()
+            .child(div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner))
+            .into_any_element()
+    }
+
+    fn render_mobile_drawer(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let drawer = self.mobile_drawer?;
+        if !is_mobile_width(self.viewport_width) {
+            return None;
+        }
+        let width = mobile_drawer_width(self.viewport_width, drawer);
+        let theme = Theme::of(cx).clone();
+        let panel: AnyElement = match drawer {
+            MobileDrawer::Sidebar => div()
+                .id("mobile-sidebar-drawer")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .w(px(width))
+                .bg(theme.surface)
+                .border_r_1()
+                .border_color(theme.border)
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(self.render_mobile_sidebar(width))
+                .into_any_element(),
+            MobileDrawer::RightPane => {
+                if !matches!(self.route, Route::Chat) || !self.right_pane_content_visible(cx) {
+                    self.mobile_drawer = None;
+                    return None;
+                }
+                div()
+                    .id("mobile-right-drawer")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right_0()
+                    .w(px(width))
+                    .bg(theme.surface)
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(self.render_right_pane(window, cx))
+                    .into_any_element()
+            }
+        };
+        let backdrop = div()
+            .id("mobile-drawer-backdrop")
+            .absolute()
+            .inset_0()
+            .bg(theme.scrim().opacity(0.35 / 0.6))
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.close_mobile_drawer(cx)),
+            );
+        Some(
+            div()
+                .id("mobile-drawer-overlay")
+                .absolute()
+                .inset_0()
+                .child(backdrop)
+                .child(panel)
+                .into_any_element(),
+        )
     }
 
     /// Settings-mode sidebar (zeron settings-sidebar.tsx): window-control
@@ -5740,7 +6051,7 @@ impl Shell {
         // the sidebar's right edge (user-reported). Device identity lives on
         // the Accounts page now — the one surface where the device matters.
         div()
-            .w(px(self.settings.sidebar_width))
+            .w(px(self.effective_sidebar_width()))
             .h_full()
             .flex()
             .flex_col()
@@ -6973,7 +7284,7 @@ impl Shell {
         .fade_overflow_y(&self.sidebar_scroll);
 
         div()
-            .w(px(self.settings.sidebar_width))
+            .w(px(self.effective_sidebar_width()))
             .h_full()
             .flex()
             .flex_col()
@@ -7103,6 +7414,8 @@ impl Shell {
 
     /// Fetch the manifest and stage the new Zeron desktop bundle under the data dir
     /// (tokio — reqwest); the strip flips to "restart to apply" when done.
+#[cfg(not(target_arch = "wasm32"))]
+
     fn begin_update_download(&mut self, cx: &mut Context<Self>) {
         let edge_url = self.boot.edge_url.clone();
         let data_dir = self.data_dir.clone();
@@ -7133,9 +7446,18 @@ impl Shell {
         cx.notify();
     }
 
+
+    #[cfg(target_arch = "wasm32")]
+    fn begin_update_download(&mut self, cx: &mut Context<Self>) {
+        self.update_flow = UpdateFlow::Failed("Desktop updates are unavailable in the browser.".into());
+        cx.notify();
+    }
+
     /// Swap the staged bundle over the installed one, arm the detached
     /// relauncher, and quit — the relauncher `open`s the new bundle once this
     /// process (and its engine lock / IPC port) is gone.
+#[cfg(not(target_arch = "wasm32"))]
+
     fn apply_staged_update(&mut self, staged: PathBuf, cx: &mut Context<Self>) {
         if !self.prepare_exit(PendingExit::InstallUpdate(staged.clone()), cx) {
             return;
@@ -7150,6 +7472,13 @@ impl Shell {
                 cx.notify();
             }
         }
+    }
+
+
+    #[cfg(target_arch = "wasm32")]
+    fn apply_staged_update(&mut self, _staged: PathBuf, cx: &mut Context<Self>) {
+        self.update_flow = UpdateFlow::Failed("Desktop updates are unavailable in the browser.".into());
+        cx.notify();
     }
 
     /// Scope-aware sidebar identity and account menu. Local runtimes advertise
@@ -7260,7 +7589,7 @@ impl Shell {
             // (`px-2 pb-1 pt-1.5 text-[11px] text-muted-foreground/70`),
             // the action selected by the runtime scope, then "Settings".
             let menu = popover::popover_card(theme)
-                .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
+                .w(px(self.effective_sidebar_width() - 2.0 * Theme::SPACE_SM))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.close_user_menu(cx);
                 }))
@@ -8296,7 +8625,7 @@ impl Shell {
         let ui_settings = settings::current(cx);
         let new_thread_background_setting = ui_settings.new_thread_composer_background;
         let new_thread_background_effect = ui_settings.new_thread_background_effect;
-        let frame_time = self.render_time.unwrap_or_else(std::time::Instant::now);
+        let frame_time = self.render_time.unwrap_or_else(Instant::now);
         // Prewarm even in an established thread. Decode/effect work is not
         // contingent on a hero measurement or a navigation gesture.
         let artwork = new_thread_background_setting
@@ -8911,7 +9240,8 @@ impl Shell {
     fn render_right_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let bg = theme.bg;
-        let content: AnyElement = if self.right_pane_open(cx) || self.tween_active(self.right_tween)
+        let content: AnyElement = if self.right_pane_content_visible(cx)
+            || self.tween_active(self.right_tween)
         {
             match self.resolved_right_active(cx) {
                 // Rendering a Files surface activates its image. Keep it unmounted
@@ -9048,14 +9378,18 @@ impl Shell {
         let target = self.right_target(cx);
         let edge_offset = self.eval_resize_edge_bounce(
             self.right_edge_bounce,
-            self.right_pane_open(cx) && !self.right_pane_expanded,
+            self.right_pane_content_visible(cx) && !self.right_pane_expanded,
         );
-        self.right_pane_container(
-            self.right_tween,
-            target,
-            edge_offset,
-            div().h_full().relative().child(panel).into_any_element(),
-        )
+        if is_mobile_width(self.viewport_width) {
+            div().h_full().relative().child(panel).into_any_element()
+        } else {
+            self.right_pane_container(
+                self.right_tween,
+                target,
+                edge_offset,
+                div().h_full().relative().child(panel).into_any_element(),
+            )
+        }
     }
 
     /// The right pane's empty state: a compact vertical list of surface rows
@@ -10432,7 +10766,7 @@ fn header_icon_button(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_time = Some(std::time::Instant::now());
+        self.render_time = Some(Instant::now());
         if self.all_file_edits_flushed(cx)
             && let Some(action) = self.pending_exit.take()
         {
@@ -10787,7 +11121,7 @@ impl Render for Shell {
                     self.state.read(cx).selected_chat.is_some(),
                     right_target_width,
                     on_chat && !self.reduced_motion,
-                    self.render_time.unwrap_or_else(std::time::Instant::now),
+                    self.render_time.unwrap_or_else(Instant::now),
                 );
                 if panel_handoff {
                     self.motion_active.set(true);
@@ -10861,10 +11195,19 @@ impl Render for Shell {
                     // seam; the panel's 1px border remains the visual divider.
                     .left(px(-PANE_RESIZE_HITBOX_HALF_WIDTH))
                 });
-                let right: AnyElement = if on_chat {
+                // On phones the right surface is mounted only by the transient
+                // drawer below; mounting it here would create a second, zero-width pane.
+                let right: AnyElement = if on_chat && !is_mobile_width(viewport) {
                     self.render_right_pane(window, cx)
                 } else {
                     Empty.into_any_element()
+                };
+                let drawer_side = self.mobile_drawer;
+                let mobile_drawer = self.render_mobile_drawer(window, cx);
+                let (mobile_sidebar, mobile_right) = match (drawer_side, mobile_drawer) {
+                    (Some(MobileDrawer::Sidebar), drawer) => (drawer, None),
+                    (Some(MobileDrawer::RightPane), drawer) => (None, drawer),
+                    (None, _) => (None, None),
                 };
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
@@ -10985,7 +11328,10 @@ impl Render for Shell {
                             ),
                     )
                     .child(div().absolute().top_0().left_0().right_0().child(title_bar))
+                    // Keep the left drawer under the shared titlebar controls.
+                    .children(mobile_sidebar)
                     .child(self.render_titlebar_cluster(cx))
+                    .children(mobile_right)
                     .children(overlays);
                 root.child(sidebar_tone)
                     .child(motion::fade_in("phase-app", page))
@@ -11067,6 +11413,24 @@ impl Render for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn mobile_drawers_are_bounded_and_exclusive() {
+        assert!(is_mobile_width(767.0));
+        assert!(!is_mobile_width(768.0));
+        assert_eq!(mobile_drawer_width(390.0, MobileDrawer::Sidebar), 280.0);
+        assert_eq!(mobile_drawer_width(390.0, MobileDrawer::RightPane), 351.0);
+        assert!(mobile_drawer_width(390.0, MobileDrawer::RightPane) < 390.0);
+        assert_eq!(
+            toggle_mobile_drawer(Some(MobileDrawer::Sidebar), MobileDrawer::RightPane),
+            Some(MobileDrawer::RightPane)
+        );
+        assert_eq!(
+            toggle_mobile_drawer(Some(MobileDrawer::RightPane), MobileDrawer::RightPane),
+            None
+        );
+    }
 
     #[test]
     fn sidebar_drag_nudges_each_edge_once_until_rearmed() {

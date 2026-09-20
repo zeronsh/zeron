@@ -11,19 +11,32 @@
 //! - failures are logged and swallowed — a missing player must never bother
 //!   the session flow.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Write;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
+#[cfg(not(target_arch = "wasm32"))]
 const DISABLE_ENV: &str = "ZERON_DISABLE_SOUND";
+#[cfg(not(target_arch = "wasm32"))]
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 static SOUND_APPSHOT: &[u8] = include_bytes!("../assets/sounds/appshot.wav");
 
+#[cfg(not(target_arch = "wasm32"))]
 static SOUND_DONE: &[u8] = include_bytes!("../assets/sounds/done.wav");
+#[cfg(not(target_arch = "wasm32"))]
 static SOUND_REQUEST: &[u8] = include_bytes!("../assets/sounds/request.wav");
+#[cfg(not(target_arch = "wasm32"))]
+
 static SOUND_ATTENTION: &[u8] = include_bytes!("../assets/sounds/attention.wav");
 
 /// Which notification chime to play.
@@ -39,6 +52,7 @@ pub enum Sound {
 
 /// Play a chime on a background thread. Silently a no-op when disabled or no
 /// player is available.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn play(sound: Sound) {
     let data = match sound {
         Sound::Done => SOUND_DONE,
@@ -47,6 +61,8 @@ pub fn play(sound: Sound) {
     };
     play_in_background(data);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
 
 /// Confirm captured pixels with a soft shutter and clear chime.
 /// The caller honors the dedicated capture sound setting.
@@ -61,6 +77,8 @@ pub fn play_appshot() {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     play_in_background(SOUND_APPSHOT);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
 
 /// Load the macOS capture cue before the first capture, without playing it.
 pub fn prepare_appshot() {
@@ -166,6 +184,8 @@ mod macos_appshot {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+
 fn play_in_background(data: &'static [u8]) {
     if std::env::var_os(DISABLE_ENV).is_some() {
         return;
@@ -177,6 +197,19 @@ fn play_in_background(data: &'static [u8]) {
     });
 }
 
+/// Browser builds deliberately have no host audio/player effect. A session
+/// transition must still render, but it must never spawn a thread, write a
+/// temporary file, or launch a native process.
+#[cfg(target_arch = "wasm32")]
+pub fn play(_sound: Sound) {}
+
+#[cfg(target_arch = "wasm32")]
+pub fn play_appshot() {}
+
+#[cfg(target_arch = "wasm32")]
+pub fn prepare_appshot() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn play_bytes(data: &[u8]) -> Result<(), String> {
     // The system players want a file path. Exclusive creation prevents a
     // predictable-name collision (including a pre-planted symlink) from
@@ -189,16 +222,19 @@ fn play_bytes(data: &[u8]) -> Result<(), String> {
     result
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct TempSoundFile {
     path: PathBuf,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for TempSoundFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn create_temp_file() -> std::io::Result<(std::fs::File, TempSoundFile)> {
     for _ in 0..128 {
         let id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -251,7 +287,7 @@ fn run_player(path: &Path) -> Result<(), String> {
     }
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(all(not(target_arch = "wasm32"), not(any(windows, target_os = "macos"))))]
 fn run_player(path: &Path) -> Result<(), String> {
     // WAV everywhere, so even bare ALSA aplay decodes it (herdr must exclude
     // aplay because it ships mp3s).
@@ -272,6 +308,7 @@ fn run_player(path: &Path) -> Result<(), String> {
     Err(format!("no audio player available: {}", errors.join("; ")))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run_checked(program: &str, args: &[&str], path: &Path) -> Result<(), String> {
     // Bounded wait: a wedged audio daemon must not accumulate zombie threads.
     let mut child = std::process::Command::new(program)
@@ -428,7 +465,7 @@ impl AttentionSoundGate {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

@@ -12,22 +12,35 @@
 //! `subscribe`. Both ends run over any pair of string channels, so the in-memory transport
 //! ([`memory_client`]) exercises the exact same code path as the WebSocket one.
 
+#[cfg(feature = "native")]
 use std::sync::Arc;
 
+#[cfg(feature = "native")]
 use async_trait::async_trait;
+#[cfg(feature = "native")]
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
+pub mod device_frame;
+
+#[cfg(feature = "client")]
 mod client;
+#[cfg(feature = "native")]
 pub mod device_room;
+#[cfg(feature = "native")]
 mod server;
 
-pub use client::{RpcClient, RpcSubscription, connect_ws};
+#[cfg(feature = "native")]
+pub use client::connect_ws;
+#[cfg(feature = "client")]
+pub use client::{RpcClient, RpcSubscription};
+#[cfg(feature = "native")]
 pub use device_room::{
-    DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
-    NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
-    decode_device_frame, device_room_ws_url, encode_device_frame,
+    DeviceFrameHeader, DeviceLink, FrameHandler, HostRelay, HostRelayConfig, LinkCache,
+    LinkCacheConfig, NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError,
+    TokenSource, decode_device_frame, device_room_ws_url, encode_device_frame,
 };
+#[cfg(feature = "native")]
 pub use server::{serve_connection, serve_ws_listener};
 
 /// RPC method names — single source of truth for both ends.
@@ -241,6 +254,15 @@ pub struct ServerFrame {
     pub done: bool,
 }
 
+/// Decode one server frame while preserving the presence of `ok: null` and
+/// `item: null`. `Option<Value>` alone cannot represent that distinction.
+pub fn decode_server_frame(text: &str) -> Result<ServerFrame, String> {
+    serde_json::from_str(text).map_err(|_| "Invalid RPC JSON".to_string())
+}
+
+
+#[cfg(feature = "native")]
+
 /// What a service returns for one invocation.
 pub enum RpcReply {
     /// Unary response — sent as `{id, ok}`.
@@ -248,6 +270,8 @@ pub enum RpcReply {
     /// Stream — each item sent as `{id, item}`, then `{id, done: true}` when it ends.
     Stream(BoxStream<'static, serde_json::Value>),
 }
+
+#[cfg(feature = "native")]
 
 impl RpcReply {
     /// Serialize a value into a unary reply.
@@ -258,11 +282,15 @@ impl RpcReply {
     }
 }
 
+#[cfg(feature = "native")]
+
 /// Server-side dispatch: one implementation serves every transport.
 #[async_trait]
 pub trait RpcService: Send + Sync + 'static {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError>;
 }
+
+#[cfg(feature = "native")]
 
 /// Deserialize typed params out of the envelope's `params` value.
 pub fn parse_params<T: serde::de::DeserializeOwned>(
@@ -270,6 +298,8 @@ pub fn parse_params<T: serde::de::DeserializeOwned>(
 ) -> Result<T, RpcError> {
     serde_json::from_value(params).map_err(|e| RpcError::BadParams(e.to_string()))
 }
+
+#[cfg(feature = "native")]
 
 /// Spawn an in-memory server for `service` and return a connected client.
 /// Same envelopes, same dispatch loop as the WebSocket path — the in-process UI
@@ -281,7 +311,7 @@ pub fn memory_client(service: Arc<dyn RpcService>) -> RpcClient {
     RpcClient::new(client_out, client_in)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
     use futures::StreamExt;

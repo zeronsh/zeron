@@ -2,6 +2,10 @@
 use super::*;
 use crate::files::client::{FilesRequestContext, WorkspaceFilesClient};
 use crate::image_media::{MediaImage, decode_project_icon, release_media};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 pub(super) const ICON_PATHS: &[&str] = &[
     "public/apple-touch-icon.png",
@@ -125,7 +129,7 @@ pub(super) struct ProjectIcon {
     name: String,
     seed: String,
     media: Option<MediaImage>,
-    refreshed: std::time::Instant,
+    refreshed: Instant,
     _task: Task<()>,
 }
 
@@ -190,7 +194,7 @@ impl ProjectIcon {
             name,
             seed,
             media: None,
-            refreshed: std::time::Instant::now(),
+            refreshed: Instant::now(),
             _task: task,
         }
     }

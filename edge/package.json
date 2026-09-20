@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run test:unit && npm run test:workerd",
     "test:unit": "vitest run",
-    "test:workerd": "vitest run -c vitest.workerd.config.ts",
+    "test:workerd": "node scripts/test-workerd.mjs",
+    "postinstall": "patch-package",
     "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
@@ -19,10 +20,11 @@
     "loro-protocol": "^0.3.0"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.20.2",
+    "@cloudflare/vitest-plugin": "^1.1.9",
     "@cloudflare/workers-types": "^5.20260714.1",
     "loro-adaptors": "^0.6.1",
     "loro-websocket": "^0.6.2",
+    "patch-package": "^8.0.1",
     "typescript": "^6.0.3",
     "vitest": "^4.1.10",
     "wrangler": "^4.111.0"

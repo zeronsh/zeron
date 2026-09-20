@@ -14,15 +14,19 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, SharedString,
     Subscription, Task, Window, div, prelude::*, px,
 };
 
-use zeron_engine::registry::HarnessDescriptor;
 use zeron_proto::{
-    ChatConfig, FolderListing, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel, Space,
+    ChatConfig, FolderListing, HarnessDescriptor, HarnessId, Model, ReasoningLevel, RepoRef,
+    SandboxLevel, Space, descriptor_enabled,
 };
 use zeron_rpc::methods;
 
@@ -4358,10 +4362,13 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
             .collect::<String>()
             .to_ascii_lowercase()
     }
+    #[cfg(not(target_arch = "wasm32"))]
     let catalog = match harness {
         HarnessId::ClaudeCode => zeron_harness::claude::catalog::static_models(),
         _ => Vec::new(),
     };
+    #[cfg(target_arch = "wasm32")]
+    let catalog: Vec<Model> = Vec::new();
     // Curated label for an id: exact normalized match, else — for bare
     // alphabetic aliases like `opus` — the first (flagship-ordered) family
     // row. Versioned foreign ids never fuzzy-match.
@@ -4494,9 +4501,7 @@ fn offered_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<H
     visible_harnesses_impl(list, allow_mock)
         .into_iter()
         .filter(|d| {
-            d.installed
-                && (zeron_engine::registry::descriptor_enabled(d)
-                    || (allow_mock && d.id == HarnessId::Mock))
+            d.installed && (descriptor_enabled(d) || (allow_mock && d.id == HarnessId::Mock))
         })
         .collect()
 }
@@ -4507,7 +4512,7 @@ fn attach_overlay(
     overlay: &mut Option<(PickerKind, AnyElement)>,
     kind: PickerKind,
     id: &'static str,
-    closing: Option<std::time::Instant>,
+    closing: Option<Instant>,
 ) -> gpui::Stateful<gpui::Div> {
     if overlay.as_ref().is_some_and(|(k, _)| *k == kind)
         && let Some((_, element)) = overlay.take()
@@ -4523,7 +4528,7 @@ fn attach_overlay_below(
     overlay: &mut Option<(PickerKind, AnyElement)>,
     kind: PickerKind,
     id: &'static str,
-    closing: Option<std::time::Instant>,
+    closing: Option<Instant>,
 ) -> gpui::Stateful<gpui::Div> {
     if overlay.as_ref().is_some_and(|(k, _)| *k == kind)
         && let Some((_, element)) = overlay.take()
@@ -4540,7 +4545,7 @@ fn attach_overlay_end(
     overlay: &mut Option<(PickerKind, AnyElement)>,
     kind: PickerKind,
     id: &'static str,
-    closing: Option<std::time::Instant>,
+    closing: Option<Instant>,
 ) -> gpui::Stateful<gpui::Div> {
     if overlay.as_ref().is_some_and(|(k, _)| *k == kind)
         && let Some((_, element)) = overlay.take()

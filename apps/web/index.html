@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+  <title>Zeron</title>
+  <link data-trunk rel="copy-file" href="_headers">
+  <link data-trunk rel="rust" data-bin="comet-web" data-bindgen-target="web" data-wasm-opt="0" data-initializer="zeron-browser-initializer.js">
+  <!-- GPUI sets the button cursor on body, so suppress its tap highlight too. -->
+  <style>html,body{margin:0;height:100%;overflow:hidden;background:#18181b;-webkit-tap-highlight-color:transparent}canvas{display:block;width:100%;height:100%;outline:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+    #loading{position:fixed;inset:0;z-index:10;display:flex;flex-direction:column;gap:14px;align-items:center;justify-content:center;color:#b8b8c0;font:14px system-ui,sans-serif}
+    #loading[hidden]{display:none}
+    #loading progress{width:min(260px,60vw);height:6px;appearance:none;border:0;border-radius:3px;background:#3f3f46;overflow:hidden}
+    #loading progress::-webkit-progress-bar{background:#3f3f46}
+    #loading progress::-webkit-progress-value{background:#fafafa;transition:width .15s}
+    #loading progress::-moz-progress-bar{background:#fafafa}
+    #loading.failed progress{display:none}
+  </style>
+</head>
+<body>
+  <div id="loading" role="status" aria-live="polite"><progress></progress><span>Loading Zeron…</span></div>
+  <script>
+    // Hide the splash once GPUI attaches its canvas; surface boot failures instead of spinning forever.
+    (() => {
+      const loading = document.getElementById("loading");
+      const watcher = new MutationObserver(() => {
+        if (document.querySelector("canvas")) { loading.hidden = true; stop(); }
+      });
+      const fail = () => {
+        loading.classList.add("failed");
+        loading.querySelector("span").textContent = "Couldn't load Zeron. Reload to try again.";
+        stop();
+      };
+      const stop = () => {
+        watcher.disconnect();
+        removeEventListener("error", fail);
+        removeEventListener("unhandledrejection", fail);
+      };
+      watcher.observe(document.body, { childList: true, subtree: true });
+      addEventListener("error", fail);
+      addEventListener("unhandledrejection", fail);
+    })();
+  </script>
+</body>
+</html>

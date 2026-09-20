@@ -5,6 +5,10 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
@@ -218,17 +222,17 @@ pub struct AppearancePage {
     size_menu: Popup<()>,
     terminal_size_menu: Popup<()>,
     code_size_menu: Popup<()>,
-    font_menu_dismissed_at: Option<std::time::Instant>,
-    terminal_font_menu_dismissed_at: Option<std::time::Instant>,
-    code_font_menu_dismissed_at: Option<std::time::Instant>,
+    font_menu_dismissed_at: Option<Instant>,
+    terminal_font_menu_dismissed_at: Option<Instant>,
+    code_font_menu_dismissed_at: Option<Instant>,
     /// Filter for whichever family menu is open — a device can carry hundreds
     /// of families, so the list narrows as you type instead of asking you to
     /// scroll. One input serves all three kinds: only one menu is ever open.
     font_search: Entity<ComposerInput>,
     _font_search_events: Subscription,
-    size_menu_dismissed_at: Option<std::time::Instant>,
-    terminal_size_menu_dismissed_at: Option<std::time::Instant>,
-    code_size_menu_dismissed_at: Option<std::time::Instant>,
+    size_menu_dismissed_at: Option<Instant>,
+    terminal_size_menu_dismissed_at: Option<Instant>,
+    code_size_menu_dismissed_at: Option<Instant>,
     light_theme_menu: Popup<()>,
     dark_theme_menu: Popup<()>,
     import_dialog: Option<ImportDialog>,
@@ -560,7 +564,7 @@ impl AppearancePage {
         }
     }
 
-    fn font_dismissed_at(&mut self, kind: FontKind) -> &mut Option<std::time::Instant> {
+    fn font_dismissed_at(&mut self, kind: FontKind) -> &mut Option<Instant> {
         match kind {
             FontKind::Ui => &mut self.font_menu_dismissed_at,
             FontKind::Terminal => &mut self.terminal_font_menu_dismissed_at,
@@ -603,7 +607,7 @@ impl AppearancePage {
         }
     }
 
-    fn size_dismissed_at(&mut self, kind: FontKind) -> &mut Option<std::time::Instant> {
+    fn size_dismissed_at(&mut self, kind: FontKind) -> &mut Option<Instant> {
         match kind {
             FontKind::Ui => &mut self.size_menu_dismissed_at,
             FontKind::Terminal => &mut self.terminal_size_menu_dismissed_at,
@@ -739,12 +743,12 @@ impl AppearancePage {
     }
 
     fn dismiss_font_menu(&mut self, kind: FontKind, cx: &mut Context<Self>) {
-        *self.font_dismissed_at(kind) = Some(std::time::Instant::now());
+        *self.font_dismissed_at(kind) = Some(Instant::now());
         self.close_font_menu(kind, cx);
     }
 
     fn dismiss_size_menu(&mut self, kind: FontKind, cx: &mut Context<Self>) {
-        *self.size_dismissed_at(kind) = Some(std::time::Instant::now());
+        *self.size_dismissed_at(kind) = Some(Instant::now());
         self.close_size_menu(kind, cx);
     }
 

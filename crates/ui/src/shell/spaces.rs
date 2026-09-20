@@ -933,7 +933,7 @@ mod pinned_session_tests {
             from: 0.0,
             to: SIDEBAR_SESSION_SLOT,
             epoch: 1,
-            started: std::time::Instant::now() - TAB_SLIDE.total(),
+            started: Instant::now() - TAB_SLIDE.total(),
         };
         slide.retarget(2.0 * SIDEBAR_SESSION_SLOT);
         assert_eq!(slide.from, SIDEBAR_SESSION_SLOT);
@@ -954,7 +954,7 @@ mod pinned_session_tests {
             from: 0.0,
             to: SIDEBAR_SESSION_SLOT,
             epoch: 0,
-            started: std::time::Instant::now() - TAB_SLIDE.total() / 2,
+            started: Instant::now() - TAB_SLIDE.total() / 2,
         };
         let halfway = slide.current();
         assert!(halfway > 0.0 && halfway < SIDEBAR_SESSION_SLOT);
@@ -2292,7 +2292,7 @@ impl Shell {
                 from: 0.0,
                 to: 0.0,
                 epoch: drag.slide.epoch,
-                started: std::time::Instant::now(),
+                started: Instant::now(),
             });
         slide.retarget(target);
         let (from, to, epoch) = (slide.from, slide.to, slide.epoch);
@@ -2340,7 +2340,7 @@ impl Shell {
                 from: 0.0,
                 to: 0.0,
                 epoch: 0,
-                started: std::time::Instant::now(),
+                started: Instant::now(),
             },
             collapsed_height: 0.0,
             section_gaps: Default::default(),
@@ -2349,7 +2349,7 @@ impl Shell {
                 from: top,
                 to: top,
                 epoch: self.pinned_session_drag_generation << 32,
-                started: std::time::Instant::now(),
+                started: Instant::now(),
             },
         });
         {
@@ -2454,7 +2454,7 @@ impl Shell {
                 self.sidebar_session_return = Some(SidebarSessionReturn {
                     transfer,
                     epoch: self.pinned_session_drag_generation,
-                    started: std::time::Instant::now(),
+                    started: Instant::now(),
                 });
                 let epoch = self.pinned_session_drag_generation;
                 cx.spawn(async move |this, cx| {
@@ -2529,7 +2529,7 @@ impl Shell {
         } else {
             transfer.slide.from = target;
             transfer.slide.to = target;
-            transfer.slide.started = std::time::Instant::now();
+            transfer.slide.started = Instant::now();
         }
         let from = transfer.slide.from;
         let to = transfer.slide.to;
@@ -3902,7 +3902,7 @@ impl Shell {
                             from: 0.0,
                             to: 0.0,
                             epoch: 0,
-                            started: std::time::Instant::now(),
+                            started: Instant::now(),
                         });
                 }
                 for (group, gap) in &mut drag.section_gaps {

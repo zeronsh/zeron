@@ -38,7 +38,11 @@
  */
 import { authenticate } from "./auth";
 import { handleAuthRoute } from "./auth-routes";
-import { AUTH_USER_HEADER, ROOM_KIND_HEADER, type Env } from "./env";
+
+import { browserDeviceRoute, browserPreviewRoute, handleBrowserRoute } from "./browser-routes";
+import { BrowserSessionStore, registerBrowserDevice } from "./browser-sessions";
+import type { Env } from "./env";
+import { forwardedHeaders } from "./forwarded-headers";
 import { SessionRoom } from "./session-room";
 import { previewRoute } from "./preview-route";
 import { PreviewRoom } from "./preview-room";
@@ -47,7 +51,7 @@ import { RegistryRoom } from "./registry-room";
 import { ChatRoom } from "./chat-room";
 import installSh from "./install.sh";
 
-export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom };
+export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, BrowserSessionStore };
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -58,6 +62,11 @@ const safeDecode = (segment: string): string | undefined => {
   } catch {
     return undefined;
   }
+};
+
+const deviceName = (value: string | null): string | undefined => {
+  const name = value?.trim();
+  return name && name.length <= 128 && !/[\u0000-\u001F\u007F]/.test(name) ? name : undefined;
 };
 /** Tool part ids are harness-minted (`tool-1`, `call_x`, `m1#c1`-style) —
  * wider than ID_RE but still no slashes, so a part id can't traverse keys. */
@@ -84,15 +93,7 @@ const forward = (
   const url = new URL(request.url);
   url.pathname = path;
   if (search !== undefined) url.search = search;
-  const headers = new Headers(request.headers);
-  // room-kind is a Worker-controlled signal (the DO relaxes owner gating for
-  // workspace rooms): clear any inbound value so only the explicit set below —
-  // reached solely on workspace forwards, after the org-membership check —
-  // can assert it. Do not drop this line; passthrough would let a caller
-  // choose their own room kind.
-  headers.delete(ROOM_KIND_HEADER);
-  headers.set(AUTH_USER_HEADER, userId);
-  if (roomKind) headers.set(ROOM_KIND_HEADER, roomKind);
+  const headers = forwardedHeaders(request, userId, roomKind);
   return stub.fetch(new Request(url.toString(), { ...requestInit(request), headers }));
 };
 
@@ -118,6 +119,14 @@ export default {
     if (url.pathname === "/health") {
       return json({ ok: true, auth: env.AUTH_MODE === "dev" ? "dev" : "workos" });
     }
+
+    // ── browser BFF (cookie-only; no provider token reaches the UI) ───────
+    const browserDevice = await browserDeviceRoute(request, env, url);
+    if (browserDevice) return browserDevice;
+    const browserPreview = await browserPreviewRoute(request, env, url);
+    if (browserPreview) return browserPreview;
+    const browserRouted = await handleBrowserRoute(request, env, url);
+    if (browserRouted) return browserRouted;
 
     // ── public install surface (also routed from zeron.sh): the
     //    `curl | sh` installer and the release artifacts it downloads ───────
@@ -354,7 +363,7 @@ export default {
         const role = url.searchParams.get("role") === "host" ? "host" : "client";
         const connId = url.searchParams.get("connId") ?? crypto.randomUUID();
         // `d2/` — same staging→prod identity break as `s2/` above.
-        return forward(
+        const forwarded = await forward(
           env.DEVICE_ROOMS,
           `d2/${deviceId}`,
           request,
@@ -362,6 +371,10 @@ export default {
           "/ws",
           `?role=${role}&connId=${encodeURIComponent(connId)}`
         );
+        // Register only a host that DeviceRoom actually accepted. Browser
+        // discovery then remains owner-scoped and never invents a backend.
+        if (role === "host" && forwarded.status === 101) await registerBrowserDevice(env, auth.userId, deviceId, deviceName(url.searchParams.get("name")));
+        return forwarded;
       }
       if (parts[2] === "sidecar" && parts[3] && /^[a-z0-9-]{1,64}$/.test(parts[3])) {
         return forward(env.DEVICE_ROOMS, `d2/${deviceId}`, request, auth.userId, `/sidecar/${parts[3]}`, "");

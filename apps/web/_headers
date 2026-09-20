@@ -1,0 +1,12 @@
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Resource-Policy: same-origin
+  X-Content-Type-Options: nosniff
+
+# Trunk content-hashes these, so a URL never changes meaning: cache them forever.
+# index.html keeps the default revalidation so a deploy is picked up immediately.
+/comet-web-*
+  Cache-Control: public, max-age=31536000, immutable
+/*-zeron-browser-initializer.js
+  Cache-Control: public, max-age=31536000, immutable

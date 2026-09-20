@@ -218,6 +218,18 @@ pub fn device_room_ws_url(
     format!("{ws_base}/device/{device_id}/ws?role={role}{conn}&token={token}")
 }
 
+fn query_component(value: &str) -> String {
+    value.bytes().fold(String::new(), |mut encoded, byte| {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            use std::fmt::Write as _;
+            write!(encoded, "%{byte:02X}").expect("writing a string cannot fail");
+        }
+        encoded
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Token source — the auth seam
 // ---------------------------------------------------------------------------
@@ -279,11 +291,13 @@ impl TokenSource for StaticToken {
 /// Called with the chat id of every nudge frame ("this chat's doc has pending commands —
 /// open it and drain"); the engine warms/opens the chat doc.
 pub type NudgeHandler = Arc<dyn Fn(String) + Send + Sync>;
+pub type FrameHandler = Arc<dyn Fn(String, Vec<u8>) -> futures::future::BoxFuture<'static, Option<Vec<u8>>> + Send + Sync>;
 
 pub struct HostRelayConfig {
     /// Edge base URL (`http(s)://…`; rewritten to `ws(s)` for the socket).
     pub edge_url: String,
     pub device_id: String,
+    pub device_name: Option<String>,
     pub token: Arc<dyn TokenSource>,
     /// Reconnect delay after a session ends (a small jitter is added).
     pub retry: Duration,
@@ -298,9 +312,15 @@ impl HostRelayConfig {
         Self {
             edge_url: edge_url.into(),
             device_id: device_id.into(),
+            device_name: None,
             token,
             retry: Duration::from_secs(5),
         }
+    }
+
+    pub fn with_device_name(mut self, name: impl Into<String>) -> Self {
+        self.device_name = Some(name.into());
+        self
     }
 }
 
@@ -314,11 +334,15 @@ pub struct HostRelay {
 }
 
 impl HostRelay {
-    pub fn spawn(
-        config: HostRelayConfig,
-        service: Arc<dyn RpcService>,
-        on_nudge: NudgeHandler,
-    ) -> Self {
+    pub fn spawn_with_frame(config: HostRelayConfig, service: Arc<dyn RpcService>, on_nudge: NudgeHandler, on_frame: Option<FrameHandler>) -> Self {
+        Self::spawn_inner(config, service, on_nudge, on_frame)
+    }
+
+    pub fn spawn(config: HostRelayConfig, service: Arc<dyn RpcService>, on_nudge: NudgeHandler) -> Self {
+        Self::spawn_inner(config, service, on_nudge, None)
+    }
+
+    fn spawn_inner(config: HostRelayConfig, service: Arc<dyn RpcService>, on_nudge: NudgeHandler, on_frame: Option<FrameHandler>) -> Self {
         let task = tokio::spawn(async move {
             let mut wake = zeron_sync::wake::subscribe();
             let mut online = zeron_sync::wake::subscribe_online();
@@ -333,16 +357,13 @@ impl HostRelay {
             loop {
                 match config.token.token().await {
                     Ok(token) => {
-                        let url = device_room_ws_url(
-                            &config.edge_url,
-                            &config.device_id,
-                            "host",
-                            None,
-                            &token,
+                        let mut url = device_room_ws_url(
+                            &config.edge_url, &config.device_id, "host", None, &token,
                         );
+                        if let Some(name) = config.device_name.as_deref() { url.push_str("&name="); url.push_str(&query_component(name)); }
                         let started = tokio::time::Instant::now();
                         let outcome = {
-                            let session = host_session(&url, &service, &on_nudge);
+                            let session = host_session(&url, &service, &on_nudge, &on_frame);
                             tokio::pin!(session);
                             loop {
                                 tokio::select! {
@@ -469,6 +490,7 @@ async fn host_session(
     url: &str,
     service: &Arc<dyn RpcService>,
     on_nudge: &NudgeHandler,
+    on_frame: &Option<FrameHandler>,
 ) -> Result<(), RpcError> {
     let ws = zeron_sync::dial::connect_ws(url)
         .await
@@ -488,7 +510,7 @@ async fn host_session(
     let mut conns: HashMap<String, VirtualConn> = HashMap::new();
     let dispatch = async {
         while let Some(bytes) = in_rx.recv().await {
-            handle_host_frame(&bytes, &mut conns, service, &out_tx, on_nudge).await;
+            handle_host_frame(&bytes, &mut conns, service, &out_tx, on_nudge, on_frame).await;
         }
     };
     // Poll the transport even when a virtual RPC connection is backpressured.
@@ -513,6 +535,7 @@ async fn handle_host_frame(
     service: &Arc<dyn RpcService>,
     out_tx: &mpsc::Sender<Vec<u8>>,
     on_nudge: &NudgeHandler,
+    on_frame: &Option<FrameHandler>,
 ) {
     let (header, payload) = match decode_device_frame(bytes) {
         Ok(frame) => frame,
@@ -558,6 +581,15 @@ async fn handle_host_frame(
                 chat_id: Some(chat_id),
             }) => on_nudge(chat_id),
             _ => tracing::warn!("device-room: malformed nudge — ignoring"),
+        }
+        return;
+    }
+    if header.k == "preview" {
+        if let (Some(from), Some(handler)) = (header.from.clone(), on_frame) {
+            if let Some(reply_payload) = handler(header.k.clone(), payload).await {
+                let reply = DeviceFrameHeader::new(header.s, "preview").with_to(from);
+                if let Ok(frame) = encode_device_frame(&reply, &reply_payload) { let _ = out_tx.send(frame).await; }
+            }
         }
         return;
     }

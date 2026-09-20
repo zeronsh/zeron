@@ -19,6 +19,8 @@ use zeron_proto::{AuthState, WorkspaceScope};
 pub mod accounts;
 pub mod appearance;
 pub mod archived;
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) mod browser_storage;
 pub mod composer;
 pub mod devices;
 pub mod files;
@@ -106,6 +108,14 @@ impl NewThreadBackgroundEffect {
             Self::Scanlines => "Adds a pronounced horizontal display-line texture.",
         }
     }
+}
+
+/// Opaque browser-local preference namespace used by the WASM fixture.
+/// It is never interpreted as a browser filesystem path.
+pub const BROWSER_PREFERENCES_NAMESPACE: &str = "comet.ui-wasm-fixture.v1";
+
+pub fn browser_preferences_namespace() -> PathBuf {
+    PathBuf::from(BROWSER_PREFERENCES_NAMESPACE)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1019,7 +1029,7 @@ pub fn sidebar_pin_profile_key(
             }
             let org_id = token_org_id
                 .or(development_org_id.filter(|org_id| !org_id.is_empty()))
-                .unwrap_or(zeron_engine::DEFAULT_ORG_ID);
+                .unwrap_or("local");
             Some(format!("development:{org_id}:{user_id}"))
         }
     }
@@ -1365,8 +1375,18 @@ impl UiSettings {
 
     /// Load from `{data_dir}/ui-settings.json`; defaults on any failure.
     pub fn load(data_dir: &Path) -> Self {
-        match std::fs::read_to_string(Self::path(data_dir)) {
-            Ok(text) => {
+        let saved = {
+            #[cfg(target_arch = "wasm32")]
+            {
+                browser_storage::load(data_dir, FILE_NAME)
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                std::fs::read_to_string(Self::path(data_dir)).map(Some)
+            }
+        };
+        match saved {
+            Ok(Some(text)) => {
                 match serde_json::from_str::<serde_json::Value>(&text).and_then(|mut value| {
                     if let Some(settings) = value.as_object_mut() {
                         let previous_sound = settings
@@ -1445,19 +1465,26 @@ impl UiSettings {
                     }
                 }
             }
-            Err(_) => Self::default(),
+            Ok(None) | Err(_) => Self::default(),
         }
     }
 
     /// Write atomically (temp file + rename) so a crash mid-write never corrupts.
     pub fn save(&self, data_dir: &Path) -> io::Result<()> {
-        std::fs::create_dir_all(data_dir)?;
-        let path = Self::path(data_dir);
-        let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, &path)
+        #[cfg(target_arch = "wasm32")]
+        {
+            return browser_storage::save(data_dir, FILE_NAME, &json);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::fs::create_dir_all(data_dir)?;
+            let path = Self::path(data_dir);
+            let tmp = path.with_extension("json.tmp");
+            std::fs::write(&tmp, json)?;
+            std::fs::rename(&tmp, &path)
+        }
     }
 
     fn migrated(mut self) -> Self {

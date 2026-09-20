@@ -36,6 +36,10 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable as _, ListAlignment, ListState,
@@ -1557,7 +1561,7 @@ struct FileFold {
     /// click — gpui replays an element's animation on remount, and in the
     /// virtualized list a row scrolling back into view is a remount (the
     /// transcript's tool groups had the same flash; user report).
-    toggled_at: Option<std::time::Instant>,
+    toggled_at: Option<Instant>,
 }
 
 /// Tween arming window after a fold toggle (COLLAPSE's 180ms plus margin).
@@ -2428,7 +2432,7 @@ impl Changes {
         };
         fold.collapsed = !currently_collapsed;
         fold.epoch += 1;
-        fold.toggled_at = Some(std::time::Instant::now());
+        fold.toggled_at = Some(Instant::now());
         // The body tweens as ONE clipped stand-in row; the settle sweep
         // swaps it for steady rows (all lines, or none) once the window
         // elapses.
