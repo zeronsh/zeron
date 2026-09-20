@@ -53,6 +53,7 @@ use zeron_proto::{
 
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::process::{Child, Command, Stdio};
+use crate::scratch::ScratchDir;
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
 use normalize::{map_update, parse_commands, preferred_allow_option};
 use subagent::SubagentTracker;
@@ -909,7 +910,7 @@ impl AcpHarness {
     /// sign-in stored.
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
         let home = std::env::var("HOME").ok();
-        let (mut child, _stderr) = self.spawn_agent(home.as_deref(), false, &[]).await?;
+        let (mut child, _stderr, _scratch) = self.spawn_agent(home.as_deref(), false, &[]).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -977,6 +978,10 @@ impl AcpHarness {
         }
         if let Some(browser) = browser {
             cmd.env("BROWSER", browser);
+        }
+        let _scratch = self.adapter_scratch()?;
+        if let Some(dir) = &_scratch {
+            dir.apply(&mut cmd);
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1207,12 +1212,27 @@ impl AcpHarness {
         }
     }
 
+    /// Archive-installed adapters are PyInstaller one-file bundles: the
+    /// bootloader unpacks its payload into the child's temp root on every
+    /// launch and removes it only on a normal exit. Adapters are reaped through
+    /// `TerminateJobObject`, which skips that path, so hand each run a temp
+    /// root this process owns and can delete once the job is gone. See
+    /// [`crate::scratch`].
+    fn adapter_scratch(&self) -> Result<Option<ScratchDir>, HarnessError> {
+        Ok(self
+            .spec
+            .archive
+            .is_some()
+            .then(|| ScratchDir::new(self.spec.executable))
+            .transpose()?)
+    }
+
     async fn spawn_agent(
         &self,
         cwd: Option<&str>,
         block_on_install: bool,
         extra_args: &[String],
-    ) -> Result<(Child, crate::StderrTail), HarnessError> {
+    ) -> Result<(Child, crate::StderrTail, Option<ScratchDir>), HarnessError> {
         let (exe, args) = self.resolve_program(block_on_install).await?;
         let mut cmd = Command::new(&exe);
         cmd.args(args);
@@ -1223,6 +1243,10 @@ impl AcpHarness {
         }
         if self.spec.id == HarnessId::Antigravity {
             cmd.env("GEMINI_HOME", antigravity_paths::home()?);
+        }
+        let scratch = self.adapter_scratch()?;
+        if let Some(dir) = &scratch {
+            dir.apply(&mut cmd);
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1246,7 +1270,7 @@ impl AcpHarness {
                 }
             });
         }
-        Ok((child, stderr_tail))
+        Ok((child, stderr_tail, scratch))
     }
 
     /// Short-lived discovery run for [`Harness::commands`]: initialize, scan
@@ -1255,7 +1279,7 @@ impl AcpHarness {
     /// refuses sessions before login still surfaces whatever the handshake
     /// advertised.
     async fn discover_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        let (mut child, _stderr) = self.spawn_agent(None, false, &[]).await?;
+        let (mut child, _stderr, _scratch) = self.spawn_agent(None, false, &[]).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1319,7 +1343,7 @@ impl AcpHarness {
     /// wire is the source of truth — the spec's static catalog only enriches
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
-        let (mut child, stderr_tail) = self.spawn_agent(None, false, &[]).await?;
+        let (mut child, stderr_tail, _scratch) = self.spawn_agent(None, false, &[]).await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1724,7 +1748,8 @@ impl Harness for AcpHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let (mut child, stderr_tail) = self.spawn_agent(Some(&request.cwd), true, &[]).await?;
+        let (mut child, stderr_tail, scratch) =
+            self.spawn_agent(Some(&request.cwd), true, &[]).await?;
         let stdin = child
             .stdin
             .take()
@@ -1737,6 +1762,7 @@ impl Harness for AcpHarness {
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             child,
+            scratch,
             client,
             incoming,
             event_tx,
@@ -1771,6 +1797,10 @@ impl Harness for AcpHarness {
 
 struct Session {
     child: Child,
+    /// Private temp root holding a PyInstaller-bundled adapter's unpack
+    /// directory, removed when the session ends. Declared after `child` so the
+    /// job is terminated before the directory is removed.
+    scratch: Option<ScratchDir>,
     client: RpcClient,
     incoming: mpsc::Receiver<Incoming>,
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
@@ -2672,6 +2702,11 @@ fn steering_call_future(
 /// turn, the steering mailbox, the interrupt token, and consumer liveness.
 async fn run_session(session: Session) {
     let Session {
+        // Bound first so it drops *last*: locals drop in reverse declaration
+        // order, and this adapter's temp root can only be removed once its job
+        // is gone. Binding it here keeps that ordering right whether or not an
+        // early return made it to `shutdown_child`.
+        scratch: _scratch,
         mut child,
         client,
         mut incoming,
