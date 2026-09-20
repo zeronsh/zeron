@@ -184,6 +184,7 @@ pub struct AccountsPage {
     /// Retargeted by the page-header device switcher (zeron parity: the
     /// accounts RPCs are relay-forwardable, CLI logins are per-device).
     target_device: Option<String>,
+    local_only: bool,
     device_menu: popover::Popup<()>,
     snapshot: Loadable<AgentAccountsSnapshot>,
     /// Account id with an in-flight Switch/Forget.
@@ -211,6 +212,7 @@ impl AccountsPage {
             state,
             scroll: widgets::PageScroll::default(),
             target_device: None,
+            local_only: false,
             device_menu: popover::Popup::default(),
             snapshot: Loadable::Idle,
             busy_account: None,
@@ -242,7 +244,8 @@ impl AccountsPage {
         }
     }
 
-    fn set_target_device(&mut self, target: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn set_target_device(&mut self, target: Option<String>, cx: &mut Context<Self>) {
+        let target = if self.local_only { None } else { target };
         self.close_device_menu(cx);
         if self.target_device == target {
             cx.notify();
@@ -256,6 +259,15 @@ impl AccountsPage {
         self.busy_account = None;
         self.error = None;
         self.load(force_usage_for(LoadTrigger::Mount), cx);
+    }
+
+    /// Onboarding exposes only this device; regular Settings retains switching.
+    pub(crate) fn set_local_only(&mut self, local_only: bool, cx: &mut Context<Self>) {
+        self.local_only = local_only;
+        if local_only {
+            self.set_target_device(None, cx);
+        }
+        cx.notify();
     }
 
     /// Params with the `targetDeviceId` passthrough merged in.
@@ -277,6 +289,12 @@ impl AccountsPage {
     /// trigger — platform glyph · name · presence dot · sort glyph — opening a
     /// dropdown of every registered device. Selecting one retargets the page.
     fn render_device_switcher(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        if self.local_only {
+            return div()
+                .text_color(theme.text_muted)
+                .child("This device")
+                .into_any_element();
+        }
         use crate::icons::{self, icon};
         let (mut devices, local_id) = {
             let s = self.state.read(cx);
@@ -1517,6 +1535,29 @@ impl Render for AccountsPage {
 mod tests {
     use super::*;
     use chrono::TimeDelta;
+
+    #[gpui::test]
+    fn onboarding_sign_ins_cannot_target_another_device(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            let state = cx.new(|_| AppState::new());
+            let page = cx.new(|cx| AccountsPage::new(state, cx));
+            page.update(cx, |page, cx| {
+                page.set_target_device(Some("remote".into()), cx);
+                page.set_local_only(true, cx);
+                assert_eq!(page.target_device, None);
+                page.set_target_device(Some("other-remote".into()), cx);
+                assert_eq!(page.params(serde_json::json!({})), serde_json::json!({}));
+                page.set_local_only(false, cx);
+                page.set_target_device(Some("remote".into()), cx);
+                assert_eq!(
+                    page.params(serde_json::json!({}))["targetDeviceId"],
+                    "remote"
+                );
+            });
+        });
+    }
 
     #[test]
     fn first_load_of_a_visit_forces_the_usage_probe() {
