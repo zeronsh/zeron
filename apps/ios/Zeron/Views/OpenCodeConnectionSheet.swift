@@ -39,7 +39,7 @@ struct OpenCodeConnectionSheet: View {
                     }
                     .disabled(busy)
                 }
-                Section("OpenCode server") {
+                Section {
                     Toggle("Connect to an existing server", isOn: $attached)
                     if attached {
                         Picker("Protocol", selection: $secure) {
@@ -66,6 +66,8 @@ struct OpenCodeConnectionSheet: View {
                                 if clear { password = "" }
                             }
                     }
+                } header: {
+                    Text("OpenCode server")
                 } footer: {
                     Text("Use a server on localhost (127.0.0.1 or ::1) of the selected execution device. Remote OpenCode servers are not supported yet. Leave server connection off to let Zeron start a local server.")
                 }
