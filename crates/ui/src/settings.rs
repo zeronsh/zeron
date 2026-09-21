@@ -308,6 +308,12 @@ pub fn current(cx: &App) -> UiSettings {
         .unwrap_or_default()
 }
 
+/// Read the picker preference without cloning the full settings for each model row.
+pub fn compact_model_picker(cx: &App) -> bool {
+    cx.try_global::<SettingsStore>()
+        .is_some_and(|store| store.current.compact_model_picker)
+}
+
 /// Copy a selected image into Zeron's device-local data directory and make it
 /// the new-thread canvas background. A unique file name avoids stale image
 /// caches when the background is replaced.
@@ -614,6 +620,8 @@ pub struct UiSettings {
     pub window_geometry: Option<WindowGeometry>,
     /// Submit using Enter or the platform modifier plus Enter.
     pub composer_send_behavior: ComposerSendBehavior,
+    /// Open model selection with an effort slider and a separate model list.
+    pub compact_model_picker: bool,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
@@ -794,6 +802,7 @@ impl Default for UiSettings {
             keymap: KeymapConfig::default(),
             escape_stops_active_agent: false,
             composer_send_behavior: ComposerSendBehavior::default(),
+            compact_model_picker: false,
             appshots_enabled: false,
             appshot_sound_enabled: true,
             appshot_destination: crate::appshots::AppshotDestination::Automatic,
@@ -1543,6 +1552,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compact_model_picker_is_opt_in_and_persists() {
+        let legacy: UiSettings = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.compact_model_picker);
+        let settings = UiSettings {
+            compact_model_picker: true,
+            ..legacy
+        };
+        let saved = serde_json::to_string(&settings).unwrap();
+        let loaded: UiSettings = serde_json::from_str(&saved).unwrap();
+        assert!(loaded.compact_model_picker);
+    }
+
+    #[test]
     fn composer_send_behavior_is_opt_in_for_old_and_partial_settings() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -2070,6 +2092,7 @@ mod tests {
             },
             escape_stops_active_agent: true,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
+            compact_model_picker: true,
             appshots_enabled: false,
             appshot_sound_enabled: true,
             // The destination is only persisted where Appshots exist (macOS and

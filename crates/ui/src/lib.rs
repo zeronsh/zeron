@@ -29,6 +29,7 @@ pub mod edge_fade;
 pub mod file_icons;
 pub mod files;
 pub mod frost;
+mod haptics;
 pub mod history;
 pub mod icons;
 pub(crate) mod image_media;

@@ -3718,6 +3718,7 @@ impl Shell {
         self.settings.code_font_family = current.code_font_family;
         self.settings.code_font_size = current.code_font_size;
         self.settings.transcript_width = current.transcript_width;
+        self.settings.compact_model_picker = current.compact_model_picker;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
