@@ -279,6 +279,18 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Whether a stored chat snapshot holds no messages at all — the placeholder
+/// `open` mints for a chat whose doc has not been written yet. Fork uses this
+/// to tell "already copied" (has rows) from "empty shell" (nothing to lose by
+/// copying over it); an unreadable snapshot reports `false`, so the caller
+/// falls back to copying rather than skipping the fork.
+fn chat_snapshot_is_empty(bytes: &[u8]) -> Result<bool, zeron_doc::DocError> {
+    let raw = loro::LoroDoc::new();
+    raw.import(bytes)
+        .map_err(|e| zeron_doc::DocError::Schema(e.to_string()))?;
+    Ok(zeron_doc::SessionDoc::from_doc(raw).message_count() == 0)
+}
+
 /// The queued-attachment transfers a command's `pending://` refs imply —
 /// shared by the retry escort and the retry re-issue.
 fn command_transfers(entry: &SessionCommandEntry) -> Vec<crate::uploads::AttachmentTransfer> {
@@ -2455,50 +2467,83 @@ impl DocHost {
     /// [`open`](Self::open) picks it up as an ordinary born-on-chat2 doc.
     ///
     /// The child inherits messages, commands and context usage as of
-    /// `boundary`; `meta.chatId` is rewritten so the doc names itself. Nothing
-    /// is copied when the source has no durable snapshot yet (a fork of a
-    /// never-run chat is an empty chat, which is what the user asked for), and
-    /// an existing child snapshot is never clobbered (idempotent retries).
+    /// `boundary`; `meta.chatId` is rewritten so the doc names itself.
+    ///
+    /// The child is usually ALREADY OPEN here: the composer selects the new
+    /// chat the moment the user confirms, which mints an empty doc before this
+    /// call arrives. A fork therefore merges into that live doc rather than
+    /// only seeding the store — writing the snapshot alone would leave the
+    /// open handle showing an empty transcript, and the debounce would then
+    /// persist that emptiness over the seeded bytes.
+    ///
+    /// Idempotent by transcript content, not by snapshot presence: a retry
+    /// against a child that already holds the source's rows is a no-op, but a
+    /// retry against the empty placeholder still copies.
     pub fn fork_chat(
         &self,
         source_chat_id: &str,
         new_chat_id: &str,
         boundary: &zeron_doc::ForkBoundary,
     ) -> Result<(), EngineError> {
-        if matches!(self.inner.store.load_snapshot(new_chat_id), Ok(Some(_))) {
-            return Ok(()); // idempotent: the child already exists
-        }
-        // Prefer the live doc (the source is usually open in this process and
-        // its snapshot may lag the debounce); fall back to the stored one.
-        let source = match lock(&self.inner.handles).get(source_chat_id).cloned() {
-            Some(handle) => {
-                let forked = handle
-                    .doc
-                    .fork_into(new_chat_id, boundary)
-                    .map_err(|e| EngineError::Other(format!("fork failed: {e}")))?;
-                forked
-                    .export_snapshot()
-                    .map_err(|e| EngineError::Other(format!("fork export failed: {e}")))?
+        let handle = lock(&self.inner.handles).get(new_chat_id).cloned();
+
+        if let Some(handle) = &handle {
+            if handle.doc.message_count() > 0 {
+                return Ok(()); // already forked (retry); the rows are the proof
             }
+        } else if let Ok(Some(bytes)) = self.inner.store.load_snapshot(new_chat_id)
+            && let Ok(is_empty) = chat_snapshot_is_empty(&bytes)
+            && !is_empty
+        {
+            return Ok(()); // already forked on disk; nothing open to repair
+        }
+
+        // Copy the source's transcript. Prefer the live doc (its snapshot may
+        // lag the debounce); fall back to the stored one. An absent source is
+        // not an error — a fork of a never-run chat is legitimately empty.
+        let forked = match lock(&self.inner.handles).get(source_chat_id).cloned() {
+            Some(source) => source
+                .doc
+                .fork_into(new_chat_id, boundary)
+                .map_err(|e| EngineError::Other(format!("fork failed: {e}")))?,
             None => match self.inner.store.load_snapshot(source_chat_id)? {
                 Some(bytes) => {
                     let raw = loro::LoroDoc::new();
                     raw.import(&bytes)
                         .map_err(|e| EngineError::Other(format!("fork import failed: {e}")))?;
-                    let doc = zeron_doc::SessionDoc::from_doc(raw);
-                    doc.fork_into(new_chat_id, boundary)
+                    zeron_doc::SessionDoc::from_doc(raw)
+                        .fork_into(new_chat_id, boundary)
                         .map_err(|e| EngineError::Other(format!("fork failed: {e}")))?
-                        .export_snapshot()
-                        .map_err(|e| EngineError::Other(format!("fork export failed: {e}")))?
                 }
-                // Source never persisted: the child starts empty, which the
-                // host will initialize on first open.
                 None => return Ok(()),
             },
         };
+        let bytes = forked
+            .export_snapshot()
+            .map_err(|e| EngineError::Other(format!("fork export failed: {e}")))?;
+
+        // Merge into the live handle when the child is open (the common path),
+        // so the transcript is visible immediately. Persist the merged result
+        // right away in BOTH cases: the child's empty placeholder is already on
+        // disk, and leaving the fix-up to the debounce would let a restart (or
+        // a concurrent re-open) resurrect the empty doc. The debounce keeps
+        // running afterwards for normal traffic.
+        let merged = match handle {
+            Some(handle) => {
+                handle
+                    .doc
+                    .import_snapshot(&bytes, new_chat_id)
+                    .map_err(|e| EngineError::Other(format!("fork merge failed: {e}")))?;
+                handle
+                    .doc
+                    .export_snapshot()
+                    .map_err(|e| EngineError::Other(format!("fork export failed: {e}")))?
+            }
+            None => bytes,
+        };
         self.inner.store.save_snapshot_with_cursor(
             new_chat_id,
-            &source,
+            &merged,
             0,
             crate::chat2_host::CHAT2_DOC_EPOCH,
         )?;

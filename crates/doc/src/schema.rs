@@ -761,6 +761,27 @@ impl SessionDoc {
             .map_err(|e| DocError::Schema(e.to_string()))
     }
 
+    /// Number of message rows in the transcript. Cheap: reads the list length
+    /// without materializing entries, so it can gate idempotency checks that
+    /// must not pay a full `read_entries` per retry.
+    pub fn message_count(&self) -> usize {
+        self.doc.get_list("messages").len()
+    }
+
+    /// Merge an exported snapshot into this doc, then re-stamp `meta.chatId`.
+    /// Used to seed a fork into a doc that already exists (the UI opened the
+    /// child before the fork landed): Loro merges the incoming messages, and
+    /// the re-stamp keeps the child's identity authoritative over anything the
+    /// imported source carried.
+    pub fn import_snapshot(&self, bytes: &[u8], self_chat_id: &str) -> Result<(), DocError> {
+        self.doc
+            .import(bytes)
+            .map_err(|e| DocError::Schema(e.to_string()))?;
+        self.doc.get_map("meta").insert("chatId", self_chat_id)?;
+        self.doc.commit();
+        Ok(())
+    }
+
     /// Fork this session doc into a copy registered under `new_chat_id`.
     ///
     /// Copies the transcript, commands ledger and context usage as they stand,
@@ -1471,6 +1492,47 @@ mod tests {
             .unwrap();
 
         assert_eq!(child.read_entries().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn importing_a_fork_into_an_already_open_empty_child_keeps_the_transcript() {
+        // The UI selects the child before the fork RPC lands, so the engine
+        // opens an empty doc first. Merging the fork into that live doc must
+        // still produce the source's transcript — not silently stay empty.
+        let source = SessionDoc::init("source").unwrap();
+        for id in ["m1", "m2", "m3"] {
+            source.push_message(&message(id)).unwrap();
+        }
+        let child = SessionDoc::init("child").unwrap();
+        assert_eq!(child.message_count(), 0);
+
+        let forked = source.fork_into("child", &ForkBoundary::Latest).unwrap();
+        child
+            .import_snapshot(&forked.export_snapshot().unwrap(), "child")
+            .unwrap();
+
+        let ids: Vec<String> = child
+            .read_entries()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, vec!["m1", "m2", "m3"]);
+        assert_eq!(child.chat_id().as_deref(), Some("child"));
+    }
+
+    #[test]
+    fn importing_the_same_fork_twice_is_a_no_op() {
+        let source = SessionDoc::init("source").unwrap();
+        source.push_message(&message("m1")).unwrap();
+        let forked = source.fork_into("child", &ForkBoundary::Latest).unwrap();
+        let bytes = forked.export_snapshot().unwrap();
+
+        let child = SessionDoc::init("child").unwrap();
+        child.import_snapshot(&bytes, "child").unwrap();
+        child.import_snapshot(&bytes, "child").unwrap();
+
+        assert_eq!(child.read_entries().unwrap().len(), 1, "no duplicate rows");
     }
 
     #[test]
