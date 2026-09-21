@@ -3932,17 +3932,19 @@ fn slash_token(text: &str, cursor: usize) -> Option<MentionToken> {
     })
 }
 
-/// Slash-command completion state: like [`FileMentionState`] but the
-/// candidate list is fetched once per harness (`ListCommands`) and filtered
-/// locally per keystroke — no RPC, debounce, or skeleton churn while typing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SlashTarget {
+    device_id: String,
+    harness: HarnessId,
+}
+
 #[derive(Debug, Clone, Default)]
 struct SlashState {
     token: Option<MentionToken>,
     /// Indices into the cached command list, filter-ranked for the query.
     filtered: Vec<usize>,
     active: Option<usize>,
-    /// Harness the popup is showing commands for (cache key).
-    harness: Option<HarnessId>,
+    target: Option<SlashTarget>,
     loading: bool,
     error: Option<SharedString>,
     dismissed: Option<(Range<usize>, String)>,
@@ -4027,15 +4029,13 @@ pub struct Composer {
     mention_task: Option<Task<()>>,
     mention: FileMentionState,
     slash: SlashState,
-    /// Advertised commands per harness (one `ListCommands` per harness per
-    /// composer lifetime; the engine caches discovery on its side too).
-    slash_cache: HashMap<HarnessId, Vec<SlashCommand>>,
-    /// in-flight `ListCommands` per harness, owned apart from the popup so
+    slash_cache: HashMap<SlashTarget, Vec<SlashCommand>>,
+    /// in-flight loads are owned apart from the popup so
     /// closing it mid-load never throws away an agent's slow cold start.
-    slash_loads: HashMap<HarnessId, Task<()>>,
-    /// harnesses whose last load failed: only an explicit `/` retries them,
+    slash_loads: HashMap<SlashTarget, Task<()>>,
+    /// targets whose last load failed: only an explicit `/` retries them,
     /// so background prefetch never respawns a broken agent on every repaint.
-    slash_failed: HashSet<HarnessId>,
+    slash_failed: HashSet<SlashTarget>,
     /// Slash-popup row scroll — the stack overflows into a wheel/keyboard-
     /// scrollable list once it outgrows the card.
     slash_scroll: gpui::ScrollHandle,
@@ -5364,45 +5364,45 @@ impl Composer {
     /// Track the `/` token on every edit: open/refresh the popup, fetch the
     /// harness's command list on first open, filter locally per keystroke.
     fn update_slash(&mut self, text: &str, cursor: usize, cx: &mut Context<Self>) {
+        let target = self.slash_target(cx);
+        let target_changed = self.slash.target != target;
         let token = slash_token(text, cursor);
-        let still_dismissed = token.as_ref().is_some_and(|token| {
-            self.slash.dismissed.as_ref().is_some_and(|(range, value)| {
-                token.range == *range && text.get(range.clone()) == Some(value.as_str())
-            })
-        });
+        let still_dismissed = !target_changed
+            && token.as_ref().is_some_and(|token| {
+                self.slash.dismissed.as_ref().is_some_and(|(range, value)| {
+                    token.range == *range && text.get(range.clone()) == Some(value.as_str())
+                })
+            });
         if still_dismissed {
             self.slash.token = None;
             self.sync_mention_controls(cx);
             return;
         }
         self.slash.dismissed = None;
-        let harness = self.pickers.read(cx).resolved(cx).harness;
-        let harness_changed = self.slash.harness != harness;
-        if token == self.slash.token && !harness_changed {
+        if token == self.slash.token && !target_changed {
             self.refilter_slash(cx);
             return;
         }
         self.slash.token = token.clone();
-        self.slash.harness = harness;
+        self.slash.target = target.clone();
         self.slash.error = None;
         if token.is_none() {
             self.slash.active = None;
             self.sync_mention_controls(cx);
             return;
         }
-        // No resolved harness (catalog still loading): empty popup, no fetch.
-        let Some(harness) = harness else {
+        let Some(target) = target else {
             self.slash.loading = false;
             self.refilter_slash(cx);
             return;
         };
-        if self.slash_cache.contains_key(&harness) {
+        if self.slash_cache.contains_key(&target) {
             self.slash.loading = false;
             self.refilter_slash(cx);
             return;
         }
-        self.slash_failed.remove(&harness);
-        self.slash.loading = self.load_slash_commands(harness, cx);
+        self.slash_failed.remove(&target);
+        self.slash.loading = self.load_slash_commands(target, cx);
         self.refilter_slash(cx);
     }
 
@@ -5410,67 +5410,87 @@ impl Composer {
     /// antigravity's cold start), so the list is fetched as soon as the
     /// composer knows its harness instead of when `/` is typed.
     fn prefetch_slash_commands(&mut self, cx: &mut Context<Self>) {
-        let Some(harness) = self.pickers.read(cx).effective_harness(cx) else {
+        let target = self.slash_target(cx);
+        if self.slash.target != target && self.wizard.is_none() {
+            let input = self.input.read(cx);
+            let text = input.text().to_string();
+            let cursor = input.cursor_offset();
+            self.update_slash(&text, cursor, cx);
+        }
+        let Some(target) = target else {
             return;
         };
-        if !self.slash_cache.contains_key(&harness) && !self.slash_failed.contains(&harness) {
-            self.load_slash_commands(harness, cx);
+        if !self.slash_cache.contains_key(&target) && !self.slash_failed.contains(&target) {
+            self.load_slash_commands(target, cx);
         }
     }
 
-    /// one `ListCommands` per harness at a time, targeted like file search (the
-    /// chat/space host device owns the agent binary). `false` when no engine
-    /// is connected to ask.
-    fn load_slash_commands(&mut self, harness: HarnessId, cx: &mut Context<Self>) -> bool {
-        if self.slash_loads.contains_key(&harness) {
+    fn slash_target(&self, cx: &App) -> Option<SlashTarget> {
+        let state = self.state.read(cx);
+        let device_id = state
+            .selected_chat_row()
+            .map(|chat| chat.device_id.clone())
+            .or_else(|| state.effective_device_id())?;
+        let harness = self.pickers.read(cx).effective_harness(cx)?;
+        Some(SlashTarget { device_id, harness })
+    }
+
+    fn load_slash_commands(&mut self, target: SlashTarget, cx: &mut Context<Self>) -> bool {
+        if self.slash_loads.contains_key(&target) {
             return true;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return false;
         };
-        let target = {
-            let state = self.state.read(cx);
-            state
-                .selected_chat_row()
-                .map(|chat| chat.device_id.clone())
-                .or_else(|| state.selected_space_row().map(|s| s.device_id.clone()))
-        };
+        let request_target = target.clone();
         let load = cx.spawn(async move |this, cx| {
-            let mut params = serde_json::json!({ "harness": harness });
-            if let (Some(target), Some(object)) = (&target, params.as_object_mut()) {
-                object.insert("targetDeviceId".into(), target.clone().into());
-            }
+            let params = serde_json::json!({
+                "harness": request_target.harness,
+                "targetDeviceId": request_target.device_id,
+            });
             let result = engine.client().call(methods::LIST_COMMANDS, params).await;
             this.update(cx, |composer, cx| {
-                composer.slash_loads.remove(&harness);
-                let error = match result {
-                    Ok(value) => match serde_json::from_value::<Vec<SlashCommand>>(value) {
-                        Ok(commands) => {
-                            composer.slash_cache.insert(harness, commands);
-                            None
-                        }
-                        Err(err) => {
-                            tracing::warn!(%err, "slash command decode failed");
-                            composer.slash_failed.insert(harness);
-                            None
-                        }
-                    },
-                    Err(err) => {
-                        tracing::debug!(%err, "slash command discovery failed");
-                        composer.slash_failed.insert(harness);
-                        Some(slash_error_message(&err))
-                    }
-                };
-                if composer.slash.token.is_some() && composer.slash.harness == Some(harness) {
-                    composer.slash.loading = false;
-                    composer.slash.error = error;
-                    composer.refilter_slash(cx);
-                }
+                composer.complete_slash_load(request_target, result, cx);
             })
             .ok();
         });
-        self.slash_loads.insert(harness, load);
+        self.slash_loads.insert(target, load);
         true
+    }
+
+    fn complete_slash_load(
+        &mut self,
+        target: SlashTarget,
+        result: Result<serde_json::Value, RpcError>,
+        cx: &mut Context<Self>,
+    ) {
+        self.slash_loads.remove(&target);
+        let error = match result {
+            Ok(value) => match serde_json::from_value::<Vec<SlashCommand>>(value) {
+                Ok(commands) => {
+                    self.slash_cache.insert(target.clone(), commands);
+                    None
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "slash command decode failed");
+                    self.slash_failed.insert(target.clone());
+                    None
+                }
+            },
+            Err(err) => {
+                tracing::debug!(%err, "slash command discovery failed");
+                self.slash_failed.insert(target.clone());
+                Some(slash_error_message(&err))
+            }
+        };
+        if self.slash.token.is_some()
+            && self.slash.target.as_ref() == Some(&target)
+            && self.slash_target(cx).as_ref() == Some(&target)
+        {
+            self.slash.loading = false;
+            self.slash.error = error;
+            self.refilter_slash(cx);
+        }
     }
 
     /// Re-rank the cached list for the current query (pure local filter).
@@ -5483,8 +5503,9 @@ impl Composer {
             .unwrap_or_default();
         let commands = self
             .slash
-            .harness
-            .and_then(|h| self.slash_cache.get(&h))
+            .target
+            .as_ref()
+            .and_then(|target| self.slash_cache.get(target))
             .map(Vec::as_slice)
             .unwrap_or_default();
         let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
@@ -5529,8 +5550,9 @@ impl Composer {
             .and_then(|active| self.slash.filtered.get(active))
             .and_then(|&ix| {
                 self.slash
-                    .harness
-                    .and_then(|h| self.slash_cache.get(&h))
+                    .target
+                    .as_ref()
+                    .and_then(|target| self.slash_cache.get(target))
                     .and_then(|c| c.get(ix))
             })
             .cloned()
@@ -5548,7 +5570,7 @@ impl Composer {
     fn reset_slash(&mut self, dismissed: Option<(Range<usize>, String)>, cx: &mut Context<Self>) {
         self.slash = SlashState {
             dismissed,
-            harness: self.slash.harness,
+            target: self.slash.target.clone(),
             ..SlashState::default()
         };
         self.sync_mention_controls(cx);
@@ -5564,8 +5586,9 @@ impl Composer {
         self.slash.token.as_ref()?;
         let commands = self
             .slash
-            .harness
-            .and_then(|h| self.slash_cache.get(&h))
+            .target
+            .as_ref()
+            .and_then(|target| self.slash_cache.get(target))
             .map(Vec::as_slice)
             .unwrap_or_default();
         // Full pill width at the mention card's height budget — both composer
@@ -9678,6 +9701,118 @@ mod tests {
         let t = vec![entry(Some(MessageStatus::Streaming), vec![resolved])];
         assert!(input_request_resolved(&t, "r1"));
         assert!(!input_request_resolved(&t, "other"));
+    }
+}
+
+#[cfg(test)]
+mod slash_target_tests {
+    use super::*;
+
+    fn state(cx: &mut gpui::TestAppContext) -> Entity<AppState> {
+        cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("local".into());
+            state.selected_chat = Some("a".into());
+            state.chats = ["a", "b"]
+                .into_iter()
+                .map(|id| {
+                    serde_json::from_value(serde_json::json!({
+                        "id": id, "deviceId": id, "archived": false,
+                        "createdAt": "2026-09-21T00:00:00Z",
+                        "config": {"harness": HarnessId::Antigravity, "sandbox": "workspace-write"}
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            state
+        })
+    }
+
+    fn catalog(name: &str) -> Result<serde_json::Value, RpcError> {
+        Ok(serde_json::json!([{"name": name, "description": name}]))
+    }
+
+    #[gpui::test]
+    fn cached_and_late_commands_stay_with_their_device(cx: &mut gpui::TestAppContext) {
+        let state = state(cx);
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        composer.update(cx, |composer, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("/", cx));
+            composer.update_slash("/", 1, cx);
+            let a = composer.slash_target(cx).unwrap();
+            composer.complete_slash_load(a.clone(), catalog("a-command"), cx);
+            assert_eq!(composer.slash.filtered, vec![0]);
+
+            state.update(cx, |state, _| state.selected_chat = Some("b".into()));
+            composer.prefetch_slash_commands(cx);
+            let b = composer.slash_target(cx).unwrap();
+            assert_ne!(a, b);
+            assert_eq!(composer.slash.target.as_ref(), Some(&b));
+            assert!(composer.slash.filtered.is_empty());
+            composer.slash.loading = true;
+            composer.slash_loads.insert(b.clone(), Task::ready(()));
+
+            composer.complete_slash_load(a.clone(), catalog("late-a-command"), cx);
+            assert!(composer.slash.loading);
+            assert!(composer.slash.filtered.is_empty());
+            assert!(composer.slash_loads.contains_key(&b));
+            composer.complete_slash_load(a.clone(), Err(RpcError::Closed), cx);
+            assert!(composer.slash.error.is_none());
+            assert!(composer.slash_failed.contains(&a));
+            assert!(!composer.slash_failed.contains(&b));
+
+            composer.complete_slash_load(b.clone(), catalog("b-command"), cx);
+            assert!(!composer.slash.loading);
+            assert_eq!(composer.slash.filtered, vec![0]);
+            composer.accept_slash(cx);
+            assert!(composer.input.read(cx).text().starts_with("/b-command"));
+            assert_eq!(composer.slash_cache[&a][0].name, "late-a-command");
+            assert_eq!(composer.slash_cache[&b][0].name, "b-command");
+        });
+    }
+
+    #[gpui::test]
+    fn prefetch_deduplicates_only_the_same_device(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (out, mut server_in) = tokio::sync::mpsc::channel::<String>(16);
+        let (_server_out, inbound) = tokio::sync::mpsc::channel::<String>(16);
+        let state = state(cx);
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::RpcClient::new(out, inbound),
+            ))
+        });
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        composer.update(cx, |composer, cx| {
+            composer.prefetch_slash_commands(cx);
+            let a = composer.slash_target(cx).unwrap();
+            composer.prefetch_slash_commands(cx);
+            assert_eq!(composer.slash_loads.len(), 1);
+            composer.slash_failed.insert(a.clone());
+
+            state.update(cx, |state, _| state.selected_chat = Some("b".into()));
+            composer.prefetch_slash_commands(cx);
+            let b = composer.slash_target(cx).unwrap();
+            assert_eq!(composer.slash_loads.len(), 2);
+            assert!(composer.slash_loads.contains_key(&a));
+            assert!(composer.slash_loads.contains_key(&b));
+        });
+        cx.run_until_parked();
+        let mut devices: Vec<String> = std::iter::from_fn(|| server_in.try_recv().ok())
+            .map(|frame| serde_json::from_str::<serde_json::Value>(&frame).unwrap())
+            .filter(|frame| frame["method"] == methods::LIST_COMMANDS)
+            .map(|frame| {
+                frame["params"]["targetDeviceId"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        devices.sort();
+        assert_eq!(devices, vec!["a", "b"]);
     }
 }
 
