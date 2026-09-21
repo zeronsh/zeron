@@ -568,6 +568,76 @@ fn models_map_provider_catalog_with_variant_ladders() {
     );
 }
 
+#[tokio::test]
+async fn v205_status_only_server_detects_v2_and_lists_models() {
+    // 2.0.5 serves no `GET /api/health` (404): detection must resolve V2
+    // from `GET /api/status` alone. Without this, discovery falls back to
+    // the V1 `/provider` route — the web SPA shell on 2.x — and the model
+    // picker skeletons forever (field report, opencode 2.0.5).
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut buf = [0; 4096];
+                let header_end = loop {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let header = String::from_utf8_lossy(&request[..header_end]);
+                let path = header
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .to_owned();
+                let body: &str = match path.as_str() {
+                    "/api/status" => r#"{"version":"2.0.5","pid":8040,"urls":[]}"#,
+                    "/api/model" => r#"{"data":[{"providerID":"opencode","id":"muse","name":"Muse","limit":{"context":1000},"variants":[],"enabled":true}]}"#,
+                    _ => {
+                        socket
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await
+                            .unwrap();
+                        return;
+                    }
+                };
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            });
+        }
+    });
+    let harness = OpencodeHarness::new().with_base_url(base);
+    let models = tokio::time::timeout(Duration::from_secs(10), harness.models())
+        .await
+        .expect("discovery must not hang")
+        .expect("discovery must succeed");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "opencode/muse");
+    server.abort();
+}
+
 #[test]
 fn missing_connected_list_falls_back_to_the_full_catalog() {
     let providers: ProviderCatalog = serde_json::from_value(json!({

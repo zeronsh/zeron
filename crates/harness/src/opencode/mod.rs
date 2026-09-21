@@ -9,12 +9,15 @@
 //! subagent traffic and thinking never reaches the ACP wire usefully. The
 //! desktop app doesn't use ACP; neither do we.
 //!
-//! Two server generations are spoken, detected at boot from the health
+//! Two server generations are spoken, detected at boot from the status
 //! endpoints ([`Protocol`]): the 1.18 "v1" wire (verified against 1.18.31)
-//! and the 2.x `/api/*` wire (verified against 2.0.3):
+//! and the 2.x `/api/*` wire (verified against 2.0.3 and 2.0.5):
 //! - spawn `opencode serve --port <free> --hostname 127.0.0.1` with
 //!   `OPENCODE_SERVER_PASSWORD=<uuid>` (HTTP Basic, username `opencode`);
-//!   readiness + protocol = `GET /api/health` vs `GET /global/health`.
+//!   readiness + protocol = `GET /api/status` (current 2.x,
+//!   `{version, pid, urls}`), falling back to `GET /api/health` (older 2.x)
+//!   vs `GET /global/health` (1.x). 2.0.5 has no `/api/health` route at
+//!   all, so probing only the health endpoints mis-detects it as V1.
 //! - one global SSE bus (`GET /api/event` on 2.x, `GET /global/event` on
 //!   1.x) carries every session's traffic, child (subagent) sessions
 //!   included, token-level. 2.x frames are rewritten into the 1.x payload
@@ -419,14 +422,19 @@ enum Protocol {
 }
 
 impl Protocol {
-    /// One readiness poll across both generations. 2.x answers
-    /// `GET /api/health` with `{healthy, version}` and serves its web UI on
-    /// `/global/health`; 1.x answers `GET /global/health` with
-    /// `{healthy, version}` AND also serves `/api/health` — with
-    /// `{"healthy":true}`, no version (both observed live). The version
-    /// field is the only unambiguous discriminator. `None` = still booting.
+    /// One readiness poll across both generations. Current 2.x answers
+    /// `GET /api/status` with `{version, pid, urls}` (observed live on
+    /// 2.0.5, which serves NO `/api/health` route — it 404s); older 2.x
+    /// answered `GET /api/health` with `{healthy, version}`. 1.x answers
+    /// `GET /global/health` with `{healthy, version}` AND also serves
+    /// `/api/health` — with `{"healthy":true}`, no version (both observed
+    /// live). The version field is the only unambiguous discriminator, and
+    /// `/api/status` is probed first so a 2.0.5+ server never falls through
+    /// to the V1 wire (whose `/provider` route serves the web SPA shell on
+    /// 2.x, failing model discovery outright). `None` = still booting.
     async fn detect(server: &Server) -> Option<Self> {
         for (path, protocol) in [
+            ("/api/status", Protocol::V2),
             ("/api/health", Protocol::V2),
             ("/global/health", Protocol::V1),
         ] {
