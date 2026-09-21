@@ -2450,6 +2450,61 @@ impl DocHost {
         }
     }
 
+    /// Materialize a fork of `source_chat_id`'s transcript under
+    /// `new_chat_id`, writing the child's snapshot to the store so the next
+    /// [`open`](Self::open) picks it up as an ordinary born-on-chat2 doc.
+    ///
+    /// The child inherits messages, commands and context usage as of
+    /// `boundary`; `meta.chatId` is rewritten so the doc names itself. Nothing
+    /// is copied when the source has no durable snapshot yet (a fork of a
+    /// never-run chat is an empty chat, which is what the user asked for), and
+    /// an existing child snapshot is never clobbered (idempotent retries).
+    pub fn fork_chat(
+        &self,
+        source_chat_id: &str,
+        new_chat_id: &str,
+        boundary: &zeron_doc::ForkBoundary,
+    ) -> Result<(), EngineError> {
+        if matches!(self.inner.store.load_snapshot(new_chat_id), Ok(Some(_))) {
+            return Ok(()); // idempotent: the child already exists
+        }
+        // Prefer the live doc (the source is usually open in this process and
+        // its snapshot may lag the debounce); fall back to the stored one.
+        let source = match lock(&self.inner.handles).get(source_chat_id).cloned() {
+            Some(handle) => {
+                let forked = handle
+                    .doc
+                    .fork_into(new_chat_id, boundary)
+                    .map_err(|e| EngineError::Other(format!("fork failed: {e}")))?;
+                forked
+                    .export_snapshot()
+                    .map_err(|e| EngineError::Other(format!("fork export failed: {e}")))?
+            }
+            None => match self.inner.store.load_snapshot(source_chat_id)? {
+                Some(bytes) => {
+                    let raw = loro::LoroDoc::new();
+                    raw.import(&bytes)
+                        .map_err(|e| EngineError::Other(format!("fork import failed: {e}")))?;
+                    let doc = zeron_doc::SessionDoc::from_doc(raw);
+                    doc.fork_into(new_chat_id, boundary)
+                        .map_err(|e| EngineError::Other(format!("fork failed: {e}")))?
+                        .export_snapshot()
+                        .map_err(|e| EngineError::Other(format!("fork export failed: {e}")))?
+                }
+                // Source never persisted: the child starts empty, which the
+                // host will initialize on first open.
+                None => return Ok(()),
+            },
+        };
+        self.inner.store.save_snapshot_with_cursor(
+            new_chat_id,
+            &source,
+            0,
+            crate::chat2_host::CHAT2_DOC_EPOCH,
+        )?;
+        Ok(())
+    }
+
     /// Composer path: append an immutable pending command entry (rule 1). Durable by
     /// construction — the change subscription kicks the drain, so a local host executes
     /// immediately and an offline doc simply holds the entry until it syncs.

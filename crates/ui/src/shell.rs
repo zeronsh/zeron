@@ -1553,6 +1553,8 @@ pub struct Shell {
     rename_dialog: Option<RenameChatDialog>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
+    /// Chat id awaiting fork confirmation (branch the conversation).
+    fork_confirm: Option<String>,
     /// Space-row context menu (dropdown rows): (space id, window position).
     space_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_space_dialog: Option<RenameSpaceDialog>,
@@ -1950,6 +1952,7 @@ impl Shell {
             chat_menu: popover::Popup::default(),
             rename_dialog: None,
             delete_confirm: None,
+            fork_confirm: None,
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
             sidebar_section_migration: None,
@@ -4440,6 +4443,27 @@ impl Shell {
             .update(cx, |composer, cx| composer.purge_chat(&chat_id, cx));
         self.mutate(
             serde_json::json!({ "op": "deleteChat", "chatId": chat_id }),
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Branch a chat: mint a new chat id, then ask the engine to fork the
+    /// transcript into it. The child opens immediately after the RPC lands —
+    /// select it optimistically so the user lands in the new session rather
+    /// than watching the source do nothing.
+    fn fork_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.fork_confirm = None;
+        let new_chat_id = uuid::Uuid::new_v4().to_string();
+        let child = new_chat_id.clone();
+        self.state
+            .update(cx, |s, cx| s.select_chat(Some(child), cx));
+        self.mutate(
+            serde_json::json!({
+                "op": "forkChat",
+                "sourceChatId": chat_id,
+                "newChatId": new_chat_id,
+            }),
             cx,
         );
         cx.notify();
@@ -7724,6 +7748,7 @@ impl Shell {
         // path close here; the others remain explicit blockers.
         if self.sync_flow.has_visible_overlay()
             || self.delete_confirm.is_some()
+            || self.fork_confirm.is_some()
             || self.delete_space_confirm.is_some()
             || self.chat_menu.get().is_some()
             || self.space_menu.get().is_some()
@@ -7856,6 +7881,7 @@ impl Shell {
             let pin_id = chat_id.clone();
             let archive_id = chat_id.clone();
             let delete_id = chat_id.clone();
+            let fork_id = chat_id.clone();
             let menu = popover::popover_card(&theme)
                 .w(px(216.0))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -7911,6 +7937,21 @@ impl Shell {
                                     .size(px(14.0))
                                     .text_color(theme.text_muted),
                             ),
+                    )
+                    .child(
+                        popover::menu_row(&theme, false, format!("chat-menu-fork-{chat_id}"))
+                            .id("chat-menu-fork")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_chat_menu(cx);
+                                this.fork_confirm = Some(fork_id.clone());
+                                cx.notify();
+                            }))
+                            .child(
+                                icon(icons::GIT_BRANCH)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from("Fork…")),
                     )
                     .child(popover::menu_separator())
                     .child(
@@ -8126,6 +8167,53 @@ impl Shell {
                 )
                 .into_any_element();
             overlays.push(popover::modal("delete-chat-dialog", viewport, card));
+        }
+
+        if let Some(chat_id) = self.fork_confirm.clone() {
+            let title = transcript::single_line(
+                &self
+                    .state
+                    .read(cx)
+                    .chats
+                    .iter()
+                    .find(|c| c.id == chat_id)
+                    .and_then(|c| c.title.clone())
+                    .unwrap_or_else(|| "New session".into()),
+            );
+            let card = popover::dialog_card(&theme)
+                .child(popover::dialog_title(&theme, "Fork session?"))
+                .child(div().mt(px(6.0)).child(popover::dialog_body(
+                    &theme,
+                    format!(
+                        "A new session will continue from \u{201C}{title}\u{201D}, keeping its transcript. \
+                         The original stays untouched \u{2014} both can run on from here."
+                    ),
+                )))
+                .child(
+                    div()
+                        .mt(px(16.0))
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .child(
+                            popover::btn_ghost(&theme, "Cancel", "fork-chat-cancel")
+                                .id("fork-chat-cancel")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.fork_confirm = None;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            popover::btn_primary(&theme, "Fork")
+                                .id("fork-chat-confirm")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.fork_chat(chat_id.clone(), cx)
+                                })),
+                        ),
+                )
+                .into_any_element();
+            overlays.push(popover::modal("fork-chat-dialog", viewport, card));
         }
 
         if let Some(sync) = self.render_sync_overlay(viewport, cx) {

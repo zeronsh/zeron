@@ -230,6 +230,13 @@ pub struct Chat {
     /// human started; a dangling id (parent deleted) is tolerated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
+    /// The chat this one was forked from, when a user branched the
+    /// conversation. Unlike `parent_chat_id` (an agent orchestration link),
+    /// this records a human-initiated fork: the child inherits the source's
+    /// transcript and diverges from there. Absent for non-forked chats; a
+    /// dangling id (source deleted) is tolerated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from_chat_id: Option<String>,
 }
 
 impl Chat {

@@ -906,6 +906,32 @@ impl WorkspaceHost {
         cwd: Option<String>,
         parent_chat_id: Option<String>,
     ) -> Result<(), EngineError> {
+        self.create_chat_full(
+            chat_id,
+            space_id,
+            device_id,
+            config,
+            cwd,
+            parent_chat_id,
+            None,
+        )
+    }
+
+    /// [`create_chat_with_parent`](Self::create_chat_with_parent) plus the
+    /// fork link (`forkedFromChatId`). A forked chat keeps the source's
+    /// transcript; this only records where it came from so the sidebar can
+    /// group and the UI can label it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_chat_full(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        device_id: Option<&str>,
+        config: Option<ChatConfig>,
+        cwd: Option<String>,
+        parent_chat_id: Option<String>,
+        forked_from_chat_id: Option<String>,
+    ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(()); // idempotent: optimistic client retries never duplicate
         }
@@ -953,6 +979,7 @@ impl WorkspaceHost {
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
+                forked_from_chat_id: forked_from_chat_id.filter(|p| !p.trim().is_empty()),
             })
         })?;
         Ok(())

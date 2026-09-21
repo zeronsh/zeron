@@ -468,6 +468,24 @@ enum MutateParams {
         #[serde(default)]
         parent_chat_id: Option<String>,
     },
+    /// Branch a chat's conversation: create `new_chat_id` inheriting the
+    /// transcript of `source_chat_id` up to `boundary`, run in the same
+    /// project/cwd by default. The child is an ordinary chat from then on —
+    /// the "forkedFromChatId" row link is display-only.
+    #[serde(rename_all = "camelCase")]
+    ForkChat {
+        /// The chat to branch from.
+        source_chat_id: String,
+        /// The id minted for the child (client-minted, like `createChat`).
+        new_chat_id: String,
+        /// How much history the child inherits. Omitted = the full, latest
+        /// transcript.
+        #[serde(default)]
+        boundary: zeron_doc::ForkBoundary,
+        /// Cwd override for the child; default = the source chat's cwd.
+        #[serde(default)]
+        cwd: Option<String>,
+    },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
     /// picker's FolderEntry — the owning device's SpacesSync re-verifies.
@@ -888,6 +906,48 @@ impl EngineRpc {
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
                     self.workspace
                         .set_chat_branch(&chat_id, branch)
+                        .map_err(failed)?;
+                }
+                Ok(())
+            }
+            MutateParams::ForkChat {
+                source_chat_id,
+                new_chat_id,
+                boundary,
+                cwd,
+            } => {
+                let source = self
+                    .workspace
+                    .chat(&source_chat_id)
+                    .map_err(failed)?
+                    .ok_or_else(|| RpcError::Failed(format!("no such chat: {source_chat_id}")))?;
+                // The child copies the source's project, config and cwd (an
+                // explicit override wins) so the branch opens in the same
+                // place; it starts unarchived, like any new chat.
+                self.workspace
+                    .create_chat_full(
+                        &new_chat_id,
+                        source.space_id.as_deref(),
+                        Some(source.device_id.as_str()),
+                        source.config.clone(),
+                        Some(cwd.unwrap_or_else(|| {
+                            source.cwd.clone().unwrap_or_else(|| "~".to_string())
+                        })),
+                        None,
+                        Some(source_chat_id.clone()),
+                    )
+                    .map_err(failed)?;
+                // Copy the transcript into the child's doc store. Runs on the
+                // host that owns the source; a remote fork is rejected by the
+                // device-routing layer before we get here.
+                self.doc_host
+                    .fork_chat(&source_chat_id, &new_chat_id, &boundary)
+                    .map_err(failed)?;
+                // Carry the source's branch label across so the sidebar's
+                // "project · branch" sub-line matches the work it continues.
+                if let Some(branch) = source.branch.as_deref().filter(|b| !b.is_empty()) {
+                    self.workspace
+                        .set_chat_branch(&new_chat_id, branch)
                         .map_err(failed)?;
                 }
                 Ok(())

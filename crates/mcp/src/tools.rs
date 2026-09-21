@@ -662,6 +662,7 @@ impl Tools {
                 harness_session_id: None,
                 harness_session_cwd: None,
                 parent_chat_id: parent_chat_id.clone(),
+                forked_from_chat_id: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 room_gen: None,
