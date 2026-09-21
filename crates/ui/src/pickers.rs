@@ -4796,7 +4796,7 @@ impl Render for Pickers {
                 .is_some_and(|(kind, _)| *kind == PickerKind::HarnessModel)
                 && let Some((_, content)) = overlay.take()
             {
-                model_chip.child(popover::anchored_menu_below_end(
+                model_chip.child(popover::anchored_menu_below(
                     "model-popover",
                     content,
                     closing,
