@@ -504,9 +504,10 @@ pub enum SendButtonMode {
     Stop,
 }
 
-/// What the composer holds that a send could carry. A staged image or diff
-/// comment counts: both synthesize their own prompt body, so either alone is
-/// a legal send — and during a live run has to read as Queue, not Stop.
+/// What the composer holds that a send could carry. A staged image, diff
+/// comment, or transcript annotation counts: each synthesizes its own prompt
+/// body, so any one alone is a legal send — and during a live run has to
+/// read as Queue, not Stop.
 pub fn composer_has_content(text: &str, attachments: usize, comments: usize) -> bool {
     !text.trim().is_empty() || attachments > 0 || comments > 0
 }
@@ -3854,6 +3855,9 @@ impl Render for ComposerInput {
 /// Events the shell listens for.
 #[derive(Debug, Clone)]
 pub enum ComposerEvent {
+    AnnotationsCleared {
+        chat_id: String,
+    },
     /// Arm the shared-element transition before the draft route is replaced
     /// by the newly-created session. Emitting this before `select_chat` keeps
     /// the first destination frame on the same timeline as the source frame.
@@ -3874,7 +3878,10 @@ pub enum ComposerEvent {
     /// A locally-authored queue row was accepted. It is not a transcript send
     /// yet: the transcript remembers the stable id and promotes it to an
     /// own-turn anchor only when the host materializes the matching bubble.
-    Queued { chat_id: String, message_id: String },
+    Queued {
+        chat_id: String,
+        message_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4619,6 +4626,7 @@ impl Composer {
         self.appshots.remove(chat_id);
         self.state.update(cx, |state, _| {
             state.purge_review_comments(chat_id);
+            state.purge_transcript_annotations(chat_id);
         });
     }
 
@@ -4628,6 +4636,17 @@ impl Composer {
             .read(cx)
             .review_comments(&self.current_key)
             .to_vec()
+    }
+
+    fn staged_annotations(&self, cx: &App) -> Vec<crate::annotations::TranscriptAnnotation> {
+        self.state
+            .read(cx)
+            .transcript_annotations(&self.current_key)
+            .to_vec()
+    }
+
+    fn extra_count(&self, cx: &App) -> usize {
+        self.staged_comments(cx).len() + self.staged_annotations(cx).len()
     }
 
     fn render_comments_chip(&self, theme: &Theme, cx: &App) -> Option<gpui::Div> {
@@ -4660,7 +4679,8 @@ impl Composer {
     /// revealed on hover, click opens the full-size preview.
     fn render_attachment_strip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let staged = self.staged();
-        if staged.is_empty() {
+        let annotations = self.staged_annotations(cx);
+        if staged.is_empty() && annotations.is_empty() {
             return None;
         }
         let mut strip = div()
@@ -4669,6 +4689,7 @@ impl Composer {
             .flex()
             .flex_row()
             .flex_wrap()
+            .items_center()
             .gap(px(STRIP_GAP))
             .px(px(STRIP_PAD_X))
             .pt(px(STRIP_PAD_TOP));
@@ -4747,6 +4768,23 @@ impl Composer {
                             ),
                     )),
             );
+        }
+        if !annotations.is_empty() {
+            strip = strip.child(crate::annotation_ui::composer_chip(
+                &annotations,
+                theme,
+                cx,
+                |this, cx| {
+                    let key = this.current_key.clone();
+                    this.state.update(cx, |state, cx| {
+                        state.purge_transcript_annotations(&key);
+                        cx.notify();
+                    });
+                    crate::annotations::sync_staged_washes(&[]);
+                    cx.emit(ComposerEvent::AnnotationsCleared { chat_id: key });
+                    cx.notify();
+                },
+            ));
         }
         Some(strip)
     }
@@ -5901,7 +5939,7 @@ impl Composer {
         let has_text = composer_has_content(
             self.input.read(cx).text(),
             self.staged().len() + self.staged_appshots().len(),
-            self.staged_comments(cx).len(),
+            self.extra_count(cx),
         );
         send_button_mode(self.run_live(cx), has_text)
     }
@@ -5923,7 +5961,7 @@ impl Composer {
         let no_content = !composer_has_content(
             &text,
             self.staged().len() + self.staged_appshots().len(),
-            self.staged_comments(cx).len(),
+            self.extra_count(cx),
         );
         match self.button_mode(cx) {
             // Enter never stops a run: Stop mode implies an empty composer,
@@ -5950,7 +5988,7 @@ impl Composer {
         let has_content = composer_has_content(
             self.input.read(cx).text(),
             self.staged().len() + self.staged_appshots().len(),
-            self.staged_comments(cx).len(),
+            self.extra_count(cx),
         );
         match modified_submit_target(has_content) {
             ModifiedSubmitTarget::SubmitContent => self.on_submit(cx),
@@ -6061,7 +6099,20 @@ impl Composer {
             }
             taken
         });
+        let annotations = self.state.update(cx, |state, cx| {
+            let taken = state.take_transcript_annotations(&key);
+            if !taken.is_empty() {
+                cx.notify();
+            }
+            taken
+        });
+        if !annotations.is_empty() {
+            cx.emit(ComposerEvent::AnnotationsCleared {
+                chat_id: key.clone(),
+            });
+        }
         let typed = text.clone();
+        let text = crate::annotations::with_annotations(&text, &annotations);
         let text = crate::comments::with_comments(&text, &comments);
         self.preview = None;
         let message_id = uuid::Uuid::new_v4().to_string();
@@ -6682,6 +6733,9 @@ impl Composer {
                         }
                         for comment in &comments {
                             s.add_review_comment(&restore_key, comment.clone());
+                        }
+                        for annotation in &annotations {
+                            s.add_transcript_annotation(&restore_key, annotation.clone());
                         }
                         cx.notify();
                     });
@@ -7450,7 +7504,7 @@ impl Render for Composer {
             && !composer_has_content(
                 self.input.read(cx).text(),
                 self.staged().len() + self.staged_appshots().len(),
-                self.staged_comments(cx).len(),
+                self.extra_count(cx),
             );
         let container = container.when_some(
             self.render_queue_panel(show_queue_latest_shortcut, window, cx),
@@ -7504,13 +7558,20 @@ impl Render for Composer {
         // Staged attachments add the wrap strip's height to the pill in BOTH
         // modes (attachment-ui.tsx AttachmentStrip sits above the input row).
         let staged_count = self.staged().len();
+        let annotation_count = self.staged_annotations(cx).len();
         // The input width excludes the inline controls in compact mode.
         // Wrap against the pill's content width in both modes, accounting
         // for the outer container padding and the pill's 1px borders.
         let strip_width_hint =
             self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH) - 2.0 * Theme::SPACE_LG - 2.0;
         let appshot_count = self.staged_appshots().len();
-        let strip_h = attachment_strip_height(staged_count, strip_width_hint);
+        let strip_h = if staged_count > 0 {
+            attachment_strip_height(staged_count, strip_width_hint)
+        } else if annotation_count > 0 {
+            STRIP_PAD_TOP + crate::badges::BADGE_HEIGHT
+        } else {
+            0.0
+        };
         let comment_strip_h = comment_strip_height(self.staged_comments(cx).len());
         let base_height = if self.dock_frame.is_some() {
             dock_height(dock_amount)
@@ -9466,6 +9527,8 @@ mod tests {
         assert!(!composer_has_content("   ", 0, 0));
         assert!(composer_has_content("hi", 0, 0));
         assert!(composer_has_content("", 1, 0));
+        assert!(composer_has_content("", 0, 1));
+        // Transcript annotations share this extras count: one quote is enough.
         assert!(composer_has_content("", 0, 1));
     }
 

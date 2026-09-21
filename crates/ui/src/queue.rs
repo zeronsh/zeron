@@ -405,7 +405,13 @@ impl Composer {
             Some(QueueDeliveryGate::ReviewRequired { .. }) if !being_edited => {
                 SharedString::from("Needs review")
             }
-            _ => one_line(&queue_visible_text(&item.text, &item.attachments)),
+            _ => {
+                let raw = queue_visible_text(&item.text, &item.attachments);
+                let visible = crate::annotations::extract_badge(&raw)
+                    .map(|(text, _)| text)
+                    .unwrap_or(raw);
+                one_line(&visible)
+            }
         };
 
         let edit_id = item.id.clone();

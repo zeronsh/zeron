@@ -80,12 +80,13 @@ impl Element for Frosted {
         cx: &mut App,
     ) {
         if Theme::of(cx).is_frost() {
+            // Quads clamp radii to half the short side; blur did not, so a
+            // 26px composer radius on a 36px chip left a halo between the
+            // capsule outline and the blur.
+            let radii = Corners::all(px(self.corner_radius))
+                .clamp_radii_for_quad_size(bounds.size);
             window.paint_layer(bounds, |window| {
-                window.paint_backdrop_blur(
-                    bounds,
-                    Corners::all(px(self.corner_radius)),
-                    px(self.blur_radius),
-                );
+                window.paint_backdrop_blur(bounds, radii, px(self.blur_radius));
                 self.child.paint(window, cx);
             });
         } else {

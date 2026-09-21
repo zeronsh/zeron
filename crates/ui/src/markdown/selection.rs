@@ -13,11 +13,12 @@
 //! This module is the pure state half (gpui-free, unit-tested); the
 //! registry, geometry and mouse listeners live in `render.rs`.
 
+use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::sync::{Mutex, OnceLock};
 
 /// One element's slice of the selection, in document order.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
     /// Element key (`{row_key}:{element ix}`).
     pub key: String,
@@ -288,6 +289,50 @@ pub fn selected_text() -> Option<String> {
     Some(join_spans(&sel.spans))
 }
 
+/// Settled (not dragging) selection spans, document order.
+pub fn current_spans() -> Vec<Span> {
+    let guard = state().lock().unwrap();
+    let Some(sel) = guard.as_ref() else {
+        return Vec::new();
+    };
+    if sel.dragging || sel.spans.iter().all(|span| span.range.is_empty()) {
+        return Vec::new();
+    }
+    sel.spans.clone()
+}
+
+pub fn is_settled() -> bool {
+    !current_spans().is_empty()
+}
+
+pub fn clear() {
+    *state().lock().unwrap() = None;
+}
+
+/// Install a settled selection (clicking an Annotation N marker).
+pub fn set_spans(spans: Vec<Span>) {
+    let spans = spans
+        .into_iter()
+        .filter(|span| {
+            span.range.start <= span.range.end
+                && span.range.end <= span.text.len()
+                && span.text.is_char_boundary(span.range.start)
+                && span.text.is_char_boundary(span.range.end)
+        })
+        .collect::<Vec<_>>();
+    if spans.iter().all(|span| span.range.is_empty()) {
+        *state().lock().unwrap() = None;
+        return;
+    }
+    *state().lock().unwrap() = Some(MdSelection {
+        anchor_key: spans[0].key.clone(),
+        anchor_ix: spans[0].range.start,
+        dragging: false,
+        forward: Some(true),
+        spans,
+    });
+}
+
 fn join_spans(spans: &[Span]) -> String {
     spans
         .iter()
@@ -436,6 +481,21 @@ mod tests {
         begin_with_span("p1", "hello world", 6..11);
         assert_eq!(wash_range("p1"), Some(6..11));
         assert_eq!(end_drag("p1").as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn set_spans_installs_a_settled_selection() {
+        let _state = state_lock();
+        clear();
+        set_spans(vec![Span {
+            key: "p1".into(),
+            range: 6..15,
+            text: "first paragraph".into(),
+        }]);
+        assert!(is_settled());
+        assert_eq!(selected_text().as_deref(), Some("paragraph"));
+        clear();
+        assert_eq!(selected_text(), None);
     }
 
     #[test]

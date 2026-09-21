@@ -166,8 +166,12 @@ pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
 /// for a user message ("Attached image" / "N attached images" when image-only).
 pub fn user_message_rail_text(content: &str) -> String {
     let parsed = parse_user_message_images(content);
-    if !parsed.text.trim().is_empty() {
-        return parsed.text;
+    let (text, badges) = crate::badges::split(&parsed.text);
+    if !text.trim().is_empty() {
+        return text;
+    }
+    if let Some(badge) = badges.first() {
+        return badge.label.to_string();
     }
     match parsed.attachments.len() {
         0 => content.to_string(),
@@ -1142,6 +1146,19 @@ mod tests {
         let with_text = with_attachments("fix this", &["/a/b.png".to_string()]);
         assert_eq!(user_message_rail_text(&with_text), "fix this");
         assert_eq!(user_message_rail_text("plain"), "plain");
+        let annotated = crate::annotations::with_annotations(
+            "",
+            &[crate::annotations::TranscriptAnnotation {
+                id: "a".into(),
+                message_id: "m".into(),
+                text: "quoted".into(),
+                comment: String::new(),
+                start_offset: 0,
+                end_offset: 6,
+                spans: Vec::new(),
+            }],
+        );
+        assert_eq!(user_message_rail_text(&annotated), "1 annotation");
     }
 
     #[test]

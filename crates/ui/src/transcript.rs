@@ -33,7 +33,8 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, BorderStyle, Bounds, ClipboardItem, ContentMask, Context, Entity, ListAlignment,
+    AnyElement, App, BorderStyle, Bounds, ClipboardItem, ContentMask, Context, Entity, Focusable,
+    ListAlignment,
     ListOffset, ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit,
     PathBuilder, Pixels, Point, SharedString, StyledImage as _, StyledText, Subscription, Task,
     TextAlign, TextRun, Window, canvas, div, img, list, point, prelude::*, px, quad, size,
@@ -42,6 +43,7 @@ use gpui::{
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 use zeron_proto::ToolCall;
 
+use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::markdown::parser::{
     Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
 };
@@ -2910,8 +2912,16 @@ pub struct Transcript {
     /// recently (click "Show full output" after a diff → see the output).
     blob_fetch_order: HashMap<SharedString, u64>,
     blob_fetch_counter: u64,
+    annotation_draft: Option<AnnotationDraft>,
     _observe: Subscription,
     _text_changes: Subscription,
+}
+
+struct AnnotationDraft {
+    id: String,
+    chat_key: String,
+    input: Entity<ComposerInput>,
+    _events: Subscription,
 }
 
 /// One sidecar blob fetch's lifecycle.
@@ -3102,6 +3112,7 @@ impl Transcript {
             blob_details: HashMap::new(),
             blob_fetch_order: HashMap::new(),
             blob_fetch_counter: 0,
+            annotation_draft: None,
             _observe: observe,
             _text_changes: text_changes,
         };
@@ -3418,6 +3429,11 @@ impl Transcript {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.annotation_draft.is_some() {
+            self.flush_annotation_draft(cx);
+            self.annotation_draft = None;
+            cx.notify();
+        }
         // Text listeners claim the drag before it bubbles here. Stop following
         // immediately: a stream commit can otherwise virtualize the anchor
         // before the first mouse move. Keep the user bubble's long-press timer.
@@ -3452,6 +3468,267 @@ impl Transcript {
                 jump_visibility(self.show_jump_button, self.last_scroll_distance);
             cx.notify();
         }
+    }
+
+    fn composer_key(&self, cx: &App) -> String {
+        self.state.read(cx).composer_key()
+    }
+
+    fn flush_annotation_draft(&mut self, cx: &mut Context<Self>) {
+        let Some(draft) = &self.annotation_draft else {
+            return;
+        };
+        let id = draft.id.clone();
+        let comment = draft.input.read(cx).text().to_string();
+        let key = draft.chat_key.clone();
+        self.state.update(cx, |state, _| {
+            state.update_transcript_annotation_comment(&key, &id, comment);
+        });
+    }
+
+    fn add_annotation_from_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let spans = crate::markdown::selection::current_spans();
+        let Some(first_message_id) = spans
+            .first()
+            .and_then(|span| crate::annotations::agent_message_id(&span.key))
+        else {
+            return;
+        };
+        if spans
+            .iter()
+            .any(|span| crate::annotations::agent_message_id(&span.key) != Some(first_message_id))
+        {
+            crate::markdown::selection::clear();
+            return;
+        }
+        let Some(text) = crate::markdown::selection::selected_text() else {
+            return;
+        };
+        let message_id = first_message_id.to_string();
+        self.flush_annotation_draft(cx);
+        let annotation =
+            crate::annotations::TranscriptAnnotation::from_selection(message_id, spans, text);
+        let id = annotation.id.clone();
+        let key = self.composer_key(cx);
+        self.state.update(cx, |state, cx| {
+            state.add_transcript_annotation(&key, annotation);
+            cx.notify();
+        });
+        crate::markdown::selection::clear();
+        self.open_annotation_draft(id, window, cx);
+    }
+
+    fn open_annotation_draft(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.flush_annotation_draft(cx);
+        let key = self.composer_key(cx);
+        let existing = self
+            .state
+            .read(cx)
+            .transcript_annotations(&key)
+            .iter()
+            .find(|annotation| annotation.id == id)
+            .map(|annotation| annotation.comment.clone())
+            .unwrap_or_default();
+        let input = cx.new(|cx| {
+            ComposerInput::new("Add an optional comment...", cx)
+                .with_single_line()
+                .with_text_metrics(13.0, 24.0)
+                .with_accessibility_role(gpui::Role::TextInput)
+        });
+        if !existing.is_empty() {
+            input.update(cx, |input, cx| input.set_text(existing, cx));
+        }
+        let draft_key = key.clone();
+        let draft_id = id.clone();
+        let draft_input = input.clone();
+        let events = cx.subscribe(&input, move |this: &mut Self, _, event, cx| match event {
+            ComposerInputEvent::Submitted => this.commit_annotation_draft(cx),
+            ComposerInputEvent::Edited => {
+                let comment = draft_input.read(cx).text().to_string();
+                this.state.update(cx, |state, _| {
+                    state.update_transcript_annotation_comment(&draft_key, &draft_id, comment);
+                });
+                cx.notify();
+            }
+            _ => {}
+        });
+        let focus = input.read(cx).focus_handle(cx);
+        self.annotation_draft = Some(AnnotationDraft {
+            id,
+            chat_key: key,
+            input,
+            _events: events,
+        });
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    fn commit_annotation_draft(&mut self, cx: &mut Context<Self>) {
+        self.flush_annotation_draft(cx);
+        self.annotation_draft = None;
+        cx.notify();
+    }
+
+    pub(crate) fn dismiss_annotation_draft(&mut self, cx: &mut Context<Self>) {
+        self.annotation_draft = None;
+        crate::markdown::selection::clear();
+        cx.notify();
+    }
+
+    fn delete_annotation_draft(&mut self, cx: &mut Context<Self>) {
+        let Some(draft) = self.annotation_draft.take() else {
+            return;
+        };
+        let key = draft.chat_key;
+        self.state.update(cx, |state, cx| {
+            state.remove_transcript_annotation(&key, &draft.id);
+            crate::annotations::sync_staged_washes(state.transcript_annotations(&key));
+            cx.notify();
+        });
+        crate::markdown::selection::clear();
+        cx.notify();
+    }
+
+    fn focus_annotation(&mut self, agent_entry_id: &str, index: usize, cx: &mut Context<Self>) {
+        if index == 0 {
+            return;
+        }
+        let mut preceding_user: Option<SharedString> = None;
+        for row in &self.rows {
+            if row.entry_id.as_ref() == agent_entry_id {
+                break;
+            }
+            if matches!(row.kind, RowKind::User { .. }) {
+                preceding_user = Some(row.entry_id.clone());
+            }
+        }
+        let Some(user_id) = preceding_user else {
+            return;
+        };
+        let annotation = self
+            .state
+            .read(cx)
+            .transcript
+            .iter()
+            .find(|entry| entry.id == user_id.as_ref())
+            .and_then(|entry| {
+                let text = entry
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        MessagePart::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                crate::annotations::annotations_from_text(&text)
+            })
+            .and_then(|annotations| annotations.into_iter().nth(index - 1));
+        let Some(annotation) = annotation else {
+            return;
+        };
+        crate::markdown::selection::set_spans(annotation.spans);
+        if let Some(ix) = self
+            .rows
+            .iter()
+            .position(|row| row.entry_id.as_ref() == annotation.message_id)
+        {
+            self.list.scroll_to(ListOffset {
+                item_ix: ix,
+                offset_in_item: px(0.0),
+            });
+        }
+        cx.notify();
+    }
+
+    fn annotation_link_ui(
+        &self,
+        entry_id: SharedString,
+        cx: &Context<Self>,
+    ) -> Option<render::LinkUi> {
+        let workspace = self.link_ui();
+        let source_session = workspace
+            .as_ref()
+            .and_then(|link| link.source_session.clone())
+            .or_else(|| self.chat_id.clone());
+        let weak = cx.weak_entity();
+        Some(render::LinkUi {
+            source_session,
+            handler: Rc::new(move |activation, window, cx| {
+                if let Some(index) =
+                    crate::annotations::parse_marker_url(&activation.target.original)
+                {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.focus_annotation(&entry_id, index, cx);
+                    });
+                    return render::LinkOutcome::Internal;
+                }
+                workspace
+                    .as_ref()
+                    .map(|link| (link.handler)(activation, window, cx))
+                    .unwrap_or(render::LinkOutcome::Rejected)
+            }),
+        })
+    }
+
+    fn render_annotation_overlays(
+        &self,
+        theme: &Theme,
+        _window: &Window,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        if self.doc_override.is_some() {
+            return Vec::new();
+        }
+        let mut overlays = Vec::new();
+        let key = self.composer_key(cx);
+        let annotations = self.state.read(cx).transcript_annotations(&key);
+        for (ix, annotation) in annotations.iter().enumerate() {
+            if let Some(bounds) = render::spans_end_bounds(&annotation.spans) {
+                let id = annotation.id.clone();
+                overlays.push(crate::annotation_ui::number_bubble(
+                    crate::annotation_ui::bounds_end(bounds),
+                    ix + 1,
+                    SharedString::from(format!("ann-bubble-{id}")),
+                    theme,
+                    cx,
+                    move |this, window, cx| {
+                        this.open_annotation_draft(id.clone(), window, cx);
+                    },
+                ));
+            }
+        }
+        if let Some(draft) = &self.annotation_draft {
+            let origin = annotations
+                .iter()
+                .find(|annotation| annotation.id == draft.id)
+                .and_then(|annotation| render::spans_end_bounds(&annotation.spans))
+                .map(crate::annotation_ui::bounds_origin)
+                .or_else(|| render::selection_union_bounds().map(|b| b.origin))
+                .unwrap_or_else(|| gpui::point(px(24.0), px(24.0)));
+            overlays.push(crate::annotation_ui::mini_composer(
+                origin,
+                draft.input.clone(),
+                theme,
+                cx,
+                |this, cx| this.commit_annotation_draft(cx),
+                |this, cx| this.delete_annotation_draft(cx),
+            ));
+        } else if crate::markdown::selection::is_settled()
+            && crate::markdown::selection::current_spans()
+                .first()
+                .is_some_and(|span| crate::annotations::agent_message_id(&span.key).is_some())
+        {
+            if let Some(bounds) = render::selection_union_bounds() {
+                overlays.push(crate::annotation_ui::toolbar(
+                    bounds.origin,
+                    theme,
+                    cx,
+                    |this, window, cx| this.add_annotation_from_selection(window, cx),
+                ));
+            }
+        }
+        overlays
     }
 
     fn stop_selection_scroll(&mut self) {
@@ -4144,6 +4421,9 @@ impl Transcript {
             self.veil_attach_pending = true;
         }
         if attached {
+            self.flush_annotation_draft(cx);
+            self.annotation_draft = None;
+            crate::markdown::selection::clear();
             // Read the incoming snapshot before inserting the outgoing one:
             // a full bounded cache may evict its oldest entry, which can be
             // exactly the chat the user is reopening.
@@ -5913,7 +6193,7 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
-                    link: self.link_ui(),
+                    link: self.annotation_link_ui(row.entry_id.clone(), cx),
                     workspace_root: workspace_root.clone(),
                     code,
                 };
@@ -5963,7 +6243,7 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
-                    link: self.link_ui(),
+                    link: self.annotation_link_ui(row.entry_id.clone(), cx),
                     workspace_root: workspace_root.clone(),
                     code,
                 };
@@ -8147,6 +8427,15 @@ impl Render for Transcript {
             .child(crate::markdown::render::selection_frame_reset())
             .child(content)
             .child(rail);
+        let theme = Theme::of(cx);
+        if self.doc_override.is_none() {
+            crate::annotations::sync_staged_washes(
+                self.state
+                    .read(cx)
+                    .transcript_annotations(&self.composer_key(cx)),
+            );
+        }
+        let root = root.children(self.render_annotation_overlays(&theme, window, cx));
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {

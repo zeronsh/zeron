@@ -37,7 +37,10 @@ pub struct BadgeDetail {
 /// it. `None` when the message carries nothing of that kind.
 pub type Extractor = fn(&str) -> Option<(String, MessageBadge)>;
 
-const EXTRACTORS: &[Extractor] = &[crate::comments::extract_badge];
+const EXTRACTORS: &[Extractor] = &[
+    crate::annotations::extract_badge,
+    crate::comments::extract_badge,
+];
 
 /// Each extractor sees what the previous ones left behind, so two features can
 /// ride the same prompt.
@@ -248,5 +251,24 @@ mod tests {
         let (text, badges) = split(&with_comments("", &staged));
         assert_eq!(text, crate::comments::COMMENT_ONLY_TEXT);
         assert_eq!(badges[0].label.as_ref(), "1 comment");
+    }
+
+    #[test]
+    fn an_annotation_block_becomes_its_own_pill() {
+        let staged = vec![crate::annotations::TranscriptAnnotation {
+            id: "a".into(),
+            message_id: "m".into(),
+            text: "quoted".into(),
+            comment: String::new(),
+            start_offset: 0,
+            end_offset: 6,
+            spans: Vec::new(),
+        }];
+        let (text, badges) = split(&crate::annotations::with_annotations(
+            "please look",
+            &staged,
+        ));
+        assert_eq!(text, "please look");
+        assert_eq!(badges[0].label.as_ref(), "1 annotation");
     }
 }

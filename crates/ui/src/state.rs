@@ -27,6 +27,7 @@ use gpui::{App, Context, Entity, Task};
 use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
+use crate::annotations::TranscriptAnnotation;
 use crate::comments::ReviewComment;
 use zeron_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 use zeron_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
@@ -736,6 +737,8 @@ pub struct AppState {
     transfers: HashMap<String, (u64, u64)>,
     /// Written by the changes pane, read by the composer.
     review_comments: HashMap<String, Vec<ReviewComment>>,
+    /// Quotes staged from agent text, keyed by composer chat id.
+    transcript_annotations: HashMap<String, Vec<TranscriptAnnotation>>,
     /// File surfaces whose editor-backed comments currently cite a buffer
     /// revision that has not reached disk yet. A chat remains blocked until
     /// every surface waiting on a workspace write has finished or cancelled.
@@ -819,6 +822,7 @@ impl AppState {
             upload_progress: None,
             transfers: HashMap::new(),
             review_comments: HashMap::new(),
+            transcript_annotations: HashMap::new(),
             review_comment_flushes: HashMap::new(),
             local_device_id: None,
             update: None,
@@ -912,6 +916,47 @@ impl AppState {
     pub fn purge_review_comments(&mut self, key: &str) {
         self.review_comment_flushes.remove(key);
         self.review_comments.remove(key);
+    }
+
+    pub fn transcript_annotations(&self, key: &str) -> &[TranscriptAnnotation] {
+        self.transcript_annotations
+            .get(key)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn add_transcript_annotation(&mut self, key: &str, annotation: TranscriptAnnotation) {
+        self.transcript_annotations
+            .entry(key.to_string())
+            .or_default()
+            .push(annotation);
+    }
+
+    pub fn update_transcript_annotation_comment(&mut self, key: &str, id: &str, comment: String) {
+        if let Some(annotation) = self
+            .transcript_annotations
+            .get_mut(key)
+            .and_then(|list| list.iter_mut().find(|annotation| annotation.id == id))
+        {
+            annotation.comment = comment;
+        }
+    }
+
+    pub fn remove_transcript_annotation(&mut self, key: &str, id: &str) {
+        if let Some(list) = self.transcript_annotations.get_mut(key) {
+            list.retain(|annotation| annotation.id != id);
+            if list.is_empty() {
+                self.transcript_annotations.remove(key);
+            }
+        }
+    }
+
+    pub fn take_transcript_annotations(&mut self, key: &str) -> Vec<TranscriptAnnotation> {
+        self.transcript_annotations.remove(key).unwrap_or_default()
+    }
+
+    pub fn purge_transcript_annotations(&mut self, key: &str) {
+        self.transcript_annotations.remove(key);
     }
 
     pub fn begin_review_comment_flush(&mut self, key: &str, source: u64) {

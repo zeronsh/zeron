@@ -951,8 +951,6 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         if run.text.is_empty() {
             continue;
         }
-        let start = text.len();
-        text.push_str(&run.text);
         let mut f = if run.style.code {
             font(theme.font_mono.clone())
         } else {
@@ -970,54 +968,63 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         };
         // Links stay monochrome — foreground with an underline (zeron's md
         // theme underlines in the text color; indigo is reserved for primary
-        // actions).
+        // actions). Annotation markers are inline accent labels, not links.
         let is_link = run.style.link.is_some();
-        // Inline code uses the spectrum's code tone; everything else
-        // stays the monochrome foreground.
         let color = if run.style.code {
             inline_code_text(theme)
         } else {
             theme.text
         };
-        if run.style.code {
-            // Merge adjacent code runs into one wash box (like links below).
-            match code_ranges.last_mut() {
-                Some(range) if range.end == start => range.end = text.len(),
-                _ => code_ranges.push(start..text.len()),
-            }
-        }
-        if let Some(url) = &run.style.link {
-            // A still-streaming link (mend.rs sentinel) keeps link styling —
-            // so the URL's completion changes nothing visually — but is not
-            // clickable until the real destination exists.
-            if url != super::mend::PENDING_LINK_URL {
-                // Merge adjacent runs of the same link into one clickable range.
-                match links.last_mut() {
-                    Some((range, last_url)) if range.end == start && last_url == url => {
-                        range.end = text.len();
-                    }
-                    _ => links.push((start..text.len(), url.clone())),
+        for piece in crate::annotations::split_markers(&run.text) {
+            let (piece_text, marker) = match piece {
+                crate::annotations::MarkerPiece::Text(piece) if piece.is_empty() => continue,
+                crate::annotations::MarkerPiece::Text(piece) => (piece.to_string(), None),
+                crate::annotations::MarkerPiece::Marker { index } => {
+                    (crate::annotations::marker_label(index), Some(index))
+                }
+            };
+            let start = text.len();
+            text.push_str(&piece_text);
+            if run.style.code && marker.is_none() {
+                match code_ranges.last_mut() {
+                    Some(range) if range.end == start => range.end = text.len(),
+                    _ => code_ranges.push(start..text.len()),
                 }
             }
+            if let Some(index) = marker {
+                links.push((start..text.len(), crate::annotations::marker_url(index)));
+            } else if let Some(url) = &run.style.link {
+                if url != super::mend::PENDING_LINK_URL {
+                    match links.last_mut() {
+                        Some((range, last_url)) if range.end == start && last_url == url => {
+                            range.end = text.len();
+                        }
+                        _ => links.push((start..text.len(), url.clone())),
+                    }
+                }
+            }
+            out.push(TextRun {
+                len: piece_text.len(),
+                font: f.clone(),
+                color: if marker.is_some() {
+                    theme.accent
+                } else {
+                    color
+                },
+                background_color: None,
+                underline: is_link
+                    .then_some(UnderlineStyle {
+                        color: Some(theme.text_muted),
+                        thickness: px(1.0),
+                        wavy: false,
+                    })
+                    .filter(|_| marker.is_none()),
+                strikethrough: run.style.strikethrough.then_some(gpui::StrikethroughStyle {
+                    thickness: px(1.0),
+                    color: Some(theme.text_muted),
+                }),
+            });
         }
-        out.push(TextRun {
-            len: run.text.len(),
-            font: f,
-            color,
-            // Inline code's wash is painted as ROUNDED quads by the canvas
-            // underlay (`code_wash_underlay`) — a run background here could
-            // only be a square box.
-            background_color: None,
-            underline: is_link.then_some(UnderlineStyle {
-                color: Some(theme.text_muted),
-                thickness: px(1.0),
-                wavy: false,
-            }),
-            strikethrough: run.style.strikethrough.then_some(gpui::StrikethroughStyle {
-                thickness: px(1.0),
-                color: Some(theme.text_muted),
-            }),
-        });
     }
     FlatText {
         original: None,
@@ -1160,6 +1167,18 @@ pub(super) fn flat_text_presented_element(
                     ));
                 }
             }
+            for range in crate::annotations::staged_wash_ranges(&sel_key) {
+                for rect in range_rects(&layout, &range, 0.0, 0.0) {
+                    window.paint_quad(quad(
+                        rect,
+                        px(0.0),
+                        sel_wash,
+                        px(0.0),
+                        gpui::transparent_black(),
+                        BorderStyle::default(),
+                    ));
+                }
+            }
             // Register this element into the frame's document-ordered
             // registry (paint order IS document order), then the frame's
             // mouse listeners.
@@ -1258,6 +1277,18 @@ fn paint_text_selection_with_wash(
             ));
         }
     }
+    for range in crate::annotations::staged_wash_ranges(key) {
+        for rect in range_rects(layout, &range, 0.0, 0.0) {
+            window.paint_quad(quad(
+                rect,
+                px(0.0),
+                wash,
+                px(0.0),
+                gpui::transparent_black(),
+                BorderStyle::default(),
+            ));
+        }
+    }
     REGISTRY.with(|r| {
         r.borrow_mut().push(RegEntry {
             key: key.clone(),
@@ -1308,6 +1339,35 @@ struct RegEntry {
 
 thread_local! {
     static REGISTRY: RefCell<Vec<RegEntry>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn selection_union_bounds() -> Option<Bounds<gpui::Pixels>> {
+    REGISTRY.with(|r| {
+        let reg = r.borrow();
+        let mut union: Option<Bounds<gpui::Pixels>> = None;
+        for entry in reg.iter() {
+            if let Some(range) = super::selection::wash_range(&entry.key) {
+                for rect in range_rects(&entry.layout, &range, 0.0, 0.0) {
+                    union = Some(match union {
+                        Some(existing) => existing.union(&rect),
+                        None => rect,
+                    });
+                }
+            }
+        }
+        union
+    })
+}
+
+pub(crate) fn spans_end_bounds(spans: &[super::selection::Span]) -> Option<Bounds<gpui::Pixels>> {
+    let last = spans.last()?;
+    REGISTRY.with(|r| {
+        let reg = r.borrow();
+        let entry = reg.iter().find(|entry| entry.key.as_ref() == last.key)?;
+        range_rects(&entry.layout, &last.range, 0.0, 0.0)
+            .into_iter()
+            .last()
+    })
 }
 
 #[cfg(test)]
@@ -2840,6 +2900,24 @@ mod tests {
         assert_eq!(flat.runs[1].color, inline_code_text(&theme));
         assert_eq!(flat.runs[1].background_color, None);
         assert_eq!(flat.runs[0].color, theme.text);
+    }
+
+    #[test]
+    fn flatten_rewrites_annotation_markers_as_accent_labels() {
+        let theme = Theme::dark();
+        let flat = flatten_runs(
+            &[InlineRun {
+                text: "225 days. :zeron-annotation{index=\"1\"}".into(),
+                style: InlineStyle::default(),
+            }],
+            &theme,
+            false,
+        );
+        assert_eq!(flat.text.as_ref(), "225 days. Annotation 1");
+        assert_eq!(flat.links.len(), 1);
+        assert_eq!(flat.links[0].1, crate::annotations::marker_url(1));
+        assert_eq!(flat.runs.last().unwrap().color, theme.accent);
+        assert!(flat.runs.last().unwrap().underline.is_none());
     }
 
     #[test]
