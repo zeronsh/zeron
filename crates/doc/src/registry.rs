@@ -915,6 +915,10 @@ impl RegistryDoc {
                 chat.room_gen.map(|g| json!(g)).unwrap_or(Value::Null),
             ),
             ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
+            (
+                "forkedFromChatId",
+                opt_str(chat.forked_from_chat_id.as_deref()),
+            ),
         ]);
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1334,6 +1338,10 @@ impl RegistryDoc {
                     ("spaceId", opt_str(chat.space_id.as_deref())),
                     ("lastSeenAt", opt_ms(chat.last_seen_at)),
                     ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
+                    (
+                        "forkedFromChatId",
+                        opt_str(chat.forked_from_chat_id.as_deref()),
+                    ),
                 ]),
             );
         }

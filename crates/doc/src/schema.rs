@@ -39,6 +39,22 @@ pub enum MessageRole {
     System,
 }
 
+/// How much of a session's history a [`crate::SessionDoc::fork_into`] child inherits.
+///
+/// Mirrors the fork-boundary vocabulary of established agent CLIs: a fork can
+/// branch off the source's latest state, or off an earlier point so the child
+/// re-runs the conversation from there.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ForkBoundary {
+    /// Inherit the source's full, latest durable state.
+    #[default]
+    Latest,
+    /// Inherit history strictly preceding the message with this id — the child
+    /// branches *before* that turn, so the next run replaces it.
+    BeforeMessage(String),
+}
+
 /// One entry in the doc's `messages` list (`SessionMessageEntry` in TS).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -744,6 +760,62 @@ impl SessionDoc {
             .export(ExportMode::Snapshot)
             .map_err(|e| DocError::Schema(e.to_string()))
     }
+
+    /// Fork this session doc into a copy registered under `new_chat_id`.
+    ///
+    /// Copies the transcript, commands ledger and context usage as they stand,
+    /// then rewrites `meta.chatId` so the child doc names itself rather than
+    /// its source. Used by `Mutate forkChat` to branch a conversation: the
+    /// child starts from the source's history and diverges from there, exactly
+    /// like a git branch off a commit.
+    ///
+    /// `boundary` trims the inherited history: `Latest` keeps everything,
+    /// `BeforeMessage(id)` keeps entries strictly before the first visible
+    /// occurrence of that message id.
+    pub fn fork_into(&self, new_chat_id: &str, boundary: &ForkBoundary) -> Result<Self, DocError> {
+        let forked = LoroDoc::new();
+        forked
+            .import(&self.export_snapshot()?)
+            .map_err(|e| DocError::Schema(e.to_string()))?;
+        let child = Self { doc: forked };
+        child.doc.get_map("meta").insert("chatId", new_chat_id)?;
+        child.apply_fork_boundary(boundary)?;
+        child.doc.commit();
+        Ok(child)
+    }
+
+    /// Trim the child doc's history down to `boundary`. No-op for [`ForkBoundary::Latest`].
+    fn apply_fork_boundary(&self, boundary: &ForkBoundary) -> Result<(), DocError> {
+        let ForkBoundary::BeforeMessage(before_id) = boundary else {
+            return Ok(());
+        };
+        let messages = self.doc.get_list("messages");
+        let len = messages.len();
+        let mut cut: Option<usize> = None;
+        for index in 0..len {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+                messages.get(index)
+            else {
+                continue;
+            };
+            let matches = match map.get("id") {
+                Some(loro::ValueOrContainer::Value(LoroValue::String(id))) => {
+                    id.as_str() == before_id.as_str()
+                }
+                _ => false,
+            };
+            // History keeps everything before the *first* visible occurrence;
+            // a continuation reuses ids, so stop at the earliest match.
+            if matches {
+                cut = Some(index);
+                break;
+            }
+        }
+        if let Some(cut) = cut {
+            messages.delete(cut, len - cut)?;
+        }
+        Ok(())
+    }
 }
 
 fn write_entry_scalar_fields(map: &LoroMap, entry: &SessionMessageEntry) -> Result<(), DocError> {
@@ -1317,6 +1389,89 @@ mod tests {
     use super::*;
     use crate::parts::fold_event_into_parts;
     use zeron_proto::{AgentEvent, ToolCall};
+
+    fn message(id: &str) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: id.into(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: format!("body of {id}"),
+            }],
+            created_at: 0,
+            device_id: "device".into(),
+            status: None,
+            continuation_of: None,
+        }
+    }
+
+    #[test]
+    fn fork_latest_copies_the_whole_transcript_under_a_new_identity() {
+        let source = SessionDoc::init("source").unwrap();
+        for id in ["m1", "m2", "m3"] {
+            source.push_message(&message(id)).unwrap();
+        }
+
+        let child = source.fork_into("child", &ForkBoundary::Latest).unwrap();
+
+        assert_eq!(
+            child.chat_id().as_deref(),
+            Some("child"),
+            "child names itself"
+        );
+        assert_eq!(
+            source.chat_id().as_deref(),
+            Some("source"),
+            "source is untouched"
+        );
+        let ids: Vec<String> = child
+            .read_entries()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, vec!["m1", "m2", "m3"]);
+    }
+
+    #[test]
+    fn fork_before_message_keeps_only_the_earlier_history() {
+        let source = SessionDoc::init("source").unwrap();
+        for id in ["m1", "m2", "m3"] {
+            source.push_message(&message(id)).unwrap();
+        }
+
+        let child = source
+            .fork_into("child", &ForkBoundary::BeforeMessage("m2".into()))
+            .unwrap();
+
+        let ids: Vec<String> = child
+            .read_entries()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["m1"],
+            "the boundary message and later turns are dropped"
+        );
+        // The source keeps everything: forking never mutates its parent.
+        assert_eq!(source.read_entries().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn fork_before_an_unknown_message_degrades_to_the_full_history() {
+        let source = SessionDoc::init("source").unwrap();
+        for id in ["m1", "m2"] {
+            source.push_message(&message(id)).unwrap();
+        }
+
+        let child = source
+            .fork_into("child", &ForkBoundary::BeforeMessage("nope".into()))
+            .unwrap();
+
+        assert_eq!(child.read_entries().unwrap().len(), 2);
+    }
 
     #[test]
     fn opening_tail_bounds_parts_and_preserves_continuation_ids() {
