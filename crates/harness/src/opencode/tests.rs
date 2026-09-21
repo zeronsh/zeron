@@ -628,15 +628,64 @@ fn prompt_body_carries_model_variant_and_attachments() {
         Some(("anthropic", "claude-opus-5")),
         Some("high"),
         &["/tmp/shot.png".to_owned()],
+        None,
     );
     assert_eq!(body["model"]["providerID"], "anthropic");
     assert_eq!(body["model"]["modelID"], "claude-opus-5");
     assert_eq!(body["variant"], "high");
+    assert!(body.get("agent").is_none());
     assert_eq!(body["parts"][0]["type"], "text");
     assert_eq!(body["parts"][0]["text"], "hello");
     assert_eq!(body["parts"][1]["type"], "file");
     assert_eq!(body["parts"][1]["mime"], "image/png");
     assert_eq!(body["parts"][1]["url"], "file:///tmp/shot.png");
+}
+
+#[test]
+fn prompt_body_carries_agent_without_model() {
+    let body = prompt_body("hello", &None, None, &[], Some("kimi-k3"));
+    assert_eq!(body["agent"], "kimi-k3");
+    assert!(body.get("model").is_none());
+    assert_eq!(body["parts"][0]["text"], "hello");
+}
+
+#[test]
+fn placeholder_providers_redirect_to_same_named_agent() {
+    assert_eq!(
+        placeholder_agent("deepseek", "deepseek-flash").as_deref(),
+        Some("deepseek-flash")
+    );
+    assert_eq!(
+        placeholder_agent("mythos", "claude-mythos-5-1").as_deref(),
+        Some("claude-mythos-5-1")
+    );
+    assert_eq!(placeholder_agent("anthropic", "claude-opus-5"), None);
+    assert_eq!(
+        placeholder_agent("opencode", "muse-spark-1.3-contributor-free"),
+        None
+    );
+}
+
+#[test]
+fn agents_from_wire_maps_agent_rows() {
+    let models = agents_from_wire(&json!([
+        {"name": "kimi-k3", "description": "Chat as Kimi K3"},
+        {"name": "build", "description": ""},
+        {"description": "nameless — dropped"},
+    ]));
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].id, "agent/build");
+    assert_eq!(models[0].label, "build");
+    assert_eq!(models[1].id, "agent/kimi-k3");
+    assert_eq!(models[1].label, "kimi-k3");
+    assert!(
+        models[1]
+            .description
+            .as_deref()
+            .unwrap()
+            .contains("Kimi K3")
+    );
+    assert!(models[1].reasoning_levels.is_empty());
 }
 
 fn feed_with_assistant(message: &str) -> SessionFeed {
