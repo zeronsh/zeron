@@ -20,8 +20,8 @@ use tokio::sync::{mpsc, oneshot};
 pub use tokio_util::sync::CancellationToken;
 
 use zeron_proto::{
-    AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand, SteeringMode,
-    UserInputAnswer, UserInputQuestion,
+    AgentEvent, GoalAction, GoalState, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
+    SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +44,13 @@ pub struct SteerMessage {
     pub message_id: Option<String>,
 }
 
+/// One provider-native persistent-goal mutation sent to a warm harness session.
+pub struct GoalActionRequest {
+    pub action: GoalAction,
+    pub objective: Option<String>,
+    pub response: oneshot::Sender<Result<Option<GoalState>, HarnessError>>,
+}
+
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
     /// The run sends questions and awaits answers (blocks the agent, mirrors zeron).
@@ -52,6 +59,9 @@ pub struct RunControls {
     >,
     /// Steer prompts consumed at step/turn boundaries.
     pub steering: mpsc::Receiver<SteerMessage>,
+    /// Provider-native persistent-goal lifecycle actions. Adapters without a
+    /// dedicated goal API drop this receiver and never advertise the control.
+    pub goal_actions: mpsc::Receiver<GoalActionRequest>,
     /// Cancel to interrupt the live run: the harness sends its protocol-level
     /// interrupt, then escalates to SIGTERM/SIGKILL on the child after a grace
     /// period. The run's stream ends with `Done { status: Interrupted }`.
@@ -84,6 +94,12 @@ pub trait Harness: Send + Sync {
     /// Unlike deterministic_turn_end, this need not cover autonomous activity.
     fn authoritative_prompt_end(&self) -> bool {
         self.deterministic_turn_end()
+    }
+    /// Reject request shapes that this harness can determine are invalid
+    /// without process startup, network access, or live capability discovery.
+    /// The engine calls this before it records or routes the user turn.
+    fn validate_request(&self, _request: &RunRequest) -> Result<(), HarnessError> {
+        Ok(())
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError>;
     /// Slash commands the agent advertises (ACP `availableCommands`); empty
@@ -118,6 +134,7 @@ pub mod claude;
 pub mod codex;
 pub mod cursor;
 pub(crate) mod executable;
+pub mod interaction_contract;
 pub(crate) mod jsonrpc;
 pub mod mock;
 pub mod opencode;

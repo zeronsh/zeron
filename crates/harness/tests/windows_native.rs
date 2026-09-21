@@ -231,6 +231,7 @@ async fn exercise(prompt: &str, resume: Option<&str>) {
             rx
         }),
         steering,
+        goal_actions: mpsc::channel(1).1,
         interrupt: interrupt.clone(),
     };
     let operation = async {
@@ -323,6 +324,7 @@ async fn exercise_tree(prompt: &str, drop_stream: bool) {
             rx
         }),
         steering,
+        goal_actions: mpsc::channel(1).1,
         interrupt: interrupt.clone(),
     };
     let mut stream = harness
@@ -482,6 +484,7 @@ async fn batch_overrides_launch_through_cmd() {
                 rx
             }),
             steering,
+            goal_actions: mpsc::channel(1).1,
             interrupt: CancellationToken::new(),
         };
         // Consume the whole stream: the shim cannot speak any agent protocol,

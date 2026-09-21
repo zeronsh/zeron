@@ -37,6 +37,29 @@ impl TurnWire {
         auto_approve: bool,
         answer: Option<bool>,
     ) -> Self {
+        Self::start_mode(queued, v2, auto_approve, answer, None).await
+    }
+
+    async fn start_mode(
+        queued: bool,
+        v2: bool,
+        auto_approve: bool,
+        answer: Option<bool>,
+        mode: Option<&str>,
+    ) -> Self {
+        Self::start_config(queued, v2, auto_approve, answer, mode, false, false, None).await
+    }
+
+    async fn start_config(
+        queued: bool,
+        v2: bool,
+        auto_approve: bool,
+        answer: Option<bool>,
+        mode: Option<&str>,
+        cancel_input: bool,
+        drop_input: bool,
+        resume: Option<&str>,
+    ) -> Self {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -84,24 +107,27 @@ impl TurnWire {
                         }
                         return;
                     }
-                    let body = if v2 {
+                    let missing_resume = path == "/session/missing" || path == "/api/session/missing";
+                    let (status, body) = if missing_resume {
+                        ("404 Not Found", r#"{"error":"missing"}"#)
+                    } else if v2 {
                         match path.as_str() {
-                            "/api/health" => r#"{"healthy":true,"version":"2.0.3"}"#,
-                            "/api/session" => r#"{"data":{"id":"fixture"}}"#,
-                            "/api/command" => r#"{"data":[]}"#,
+                            "/api/health" => ("200 OK", r#"{"healthy":true,"version":"2.0.3"}"#),
+                            "/api/session" => ("200 OK", r#"{"data":{"id":"fixture"}}"#),
+                            "/api/command" => ("200 OK", r#"{"data":[]}"#),
                             // Non-empty: the catalog-sync retry loop must not stall tests.
-                            "/api/model" => r#"{"data":[{"providerID":"opencode","id":"muse","name":"Muse","limit":{"context":1000},"variants":[{"id":"low"}],"enabled":true}]}"#,
-                            _ => "{}",
+                            "/api/model" => ("200 OK", r#"{"data":[{"providerID":"opencode","id":"muse","name":"Muse","limit":{"context":1000},"variants":[{"id":"low"}],"enabled":true}]}"#),
+                            _ => ("200 OK", "{}"),
                         }
                     } else {
                         match path.as_str() {
-                            "/global/health" => r#"{"healthy":true,"version":"1.18.31"}"#,
-                            "/session" => r#"{"id":"fixture"}"#,
-                            "/command" => "[]",
-                            _ => "{}",
+                            "/global/health" => ("200 OK", r#"{"healthy":true,"version":"1.18.31"}"#),
+                            "/session" => ("200 OK", r#"{"id":"fixture"}"#),
+                            "/command" => ("200 OK", "[]"),
+                            _ => ("200 OK", "{}"),
                         }
                     };
-                    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                    socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
                     if path.ends_with("/prompt_async")
                         || path.ends_with("/prompt")
                         || path.ends_with("/abort")
@@ -131,18 +157,25 @@ impl TurnWire {
             event_tx,
             controls: RunControls {
                 request_input: Box::new(move |questions| {
-                    let answer = answer.expect("fixture must not ask for input");
                     let (tx, rx) = tokio::sync::oneshot::channel();
-                    let _ = tx.send(questions.into_iter().map(|q| UserInputAnswer {
-                        question_id: q.id, labels: vec![if answer { "Yes" } else { "No" }.into()],
-                    }).collect());
+                    if drop_input {
+                        drop(tx);
+                    } else if cancel_input {
+                        let _ = tx.send(Vec::new());
+                    } else {
+                        let answer = answer.expect("fixture must not ask for input");
+                        let _ = tx.send(questions.into_iter().map(|q| UserInputAnswer {
+                            question_id: q.id, labels: vec![if answer { "Yes" } else { "No" }.into()],
+                        }).collect());
+                    }
                     rx
                 }),
                 steering,
+                goal_actions: tokio::sync::mpsc::channel(1).1,
                 interrupt: interrupt.clone(),
             },
             request: serde_json::from_value(
-                json!({"prompt":"first", "cwd":"", "sandbox":"workspace-write", "autoApprove": auto_approve, "model": if v2 { Some("opencode/muse") } else { None }, "reasoning": "low"}),
+                json!({"prompt":"first", "cwd":"", "sandbox":"workspace-write", "autoApprove": auto_approve, "modelOptions": mode.map(|mode| json!({"agentMode":mode})).unwrap_or(json!({})), "model": if v2 { Some("opencode/muse") } else { None }, "reasoning": "low", "resume": resume}),
             )
             .unwrap(),
             interrupt_grace: Duration::from_secs(2),
@@ -1040,6 +1073,31 @@ fn v2_frames_normalize_to_v1_payloads() {
         vec![json!({"type":"permission.asked","properties":{
             "id":"per_1","sessionID":"ses_1","action":"external_directory","resources":["/tmp/*"]}})]
     );
+    assert_eq!(
+        normalize_v2_frame(
+            json!({"id":"evt_11b","type":"permission.replied","data":{
+                "requestID":"per_1","sessionID":"ses_1","reply":"once"}}),
+            &mut tools,
+        ),
+        vec![json!({"type":"permission.replied","properties":{
+            "requestID":"per_1","sessionID":"ses_1","reply":"once"}})]
+    );
+    // Native todo snapshots keep their event name on 2.x, while the /api
+    // stream carries the payload under `data` rather than `properties`.
+    let out = normalize_v2_frame(
+        json!({"id":"evt_12","type":"todo.updated","data":{
+        "sessionID":"ses_1","todos":[
+            {"id":"todo_1","content":"Inspect","status":"in_progress","priority":"high"}
+        ]}}),
+        &mut tools,
+    );
+    assert_eq!(
+        out,
+        vec![json!({"type":"todo.updated","properties":{
+        "sessionID":"ses_1","todos":[
+            {"id":"todo_1","content":"Inspect","status":"in_progress","priority":"high"}
+        ]}})]
+    );
     // Boilerplate frames (catalog sync etc.) drop.
     assert!(
         normalize_v2_frame(
@@ -1167,6 +1225,18 @@ async fn permissions_stay_session_scoped_and_never_persist_grants() {
         for (path, body) in approvals {
             assert_eq!(body["reply"], "once");
             assert!(!path.contains("foreign") && !path.contains("missing"));
+            if v2 {
+                assert!(
+                    path == "/api/session/fixture/permission/own/reply"
+                        || path == "/api/session/child/permission/child/reply",
+                    "unexpected 2.x permission path: {path}"
+                );
+            } else {
+                assert!(
+                    path == "/permission/own/reply" || path == "/permission/child/reply",
+                    "unexpected 1.x permission path: {path}"
+                );
+            }
         }
     }
 }

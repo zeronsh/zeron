@@ -33,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
             rx
         }),
         steering,
+        goal_actions: tokio::sync::mpsc::channel(1).1,
         interrupt: CancellationToken::new(),
     };
     let request = RunRequest {

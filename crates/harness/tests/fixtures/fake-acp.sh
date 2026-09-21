@@ -43,6 +43,9 @@ if has "$line" '"method":"session/load"'; then
     has "$line" '"method":"session/new"' || exit 1
     emit "{\"id\":$(rid "$line"),\"result\":{\"sessionId\":\"s-fresh\"}}"
     SID="s-fresh"
+  elif has "$line" '"sessionId":"opaque-mode"'; then
+    SID="opaque-mode"
+    emit "{\"id\":$(rid "$line"),\"result\":{\"configOptions\":[{\"id\":\"execution-profile\",\"name\":\"Execution profile\",\"category\":\"mode\",\"type\":\"select\",\"currentValue\":\"build\",\"options\":[{\"value\":\"build\",\"name\":\"Build\"},{\"value\":\"architect/native.v2\",\"name\":\"Architect\"}]}]}}"
   else
     if [ "$MODEL_API" -eq 1 ]; then
       SID="existing-grok-session"
@@ -113,6 +116,16 @@ case "$promptline" in
   if has "$CONFIG_SETS" '"configId":"model"' && has "$CONFIG_SETS" '"value":"grok-4.5"' \
     && has "$CONFIG_SETS" '"configId":"effort"' && has "$CONFIG_SETS" '"value":"medium"'; then
     update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"configured"}}'
+    emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  else
+    emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"
+  fi
+  ;;
+
+*scenario:opaque-mode*)
+  if has "$CONFIG_SETS" '"configId":"execution-profile"' \
+    && has "$CONFIG_SETS" '"value":"architect/native.v2"'; then
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"opaque mode selected"}}'
     emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   else
     emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"
@@ -211,7 +224,7 @@ case "$promptline" in
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   ;;
 
-*scenario:question*)
+*scenario:question\"*)
   # AskUserQuestion-shaped request: options WITHOUT allow/reject kinds are
   # user-facing choices — must round-trip through the input bridge, never
   # auto-accept. The test's bridge answers "Use tokio".
@@ -223,6 +236,130 @@ case "$promptline" in
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   ;;
 
+*scenario:question-cancel*)
+  emit "{\"id\":89,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"q-cancel\",\"title\":\"Pick one\"},\"options\":[{\"optionId\":\"one\",\"name\":\"One\"},{\"optionId\":\"two\",\"name\":\"Two\"}]}}"
+  read -r ans || exit 1
+  { has "$ans" '"id":89' && has "$ans" '"outcome":"cancelled"'; } ||
+    { emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"; exit 0; }
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"cancelled question"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
+*scenario:question-interrupt*)
+  emit "{\"id\":95,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"q-interrupt\",\"title\":\"Wait for input\"},\"options\":[{\"optionId\":\"continue\",\"name\":\"Continue\"}]}}"
+  read -r ans || exit 1
+  # The harness sends session/cancel and the required permission response from
+  # separate tasks; accept either wire order and inspect the response frame.
+  if has "$ans" '"method":"session/cancel"'; then
+    read -r ans || exit 1
+  fi
+  { has "$ans" '"id":95' && has "$ans" '"outcome":"cancelled"'; } || exit 1
+  # A permission request racing in AFTER cancellation must observe the current
+  # cancellation state immediately; a newly cloned watch receiver cannot wait
+  # for another change that will never come.
+  emit "{\"id\":96,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"q-late\",\"title\":\"Late input\"},\"options\":[{\"optionId\":\"continue\",\"name\":\"Continue\"}]}}"
+  read -r late || exit 1
+  if has "$late" '"method":"session/cancel"'; then
+    read -r late || exit 1
+  fi
+  { has "$late" '"id":96' && has "$late" '"outcome":"cancelled"'; } || exit 1
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"native input cancelled on interrupt"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"cancelled\"}}"
+  ;;
+
+*scenario:duplicate-question-options*)
+  emit "{\"id\":94,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"duplicates\",\"title\":\"Choose the second duplicate\"},\"options\":[{\"optionId\":\"first\",\"name\":\"Same\"},{\"optionId\":\"second\",\"name\":\"Same\"},{\"optionId\":\"unnamed\",\"name\":\"   \"}]}}"
+  read -r ans || exit 1
+  { has "$ans" '"id":94' && has "$ans" '"optionId":"second"'; } ||
+    { emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"; exit 0; }
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"duplicate label mapped"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
+*scenario:cross-session-question*)
+  # A request replayed from another session is stale for this run. It must be
+  # cancelled on the wire without opening the active conversation's tray.
+  emit "{\"id\":90,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"foreign-session\",\"toolCall\":{\"toolCallId\":\"old\",\"title\":\"Stale question\"},\"options\":[{\"optionId\":\"stale\",\"name\":\"Stale\"}]}}"
+  read -r stale || exit 1
+  { has "$stale" '"id":90' && has "$stale" '"outcome":"cancelled"'; } ||
+    { emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"; exit 0; }
+  emit "{\"id\":91,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"live\",\"title\":\"Live question\"},\"options\":[{\"optionId\":\"live\",\"name\":\"Live\"}]}}"
+  read -r live || exit 1
+  { has "$live" '"id":91' && has "$live" '"optionId":"live"'; } ||
+    { emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"; exit 0; }
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"only live question shown"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
+*scenario:invalid-question-owner*)
+  emit '{"id":97,"method":"session/request_permission","params":{"toolCall":{"toolCallId":"missing-owner","title":"Missing owner"},"options":[{"optionId":"missing","name":"Missing"}]}}'
+  read -r missing || exit 1
+  { has "$missing" '"id":97' && has "$missing" '"outcome":"cancelled"'; } || exit 1
+  emit '{"id":98,"method":"session/request_permission","params":{"sessionId":42,"toolCall":{"toolCallId":"numeric-owner","title":"Numeric owner"},"options":[{"optionId":"numeric","name":"Numeric"}]}}'
+  read -r numeric || exit 1
+  { has "$numeric" '"id":98' && has "$numeric" '"outcome":"cancelled"'; } || exit 1
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"invalid owners cancelled"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
+*scenario:malformed-question-option*)
+  # The malformed kind-less choice still makes this a user question. It must
+  # never disappear during validation and leave "Allow once" auto-approved.
+  emit "{\"id\":99,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"mixed-malformed\",\"title\":\"Choose safely\"},\"options\":[{\"name\":\"Custom choice\"},{\"optionId\":\"once\",\"name\":\"Allow once\",\"kind\":\"allow_once\"}]}}"
+  read -r mixed || exit 1
+  { has "$mixed" '"id":99' && has "$mixed" '"outcome":"cancelled"'; } || exit 1
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"malformed question cancelled"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
+*scenario:dynamic-mode-permission*)
+  # Mode support can appear after session/new (login refresh/resume hydration).
+  # Once advertised, even ordinary allow/reject permissions use native input.
+  update '{"sessionUpdate":"config_option_update","configOptions":[{"id":"execution-profile","name":"Execution profile","category":"mode","type":"select","currentValue":"build","options":[{"value":"build","name":"Build"},{"value":"architect/native.v2","name":"Architect"}]}]}'
+  emit "{\"id\":92,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"mode-tool\",\"title\":\"Run in this native mode?\"},\"options\":[{\"optionId\":\"once\",\"name\":\"Allow once\",\"kind\":\"allow_once\"},{\"optionId\":\"no\",\"name\":\"Reject\",\"kind\":\"reject_once\"}]}}"
+  read -r ans || exit 1
+  { has "$ans" '"id":92' && has "$ans" '"optionId":"once"'; } ||
+    { emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"; exit 0; }
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"mode permission answered"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
+*scenario:warm-mode-removal*)
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"first mode turn"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  # The native session exits the selected opaque mode and then removes it
+  # from the live catalog after the turn has parked. A text-only warm steer would
+  # silently run in build; the adapter must close so the next dispatch resumes
+  # through authoritative setup instead.
+  sleep 0.1
+  update '{"sessionUpdate":"current_mode_update","currentModeId":"build"}'
+  update '{"sessionUpdate":"config_option_update","configOptions":[{"id":"execution-profile","name":"Execution profile","category":"mode","type":"select","currentValue":"build","options":[{"value":"build","name":"Build"}]}]}'
+  # A buggy warm runtime receives the follow-up as another session/prompt.
+  # Keep the fixture alive long enough to make that visible on its stream.
+  read -r unexpected || exit 0
+  if has "$unexpected" '"method":"session/prompt"'; then
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"WRONG MODE WARM TURN"}}'
+    emit "{\"id\":$(rid "$unexpected"),\"result\":{\"stopReason\":\"end_turn\"}}"
+  fi
+  ;;
+
+*scenario:empty-mode-permission*)
+  update '{"sessionUpdate":"config_option_update","configOptions":[{"id":"execution-profile","name":"Execution profile","category":"mode","type":"select","currentValue":"build","options":[{"value":"build","name":"Build"},{"value":"architect/native.v2","name":"Architect"}]}]}'
+  emit "{\"id\":93,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"empty\",\"title\":\"Impossible choice\"},\"options\":[]}}"
+  read -r ans || exit 1
+  { has "$ans" '"id":93' && has "$ans" '"outcome":"cancelled"'; } ||
+    { emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"; exit 0; }
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"empty request cancelled"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
+*scenario:plan-exit*)
+  emit "{\"id\":77,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"exit\",\"kind\":\"switch_mode\",\"title\":\"Implement the plan?\"},\"options\":[{\"optionId\":\"yes\",\"name\":\"Yes\",\"kind\":\"allow_once\"},{\"optionId\":\"no\",\"name\":\"No\",\"kind\":\"reject_once\"}]}}"
+  read -r reply || exit 1
+  has "$reply" '"optionId":"yes"' || exit 1
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"approved plan"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
 *scenario:permission*)
   emit "{\"id\":77,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"t1\"},\"options\":[{\"optionId\":\"once\",\"name\":\"Allow once\",\"kind\":\"allow_once\"},{\"optionId\":\"always\",\"name\":\"Always allow\",\"kind\":\"allow_always\"},{\"optionId\":\"no\",\"name\":\"Reject\",\"kind\":\"reject_once\"}]}}"
   read -r ans || exit 1

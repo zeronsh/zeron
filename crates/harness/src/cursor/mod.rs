@@ -247,6 +247,9 @@ impl Harness for CursorHarness {
     fn deterministic_turn_end(&self) -> bool {
         true
     }
+    fn validate_request(&self, request: &RunRequest) -> Result<(), HarnessError> {
+        validate_agent_mode(request)
+    }
 
     /// Keep a successful catalog during transient outages. A cold failure
     /// is an error, never a fabricated two-model success.
@@ -265,6 +268,7 @@ impl Harness for CursorHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        validate_agent_mode(&request)?;
         let lease = if self.executable.is_none() {
             Some(state::Lease::acquire(&state::state_root(), request.resume.as_deref()).await?)
         } else {
@@ -349,6 +353,24 @@ impl Harness for CursorHarness {
     }
 }
 
+fn validate_agent_mode(request: &RunRequest) -> Result<(), HarnessError> {
+    let Some(value) = request.model_options.get(zeron_proto::AGENT_MODE_OPTION) else {
+        return Ok(());
+    };
+    let Some(mode) = value.as_str() else {
+        return Err(HarnessError::Protocol(
+            "Cursor mode must be a string".into(),
+        ));
+    };
+    if matches!(mode, "default" | "plan") {
+        Ok(())
+    } else {
+        Err(HarnessError::Protocol(format!(
+            "Unsupported Cursor mode: {mode}"
+        )))
+    }
+}
+
 /// `Cursor.models.list()` items → picker models. Item shape (1.0.28
 /// `options.d.ts` `ModelListItem`): `{id, displayName, description?,
 /// aliases?, parameters?: [{id, displayName?, values: [{value,
@@ -384,7 +406,7 @@ fn map_model_items(items: &Value) -> Vec<Model> {
                 .find(|v| v.get("isDefault").and_then(Value::as_bool) == Some(true))
                 .and_then(|v| v.get("params").and_then(Value::as_array).cloned())
                 .unwrap_or_default();
-            let options: Vec<ModelOption> = item
+            let mut options: Vec<ModelOption> = item
                 .get("parameters")
                 .and_then(Value::as_array)
                 .map(|a| a.as_slice())
@@ -422,6 +444,7 @@ fn map_model_items(items: &Value) -> Vec<Model> {
                     })
                 })
                 .collect();
+            options.extend(zeron_proto::agent_mode_option(HarnessId::Cursor));
             Some(Model {
                 id,
                 label,
@@ -483,6 +506,7 @@ async fn run_session(session: Session) {
     let RunControls {
         request_input: _request_input,
         mut steering,
+        goal_actions: _goal_actions,
         interrupt,
     } = controls;
 
@@ -750,6 +774,7 @@ fn decode_tool(name: &str, args: &Value) -> ToolCall {
             url: s(&["url"]),
             prompt: None,
         },
+        "createPlan" => ToolCall::Plan { text: s(&["plan"]) },
         "updateTodos" => ToolCall::Todo {
             items: args
                 .get("todos")
@@ -759,6 +784,8 @@ fn decode_tool(name: &str, args: &Value) -> ToolCall {
                 .unwrap_or_default()
                 .iter()
                 .map(|t| TodoItem {
+                    id: t.get("id").and_then(Value::as_str).map(str::to_owned),
+                    status: zeron_proto::TodoStatus::from_wire(t["status"].as_str()),
                     text: t
                         .get("content")
                         .or_else(|| t.get("text"))
@@ -946,8 +973,70 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
 mod tests {
     use super::*;
 
+    fn request_with_mode(mode: Value) -> RunRequest {
+        let mut model_options = serde_json::Map::new();
+        model_options.insert(zeron_proto::AGENT_MODE_OPTION.into(), mode);
+        RunRequest {
+            prompt: "test".into(),
+            harness: Some(HarnessId::Cursor),
+            model: None,
+            reasoning: None,
+            model_options,
+            cwd: String::new(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            resume: None,
+            attachments: Vec::new(),
+            worktree: None,
+        }
+    }
+
+    #[test]
+    fn request_preflight_rejects_malformed_or_unknown_mode() {
+        let harness = CursorHarness::default();
+        assert_eq!(
+            harness
+                .validate_request(&request_with_mode(json!(false)))
+                .unwrap_err()
+                .to_string(),
+            "harness protocol error: Cursor mode must be a string"
+        );
+        assert_eq!(
+            harness
+                .validate_request(&request_with_mode(json!("architect")))
+                .unwrap_err()
+                .to_string(),
+            "harness protocol error: Unsupported Cursor mode: architect"
+        );
+        harness
+            .validate_request(&request_with_mode(json!("plan")))
+            .unwrap();
+    }
+
     #[test]
     fn decodes_cursor_tool_vocabulary() {
+        assert_eq!(
+            decode_tool("createPlan", &json!({"plan":"# Native plan"})),
+            ToolCall::Plan {
+                text: "# Native plan".into()
+            }
+        );
+        let todos = decode_tool(
+            "updateTodos",
+            &json!({"todos":[
+                {"id":"todo_a","content":"Inspect","status":"inProgress"},
+                {"id":"todo_b","content":"Ship","status":"completed"}
+            ]}),
+        );
+        assert!(matches!(
+            todos,
+            ToolCall::Todo { items }
+                if items[0].id.as_deref() == Some("todo_a")
+                    && items[0].state() == zeron_proto::TodoStatus::InProgress
+                    && items[1].id.as_deref() == Some("todo_b")
+                    && items[1].state() == zeron_proto::TodoStatus::Completed
+        ));
+
         assert_eq!(
             decode_tool("shell", &json!({"command": "ls"})),
             ToolCall::Exec {

@@ -130,8 +130,11 @@ fn model(
     label: &str,
     description: &str,
     ladder: &[ReasoningLevel],
-    options: Vec<ModelOption>,
+    mut options: Vec<ModelOption>,
 ) -> Model {
+    options.extend(zeron_proto::agent_mode_option(
+        zeron_proto::HarnessId::ClaudeCode,
+    ));
     Model {
         id: id.into(),
         label: label.into(),

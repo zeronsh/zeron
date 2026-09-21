@@ -1,13 +1,13 @@
 //! The composer: a hand-rolled multiline text input (adapted from gpui's
 //! `examples/input.rs`), the compact↔expanded flip, the Send/Queue/Stop morph,
 //! optimistic send with failure recovery, per-chat drafts, and the question
-//! wizard that replaces the composer while a run awaits input.
+//! wizard docked above the shared composer input while questions await answers.
 //!
 //! Pure decision logic (flip, auto-grow math, button morph, wizard reducer,
 //! pending-input detection) lives in free functions/structs with unit tests;
 //! the gpui element only feeds them measurements.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -24,7 +24,12 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use zeron_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry};
+#[path = "composer_activity.rs"]
+mod activity;
+
+use zeron_doc::{
+    MessagePart, MessageRole, SessionCommandPayload, SessionCommandStatus, SessionMessageEntry,
+};
 use zeron_proto::{
     FileSearchMatch, HarnessId, RunRequest, SandboxLevel, SlashCommand, UserInputAnswer,
     UserInputQuestion, capabilities,
@@ -76,6 +81,137 @@ const QUEUE_SIDE_INSET: f32 = 16.0;
 /// The composer covers the tray's lower padding so the queue reads as emerging
 /// from behind it instead of as a separate rounded pill.
 pub(crate) const QUEUE_COMPOSER_OVERLAP: f32 = 18.0;
+/// Retain enough displaced requests for realistic cross-chat navigation while
+/// preventing resolved chats that are never revisited from growing forever.
+const WIZARD_CACHE_MAX: usize = 32;
+/// Local suppression normally lasts only until the next resolved document
+/// frame. Keep a wider bound for rapid cross-chat answering while ensuring a
+/// disconnected host cannot retain request ids indefinitely.
+const ANSWERED_REQUEST_MAX: usize = 64;
+const COMMAND_WATCH_RETRY_INITIAL: Duration = Duration::from_secs(1);
+const COMMAND_WATCH_RETRY_MAX: Duration = Duration::from_secs(15);
+
+/// Maximum scrollable heights for the three trays that may stack above the
+/// composer. The dense state deliberately stays below half the viewport so a
+/// small window retains transcript context and the answer controls.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ComposerTrayLimits {
+    activity: f32,
+    question: f32,
+    queue: f32,
+}
+
+fn composer_tray_limits(
+    viewport_height: f32,
+    has_question: bool,
+    has_queue: bool,
+) -> ComposerTrayLimits {
+    let (activity, question, queue) = match (has_question, has_queue) {
+        (true, true) => (0.12, 0.22, 0.14),
+        (true, false) => (0.14, 0.35, 0.0),
+        (false, true) => (0.14, 0.0, 0.30),
+        (false, false) => (0.25, 0.0, 0.0),
+    };
+    ComposerTrayLimits {
+        activity: viewport_height * activity,
+        question: viewport_height * question,
+        queue: viewport_height * queue,
+    }
+}
+
+fn answered_request_key(chat_id: &str, request_id: &str) -> (String, String) {
+    (chat_id.to_owned(), request_id.to_owned())
+}
+
+fn store_cached_wizard(
+    cache: &mut HashMap<(String, String), Wizard>,
+    order: &mut VecDeque<(String, String)>,
+    key: (String, String),
+    wizard: Wizard,
+) {
+    order.retain(|candidate| candidate != &key);
+    cache.insert(key.clone(), wizard);
+    order.push_back(key);
+    while cache.len() > WIZARD_CACHE_MAX {
+        let Some(oldest) = order.pop_front() else {
+            break;
+        };
+        cache.remove(&oldest);
+    }
+}
+
+fn take_cached_wizard(
+    cache: &mut HashMap<(String, String), Wizard>,
+    order: &mut VecDeque<(String, String)>,
+    key: &(String, String),
+) -> Option<Wizard> {
+    order.retain(|candidate| candidate != key);
+    cache.remove(key)
+}
+
+fn remove_cached_wizard(
+    cache: &mut HashMap<(String, String), Wizard>,
+    order: &mut VecDeque<(String, String)>,
+    key: &(String, String),
+) {
+    order.retain(|candidate| candidate != key);
+    cache.remove(key);
+}
+
+fn store_answered_request(
+    answered: &mut HashSet<(String, String)>,
+    order: &mut VecDeque<(String, String)>,
+    key: (String, String),
+) {
+    order.retain(|candidate| candidate != &key);
+    answered.insert(key.clone());
+    order.push_back(key);
+    while answered.len() > ANSWERED_REQUEST_MAX {
+        let Some(oldest) = order.pop_front() else {
+            break;
+        };
+        answered.remove(&oldest);
+    }
+}
+
+fn remove_answered_request(
+    answered: &mut HashSet<(String, String)>,
+    order: &mut VecDeque<(String, String)>,
+    key: &(String, String),
+) -> bool {
+    order.retain(|candidate| candidate != key);
+    answered.remove(key)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommandOutcomeFrame {
+    command_id: String,
+    status: SessionCommandStatus,
+    resolution: Option<String>,
+}
+
+fn answer_command_failure(status: SessionCommandStatus, resolution: Option<&str>) -> String {
+    let fallback = match status {
+        SessionCommandStatus::Rejected => "the answer was rejected",
+        SessionCommandStatus::Expired => "the answer expired before delivery",
+        SessionCommandStatus::Superseded => "the answer was superseded",
+        SessionCommandStatus::Cancelled => "the answer was cancelled",
+        SessionCommandStatus::Pending | SessionCommandStatus::Applied => {
+            "the answer could not be confirmed"
+        }
+    };
+    format!("Answer failed: {}", resolution.unwrap_or(fallback))
+}
+
+fn next_command_watch_retry(delay: Duration) -> Duration {
+    Duration::from_secs(
+        delay
+            .as_secs()
+            .saturating_mul(2)
+            .min(COMMAND_WATCH_RETRY_MAX.as_secs()),
+    )
+}
 /// The original floating selector rows use the same 20px chip height as the
 /// established-thread footer. Their surrounding rows own no plate or border.
 const NEW_THREAD_SELECTOR_ROW_HEIGHT: f32 = 20.0;
@@ -612,36 +748,95 @@ fn wizard_escape_goes_back(key: &str, input_focused: bool, input_empty: bool) ->
     key == "escape" && (!input_focused || input_empty)
 }
 
-/// Find the unresolved input request the panel should serve, if any: an
-/// unresolved input part on the LAST assistant entry — regardless of the
-/// entry's run status. The question stays answerable until the user actually
-/// answers it (user requirement): a run that died under its question (engine
-/// restart reaping it) leaves an aborted entry whose answer the engine
-/// delivers as a resumed turn (`RespondInput`'s dead-run fallback). A newer
-/// assistant entry supersedes an unanswered question. Assistant-entry-scoped,
-/// not last-entry: a steer prompt sent while the agent waits appends a USER
-/// entry after the streaming assistant entry, and a last-entry-only read made
-/// the QuestionPanel vanish exactly when the user typed (earlier forensics;
-/// matches the original composer.tsx, which reads the live-assistant fold —
-/// rebuilt from replay even after the run died).
+/// Serve unresolved questions in transcript order, including nonblocking agent
+/// questions whose assistant has already continued into a newer entry.
+fn pending_input_request_matching(
+    transcript: &[SessionMessageEntry],
+    mut include: impl FnMut(&str) -> bool,
+) -> Option<(String, Vec<UserInputQuestion>)> {
+    let resolved: HashSet<&str> = transcript
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .filter_map(|part| match part {
+            MessagePart::Input {
+                request_id,
+                resolved: true,
+                ..
+            } => Some(request_id.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    // A blocking request suspends the run and must outrank asynchronous
+    // questions that arrive around it. Search backwards, ignoring entries
+    // made only of asynchronous requests; ordinary later assistant output
+    // still supersedes a stale blocking request from an earlier run.
+    for entry in transcript
+        .iter()
+        .rev()
+        .filter(|entry| entry.role == MessageRole::Assistant)
+    {
+        let blocking = entry.parts.iter().find_map(|part| match part {
+            MessagePart::Input {
+                request_id,
+                questions,
+                resolved: false,
+                ..
+            } if !questions.is_empty()
+                && !resolved.contains(request_id.as_str())
+                && questions.iter().any(|question| !question.non_blocking) =>
+            {
+                Some((request_id, questions))
+            }
+            _ => None,
+        });
+        if let Some((request_id, questions)) = blocking {
+            if include(request_id) {
+                return Some((request_id.clone(), questions.clone()));
+            }
+            break;
+        }
+        let asynchronous_only = !entry.parts.is_empty()
+            && entry.parts.iter().all(|part| {
+                matches!(
+                    part,
+                    MessagePart::Input { questions, .. }
+                        if !questions.is_empty()
+                            && questions.iter().all(|question| question.non_blocking)
+                )
+            });
+        if !asynchronous_only && !entry.parts.is_empty() {
+            break;
+        }
+    }
+
+    // Once blocking input is answered, resume nonblocking requests in
+    // transcript order so locally typed pages are not starved by newer ones.
+    transcript
+        .iter()
+        .filter(|entry| entry.role == MessageRole::Assistant)
+        .flat_map(|entry| &entry.parts)
+        .find_map(|part| match part {
+            MessagePart::Input {
+                request_id,
+                questions,
+                resolved: false,
+                ..
+            } if !questions.is_empty()
+                && !resolved.contains(request_id.as_str())
+                && questions.iter().all(|question| question.non_blocking)
+                && include(request_id) =>
+            {
+                Some((request_id.clone(), questions.clone()))
+            }
+            _ => None,
+        })
+}
+
 pub fn pending_input_request(
     transcript: &[SessionMessageEntry],
 ) -> Option<(String, Vec<UserInputQuestion>)> {
-    transcript
-        .iter()
-        .rev()
-        .find(|entry| entry.role == MessageRole::Assistant)
-        .and_then(|entry| {
-            entry.parts.iter().find_map(|part| match part {
-                MessagePart::Input {
-                    request_id,
-                    questions,
-                    resolved: false,
-                    ..
-                } => Some((request_id.clone(), questions.clone())),
-                _ => None,
-            })
-        })
+    pending_input_request_matching(transcript, |_| true)
 }
 
 /// Whether the transcript shows `request_id` explicitly resolved (here or on
@@ -752,6 +947,9 @@ impl Wizard {
     }
 
     pub fn set_typed(&mut self, text: String) {
+        if !self.current().is_some_and(|q| q.allow_custom) {
+            return;
+        }
         if let Some(slot) = self.typed.get_mut(self.page) {
             *slot = text;
         }
@@ -759,6 +957,13 @@ impl Wizard {
 
     /// Explicit submit / auto-advance landing.
     pub fn advance(&mut self) -> WizardStep {
+        if !self.page_has_pick()
+            && !self
+                .current()
+                .is_some_and(|q| q.allow_custom && self.typed[self.page].trim().len() > 0)
+        {
+            return WizardStep::Stay;
+        }
         if self.page + 1 < self.questions.len() {
             self.page += 1;
             WizardStep::Stay
@@ -777,26 +982,28 @@ impl Wizard {
         }
     }
 
-    /// Answers per question: free text overrides picked labels.
+    /// Custom text replaces a single choice, or supplements multiple choices.
     pub fn answers(&self) -> Vec<UserInputAnswer> {
         self.questions
             .iter()
             .enumerate()
             .map(|(ix, q)| {
                 let typed = self.typed.get(ix).map(|s| s.trim()).unwrap_or("");
-                let labels = if !typed.is_empty() {
-                    vec![typed.to_string()]
-                } else {
-                    self.picked
-                        .get(ix)
-                        .map(|picked| {
-                            picked
-                                .iter()
-                                .filter_map(|&p| q.options.get(p).cloned())
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                };
+                let mut labels: Vec<String> = self
+                    .picked
+                    .get(ix)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|&p| q.options.get(p).cloned())
+                    .collect();
+                if q.allow_custom && !typed.is_empty() {
+                    if !q.multi_select {
+                        labels.clear();
+                    }
+                    if !labels.iter().any(|label| label == typed) {
+                        labels.push(typed.to_owned());
+                    }
+                }
                 UserInputAnswer {
                     question_id: q.id.clone(),
                     labels,
@@ -4062,10 +4269,17 @@ pub struct Composer {
     /// visible trace of a failed send (2026-08-19).
     failure_key: Option<String>,
     wizard: Option<Wizard>,
+    /// In-progress pages for requests temporarily displaced by a blocking
+    /// question or by conversation navigation.
+    wizard_cache: HashMap<(String, String), Wizard>,
+    wizard_cache_order: VecDeque<(String, String)>,
+    question_draft: Option<EditSnapshot>,
     wizard_focus: FocusHandle,
-    /// Requests already answered locally (suppresses the panel until the doc
-    /// frame marks them resolved).
-    answered_requests: HashSet<String>,
+    /// Locally answered requests, scoped by chat because native providers may
+    /// reuse short request ids after a restart or in another conversation.
+    /// Suppresses the panel until the document marks them resolved.
+    answered_requests: HashSet<(String, String)>,
+    answered_request_order: VecDeque<(String, String)>,
     advance_task: Option<Task<()>>,
     send_task: Option<Task<()>>,
     /// The queued message being edited in the composer (see
@@ -4087,6 +4301,25 @@ pub struct Composer {
     /// Live drag over the queue panel: which row, and where it would land.
     pub(crate) queue_drag: Option<crate::queue::QueueDragState>,
     pub(crate) queue_scroll: gpui::ScrollHandle,
+    activity_scroll: gpui::ScrollHandle,
+    activity_chat: Option<String>,
+    activity_expanded: bool,
+    activity_height: f32,
+    activity_motion: activity::ActivityMotion,
+    activity_focus: FocusHandle,
+    activity_plan: Option<(String, crate::markdown::BlockTree)>,
+    /// Goal editing deliberately owns a separate input entity so opening the
+    /// inline editor can never borrow, clear, or replace the message draft.
+    goal_input: Entity<ComposerInput>,
+    goal_edit_chat: Option<String>,
+    goal_action_focuses: HashMap<&'static str, FocusHandle>,
+    /// One mutation per chat may be in flight while the user navigates. The
+    /// RPC tasks are detached so switching chats cannot cancel a host write.
+    goal_pending: HashMap<String, SharedString>,
+    /// Host-acknowledged state shown until the document notification catches
+    /// up or advances beyond the snapshot that preceded the mutation.
+    goal_overrides: HashMap<String, activity::GoalOverride>,
+    question_scroll: gpui::ScrollHandle,
     pub(crate) queue_full_preview: Option<Task<()>>,
     pub(crate) queue_previews: HashMap<(String, String), crate::queue::QueuePreview>,
     /// Rows awaiting a host-authoritative removal acknowledgement. They stay
@@ -4095,11 +4328,6 @@ pub struct Composer {
     /// Whether the modifier overlay should currently reveal the queue hint.
     /// The shell owns modifier tracking and clears this on window deactivation.
     queue_shortcut_revealed: bool,
-    /// Interrupt/answer commands get their own slot: assigning `send_task`
-    /// DROPPED an in-flight send future mid-upload — no banner, no cleanup,
-    /// `sending` stuck true forever (2026-08-19 incident, "press Stop while
-    /// a send grinds" shape).
-    action_task: Option<Task<()>>,
     /// Chats whose durable Interrupt command has been accepted or is still
     /// being queued. Kept independently so stopping one chat cannot replace
     /// another chat's request when the user navigates quickly.
@@ -4153,6 +4381,7 @@ pub struct Composer {
     _pickers_observe: Subscription,
     _picker_focus: Subscription,
     _input_events: Subscription,
+    _goal_input_events: Subscription,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -4220,6 +4449,22 @@ impl Composer {
             input.enable_mentions();
             input
         });
+        let goal_input = cx.new(|cx| {
+            let mut input = ComposerInput::new("Edit goal objective…", cx);
+            input.text_size = 12.0;
+            input.configured_line_height = 18.0;
+            input
+        });
+        let goal_action_focuses = [
+            "goal-lifecycle",
+            "goal-edit",
+            "goal-save",
+            "goal-cancel",
+            "goal-clear",
+        ]
+        .into_iter()
+        .map(|id| (id, cx.focus_handle().tab_stop(true)))
+        .collect();
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
         // The footer toolbar (checkout kind + ref picker) is rendered INLINE
         // by the composer from picker state — a pickers-side notify (refs
@@ -4273,6 +4518,18 @@ impl Composer {
             }
             ComposerInputEvent::PastedPaths(paths) => this.add_paths(paths.clone(), cx),
         });
+        let goal_input_events =
+            cx.subscribe(&goal_input, |this: &mut Self, _, event, cx| match event {
+                ComposerInputEvent::Submitted => this.submit_goal_edit(cx),
+                ComposerInputEvent::Edited | ComposerInputEvent::ViewportChanged => cx.notify(),
+                ComposerInputEvent::ModifiedSubmitted
+                | ComposerInputEvent::CursorMoved
+                | ComposerInputEvent::MentionNavigate(_)
+                | ComposerInputEvent::MentionAccept
+                | ComposerInputEvent::MentionDismiss
+                | ComposerInputEvent::PastedImages(_)
+                | ComposerInputEvent::PastedPaths(_) => {}
+            });
         let current_key = state.read(cx).selected_chat.clone().unwrap_or_default();
         let mut composer = Self {
             state,
@@ -4300,10 +4557,13 @@ impl Composer {
             launching_new_chat: false,
             failure: None,
             wizard: None,
+            wizard_cache: HashMap::new(),
+            wizard_cache_order: VecDeque::new(),
+            question_draft: None,
             wizard_focus: cx.focus_handle(),
             answered_requests: HashSet::new(),
+            answered_request_order: VecDeque::new(),
             failure_key: None,
-            action_task: None,
             advance_task: None,
             send_task: None,
             interrupting: HashSet::new(),
@@ -4321,6 +4581,19 @@ impl Composer {
             focus_pending: true,
             queue_drag: None,
             queue_scroll: gpui::ScrollHandle::new(),
+            activity_scroll: gpui::ScrollHandle::new(),
+            activity_chat: None,
+            activity_expanded: false,
+            activity_height: 0.0,
+            activity_motion: activity::ActivityMotion::default(),
+            activity_focus: cx.focus_handle().tab_stop(true),
+            activity_plan: None,
+            goal_input,
+            goal_edit_chat: None,
+            goal_action_focuses,
+            goal_pending: HashMap::new(),
+            goal_overrides: HashMap::new(),
+            question_scroll: gpui::ScrollHandle::new(),
             queue_full_preview: None,
             queue_previews: HashMap::new(),
             queue_removing: HashSet::new(),
@@ -4351,6 +4624,7 @@ impl Composer {
             _pickers_observe: pickers_observe,
             _picker_focus: picker_focus,
             _input_events: input_events,
+            _goal_input_events: goal_input_events,
         };
         // Dev knob: pre-stage attachments (drop/paste can't be synthesized on
         // a rig) — `ZERON_ATTACH=/path/a.png[,/path/b.png]`, and
@@ -5030,7 +5304,12 @@ impl Composer {
     }
 
     fn on_input_edited(&mut self, cx: &mut Context<Self>) {
-        if self.wizard.is_some() {
+        if let Some(wizard) = self.wizard.as_mut() {
+            let text = self.input.read(cx).text().to_owned();
+            if !text.trim().is_empty() {
+                self.advance_task = None;
+            }
+            wizard.set_typed(text);
             if self.mention.token.is_some() || self.mention_task.is_some() {
                 self.reset_mention(None, cx);
             }
@@ -5716,16 +5995,36 @@ impl Composer {
             .retain(|chat_id, _| self.interrupting.contains(chat_id));
 
         let editing_id = self.editing_queued.clone();
-        let (key, pending, edited_row_exists) = {
+        let (key, pending, edited_row_exists, resolved_requests) = {
             let s = self.state.read(cx);
+            let key = s.selected_chat.clone().unwrap_or_default();
+            let pending = pending_input_request_matching(&s.transcript, |request_id| {
+                !self
+                    .answered_requests
+                    .iter()
+                    .any(|(chat, request)| chat == &key && request == request_id)
+            });
             (
-                s.selected_chat.clone().unwrap_or_default(),
-                pending_input_request(&s.transcript),
+                key,
+                pending,
                 editing_id
                     .as_ref()
                     .is_none_or(|id| s.queue.iter().any(|item| item.id == *id)),
+                s.transcript
+                    .iter()
+                    .flat_map(|entry| &entry.parts)
+                    .filter_map(|part| match part {
+                        MessagePart::Input {
+                            request_id,
+                            resolved: true,
+                            ..
+                        } => Some(request_id.clone()),
+                        _ => None,
+                    })
+                    .collect::<HashSet<_>>(),
             )
         };
+        self.prune_resolved_request_state(&key, &resolved_requests);
 
         // A queue edit belongs to exactly one visible row. Navigation or a
         // remote drain/removal cancels it instead of leaving a focused but
@@ -5758,6 +6057,11 @@ impl Composer {
             self.clear_queue_edit(cx);
         }
 
+        // Return the borrowed draft before saving it under the previous chat.
+        if key != self.current_key {
+            self.cache_current_wizard(cx);
+            self.restore_question_draft(cx);
+        }
         // Draft swap on chat navigation — the input entity itself survives.
         if key != self.current_key {
             let new_thread_launch =
@@ -5772,6 +6076,18 @@ impl Composer {
             }
             let draft = self.drafts.get(&key).cloned().unwrap_or_default();
             self.current_key = key;
+            // Every tray is conversation-scoped. Reset before the next render
+            // so a freshly selected chat cannot inherit another chat's reveal
+            // height or scroll position for even one frame.
+            self.activity_chat = (!self.current_key.is_empty()).then(|| self.current_key.clone());
+            self.activity_expanded = false;
+            self.activity_height = 0.0;
+            self.activity_motion = activity::ActivityMotion::default();
+            self.activity_plan = None;
+            self.activity_scroll.set_offset(point(px(0.0), px(0.0)));
+            self.goal_edit_chat = None;
+            self.question_scroll.set_offset(point(px(0.0), px(0.0)));
+            self.queue_scroll.set_offset(point(px(0.0), px(0.0)));
             // `failure` deliberately survives navigation: chat-scoped
             // failures render only under their own chat (see `failure_key`),
             // so switching away and back must not erase the one visible
@@ -5818,19 +6134,29 @@ impl Composer {
         }
         // Question panel lifecycle (wizard state cached per request id).
         match pending {
-            Some((request_id, questions)) if !self.answered_requests.contains(&request_id) => {
+            Some((request_id, questions)) => {
                 let same = self
                     .wizard
                     .as_ref()
                     .is_some_and(|w| w.request_id == request_id);
                 if !same {
+                    self.cache_current_wizard(cx);
                     self.reset_mention(None, cx);
-                    self.wizard = Some(Wizard::new(request_id, questions));
+                    if self.question_draft.is_none() {
+                        self.question_draft = Some(self.input.read(cx).snapshot());
+                    }
+                    let key = answered_request_key(&self.current_key, &request_id);
+                    self.wizard = take_cached_wizard(
+                        &mut self.wizard_cache,
+                        &mut self.wizard_cache_order,
+                        &key,
+                    )
+                    .filter(|wizard| wizard.questions == questions)
+                    .or_else(|| Some(Wizard::new(request_id, questions)));
+                    self.question_scroll.set_offset(point(px(0.0), px(0.0)));
                     self.advance_task = None;
                     // The shared input becomes the panel's free-text override.
-                    self.input.update(cx, |input, cx| {
-                        input.set_placeholder("Type your own answer, or pick an option above", cx)
-                    });
+                    self.sync_question_input(cx);
                 }
             }
             _ => {
@@ -5847,19 +6173,41 @@ impl Composer {
                     let transcript = self.state.read(cx).transcript.clone();
                     let released = input_request_resolved(&transcript, &wizard.request_id)
                         || (!transcript.is_empty()
-                            && !self.answered_requests.contains(&wizard.request_id));
+                            && !self.answered_requests.contains(&answered_request_key(
+                                &self.current_key,
+                                &wizard.request_id,
+                            )));
                     if released {
+                        remove_cached_wizard(
+                            &mut self.wizard_cache,
+                            &mut self.wizard_cache_order,
+                            &answered_request_key(&self.current_key, &wizard.request_id),
+                        );
                         self.wizard = None;
+                        self.restore_question_draft(cx);
                         self.advance_task = None;
-                        self.input
-                            .update(cx, |input, cx| input.set_placeholder("Do anything…", cx));
+                        self.input.update(cx, |input, cx| {
+                            input.read_only = false;
+                            input.set_placeholder("Do anything…", cx);
+                        });
                     }
                 }
             }
         }
+        // Displacing a request above may have cached it in the same update
+        // that delivered its resolved frame.
+        self.prune_resolved_request_state(&self.current_key.clone(), &resolved_requests);
         let input_context = message_input_context(self.wizard.is_some());
-        self.input
-            .update(cx, |input, cx| input.set_key_context(input_context, cx));
+        let read_only = self
+            .wizard
+            .as_ref()
+            .and_then(Wizard::current)
+            .is_some_and(|question| !question.allow_custom);
+        self.input.update(cx, |input, cx| {
+            input.read_only = read_only;
+            input.set_key_context(input_context, cx);
+        });
+        self.on_input_edited(cx);
         cx.notify();
     }
 
@@ -5904,6 +6252,12 @@ impl Composer {
             self.staged_comments(cx).len(),
         );
         send_button_mode(self.run_live(cx), has_text)
+    }
+
+    fn available_modes(&self, cx: &App) -> Option<zeron_proto::ModelOption> {
+        // Pickers owns the effective-options gate used by both the ordinary
+        // model options menu and the eventual Run request.
+        self.pickers.read(cx).composer_modes(cx)
     }
 
     fn on_submit(&mut self, cx: &mut Context<Self>) {
@@ -5983,6 +6337,22 @@ impl Composer {
         // Fully-resolved model/reasoning/options — concrete values (chat config
         // or defaults), so the engine never has to guess a "default".
         let resolved = self.pickers.read(cx).resolved(cx);
+        let fresh_goal = resolved
+            .model_options
+            .get(zeron_proto::FRESH_GOAL_OPTION)
+            .and_then(|v| v.as_bool())
+            == Some(true);
+        if queue && fresh_goal {
+            self.failure = Some(
+                "Start a new goal after the current turn finishes. Your draft is preserved.".into(),
+            );
+            self.failure_key = Some(chat_id);
+            cx.notify();
+            return;
+        }
+        let goal_selection = fresh_goal
+            .then(|| self.pickers.read(cx).goal_selection(cx))
+            .flatten();
         let existing_cwd = self
             .state
             .read(cx)
@@ -6650,6 +7020,11 @@ impl Composer {
             }
             this.update(cx, |composer, cx| {
                 composer.sending = false;
+                if result.is_ok() {
+                    if let Some(selection) = &goal_selection {
+                        composer.pickers.update(cx, |picker, cx| picker.consume_goal_selection(selection, cx));
+                    }
+                }
                 composer
                     .state
                     .update(cx, |s, _| s.end_upload_progress());
@@ -6761,22 +7136,140 @@ impl Composer {
 
     // ---- wizard glue ----
 
+    fn prune_resolved_request_state(&mut self, chat_id: &str, resolved_requests: &HashSet<String>) {
+        for request_id in resolved_requests {
+            let key = answered_request_key(chat_id, request_id);
+            remove_cached_wizard(&mut self.wizard_cache, &mut self.wizard_cache_order, &key);
+            remove_answered_request(
+                &mut self.answered_requests,
+                &mut self.answered_request_order,
+                &key,
+            );
+        }
+    }
+
+    fn restore_failed_wizard(&mut self, chat_id: &str, wizard: Wizard, cx: &mut Context<Self>) {
+        let key = answered_request_key(chat_id, &wizard.request_id);
+        remove_answered_request(
+            &mut self.answered_requests,
+            &mut self.answered_request_order,
+            &key,
+        );
+        store_cached_wizard(
+            &mut self.wizard_cache,
+            &mut self.wizard_cache_order,
+            key,
+            wizard,
+        );
+        if self.current_key == chat_id {
+            // Re-run normal arbitration: a blocking request remains visible,
+            // while an otherwise-unmasked failed request is restored from the
+            // cache with its page, picks, and typed answer intact.
+            self.on_state_changed(cx);
+        }
+    }
+
+    fn fail_wizard_submission(
+        &mut self,
+        chat_id: &str,
+        wizard: Wizard,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = self.state.read(cx).selected_chat.as_deref() == Some(chat_id);
+        self.restore_failed_wizard(chat_id, wizard, cx);
+        if selected {
+            self.failure = Some(message.into());
+            self.failure_key = Some(chat_id.to_owned());
+            cx.notify();
+        }
+    }
+
+    /// Apply one durable command outcome. Pending answers remain suppressed,
+    /// and Applied waits for the transcript's resolved input frame so stream
+    /// ordering cannot briefly remount the question. Every other terminal
+    /// state restores the exact submitted pages, picks, and typed answers.
+    fn apply_wizard_command_outcome(
+        &mut self,
+        chat_id: &str,
+        wizard: &Wizard,
+        status: SessionCommandStatus,
+        resolution: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match status {
+            SessionCommandStatus::Pending => false,
+            SessionCommandStatus::Applied => true,
+            SessionCommandStatus::Rejected
+            | SessionCommandStatus::Expired
+            | SessionCommandStatus::Superseded
+            | SessionCommandStatus::Cancelled => {
+                self.fail_wizard_submission(
+                    chat_id,
+                    wizard.clone(),
+                    answer_command_failure(status, resolution),
+                    cx,
+                );
+                true
+            }
+        }
+    }
+
+    fn cache_current_wizard(&mut self, cx: &App) {
+        let typed = self.input.read(cx).text().to_owned();
+        let Some(wizard) = self.wizard.as_mut() else {
+            return;
+        };
+        wizard.set_typed(typed);
+        store_cached_wizard(
+            &mut self.wizard_cache,
+            &mut self.wizard_cache_order,
+            answered_request_key(&self.current_key, &wizard.request_id),
+            wizard.clone(),
+        );
+    }
+
+    fn restore_question_draft(&mut self, cx: &mut Context<Self>) {
+        if let Some(draft) = self.question_draft.take() {
+            self.input.update(cx, |input, cx| {
+                input.read_only = false;
+                input.restore(draft, cx);
+            });
+        }
+    }
+
+    fn sync_question_input(&mut self, cx: &mut Context<Self>) {
+        let question = self.wizard.as_ref().and_then(Wizard::current);
+        let allow_custom = question.is_none_or(|q| q.allow_custom);
+        let placeholder = match question {
+            Some(q) if !q.allow_custom && q.multi_select => "Choose options above",
+            Some(q) if !q.allow_custom => "Choose an option above",
+            Some(q) if q.options.is_empty() => "Type your answer",
+            Some(q) if q.multi_select => "Choose options above, or add your own answer",
+            _ => "Type your own answer, or pick an option above",
+        };
+        let text = self
+            .wizard
+            .as_ref()
+            .and_then(|w| w.typed.get(w.page))
+            .cloned()
+            .unwrap_or_default();
+        self.input.update(cx, |input, cx| {
+            input.read_only = !allow_custom;
+            input.set_text(&text, cx);
+            input.set_placeholder(placeholder, cx);
+        });
+    }
+
     fn wizard_select(&mut self, option_ix: usize, cx: &mut Context<Self>) {
         let Some(wizard) = self.wizard.as_mut() else {
             return;
         };
         let step = wizard.select(option_ix);
-        let has_pick = wizard.page_has_pick();
-        self.input.update(cx, |input, cx| {
-            input.set_placeholder(
-                if has_pick {
-                    "Type your own answer, or leave this blank to use the selected option"
-                } else {
-                    "Type your own answer, or pick an option above"
-                },
-                cx,
-            )
-        });
+        if !wizard.current().is_some_and(|q| q.multi_select) {
+            wizard.set_typed(String::new());
+            self.input.update(cx, |input, cx| input.set_text("", cx));
+        }
         match step {
             WizardStep::AutoAdvance => self.schedule_auto_advance(cx),
             WizardStep::Done(answers) => self.wizard_finish(answers, cx),
@@ -6796,45 +7289,79 @@ impl Composer {
     }
 
     fn wizard_advance(&mut self, cx: &mut Context<Self>) {
+        // Mouse Submit, keyboard Enter and auto-advance must use the same
+        // snapshot; an Edited subscription may not have run before a click.
+        let typed = self.input.read(cx).text().to_owned();
         let Some(wizard) = self.wizard.as_mut() else {
             return;
         };
+        wizard.set_typed(typed);
         match wizard.advance() {
             WizardStep::Done(answers) => self.wizard_finish(answers, cx),
             _ => {
+                self.question_scroll.set_offset(point(px(0.0), px(0.0)));
                 // Moving on: clear the shared free-text input for the next page.
-                self.input.update(cx, |input, cx| input.set_text("", cx));
+                self.sync_question_input(cx);
                 cx.notify();
             }
         }
     }
 
     fn wizard_back(&mut self, cx: &mut Context<Self>) {
+        self.advance_task = None;
         if let Some(wizard) = self.wizard.as_mut() {
             wizard.back();
+            self.sync_question_input(cx);
+            self.question_scroll.set_offset(point(px(0.0), px(0.0)));
             cx.notify();
         }
     }
 
-    /// Submit RespondInput and retire the panel.
-    fn wizard_finish(&mut self, answers: Vec<UserInputAnswer>, cx: &mut Context<Self>) {
-        let Some(wizard) = self.wizard.take() else {
+    /// Cancel the whole native request through the same durable response path.
+    /// Capture the visible page first so a rejected cancellation restores the
+    /// user's exact draft instead of the last subscription tick's snapshot.
+    fn wizard_cancel(&mut self, cx: &mut Context<Self>) {
+        let typed = self.input.read(cx).text().to_owned();
+        let Some(wizard) = self.wizard.as_mut() else {
             return;
         };
-        self.advance_task = None;
-        self.answered_requests.insert(wizard.request_id.clone());
-        self.input.update(cx, |input, cx| {
-            input.set_text("", cx);
-            // The panel borrowed the composer input; hand back its identity.
-            input.set_placeholder("Do anything…", cx);
-            input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
-        });
+        wizard.set_typed(typed);
+        self.wizard_finish(Vec::new(), cx);
+    }
+
+    /// Submit RespondInput and retire the panel.
+    fn wizard_finish(&mut self, answers: Vec<UserInputAnswer>, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.failure = Some("Reconnect to send your answer".into());
+            cx.notify();
             return;
         };
         let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
             return;
         };
+        let Some(wizard) = self.wizard.take() else {
+            return;
+        };
+        self.advance_task = None;
+        let answer_key = answered_request_key(&chat_id, &wizard.request_id);
+        remove_cached_wizard(
+            &mut self.wizard_cache,
+            &mut self.wizard_cache_order,
+            &answer_key,
+        );
+        store_answered_request(
+            &mut self.answered_requests,
+            &mut self.answered_request_order,
+            answer_key.clone(),
+        );
+        self.input.update(cx, |input, cx| {
+            input.set_text("", cx);
+            // The panel borrowed the composer input; hand back its identity.
+            input.read_only = false;
+            input.set_placeholder("Do anything…", cx);
+            input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
+        });
+        self.restore_question_draft(cx);
         let request_id = wizard.request_id.clone();
         let command = SessionCommandPayload::RespondInput {
             request_id: request_id.clone(),
@@ -6845,37 +7372,160 @@ impl Composer {
             Ok(value) => serde_json::json!({ "chatId": chat_id, "command": value }),
             Err(_) => return,
         };
-        // `action_task`, NOT `send_task` — see `interrupt`.
-        self.action_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine.client().call(methods::QUEUE_COMMAND, params).await;
-            if let Err(err) = result {
+        // Keep each native response alive independently. A second asynchronous
+        // question may become visible before this command reaches a terminal
+        // ledger state.
+        let task = cx.spawn(async move |this, cx| {
+            let reply = match engine.client().call(methods::QUEUE_COMMAND, params).await {
+                Ok(reply) => reply,
+                Err(err) => {
+                    this.update(cx, |composer, cx| {
+                        composer.fail_wizard_submission(
+                            &failure_chat,
+                            wizard.clone(),
+                            format!("Answer failed: {err}"),
+                            cx,
+                        );
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            let Some(command_id) = reply
+                .get("commandId")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+            else {
                 this.update(cx, |composer, cx| {
-                    composer.failure = Some(format!("Answer failed: {err}").into());
-                    composer.failure_key = Some(failure_chat);
-                    // The answer never left this device — put the panel back.
-                    composer.answered_requests.remove(&request_id);
-                    cx.notify();
+                    composer.fail_wizard_submission(
+                        &failure_chat,
+                        wizard.clone(),
+                        "Answer status unavailable: the engine did not return a command id"
+                            .into(),
+                        cx,
+                    );
                 })
                 .ok();
                 return;
-            }
-            // Safety net against a dead-looking session: the command queued,
-            // but the host may still REJECT it (e.g. the run's resolver is
-            // gone). If the very same request is still the live pending input
-            // once the host has had ample time to execute and the resolved
-            // flag to sync back, the answer demonstrably didn't take —
-            // un-hide the panel instead of leaving the question unanswerable.
-            cx.background_executor().timer(Duration::from_secs(2)).await;
-            this.update(cx, |composer, cx| {
-                let transcript = composer.state.read(cx).transcript.clone();
-                let still_pending = pending_input_request(&transcript)
-                    .is_some_and(|(pending_id, _)| pending_id == request_id);
-                if still_pending && composer.answered_requests.remove(&request_id) {
-                    cx.notify();
+            };
+
+            // A queued command can outlive a connection. Re-subscribe with the
+            // same durable id after transport gaps; a terminal frame is the
+            // only authority for retiring or restoring the captured wizard.
+            let mut retry_delay = COMMAND_WATCH_RETRY_INITIAL;
+            loop {
+                let mut subscription = match engine
+                    .client()
+                    .subscribe_checked(
+                        methods::WATCH_COMMAND,
+                        serde_json::json!({
+                            "chatId": failure_chat,
+                            "commandId": command_id,
+                        }),
+                    )
+                    .await
+                {
+                    Ok(subscription) => subscription,
+                    Err(RpcError::Transport(_) | RpcError::Closed) => {
+                        if this.update(cx, |_, _| {}).is_err() {
+                            return;
+                        }
+                        cx.background_executor().timer(retry_delay).await;
+                        retry_delay = next_command_watch_retry(retry_delay);
+                        continue;
+                    }
+                    Err(RpcError::UnknownMethod(_)) => {
+                        this.update(cx, |composer, cx| {
+                            composer.fail_wizard_submission(
+                                &failure_chat,
+                                wizard.clone(),
+                                "This engine cannot confirm answer delivery. Update it and retry."
+                                    .into(),
+                                cx,
+                            );
+                        })
+                        .ok();
+                        return;
+                    }
+                    Err(err) => {
+                        this.update(cx, |composer, cx| {
+                            composer.fail_wizard_submission(
+                                &failure_chat,
+                                wizard.clone(),
+                                format!("Answer status unavailable: {err}"),
+                                cx,
+                            );
+                        })
+                        .ok();
+                        return;
+                    }
+                };
+
+                while let Some(value) = subscription.recv().await {
+                    let frame = match serde_json::from_value::<CommandOutcomeFrame>(value) {
+                        Ok(frame) if frame.command_id == command_id => frame,
+                        Ok(frame) => {
+                            this.update(cx, |composer, cx| {
+                                composer.fail_wizard_submission(
+                                    &failure_chat,
+                                    wizard.clone(),
+                                    format!(
+                                        "Answer status unavailable: expected command {command_id}, got {}",
+                                        frame.command_id
+                                    ),
+                                    cx,
+                                );
+                            })
+                            .ok();
+                            return;
+                        }
+                        Err(err) => {
+                            this.update(cx, |composer, cx| {
+                                composer.fail_wizard_submission(
+                                    &failure_chat,
+                                    wizard.clone(),
+                                    format!("Answer status unavailable: invalid command update ({err})"),
+                                    cx,
+                                );
+                            })
+                            .ok();
+                            return;
+                        }
+                    };
+                    retry_delay = COMMAND_WATCH_RETRY_INITIAL;
+                    let terminal = match this.update(cx, |composer, cx| {
+                        composer.apply_wizard_command_outcome(
+                            &failure_chat,
+                            &wizard,
+                            frame.status,
+                            frame.resolution.as_deref(),
+                            cx,
+                        )
+                    }) {
+                        Ok(terminal) => terminal,
+                        Err(_) => return,
+                    };
+                    if terminal {
+                        return;
+                    }
                 }
-            })
-            .ok();
-        }));
+
+                if this.update(cx, |_, _| {}).is_err() {
+                    return;
+                }
+                cx.background_executor().timer(retry_delay).await;
+                retry_delay = next_command_watch_retry(retry_delay);
+            }
+        });
+        // This command must outlive the currently visible wizard, but retaining
+        // every completed handle would grow for the lifetime of the composer.
+        // Detaching keeps the independent submission alive and lets GPUI retire
+        // its allocation as soon as the future completes.
+        task.detach();
+        // Locally answered nonblocking requests are skipped immediately; do not
+        // wait for the document's resolved frame before mounting the next one.
+        self.on_state_changed(cx);
         cx.notify();
     }
 
@@ -6914,12 +7564,14 @@ impl Composer {
 
     // ---- render pieces ----
 
-    /// The agent-asked-a-question panel (zeron question-panel.tsx), rendered in
-    /// place of the composer: the same floating-pill chrome (`rounded-[26px]
-    /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
-    /// "1/3" counter chip, option rows with number kbd chips, a free-text
-    /// override over a hairline, and Back / Next-Submit footer.
-    fn render_wizard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// Agent questions share the activity tray above the composer. The existing
+    /// input remains the free-text answer, with the wizard's paging and shortcuts.
+    fn render_wizard(
+        &mut self,
+        max_height: Pixels,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
             return gpui::Empty.into_any_element();
@@ -6931,194 +7583,394 @@ impl Composer {
         let page = wizard.page;
         let last = page + 1 >= wizard.questions.len();
         let typed_empty = self.input.read(cx).is_empty();
-        let can_advance = wizard.page_has_pick() || !typed_empty;
+        let can_advance = wizard.page_has_pick() || (question.allow_custom && !typed_empty);
+        // The answer field keeps the ordinary compact pill at one line, then
+        // grows with the measured rich-text content. At the cap, the input's
+        // own scroll/caret machinery takes over instead of clipping the text.
+        const ANSWER_PAD_V: f32 = 24.0;
+        let answer_input_height = self
+            .input
+            .read(cx)
+            .measured_content_height()
+            .clamp(INPUT_LINE_HEIGHT, TEXTAREA_MAX - ANSWER_PAD_V);
+        let answer_height =
+            (answer_input_height + ANSWER_PAD_V + PILL_BORDER_V).max(COMPACT_TOTAL_HEIGHT);
+        self.input.update(cx, |input, cx| {
+            if input.viewport_height != Some(answer_input_height)
+                || input.settled_viewport_height != Some(answer_input_height)
+                || input.resizing
+                || input.overflow_top_padding != 0.0
+            {
+                input.viewport_height = Some(answer_input_height);
+                input.settled_viewport_height = Some(answer_input_height);
+                input.resizing = false;
+                input.overflow_top_padding = 0.0;
+                cx.notify();
+            }
+        });
 
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // Selection reads on the row only while no typed override exists
             // (typed answers win — zeron question-panel.tsx `isSel`).
-            let picked = wizard.is_picked(ix) && typed_empty;
+            let picked = wizard.is_picked(ix) && (question.multi_select || typed_empty);
+            let focus_accent = theme.accent;
             div()
                 .id(("wizard-option", ix))
+                .role(Role::Button)
+                .aria_label(SharedString::from(label.clone()))
+                .aria_toggled(picked.into())
+                .when(ix < 9, |el| {
+                    el.aria_keyshortcuts(SharedString::from(format!("{}", ix + 1)))
+                })
+                .tab_index(0)
+                .focus_visible(move |s| {
+                    s.shadow(vec![gpui::BoxShadow {
+                        color: focus_accent,
+                        offset: point(px(0.0), px(0.0)),
+                        blur_radius: px(0.0),
+                        spread_radius: px(2.0),
+                        inset: true,
+                    }])
+                })
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(12.0))
-                .px(px(14.0))
-                .py(px(10.0))
-                .rounded(px(12.0))
-                .border_1()
-                .border_color(if picked {
-                    crate::theme::ink(0.16)
-                } else {
-                    gpui::transparent_black()
-                })
-                // zeron question-panel.tsx option rows: `transition-colors`.
+                .gap(px(8.0))
+                .px(px(8.0))
+                .py(px(6.0))
+                .rounded(px(8.0))
+                // Options are rows within one shared tray surface, like the
+                // queue. Selection is carried by the compact control and a
+                // quiet wash instead of a stack of raised, bordered cards.
                 .bg(if picked {
-                    crate::theme::ink(0.09)
+                    crate::theme::ink(0.07)
                 } else {
                     motion::hover_blend(
                         &format!("wizard-option-{ix}"),
-                        crate::theme::ink(0.025),
-                        crate::theme::ink(0.06),
+                        gpui::transparent_black(),
+                        crate::theme::ink(0.045),
                     )
                 })
                 .on_hover(motion::hover_listener(format!("wizard-option-{ix}")))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(ix, cx)))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.wizard_select(ix, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(
+                    div()
+                        .size(px(16.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(if question.multi_select { 4.0 } else { 8.0 }))
+                        .border_1()
+                        .border_color(if picked {
+                            theme.text.opacity(0.9)
+                        } else {
+                            theme.text_muted.opacity(0.45)
+                        })
+                        .when(picked, |el| el.bg(theme.text))
+                        .when(picked, |el| {
+                            el.child(
+                                crate::icons::icon(crate::icons::CHECK)
+                                    .size(px(10.0))
+                                    .text_color(theme.bg),
+                            )
+                        }),
+                )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(crate::typography::ui_rems(13.5))
+                        .text_size(crate::typography::ui_rems(13.0))
+                        .line_height(px(17.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(if picked {
-                            theme.text
-                        } else {
-                            theme.text.opacity(0.9)
-                        })
-                        .child(SharedString::from(label.clone())),
+                        .text_color(theme.text.opacity(if picked { 1.0 } else { 0.9 }))
+                        .child(SharedString::from(label.clone()))
+                        .when_some(
+                            question
+                                .option_descriptions
+                                .get(ix)
+                                .filter(|description| !description.is_empty()),
+                            |row, description| {
+                                row.child(
+                                    div()
+                                        .mt(px(1.0))
+                                        .font_weight(gpui::FontWeight::NORMAL)
+                                        .text_size(crate::typography::ui_rems(11.5))
+                                        .line_height(px(15.0))
+                                        .text_color(theme.text_muted)
+                                        .child(SharedString::from(description.clone())),
+                                )
+                            },
+                        ),
                 )
                 .when(ix < 9, |el| {
                     el.child(
-                        // Number kbd chip: `size-[22px] rounded-md text-[11px]`.
                         div()
                             .flex_none()
-                            .size(px(22.0))
+                            .size(px(20.0))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(6.0))
-                            .bg(if picked {
-                                crate::theme::ink(0.16)
-                            } else {
-                                crate::theme::ink(0.05)
-                            })
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(if picked {
-                                theme.text
-                            } else {
-                                theme.text_muted.opacity(0.6)
-                            })
+                            .rounded(px(5.0))
+                            .border_1()
+                            .border_color(theme.border.opacity(0.7))
+                            .text_size(crate::typography::ui_rems(10.5))
+                            .text_color(theme.text_muted.opacity(0.65))
                             .child(SharedString::from(format!("{}", ix + 1))),
                     )
                 })
         });
 
+        let cancel = div()
+            .id("wizard-cancel")
+            .role(Role::Button)
+            .aria_label("Cancel question")
+            .size(px(24.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .text_color(theme.text_muted)
+            .bg(motion::hover_blend(
+                "wizard-cancel",
+                gpui::transparent_black(),
+                crate::theme::ink(0.07),
+            ))
+            .on_hover(motion::hover_listener("wizard-cancel"))
+            .cursor_pointer()
+            .tab_index(0)
+            .focus_visible({
+                let accent = theme.accent;
+                move |s| {
+                    s.shadow(vec![gpui::BoxShadow {
+                        color: accent,
+                        offset: point(px(0.0), px(0.0)),
+                        blur_radius: px(0.0),
+                        spread_radius: px(2.0),
+                        inset: false,
+                    }])
+                }
+            })
+            .tooltip(|_, cx| {
+                cx.new(|_| AppshotActionTooltip("Cancel question".into()))
+                    .into()
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.wizard_cancel(cx)))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.wizard_cancel(cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(
+                crate::icons::icon(crate::icons::CLOSE)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
+            );
+
+        let question_body = div()
+            .px(px(8.0))
+            .pt(px(8.0))
+            .pb(px(6.0))
+            .flex()
+            .flex_col()
+            .gap(px(5.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .line_height(px(14.0))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(question.header.clone()))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .when(wizard.questions.len() > 1, |el| {
+                                el.child(SharedString::from(counter))
+                            })
+                            .child(cancel),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(crate::typography::ui_rems(13.5))
+                    .line_height(px(18.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(SharedString::from(question.question.clone())),
+            )
+            .when(question.multi_select, |el| {
+                el.child(
+                    div()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .line_height(px(14.0))
+                        .text_color(theme.text_muted)
+                        .child("Choose any that apply."),
+                )
+            })
+            .child(div().flex().flex_col().gap(px(1.0)).children(options));
+        let questions = crate::edge_fade::edge_faded(
+            Theme::TRANSCRIPT_FADE_BAND,
+            true,
+            true,
+            div()
+                .id("composer-question-rows")
+                .max_h(max_height)
+                .overflow_y_scroll()
+                .track_scroll(&self.question_scroll)
+                .child(question_body),
+        )
+        .fade_overflow_y(&self.question_scroll);
+        // Match the ordinary composer edge rather than introducing a second
+        // answer-card material. The action stays circular and in the same
+        // bottom-right position as Send; its label remains available to AT.
+        let answer_border = if theme.is_frost() {
+            match theme.appearance {
+                crate::theme::Appearance::Dark => gpui::hsla(210.0 / 360.0, 0.18, 0.78, 0.09),
+                crate::theme::Appearance::Light => gpui::hsla(210.0 / 360.0, 0.18, 0.32, 0.10),
+            }
+        } else {
+            theme.border
+        };
+        let advance_label = if last {
+            "Submit answer"
+        } else {
+            "Next question"
+        };
+        let advance = div()
+            .id("wizard-submit")
+            .role(Role::Button)
+            .aria_label(advance_label)
+            .size(px(28.0))
+            .flex_none()
+            .rounded_full()
+            .bg(theme.text)
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(!can_advance, |el| el.opacity(0.35))
+            .when(can_advance, |el| {
+                el.tab_index(0)
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.85))
+                    .focus_visible({
+                        let accent = theme.accent;
+                        move |s| {
+                            s.shadow(vec![gpui::BoxShadow {
+                                color: accent,
+                                offset: point(px(0.0), px(0.0)),
+                                blur_radius: px(0.0),
+                                spread_radius: px(2.0),
+                                inset: false,
+                            }])
+                        }
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx)))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.wizard_advance(cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+            })
+            .child(
+                crate::icons::icon(crate::icons::ARROW_UP)
+                    .size(px(14.0))
+                    .text_color(theme.bg),
+            );
+        let answer = div()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    window.focus(&this.input.focus_handle(cx), cx);
+                }),
+            )
+            .h(px(answer_height))
+            .rounded(px(COMPOSER_RADIUS))
+            .border_1()
+            .border_color(answer_border)
+            .when(theme.is_frost(), |el| el.bg(theme.composer_sidebar_tint()))
+            .when(!theme.is_frost(), |el| {
+                el.bg(theme.input_glass_bg()).shadow_lg()
+            })
+            .flex()
+            .items_center()
+            .when(page > 0, |el| {
+                el.child(
+                    crate::popover::btn_ghost(&theme, "Back", "wizard-back")
+                        .id("wizard-back")
+                        .role(Role::Button)
+                        .aria_label("Previous question")
+                        .ml(px(8.0))
+                        .px(px(8.0))
+                        .py(px(5.0))
+                        .tab_index(0)
+                        .focus_visible({
+                            let accent = theme.accent;
+                            move |s| {
+                                s.shadow(vec![gpui::BoxShadow {
+                                    color: accent,
+                                    offset: point(px(0.0), px(0.0)),
+                                    blur_radius: px(0.0),
+                                    spread_radius: px(2.0),
+                                    inset: false,
+                                }])
+                            }
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                this.wizard_back(cx);
+                                cx.stop_propagation();
+                            }
+                        })),
+                )
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .px(px(if page > 0 { 8.0 } else { 16.0 }))
+                    .child(self.input.clone()),
+            )
+            .child(div().flex_none().pl(px(12.0)).pr(px(12.0)).child(advance));
         div()
             .id("question-panel")
             .track_focus(&self.wizard_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_wizard_key(event, window, cx)
             }))
-            .rounded(px(COMPOSER_RADIUS))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.input_glass_bg())
-            .when(!theme.is_frost(), |el| el.shadow_lg())
             .flex()
             .flex_col()
             .child(
                 div()
-                    .px(px(16.0))
-                    .pt(px(16.0))
-                    .flex()
-                    .flex_col()
-                    // Header: tracked uppercase + counter chip when paged.
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(10.0))
-                            .child(
-                                div()
-                                    .text_size(crate::typography::ui_rems(10.5))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text_muted.opacity(0.6))
-                                    .child(SharedString::from(crate::popover::tracked_upper(
-                                        &question.header,
-                                    ))),
-                            )
-                            .when(wizard.questions.len() > 1, |el| {
-                                el.child(
-                                    div()
-                                        .h(px(20.0))
-                                        .px(px(6.0))
-                                        .flex()
-                                        .items_center()
-                                        .rounded(px(6.0))
-                                        .bg(crate::theme::ink(0.06))
-                                        .text_size(crate::typography::ui_rems(10.0))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme.text_muted.opacity(0.6))
-                                        .child(SharedString::from(counter)),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .mt(px(6.0))
-                            .text_size(crate::typography::ui_rems(15.0))
-                            .line_height(px(20.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(SharedString::from(question.question.clone())),
-                    )
-                    .when(question.multi_select, |el| {
-                        el.child(
-                            div()
-                                .mt(px(4.0))
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text_muted.opacity(0.65))
-                                .child(SharedString::from("Select one or more options.")),
-                        )
-                    })
-                    .child(
-                        div()
-                            .mt(px(12.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.0))
-                            .children(options),
-                    )
-                    // Free-text override over a hairline (shares the composer
-                    // input entity).
-                    .child(
-                        div()
-                            .mt(px(12.0))
-                            .border_t_1()
-                            .border_color(crate::theme::hairline(0.06))
-                            .pt(px(12.0))
-                            .pb(px(4.0))
-                            .px(px(4.0))
-                            .child(self.input.clone()),
-                    ),
+                    .mx(px(QUEUE_SIDE_INSET))
+                    // These siblings have no column gap: tuck exactly the
+                    // queue overlap behind the answer pill. The tray's bottom
+                    // border is opened below so frost cannot reveal a square
+                    // edge through the translucent composer.
+                    .mb(px(-QUEUE_COMPOSER_OVERLAP))
+                    .child(crate::frost::frosted(
+                        crate::queue::PANEL_RADIUS,
+                        crate::frost::MENU_BLUR,
+                        crate::queue::queue_panel_surface(&theme)
+                            .border_b(px(0.0))
+                            .child(questions),
+                    )),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_between()
-                    .items_center()
-                    .px(px(16.0))
-                    .pb(px(16.0))
-                    .pt(px(4.0))
-                    .child(if page > 0 {
-                        crate::popover::btn_ghost(&theme, "Back", "wizard-back")
-                            .id("wizard-back")
-                            .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
-                            .into_any_element()
-                    } else {
-                        gpui::Empty.into_any_element()
-                    })
-                    .child(
-                        crate::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
-                            .id("wizard-submit")
-                            .px(px(16.0))
-                            .when(!can_advance, |el| el.opacity(0.4))
-                            .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
-                    ),
-            )
+            .child(crate::frost::frosted(COMPOSER_RADIUS, 16.0, answer))
             .into_any_element()
     }
 
@@ -7436,15 +8288,21 @@ impl Render for Composer {
                 ))
             });
 
-        if wizard_active {
-            let wizard = self.render_wizard(cx);
-            return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
-        }
+        let has_queue = !self.state.read(cx).queue.is_empty();
+        let tray_limits = composer_tray_limits(
+            f32::from(window.viewport_size().height),
+            wizard_active,
+            has_queue,
+        );
+        let container = container.when_some(self.render_agent_activity(window, cx), |el, panel| {
+            el.child(panel)
+        });
 
         // What is waiting to be sent, stacked directly above the box it was
         // typed in — the queue is a property of this composer, not a panel
         // somewhere else.
-        let show_queue_latest_shortcut = self.queue_shortcut_revealed
+        let show_queue_latest_shortcut = !wizard_active
+            && self.queue_shortcut_revealed
             && self.editing_queued.is_none()
             && !self.pickers.read(cx).is_open()
             && !composer_has_content(
@@ -7453,7 +8311,12 @@ impl Render for Composer {
                 self.staged_comments(cx).len(),
             );
         let container = container.when_some(
-            self.render_queue_panel(show_queue_latest_shortcut, window, cx),
+            self.render_queue_panel(
+                show_queue_latest_shortcut,
+                px(tray_limits.queue),
+                window,
+                cx,
+            ),
             |el, panel| {
                 el.child(motion::fade_quick(
                     "composer-queue",
@@ -7480,6 +8343,11 @@ impl Render for Composer {
                 }
             }))
         });
+
+        if wizard_active {
+            let wizard = self.render_wizard(px(tray_limits.question), window, cx);
+            return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
+        }
 
         // Route coordination must not force an established thread into the
         // two-row layout. Short drafts keep the original skinny composer.
@@ -8070,6 +8938,182 @@ impl Render for Composer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt as _;
+
+    struct WizardOutcomeRpc {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+        reject: tokio::sync::watch::Receiver<bool>,
+    }
+
+    #[async_trait::async_trait]
+    impl zeron_rpc::RpcService for WizardOutcomeRpc {
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<zeron_rpc::RpcReply, RpcError> {
+            self.calls.lock().unwrap().push((method.to_owned(), params));
+            match method {
+                methods::QUEUE_COMMAND => zeron_rpc::RpcReply::value(
+                    &serde_json::json!({ "commandId": "answer-command" }),
+                ),
+                methods::WATCH_COMMAND => {
+                    let reject = self.reject.clone();
+                    let stream =
+                        futures::stream::unfold((0_u8, reject), |(phase, mut reject)| async move {
+                            match phase {
+                                0 => Some((
+                                    serde_json::json!({
+                                        "commandId": "answer-command",
+                                        "status": "pending",
+                                        "resolution": null,
+                                    }),
+                                    (1, reject),
+                                )),
+                                1 => {
+                                    while !*reject.borrow() {
+                                        reject.changed().await.ok()?;
+                                    }
+                                    Some((
+                                        serde_json::json!({
+                                            "commandId": "answer-command",
+                                            "status": "rejected",
+                                            "resolution": "native resolver closed",
+                                        }),
+                                        (2, reject),
+                                    ))
+                                }
+                                _ => None,
+                            }
+                        })
+                        .boxed();
+                    Ok(zeron_rpc::RpcReply::Stream(stream))
+                }
+                other => Err(RpcError::UnknownMethod(other.into())),
+            }
+        }
+    }
+
+    #[test]
+    fn dense_trays_share_less_than_half_the_viewport() {
+        let limits = composer_tray_limits(600.0, true, true);
+        assert_eq!(limits.activity, 72.0);
+        assert_eq!(limits.question, 132.0);
+        assert_eq!(limits.queue, 84.0);
+        assert!(limits.activity + limits.question + limits.queue <= 600.0 * 0.48);
+
+        let question_only = composer_tray_limits(600.0, true, false);
+        assert_eq!(question_only.question, 210.0);
+        assert_eq!(question_only.queue, 0.0);
+    }
+
+    #[test]
+    fn answered_native_request_ids_are_scoped_to_their_chat() {
+        assert_ne!(
+            answered_request_key("chat-a", "request-1"),
+            answered_request_key("chat-b", "request-1")
+        );
+        let mut answered = HashSet::new();
+        let mut order = VecDeque::new();
+        for index in 0..ANSWERED_REQUEST_MAX + 2 {
+            store_answered_request(
+                &mut answered,
+                &mut order,
+                answered_request_key("chat", &format!("request-{index}")),
+            );
+        }
+        assert_eq!(answered.len(), ANSWERED_REQUEST_MAX);
+        assert_eq!(order.len(), ANSWERED_REQUEST_MAX);
+        assert!(!answered.contains(&answered_request_key("chat", "request-0")));
+    }
+
+    #[test]
+    fn command_watch_retry_backoff_is_bounded() {
+        let mut delay = COMMAND_WATCH_RETRY_INITIAL;
+        let mut observed = Vec::new();
+        for _ in 0..6 {
+            observed.push(delay.as_secs());
+            delay = next_command_watch_retry(delay);
+        }
+        assert_eq!(observed, [1, 2, 4, 8, 15, 15]);
+    }
+
+    #[test]
+    fn displaced_wizard_cache_is_bounded_and_keeps_recent_navigation_state() {
+        let mut cache = HashMap::new();
+        let mut order = VecDeque::new();
+        for index in 0..WIZARD_CACHE_MAX + 3 {
+            let request_id = format!("request-{index}");
+            store_cached_wizard(
+                &mut cache,
+                &mut order,
+                answered_request_key("chat", &request_id),
+                Wizard::new(request_id, vec![]),
+            );
+        }
+        assert_eq!(cache.len(), WIZARD_CACHE_MAX);
+        assert_eq!(order.len(), WIZARD_CACHE_MAX);
+        assert!(!cache.contains_key(&answered_request_key("chat", "request-0")));
+        let newest = answered_request_key("chat", &format!("request-{}", WIZARD_CACHE_MAX + 2));
+        assert_eq!(
+            take_cached_wizard(&mut cache, &mut order, &newest)
+                .unwrap()
+                .request_id,
+            newest.1.clone()
+        );
+        assert!(!order.contains(&newest));
+    }
+
+    #[gpui::test]
+    fn resolved_frames_prune_selected_chat_request_state(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.selected_chat = Some("chat-a".into());
+            state.transcript = vec![SessionMessageEntry {
+                id: "entry".into(),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Input {
+                    id: "input".into(),
+                    request_id: "resolved".into(),
+                    questions: vec![],
+                    resolved: true,
+                }],
+                created_at: 0,
+                device_id: "device".into(),
+                status: None,
+                continuation_of: None,
+            }];
+        });
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, cx| {
+            for chat in ["chat-a", "chat-b"] {
+                store_cached_wizard(
+                    &mut composer.wizard_cache,
+                    &mut composer.wizard_cache_order,
+                    answered_request_key(chat, "resolved"),
+                    Wizard::new("resolved".into(), vec![]),
+                );
+                store_answered_request(
+                    &mut composer.answered_requests,
+                    &mut composer.answered_request_order,
+                    answered_request_key(chat, "resolved"),
+                );
+            }
+
+            composer.on_state_changed(cx);
+
+            let selected = answered_request_key("chat-a", "resolved");
+            let other = answered_request_key("chat-b", "resolved");
+            assert!(!composer.wizard_cache.contains_key(&selected));
+            assert!(!composer.wizard_cache_order.contains(&selected));
+            assert!(!composer.answered_requests.contains(&selected));
+            assert!(!composer.answered_request_order.contains(&selected));
+            assert!(composer.wizard_cache.contains_key(&other));
+            assert!(composer.wizard_cache_order.contains(&other));
+            assert!(composer.answered_requests.contains(&other));
+            assert!(composer.answered_request_order.contains(&other));
+        });
+    }
 
     fn composer_focus_window(
         cx: &mut gpui::TestAppContext,
@@ -8095,6 +9139,38 @@ mod tests {
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
         (dir, window)
+    }
+
+    #[gpui::test]
+    fn conversation_switch_resets_every_tray_viewport(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.current_key = "chat-a".into();
+                composer.activity_chat = Some("chat-a".into());
+                composer.activity_expanded = true;
+                composer.activity_height = 180.0;
+                composer
+                    .activity_scroll
+                    .set_offset(point(px(0.0), px(-80.0)));
+                composer
+                    .question_scroll
+                    .set_offset(point(px(0.0), px(-60.0)));
+                composer.queue_scroll.set_offset(point(px(0.0), px(-40.0)));
+                composer.state.update(cx, |state, _| {
+                    state.selected_chat = Some("chat-b".into());
+                });
+                composer.on_state_changed(cx);
+
+                assert_eq!(composer.current_key, "chat-b");
+                assert_eq!(composer.activity_chat.as_deref(), Some("chat-b"));
+                assert!(!composer.activity_expanded);
+                assert_eq!(composer.activity_height, 0.0);
+                assert_eq!(composer.activity_scroll.offset().y, px(0.0));
+                assert_eq!(composer.question_scroll.offset().y, px(0.0));
+                assert_eq!(composer.queue_scroll.offset().y, px(0.0));
+            })
+            .unwrap();
     }
 
     #[gpui::test]
@@ -8823,6 +9899,9 @@ mod tests {
             header: "Header".into(),
             question: format!("Question {id}"),
             options: options.iter().map(|s| s.to_string()).collect(),
+            option_descriptions: Vec::new(),
+            allow_custom: true,
+            non_blocking: false,
             multi_select: multi,
         }
     }
@@ -9670,8 +10749,8 @@ mod tests {
             pending_input_request(&t).map(|(id, _)| id),
             Some("r1".into())
         );
-        // A NEWER assistant entry supersedes an unanswered question.
-        let t = vec![
+        // Nonblocking questions remain answerable when the agent continues.
+        let mut t = vec![
             entry(Some(MessageStatus::Aborted), vec![input_part.clone()]),
             SessionMessageEntry {
                 id: "m2".into(),
@@ -9686,7 +10765,71 @@ mod tests {
                 continuation_of: None,
             },
         ];
-        assert!(pending_input_request(&t).is_none());
+        assert!(
+            pending_input_request(&t).is_none(),
+            "Old blocking requests stay superseded"
+        );
+        if let MessagePart::Input { questions, .. } = &mut t[0].parts[0] {
+            questions[0].non_blocking = true;
+        }
+        assert_eq!(
+            pending_input_request(&t).map(|(id, _)| id),
+            Some("r1".into())
+        );
+        let mut next_question = question("q2", &["b"], false);
+        next_question.non_blocking = true;
+        t.push(entry(
+            Some(MessageStatus::Complete),
+            vec![MessagePart::Input {
+                id: "in-r2".into(),
+                request_id: "r2".into(),
+                questions: vec![next_question],
+                resolved: false,
+            }],
+        ));
+        assert_eq!(
+            pending_input_request_matching(&t, |request_id| request_id != "r1").map(|(id, _)| id),
+            Some("r2".into()),
+            "locally answered nonblocking requests must not hide the next question"
+        );
+        t.push(entry(
+            Some(MessageStatus::Streaming),
+            vec![MessagePart::Input {
+                id: "in-r3".into(),
+                request_id: "r3".into(),
+                questions: vec![question("blocking", &["continue"], false)],
+                resolved: false,
+            }],
+        ));
+        assert_eq!(
+            pending_input_request(&t).map(|(id, _)| id),
+            Some("r3".into()),
+            "the active blocking request outranks older asynchronous questions"
+        );
+        let mut newest_question = question("q4", &["c"], false);
+        newest_question.non_blocking = true;
+        t.push(entry(
+            Some(MessageStatus::Complete),
+            vec![MessagePart::Input {
+                id: "in-r4".into(),
+                request_id: "r4".into(),
+                questions: vec![newest_question],
+                resolved: false,
+            }],
+        ));
+        assert_eq!(
+            pending_input_request(&t).map(|(id, _)| id),
+            Some("r3".into()),
+            "a newer asynchronous request must not mask blocking input"
+        );
+        assert_eq!(
+            pending_input_request_matching(&t, |request_id| {
+                request_id != "r1" && request_id != "r3"
+            })
+            .map(|(id, _)| id),
+            Some("r2".into()),
+            "the asynchronous queue resumes after the blocking request"
+        );
         // Resolved part → no panel.
         let resolved = MessagePart::Input {
             id: "in-r1".into(),
@@ -9811,6 +10954,261 @@ mod appshot_rebase_tests {
 
 #[cfg(feature = "appshots-fixture")]
 impl Composer {
+    pub fn fixture_activity(
+        &mut self,
+        calls: Vec<zeron_proto::ToolCall>,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.wizard = None;
+        self.current_key = "composer-fixture".into();
+        self.state.update(cx, |state, cx| {
+            state.selected_chat = Some("composer-fixture".into());
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "composer-fixture",
+                    "deviceId": "fixture-device",
+                    "title": "Codex composer fixture",
+                    "archived": false,
+                    "cwd": "/fixture",
+                    "branch": "fixture",
+                    "checkoutId": "fixture-checkout",
+                    "lastMessagePreview": null,
+                    "lastMessageAt": null,
+                    "createdAt": chrono::Utc::now(),
+                    "config": {
+                        "harness": HarnessId::Codex,
+                        "model": null,
+                        "reasoning": null,
+                        "modelOptions": {},
+                        "sandbox": SandboxLevel::WorkspaceWrite
+                    }
+                }))
+                .expect("valid Codex composer fixture chat"),
+            ];
+            state.queue.clear();
+            state.transcript = vec![SessionMessageEntry {
+                id: "fixture-entry".into(),
+                role: MessageRole::Assistant,
+                created_at: 0,
+                device_id: "fixture".into(),
+                status: None,
+                continuation_of: None,
+                parts: calls
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, call)| {
+                        serde_json::from_value(serde_json::json!({
+                            "kind": "tool",
+                            "id": format!("fixture-{index}"),
+                            "call": call,
+                            "resolved": true,
+                            "isError": false
+                        }))
+                        .unwrap()
+                    })
+                    .collect(),
+            }];
+            cx.notify();
+        });
+        self.activity_chat = Some(self.current_key.clone());
+        self.activity_expanded = expanded;
+        self.activity_motion = activity::ActivityMotion::default();
+        self.input.update(cx, |input, cx| {
+            input.read_only = false;
+            input.set_placeholder("Do anything…", cx);
+            input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
+            input.set_text("", cx);
+        });
+        cx.notify();
+    }
+
+    pub fn fixture_harness(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        if harness == HarnessId::Codex {
+            self.pickers
+                .update(cx, |pickers, cx| pickers.fixture_model_catalog(cx));
+        }
+        self.state.update(cx, |state, cx| {
+            if let Some(config) = state
+                .chats
+                .iter_mut()
+                .find(|chat| chat.id == "composer-fixture")
+                .and_then(|chat| chat.config.as_mut())
+            {
+                config.harness = harness;
+            }
+            cx.notify();
+        });
+        self.on_state_changed(cx);
+        cx.notify();
+    }
+
+    pub fn fixture_message_draft(&self, cx: &App) -> String {
+        self.input.read(cx).text().to_owned()
+    }
+
+    pub fn fixture_set_message_draft(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+        cx.notify();
+    }
+
+    pub fn fixture_goal_edit_state(&self, window: &Window, cx: &App) -> (bool, bool) {
+        (
+            self.goal_edit_chat.is_some(),
+            self.goal_input.focus_handle(cx).is_focused(window),
+        )
+    }
+
+    pub fn fixture_goal_edit_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        assert!(self.goal_edit_chat.is_some());
+        self.goal_input
+            .update(cx, |input, cx| input.set_text(text, cx));
+        cx.notify();
+    }
+
+    pub fn fixture_activity_keyboard_state(&self, window: &Window) -> (bool, bool) {
+        (
+            self.activity_focus.is_focused(window),
+            self.activity_expanded,
+        )
+    }
+
+    pub fn fixture_question(&mut self, question: UserInputQuestion, cx: &mut Context<Self>) {
+        self.fixture_pending_questions("fixture-question", vec![question], cx);
+    }
+
+    pub fn fixture_paginated_question(
+        &mut self,
+        questions: Vec<UserInputQuestion>,
+        cx: &mut Context<Self>,
+    ) {
+        self.fixture_pending_questions("fixture-question-pages", questions, cx);
+        self.input.update(cx, |input, cx| {
+            input.set_text("Keep this typed answer when I return", cx)
+        });
+        self.wizard_advance(cx);
+        cx.notify();
+    }
+
+    fn fixture_pending_questions(
+        &mut self,
+        request_id: &str,
+        questions: Vec<UserInputQuestion>,
+        cx: &mut Context<Self>,
+    ) {
+        const CHAT_ID: &str = "composer-fixture";
+        const ENTRY_ID: &str = "fixture-question-entry";
+        self.wizard = None;
+        self.current_key = CHAT_ID.into();
+        remove_answered_request(
+            &mut self.answered_requests,
+            &mut self.answered_request_order,
+            &answered_request_key(CHAT_ID, request_id),
+        );
+        self.state.update(cx, |state, cx| {
+            state.selected_chat = Some(CHAT_ID.into());
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": CHAT_ID,
+                    "deviceId": "fixture-device",
+                    "title": "Codex composer fixture",
+                    "archived": false,
+                    "cwd": "/fixture",
+                    "branch": "fixture",
+                    "checkoutId": "fixture-checkout",
+                    "lastMessagePreview": null,
+                    "lastMessageAt": null,
+                    "createdAt": chrono::Utc::now(),
+                    "config": {
+                        "harness": HarnessId::Codex,
+                        "model": null,
+                        "reasoning": null,
+                        "modelOptions": {},
+                        "sandbox": SandboxLevel::WorkspaceWrite
+                    }
+                }))
+                .expect("valid Codex composer fixture chat"),
+            ];
+            state.transcript.retain(|entry| entry.id != ENTRY_ID);
+            state.transcript.push(SessionMessageEntry {
+                id: ENTRY_ID.into(),
+                role: MessageRole::Assistant,
+                created_at: 1,
+                device_id: "fixture".into(),
+                status: None,
+                continuation_of: None,
+                parts: vec![MessagePart::Input {
+                    id: "fixture-question-input".into(),
+                    request_id: request_id.into(),
+                    questions,
+                    resolved: false,
+                }],
+            });
+            cx.notify();
+        });
+        self.on_state_changed(cx);
+        assert_eq!(
+            self.wizard
+                .as_ref()
+                .map(|wizard| wizard.request_id.as_str()),
+            Some(request_id)
+        );
+    }
+
+    pub fn fixture_has_pending_question(&self, request_id: &str, cx: &App) -> bool {
+        self.wizard
+            .as_ref()
+            .is_some_and(|wizard| wizard.request_id == request_id)
+            && pending_input_request(&self.state.read(cx).transcript)
+                .is_some_and(|(pending, _)| pending == request_id)
+    }
+
+    pub fn fixture_scroll_probe(
+        &self,
+        target: &str,
+        visible_top: bool,
+    ) -> (Point<Pixels>, Pixels, Pixels) {
+        let scroll = match target {
+            "activity" => &self.activity_scroll,
+            "question" => &self.question_scroll,
+            "queue" => &self.queue_scroll,
+            _ => panic!("unknown composer fixture scroll target: {target}"),
+        };
+        let bounds = scroll.bounds();
+        let position = if visible_top {
+            point(
+                bounds.center().x,
+                bounds.top() + px((f32::from(bounds.size.height) * 0.25).min(12.0)),
+            )
+        } else {
+            bounds.center()
+        };
+        (position, scroll.offset().y, scroll.max_offset().y)
+    }
+
+    pub fn fixture_question_back(&mut self, cx: &mut Context<Self>) {
+        self.wizard_back(cx);
+    }
+
+    pub fn fixture_queue(&mut self, messages: &[&str], cx: &mut Context<Self>) {
+        self.state.update(cx, |state, cx| {
+            state.queue = messages
+                .iter()
+                .enumerate()
+                .map(|(index, text)| {
+                    zeron_doc::QueuedMessage::new(
+                        format!("fixture-queue-{index}"),
+                        *text,
+                        "fixture-device",
+                    )
+                })
+                .collect();
+            cx.notify();
+        });
+        self.queue_scroll.set_offset(point(px(0.0), px(0.0)));
+        cx.notify();
+    }
+
     pub fn fixture_clear_appshots(&mut self, cx: &mut Context<Self>) {
         self.appshots.clear();
         cx.notify();

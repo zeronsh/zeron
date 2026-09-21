@@ -43,6 +43,7 @@ async fn silent_agent_errors_via_the_prompt_stall_watchdog() {
             rx
         }),
         steering: steer_rx,
+        goal_actions: mpsc::channel(1).1,
         interrupt: token.clone(),
     };
     let request = RunRequest {

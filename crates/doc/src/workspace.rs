@@ -10,7 +10,7 @@
 //!   gitDetected, gitCheckedAt?, checkoutId?, createdAt}
 //! - `chats`: LoroMap keyed by chatId → row map {id, deviceId, title?, archived, cwd?,
 //!   branch?, checkoutId?, config?(json), lastMessagePreview?, lastMessageAt?, createdAt,
-//!   harnessSessionId?, harnessSessionCwd?, spaceId?, lastSeenAt?}
+//!   harnessSessionId?, harnessSessionHarness?, harnessSessionCwd?, spaceId?, lastSeenAt?}
 //! - `sessions`: LoroMap keyed by chatId → row map {chatId, deviceId, status, startedAt?,
 //!   updatedAt}
 //! - `meta`: LoroMap {schemaVersion} — in-band detection for future destructive changes
@@ -28,7 +28,7 @@ use chrono::{DateTime, Utc};
 use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
 
-use zeron_proto::{Chat, ChatConfig, Device, Session, SessionStatus, Space};
+use zeron_proto::{Chat, ChatConfig, Device, HarnessId, Session, SessionStatus, Space};
 
 use crate::schema::DocError;
 
@@ -277,6 +277,13 @@ impl WorkspaceDoc {
         // Preserved on full-row upserts (set_chat_activity/set_chat_host read →
         // modify → upsert; dropping these here would silently amnesia the chat).
         set_opt_str(&row, "harnessSessionId", chat.harness_session_id.as_deref())?;
+        match chat.harness_session_harness {
+            Some(harness) => row.insert(
+                "harnessSessionHarness",
+                LoroValue::from(serde_json::to_value(harness)?),
+            )?,
+            None => row.delete("harnessSessionHarness")?,
+        }
         set_opt_str(
             &row,
             "harnessSessionCwd",
@@ -427,6 +434,7 @@ impl WorkspaceDoc {
     pub fn set_chat_harness_session(
         &self,
         chat_id: &str,
+        harness: HarnessId,
         session_id: &str,
         cwd: &str,
     ) -> Result<bool, DocError> {
@@ -434,6 +442,10 @@ impl WorkspaceDoc {
             return Ok(false);
         };
         row.insert("harnessSessionId", session_id)?;
+        row.insert(
+            "harnessSessionHarness",
+            LoroValue::from(serde_json::to_value(harness)?),
+        )?;
         row.insert("harnessSessionCwd", cwd)?;
         self.doc.commit();
         Ok(true)
@@ -705,6 +717,8 @@ pub(crate) struct RawChat {
     created_at: i64,
     #[serde(default)]
     harness_session_id: Option<String>,
+    #[serde(default, deserialize_with = "lenient_harness_id")]
+    harness_session_harness: Option<HarnessId>,
     #[serde(default)]
     harness_session_cwd: Option<String>,
     #[serde(default)]
@@ -735,6 +749,14 @@ where
     }))
 }
 
+fn lenient_harness_id<'de, D>(deserializer: D) -> Result<Option<HarnessId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+}
+
 impl From<RawChat> for Chat {
     fn from(raw: RawChat) -> Self {
         Chat {
@@ -751,6 +773,7 @@ impl From<RawChat> for Chat {
             last_message_at: raw.last_message_at.map(dt),
             created_at: dt(raw.created_at),
             harness_session_id: raw.harness_session_id,
+            harness_session_harness: raw.harness_session_harness,
             harness_session_cwd: raw.harness_session_cwd,
             space_id: raw.space_id,
             last_seen_at: raw.last_seen_at.map(dt),
@@ -860,6 +883,7 @@ mod tests {
             last_message_at: None,
             created_at: ts(2_000),
             harness_session_id: None,
+            harness_session_harness: None,
             harness_session_cwd: None,
             parent_chat_id: Some("parent-chat".into()),
             space_id: None,

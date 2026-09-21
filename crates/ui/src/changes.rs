@@ -5931,6 +5931,7 @@ rename to new_name.rs
             last_message_at: None,
             created_at: Utc::now(),
             harness_session_id: None,
+            harness_session_harness: None,
             harness_session_cwd: None,
             parent_chat_id: None,
             space_id: None,

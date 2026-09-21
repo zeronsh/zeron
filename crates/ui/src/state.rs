@@ -516,6 +516,30 @@ impl EngineHandle {
         }
     }
 
+    /// In-memory engine identity for the isolated appshot host. The fixture
+    /// still crosses the production RPC client/service boundary; only the
+    /// backing service and advertised capability are synthetic.
+    #[cfg(feature = "appshots-fixture")]
+    pub fn from_goal_fixture_client(client: RpcClient) -> Self {
+        Self {
+            inner: Arc::new(RemoteEngine {
+                client: Arc::new(client),
+                url: "memory://composer-goal-fixture".into(),
+                lifecycle_task: tokio::sync::Mutex::new(None),
+            }),
+            engine_info: EngineInfo {
+                device_id: "fixture-device".into(),
+                workspace_scope: WorkspaceScope::Local,
+                cursor_sdk_version: None,
+                capabilities: vec![
+                    zeron_proto::capabilities::AGENT_MODES_V1.into(),
+                    zeron_proto::capabilities::GOAL_ACTIONS_V1.into(),
+                ],
+            },
+            deferred_state: None,
+        }
+    }
+
     pub fn client(&self) -> &RpcClient {
         self.inner.client()
     }
@@ -1773,6 +1797,11 @@ impl AppState {
 
     #[cfg(test)]
     pub(crate) fn set_test_engine(&mut self, handle: EngineHandle) {
+        self.engine = Some(handle);
+    }
+
+    #[cfg(feature = "appshots-fixture")]
+    pub fn set_goal_fixture_engine(&mut self, handle: EngineHandle) {
         self.engine = Some(handle);
     }
 
@@ -3292,6 +3321,7 @@ mod tests {
             last_message_at: last_msg_min.map(|m| base + TimeDelta::minutes(m)),
             created_at: base + TimeDelta::minutes(created_min),
             harness_session_id: None,
+            harness_session_harness: None,
             harness_session_cwd: None,
             parent_chat_id: None,
             space_id: None,

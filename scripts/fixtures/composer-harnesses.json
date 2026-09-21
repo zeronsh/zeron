@@ -1,0 +1,346 @@
+[
+  {
+    "harness": "codex",
+    "title": "Codex",
+    "calls": [
+      {
+        "kind": "goal",
+        "objective": "Polish the composer without changing the queue.",
+        "status": "active",
+        "tokensUsed": 8400,
+        "tokenBudget": 24000
+      },
+      {
+        "kind": "plan",
+        "text": "Keep the existing composer and queue styling. Add compact controls and verify native delivery."
+      },
+      {
+        "kind": "todo",
+        "items": [
+          {
+            "text": "Review the existing composer",
+            "done": true,
+            "status": "completed"
+          },
+          {
+            "text": "Match the queue and composer styling",
+            "done": false,
+            "status": "inProgress"
+          },
+          {
+            "text": "Verify keyboard and narrow windows",
+            "done": false,
+            "status": "pending"
+          }
+        ]
+      }
+    ],
+    "question": {
+      "id": "approach",
+      "header": "Next step",
+      "question": "What would you like to work on?",
+      "options": [
+        "Plan a change",
+        "Inspect the repo",
+        "Ask a question"
+      ],
+      "optionDescriptions": [
+        "Explore the project and prepare an implementation plan.",
+        "Review the codebase and report findings.",
+        "Get an explanation or recommendation."
+      ],
+      "allowCustom": true,
+      "multiSelect": false
+    }
+  },
+  {
+    "harness": "claude-code",
+    "title": "Claude Code",
+    "calls": [
+      {
+        "kind": "plan",
+        "text": "Keep the existing composer and queue styling. Add compact controls and verify native delivery."
+      },
+      {
+        "kind": "todo",
+        "items": [
+          {
+            "text": "Review the existing composer",
+            "done": true,
+            "status": "completed"
+          },
+          {
+            "text": "Match the queue and composer styling",
+            "done": false,
+            "status": "inProgress"
+          },
+          {
+            "text": "Verify keyboard and narrow windows",
+            "done": false,
+            "status": "pending"
+          }
+        ]
+      }
+    ],
+    "question": {
+      "id": "approach",
+      "header": "Next step",
+      "question": "What would you like to work on?",
+      "options": [
+        "Plan a change",
+        "Inspect the repo",
+        "Ask a question"
+      ],
+      "optionDescriptions": [
+        "Explore the project and prepare an implementation plan.",
+        "Review the codebase and report findings.",
+        "Get an explanation or recommendation."
+      ],
+      "allowCustom": true,
+      "multiSelect": false
+    }
+  },
+  {
+    "harness": "cursor",
+    "title": "Cursor",
+    "calls": [
+      {
+        "kind": "plan",
+        "text": "Keep the existing composer and queue styling. Add compact controls and verify native delivery."
+      },
+      {
+        "kind": "todo",
+        "items": [
+          {
+            "text": "Review the existing composer",
+            "done": true,
+            "status": "completed"
+          },
+          {
+            "text": "Match the queue and composer styling",
+            "done": false,
+            "status": "inProgress"
+          },
+          {
+            "text": "Verify keyboard and narrow windows",
+            "done": false,
+            "status": "pending"
+          }
+        ]
+      }
+    ],
+    "question": null
+  },
+  {
+    "harness": "opencode",
+    "title": "OpenCode",
+    "calls": [
+      {
+        "kind": "todo",
+        "items": [
+          {
+            "text": "Review the existing composer",
+            "done": true,
+            "status": "completed"
+          },
+          {
+            "text": "Match the queue and composer styling",
+            "done": false,
+            "status": "inProgress"
+          },
+          {
+            "text": "Verify keyboard and narrow windows",
+            "done": false,
+            "status": "pending"
+          }
+        ]
+      }
+    ],
+    "question": {
+      "id": "approach",
+      "header": "Next step",
+      "question": "What would you like to work on?",
+      "options": [
+        "Plan a change",
+        "Inspect the repo",
+        "Ask a question"
+      ],
+      "optionDescriptions": [
+        "Explore the project and prepare an implementation plan.",
+        "Review the codebase and report findings.",
+        "Get an explanation or recommendation."
+      ],
+      "allowCustom": true,
+      "multiSelect": false
+    }
+  },
+  {
+    "harness": "devin",
+    "title": "Devin",
+    "calls": [
+      {
+        "kind": "todo",
+        "items": [
+          {
+            "text": "Review the existing composer",
+            "done": true,
+            "status": "completed"
+          },
+          {
+            "text": "Match the queue and composer styling",
+            "done": false,
+            "status": "inProgress"
+          },
+          {
+            "text": "Verify keyboard and narrow windows",
+            "done": false,
+            "status": "pending"
+          }
+        ]
+      }
+    ],
+    "question": {
+      "id": "permission",
+      "header": "Permission",
+      "question": "Allow the agent to run the focused checks?",
+      "options": [
+        "Allow once",
+        "Reject"
+      ],
+      "optionDescriptions": [],
+      "allowCustom": false,
+      "multiSelect": false
+    }
+  },
+  {
+    "harness": "grok",
+    "title": "Grok",
+    "calls": [
+      {
+        "kind": "todo",
+        "items": [
+          {
+            "text": "Review the existing composer",
+            "done": true,
+            "status": "completed"
+          },
+          {
+            "text": "Match the queue and composer styling",
+            "done": false,
+            "status": "inProgress"
+          },
+          {
+            "text": "Verify keyboard and narrow windows",
+            "done": false,
+            "status": "pending"
+          }
+        ]
+      }
+    ],
+    "question": {
+      "id": "permission",
+      "header": "Permission",
+      "question": "Allow the agent to run the focused checks?",
+      "options": [
+        "Allow once",
+        "Reject"
+      ],
+      "optionDescriptions": [],
+      "allowCustom": false,
+      "multiSelect": false
+    }
+  },
+  {
+    "harness": "hermes",
+    "title": "Hermes",
+    "calls": [
+      {
+        "kind": "todo",
+        "items": [
+          {
+            "text": "Review the existing composer",
+            "done": true,
+            "status": "completed"
+          },
+          {
+            "text": "Match the queue and composer styling",
+            "done": false,
+            "status": "inProgress"
+          },
+          {
+            "text": "Verify keyboard and narrow windows",
+            "done": false,
+            "status": "pending"
+          }
+        ]
+      }
+    ],
+    "question": {
+      "id": "permission",
+      "header": "Permission",
+      "question": "Allow the agent to run the focused checks?",
+      "options": [
+        "Allow once",
+        "Reject"
+      ],
+      "optionDescriptions": [],
+      "allowCustom": false,
+      "multiSelect": false
+    }
+  },
+  {
+    "harness": "pi",
+    "title": "Pi",
+    "calls": [],
+    "question": {
+      "id": "permission",
+      "header": "Permission",
+      "question": "Allow the agent to run the focused checks?",
+      "options": [
+        "Allow once",
+        "Reject"
+      ],
+      "optionDescriptions": [],
+      "allowCustom": false,
+      "multiSelect": false
+    }
+  },
+  {
+    "harness": "antigravity",
+    "title": "Antigravity",
+    "calls": [
+      {
+        "kind": "todo",
+        "items": [
+          {
+            "text": "Review the existing composer",
+            "done": true,
+            "status": "completed"
+          },
+          {
+            "text": "Match the queue and composer styling",
+            "done": false,
+            "status": "inProgress"
+          },
+          {
+            "text": "Verify keyboard and narrow windows",
+            "done": false,
+            "status": "pending"
+          }
+        ]
+      }
+    ],
+    "question": {
+      "id": "permission",
+      "header": "Permission",
+      "question": "Allow the agent to run the focused checks?",
+      "options": [
+        "Allow once",
+        "Reject"
+      ],
+      "optionDescriptions": [],
+      "allowCustom": false,
+      "multiSelect": false
+    }
+  }
+]

@@ -30,6 +30,7 @@ async fn main() {
             rx
         }),
         steering,
+        goal_actions: mpsc::channel(1).1,
         interrupt: CancellationToken::new(),
     };
     let request = RunRequest {

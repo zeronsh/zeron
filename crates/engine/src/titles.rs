@@ -263,6 +263,7 @@ async fn collect_text(
     request: RunRequest,
 ) -> Result<String, EngineError> {
     let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerMessage>(1);
+    let (_goal_tx, goal_rx) = tokio::sync::mpsc::channel(1);
     let interrupt = CancellationToken::new();
     let _cancel_on_drop = interrupt.clone().drop_guard();
     let controls = RunControls {
@@ -272,6 +273,7 @@ async fn collect_text(
             rx
         }),
         steering: steer_rx,
+        goal_actions: goal_rx,
         interrupt: interrupt.clone(),
     };
     let mut stream = harness.run_title(request, controls).await?;

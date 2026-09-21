@@ -502,6 +502,10 @@ pub struct ChatDocHandle {
     /// of short rows — so unlike the transcript mirror it publishes on every
     /// change without a dirty flag.
     queue_tx: watch::Sender<Vec<QueuedMessage>>,
+    /// General document-change feed shared with command outcome watches. This
+    /// is the receiver paired with the existing root subscription; retaining
+    /// it avoids a second Loro subscription or transcript-sized mirror.
+    changed_rx: watch::Receiver<u64>,
     /// Serializes everything that TAKES from the queue. Both the doc-change
     /// task and the turn-end status watcher call `drain_queue`, and nothing
     /// keeps those two apart: without this they interleave across the
@@ -608,6 +612,12 @@ impl ChatDocHandle {
         let rx = self.queue_tx.subscribe();
         self.publish_queue();
         rx
+    }
+
+    /// Cheap general document-change watch for narrow container reads.
+    pub fn watch_changes(&self) -> watch::Receiver<u64> {
+        self.touch();
+        self.changed_rx.clone()
     }
 
     fn publish_queue(&self) {
@@ -1343,6 +1353,7 @@ impl DocHost {
             transcript_import: Mutex::default(),
             transcript_history,
             queue_tx,
+            changed_rx: changed_rx.clone(),
             drain_lock: tokio::sync::Mutex::new(()),
             queue_paused: AtomicBool::new(recovered_queue_pending),
             mirror_dirty: AtomicBool::new(true),
@@ -3208,11 +3219,6 @@ impl DocHost {
                 SteerOutcome::NotSteerable => {}
             }
         }
-        // Same reading of "busy" as the drain: a turn parked on a question is
-        // still a turn, and it has to be stopped before this one starts.
-        if send == QueueSend::Interrupt && sessions.turn_in_flight(chat_id) {
-            sessions.interrupt(chat_id).await?;
-        }
         let previous = sessions.last_request(chat_id);
         let request = self
             .request_from_chat_row(chat_id, &prompt)
@@ -3233,6 +3239,12 @@ impl DocHost {
         request.resume = None; // dispatch re-derives the harness session
         request.attachments = item.attachments.clone();
         let harness = self.harness_for_request(chat_id, &request);
+        sessions.validate_request(chat_id, harness, &request)?;
+        // Validate before cancelling the predecessor: an unsupported queued
+        // command must leave both its queue row and the current turn intact.
+        if send == QueueSend::Interrupt && sessions.turn_in_flight(chat_id) {
+            sessions.interrupt(chat_id).await?;
+        }
         self.dispatch_with_source_context(&sessions, chat_id, harness, request, Some(message_id))
             .await?;
         Ok(())
@@ -4337,6 +4349,16 @@ impl DocHost {
                         Some("no pending input request".into()),
                     ));
                 };
+                if !zeron_proto::valid_input_answers(&questions, answers) {
+                    return Ok((
+                        SessionCommandStatus::Rejected,
+                        Some("answers do not match the requested question choices".into()),
+                    ));
+                }
+                if answers.is_empty() {
+                    handle.doc.resolve_input(request_id)?;
+                    return Ok((SessionCommandStatus::Applied, None));
+                }
                 // The run died under the question (engine restart, crash).
                 // The question is still open in the doc and the command is
                 // durable, so honor it anyway — stamp the part resolved and
@@ -4356,11 +4378,14 @@ impl DocHost {
                 request.prompt = respond_input_prompt(&questions, answers);
                 request.resume = None; // dispatch re-derives the harness session
                 request.attachments = Vec::new();
+                let harness = self.harness_for_request(chat_id, &request);
+                // Stale mode/configuration can reject a recovered answer too.
+                // Keep the question available until its new turn is valid.
+                sessions.validate_request(chat_id, harness, &request)?;
                 if let Err(err) = handle.doc.resolve_input(request_id) {
                     tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
                         "orphaned input resolve failed");
                 }
-                let harness = self.harness_for_request(chat_id, &request);
                 self.dispatch_with_source_context(sessions, chat_id, harness, request, None)
                     .await?;
                 Ok((

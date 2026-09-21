@@ -23,6 +23,7 @@ use gpui::{
 use zeron_engine::registry::HarnessDescriptor;
 use zeron_proto::{
     ChatConfig, FolderListing, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel, Space,
+    capabilities,
 };
 use zeron_rpc::methods;
 
@@ -148,7 +149,19 @@ impl ResolvedRunConfig {
             harness: self.harness?,
             model: self.model.clone(),
             reasoning: self.reasoning,
-            model_options: self.model_options.clone(),
+            model_options: {
+                let mut options = self.model_options.clone();
+                options.remove(zeron_proto::FRESH_GOAL_OPTION);
+                if self.harness == Some(HarnessId::Codex)
+                    && options
+                        .get(zeron_proto::AGENT_MODE_OPTION)
+                        .and_then(|v| v.as_str())
+                        == Some("goal")
+                {
+                    options.remove(zeron_proto::AGENT_MODE_OPTION);
+                }
+                options
+            },
             sandbox: SandboxLevel::WorkspaceWrite,
         })
     }
@@ -228,6 +241,9 @@ pub fn traits_summary(
     }
     if let Some(model) = model {
         for option in &model.options {
+            if option.id == zeron_proto::AGENT_MODE_OPTION {
+                continue;
+            }
             let choice_id = selections
                 .get(&option.id)
                 .and_then(|v| v.as_str())
@@ -260,6 +276,24 @@ pub fn offered_options(
                     .is_some_and(|choice| option.choices.iter().any(|c| c.id == choice))
         })
     });
+    selections
+}
+
+/// Validate the effective send/render copy without rewriting persisted picks.
+/// Catalog changes can retire any option; an older host specifically cannot
+/// receive the agent-mode extension even if that choice remains in a chat row.
+fn effective_model_options(
+    model: Option<&Model>,
+    selections: serde_json::Map<String, serde_json::Value>,
+    supports_agent_modes: bool,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut selections = match model {
+        Some(model) => offered_options(model, selections),
+        None => selections,
+    };
+    if !supports_agent_modes {
+        selections.remove(zeron_proto::AGENT_MODE_OPTION);
+    }
     selections
 }
 
@@ -492,6 +526,9 @@ pub struct Pickers {
     /// Sticky last-used picks (zeron `zeron.composer.defaults:v1`): seeds the
     /// new-chat chips and is rewritten on every new-chat pick.
     defaults: ComposerDefaults,
+    /// Goal is an explicit next-send intent, never a sticky model preference.
+    pending_goals: HashMap<String, u64>,
+    goal_generation: u64,
     /// Where [`Self::defaults`] persists (`{data_dir}/composer-defaults.json`);
     /// `None` before bootstrap stamps the state (writes are skipped).
     data_dir: Option<PathBuf>,
@@ -688,6 +725,8 @@ impl Pickers {
             target_generation: 0,
             config: DraftConfig::default(),
             defaults,
+            pending_goals: HashMap::new(),
+            goal_generation: 0,
             data_dir,
             draft_owner,
             open,
@@ -840,28 +879,96 @@ impl Pickers {
         }
     }
 
+    fn host_supports_agent_modes(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        if let Some(chat_id) = state.selected_chat.as_deref() {
+            state.chat_host_supports(chat_id, capabilities::AGENT_MODES_V1)
+        } else {
+            state
+                .effective_device_id()
+                .is_some_and(|device| state.device_supports(&device, capabilities::AGENT_MODES_V1))
+        }
+    }
+
     /// The explicit (non-default) option picks: the chat's persisted
     /// selections for existing chats, the remembered picks for the model the
     /// new-chat canvas resolves to (same id [`Self::resolved`] sends).
     fn explicit_options(&self, cx: &App) -> serde_json::Map<String, serde_json::Value> {
+        let mut options = self.stored_options(cx);
+        options.remove(zeron_proto::FRESH_GOAL_OPTION);
+        if self.effective_harness(cx) == Some(HarnessId::Codex) {
+            // Older builds saved Goal as a sticky mode. Never turn an ordinary
+            // message into a new goal after completion, deletion or relaunch.
+            if options
+                .get(zeron_proto::AGENT_MODE_OPTION)
+                .and_then(|v| v.as_str())
+                == Some("goal")
+            {
+                options.remove(zeron_proto::AGENT_MODE_OPTION);
+            }
+            let key = self
+                .state
+                .read(cx)
+                .selected_chat
+                .clone()
+                .unwrap_or_default();
+            if self.pending_goals.contains_key(&key)
+                && self
+                    .composer_modes(cx)
+                    .is_some_and(|mode| mode.choices.iter().any(|choice| choice.id == "goal"))
+            {
+                options.insert(zeron_proto::AGENT_MODE_OPTION.into(), "goal".into());
+            }
+        }
+        options
+    }
+
+    pub(crate) fn goal_selection(&self, cx: &App) -> Option<(String, u64)> {
+        let key = self
+            .state
+            .read(cx)
+            .selected_chat
+            .clone()
+            .unwrap_or_default();
+        self.pending_goals
+            .get(&key)
+            .map(|generation| (key, *generation))
+    }
+
+    pub(crate) fn consume_goal_selection(
+        &mut self,
+        selection: &(String, u64),
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_goals.get(&selection.0) == Some(&selection.1) {
+            self.pending_goals.remove(&selection.0);
+            cx.notify();
+        }
+    }
+
+    fn stored_options(&self, cx: &App) -> serde_json::Map<String, serde_json::Value> {
         if let Some(chat) = self.state.read(cx).selected_chat_row() {
-            return chat
+            let selections = chat
                 .config
                 .as_ref()
                 .map(|c| c.model_options.clone())
                 .unwrap_or_default();
+            return effective_model_options(
+                self.selected_model(cx),
+                selections,
+                self.host_supports_agent_modes(cx),
+            );
         }
         let Some(harness) = self.effective_harness(cx) else {
             return Default::default();
         };
-        match self.selected_model(cx) {
-            Some(model) => offered_options(
-                model,
-                self.defaults
-                    .model_options_for(harness, &model.id)
-                    .cloned()
-                    .unwrap_or_default(),
-            ),
+        let model = self.selected_model(cx);
+        let selections = match model {
+            Some(model) => self
+                .defaults
+                .model_options_for(harness, &model.id)
+                .cloned()
+                .unwrap_or_default(),
             // Catalog not loaded (or failed): the picks were validated for
             // this exact model when made, so they are safe to send as-is.
             None => self
@@ -869,7 +976,8 @@ impl Pickers {
                 .and_then(|id| self.defaults.model_options_for(harness, id))
                 .cloned()
                 .unwrap_or_default(),
-        }
+        };
+        effective_model_options(model, selections, self.host_supports_agent_modes(cx))
     }
 
     /// The catalog is loaded and offers nothing runnable — the no-agents
@@ -885,6 +993,36 @@ impl Pickers {
     /// The fully-resolved config the composer threads into the Run request and
     /// `Mutate createChat`: concrete model + reasoning whenever the catalog is
     /// loaded (no "engine picks a default" passthrough).
+    pub(crate) fn composer_modes(&self, cx: &App) -> Option<zeron_proto::ModelOption> {
+        if !self.host_supports_agent_modes(cx) {
+            return None;
+        }
+        self.selected_model(cx)?
+            .options
+            .iter()
+            .find(|option| {
+                option.id == zeron_proto::AGENT_MODE_OPTION
+                    || (option.id == "mode"
+                        && option.choices.iter().any(|choice| choice.id == "plan"))
+            })
+            .cloned()
+            .map(|mut mode| {
+                if self.effective_harness(cx) == Some(HarnessId::Codex) {
+                    let state = self.state.read(cx);
+                    let supported = match state.selected_chat.as_deref() {
+                        Some(chat) => state.chat_host_supports(chat, capabilities::GOAL_ACTIONS_V1),
+                        None => state.effective_device_id().is_some_and(|device| {
+                            state.device_supports(&device, capabilities::GOAL_ACTIONS_V1)
+                        }),
+                    };
+                    if !supported {
+                        mode.choices.retain(|choice| choice.id != "goal");
+                    }
+                }
+                mode
+            })
+    }
+
     pub fn resolved(&self, cx: &App) -> ResolvedRunConfig {
         ResolvedRunConfig {
             harness: self.effective_harness(cx),
@@ -894,7 +1032,18 @@ impl Pickers {
                 // Catalog not loaded (offline): still send the id we know.
                 .or_else(|| self.effective_model_id(cx).map(str::to_string)),
             reasoning: self.effective_reasoning(cx),
-            model_options: self.explicit_options(cx),
+            model_options: {
+                let mut options = self.explicit_options(cx);
+                if self.effective_harness(cx) == Some(HarnessId::Codex)
+                    && options
+                        .get(zeron_proto::AGENT_MODE_OPTION)
+                        .and_then(|v| v.as_str())
+                        == Some("goal")
+                {
+                    options.insert(zeron_proto::FRESH_GOAL_OPTION.into(), true.into());
+                }
+                options
+            },
         }
     }
 
@@ -1499,13 +1648,30 @@ impl Pickers {
         cx.notify();
     }
 
-    fn pick_option(
+    pub(crate) fn pick_option(
         &mut self,
         option_id: String,
         choice_id: String,
         default: bool,
         cx: &mut Context<Self>,
     ) {
+        if option_id == zeron_proto::AGENT_MODE_OPTION
+            && self.effective_harness(cx) == Some(HarnessId::Codex)
+        {
+            let key = self
+                .state
+                .read(cx)
+                .selected_chat
+                .clone()
+                .unwrap_or_default();
+            if choice_id == "goal" && !default {
+                self.goal_generation = self.goal_generation.wrapping_add(1);
+                self.pending_goals.insert(key, self.goal_generation);
+                cx.notify();
+                return;
+            }
+            self.pending_goals.remove(&key);
+        }
         if self.state.read(cx).selected_chat.is_some() {
             self.update_chat_config(cx, move |config| {
                 if default {
@@ -3778,7 +3944,16 @@ impl Pickers {
         }
         if let Some(model) = self.selected_model(cx) {
             let selections = self.explicit_options(cx);
-            for option in &model.options {
+            let available_modes = self.composer_modes(cx);
+            for catalog_option in &model.options {
+                let option = if catalog_option.id == zeron_proto::AGENT_MODE_OPTION {
+                    let Some(mode) = available_modes.as_ref() else {
+                        continue;
+                    };
+                    mode
+                } else {
+                    catalog_option
+                };
                 if option.choices.is_empty() {
                     continue;
                 }
@@ -5564,6 +5739,328 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn existing_chat_options_follow_model_catalog_and_host_without_rewriting_saved_config(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let option = |id: &str, choice: &str| ModelOption {
+            id: id.into(),
+            label: id.into(),
+            choices: vec![ModelOptionChoice {
+                id: choice.into(),
+                label: choice.into(),
+            }],
+            default_choice: choice.into(),
+        };
+        let mut alpha = bare_model("alpha", "Alpha");
+        alpha.options = vec![
+            option("profile", "alpha"),
+            option("alphaOnly", "on"),
+            zeron_proto::agent_mode_option(HarnessId::ClaudeCode).unwrap(),
+        ];
+        let mut beta = bare_model("beta", "Beta");
+        beta.options = vec![option("profile", "beta"), option("betaOnly", "on")];
+        let saved = serde_json::json!({
+            "profile": "alpha",
+            "alphaOnly": "on",
+            "betaOnly": "on",
+            "removed": "stale",
+            "agentMode": "plan"
+        });
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.selected_chat = Some("thread".into());
+            state.devices = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "fixture-device",
+                    "name": "Fixture",
+                    "platform": "macos",
+                    "lastSeenAt": null,
+                    "capabilities": ["agent-modes-v1"]
+                }))
+                .unwrap(),
+            ];
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "thread",
+                    "deviceId": "fixture-device",
+                    "title": null,
+                    "archived": false,
+                    "cwd": "/fixture",
+                    "branch": null,
+                    "checkoutId": null,
+                    "config": {
+                        "harness": "claude-code",
+                        "model": "alpha",
+                        "reasoning": null,
+                        "modelOptions": saved,
+                        "sandbox": "workspace-write"
+                    },
+                    "lastMessagePreview": null,
+                    "lastMessageAt": null,
+                    "createdAt": chrono::Utc::now()
+                }))
+                .unwrap(),
+            ];
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        pickers.update(cx, |pickers, _| {
+            pickers.models.insert(
+                HarnessId::ClaudeCode,
+                Loadable::Ready(vec![alpha.clone(), beta.clone()]),
+            );
+        });
+
+        pickers.read_with(cx, |pickers, cx| {
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.model.as_deref(), Some("alpha"));
+            assert_eq!(
+                resolved.model_options,
+                serde_json::from_value::<serde_json::Map<String, serde_json::Value>>(
+                    serde_json::json!({
+                        "profile": "alpha",
+                        "alphaOnly": "on",
+                        "agentMode": "plan"
+                    })
+                )
+                .unwrap()
+            );
+            assert!(pickers.composer_modes(cx).is_some());
+        });
+
+        // Once Alpha disappears, Beta becomes the selected catalog model and
+        // validates the old row against Beta's own option contract.
+        pickers.update(cx, |pickers, _| {
+            pickers
+                .models
+                .insert(HarnessId::ClaudeCode, Loadable::Ready(vec![beta.clone()]));
+        });
+        pickers.read_with(cx, |pickers, cx| {
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.model.as_deref(), Some("beta"));
+            assert_eq!(
+                resolved.model_options,
+                serde_json::from_value::<serde_json::Map<String, serde_json::Value>>(
+                    serde_json::json!({"betaOnly": "on"})
+                )
+                .unwrap()
+            );
+        });
+
+        // A catalog refresh can retire Beta's last matching option. The
+        // effective map updates immediately, without mutating the chat row.
+        beta.options.clear();
+        pickers.update(cx, |pickers, _| {
+            pickers
+                .models
+                .insert(HarnessId::ClaudeCode, Loadable::Ready(vec![beta]));
+        });
+        pickers.read_with(cx, |pickers, cx| {
+            assert!(pickers.resolved(cx).model_options.is_empty());
+        });
+        state.read_with(cx, |state, _| {
+            assert_eq!(
+                serde_json::Value::Object(
+                    state
+                        .selected_chat_row()
+                        .unwrap()
+                        .config
+                        .as_ref()
+                        .unwrap()
+                        .model_options
+                        .clone()
+                ),
+                saved
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn goal_selection_is_one_shot_chat_scoped_and_never_saved(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.selected_chat = Some("first".into());
+            state.devices =
+                vec![serde_json::from_value(serde_json::json!({
+                "id":"fixture-device", "name":"Fixture", "platform":"macos", "lastSeenAt":null,
+                "capabilities":["agent-modes-v1", "goal-actions-v1"]
+            })).unwrap()];
+            state.chats = ["first", "second"]
+                .into_iter()
+                .map(|id| {
+                    serde_json::from_value(serde_json::json!({
+                "id":id, "deviceId":"fixture-device", "title":null, "archived":false,
+                "cwd":"/fixture", "branch":null, "checkoutId":null,
+                "config":{"harness":"codex", "model":"alpha", "reasoning":null,
+                    "modelOptions":{"agentMode":"goal"}, "sandbox":"workspace-write"},
+                "lastMessagePreview":null, "lastMessageAt":null, "createdAt":chrono::Utc::now()
+            })).unwrap()
+                })
+                .collect();
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        pickers.update(cx, |picker, cx| {
+            let mut model = bare_model("alpha", "Alpha");
+            model.options = vec![zeron_proto::agent_mode_option(HarnessId::Codex).unwrap()];
+            picker
+                .models
+                .insert(HarnessId::Codex, Loadable::Ready(vec![model]));
+            assert!(
+                !picker
+                    .resolved(cx)
+                    .model_options
+                    .contains_key(zeron_proto::FRESH_GOAL_OPTION),
+                "legacy sticky Goal must not create another goal"
+            );
+            picker.pick_option(
+                zeron_proto::AGENT_MODE_OPTION.into(),
+                "goal".into(),
+                false,
+                cx,
+            );
+            let first = picker.goal_selection(cx).unwrap();
+            let run = picker.resolved(cx);
+            assert_eq!(run.model_options[zeron_proto::FRESH_GOAL_OPTION], true);
+            let stored = run.chat_config().unwrap();
+            assert!(
+                !stored
+                    .model_options
+                    .contains_key(zeron_proto::FRESH_GOAL_OPTION)
+            );
+            assert!(
+                !stored
+                    .model_options
+                    .contains_key(zeron_proto::AGENT_MODE_OPTION)
+            );
+            picker
+                .state
+                .update(cx, |state, _| state.selected_chat = Some("second".into()));
+            assert!(
+                !picker
+                    .resolved(cx)
+                    .model_options
+                    .contains_key(zeron_proto::FRESH_GOAL_OPTION),
+                "one chat's selection must not leak"
+            );
+            picker
+                .state
+                .update(cx, |state, _| state.selected_chat = Some("first".into()));
+            picker.pick_option(
+                zeron_proto::AGENT_MODE_OPTION.into(),
+                "goal".into(),
+                false,
+                cx,
+            );
+            let newer = picker.goal_selection(cx).unwrap();
+            picker.consume_goal_selection(&first, cx);
+            assert!(
+                picker
+                    .resolved(cx)
+                    .model_options
+                    .contains_key(zeron_proto::FRESH_GOAL_OPTION),
+                "late acceptance must not clear a newer selection"
+            );
+            picker.consume_goal_selection(&newer, cx);
+            assert!(
+                !picker
+                    .resolved(cx)
+                    .model_options
+                    .contains_key(zeron_proto::FRESH_GOAL_OPTION)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn unsupported_host_removes_mode_from_render_and_send_effective_state(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut model = bare_model("alpha", "Alpha");
+        model.options = vec![
+            ModelOption {
+                id: "serviceTier".into(),
+                label: "Service tier".into(),
+                choices: vec![ModelOptionChoice {
+                    id: "fast".into(),
+                    label: "Fast".into(),
+                }],
+                default_choice: "fast".into(),
+            },
+            zeron_proto::agent_mode_option(HarnessId::ClaudeCode).unwrap(),
+        ];
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.selected_chat = Some("thread".into());
+            state.devices = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "old-host",
+                    "name": "Old host",
+                    "platform": "macos",
+                    "lastSeenAt": null,
+                    "capabilities": []
+                }))
+                .unwrap(),
+            ];
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "thread",
+                    "deviceId": "old-host",
+                    "title": null,
+                    "archived": false,
+                    "cwd": "/fixture",
+                    "branch": null,
+                    "checkoutId": null,
+                    "config": {
+                        "harness": "claude-code",
+                        "model": "alpha",
+                        "reasoning": null,
+                        "modelOptions": {"agentMode": "plan", "serviceTier": "fast"},
+                        "sandbox": "workspace-write"
+                    },
+                    "lastMessagePreview": null,
+                    "lastMessageAt": null,
+                    "createdAt": chrono::Utc::now()
+                }))
+                .unwrap(),
+            ];
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        pickers.update(cx, |pickers, _| {
+            pickers
+                .models
+                .insert(HarnessId::ClaudeCode, Loadable::Ready(vec![model]));
+        });
+        pickers.read_with(cx, |pickers, cx| {
+            assert!(
+                pickers.composer_modes(cx).is_none(),
+                "the command UI must not advertise modes the host cannot run"
+            );
+            assert_eq!(
+                pickers.resolved(cx).model_options,
+                serde_json::from_value::<serde_json::Map<String, serde_json::Value>>(
+                    serde_json::json!({"serviceTier": "fast"})
+                )
+                .unwrap(),
+                "the same effective state must feed the Run request"
+            );
+        });
+        state.read_with(cx, |state, _| {
+            assert_eq!(
+                state
+                    .selected_chat_row()
+                    .unwrap()
+                    .config
+                    .as_ref()
+                    .unwrap()
+                    .model_options[zeron_proto::AGENT_MODE_OPTION],
+                "plan",
+                "capability filtering must not rewrite synced configuration"
+            );
+        });
+    }
+
     fn descriptor(id: HarnessId, name: &str) -> HarnessDescriptor {
         HarnessDescriptor {
             id,
@@ -6166,7 +6663,7 @@ mod tests {
 }
 
 /// Catalog for the isolated native screenshot fixture; never used by the app.
-#[cfg(feature = "project-palette-fixture")]
+#[cfg(any(feature = "project-palette-fixture", feature = "appshots-fixture"))]
 impl Pickers {
     pub(crate) fn fixture_model_catalog(&mut self, cx: &mut Context<Self>) {
         if matches!(self.models.get(&HarnessId::Codex), Some(Loadable::Ready(_))) {
@@ -6175,7 +6672,7 @@ impl Pickers {
         self.config.harness = Some(HarnessId::Codex);
         self.config.model = Some("gpt-5.4".into());
         self.harnesses = Loadable::Ready(serde_json::from_value(serde_json::json!([
-            {"id":"codex","name":"Codex","supportsSteering":true,"steeringMode":"step-boundary","reasoningLevels":[]}
+            {"id":"codex","name":"Codex","installed":true,"enabled":true,"supportsSteering":true,"steeringMode":"step-boundary","reasoningLevels":[]}
         ])).unwrap());
         self.models.insert(HarnessId::Codex, Loadable::Ready(serde_json::from_value(serde_json::json!([
             {"id":"gpt-5.4","label":"GPT-5.4","description":"For complex coding and reasoning", "reasoningLevels":["low","medium","high","xhigh"], "options":[
@@ -6186,6 +6683,11 @@ impl Pickers {
             {"id":"gpt-5.2","label":"GPT-5.2","description":"General purpose reasoning"},
             {"id":"gpt-5.1-codex-mini","label":"GPT-5.1 Codex Mini","description":"Fast, efficient coding"}
         ])).unwrap()));
+        if let Some(Loadable::Ready(models)) = self.models.get_mut(&HarnessId::Codex) {
+            models[0]
+                .options
+                .push(zeron_proto::agent_mode_option(HarnessId::Codex).unwrap());
+        }
         self.catalog_rev += 1;
         cx.notify();
     }

@@ -45,6 +45,7 @@ async fn main() {
             RunControls {
                 request_input: Box::new(|_| panic!("probe must not ask for input")),
                 steering,
+                goal_actions: tokio::sync::mpsc::channel(1).1,
                 interrupt: CancellationToken::new(),
             },
         )

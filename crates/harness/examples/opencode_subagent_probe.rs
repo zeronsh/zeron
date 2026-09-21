@@ -38,6 +38,7 @@ async fn main() {
             rx
         }),
         steering,
+        goal_actions: mpsc::channel(1).1,
         interrupt: CancellationToken::new(),
     };
     // Optional second arg overrides the prompt (e.g. the mock rig's

@@ -72,6 +72,7 @@ fn controls(
             rx
         }),
         steering: steer_rx,
+        goal_actions: mpsc::channel(1).1,
         interrupt: token.clone(),
     };
     (controls, steer_tx, token)
@@ -303,6 +304,7 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
             rx
         }),
         steering: steer_rx,
+        goal_actions: mpsc::channel(1).1,
         interrupt: token.clone(),
     };
     let events = run_to_end(&harness(), request("scenario:askuser"), controls).await;
@@ -331,6 +333,96 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
             error: None,
             session_id: Some("sess-ask".into()),
         })
+    );
+}
+
+#[tokio::test]
+async fn native_control_cancel_aborts_the_exact_question_waiter() {
+    let cwd = tempfile::tempdir().unwrap();
+    let bridge_ready = cwd.path().join(".bridge-ready");
+    let pending: Arc<Mutex<Option<oneshot::Sender<Vec<UserInputAnswer>>>>> =
+        Arc::new(Mutex::new(None));
+    let pending_for_bridge = Arc::clone(&pending);
+    let (steer_tx, steer_rx) = mpsc::channel(1);
+    let controls = RunControls {
+        request_input: Box::new(move |_| {
+            let (tx, rx) = oneshot::channel();
+            *pending_for_bridge.lock().unwrap() = Some(tx);
+            std::fs::write(&bridge_ready, b"ready").unwrap();
+            rx
+        }),
+        steering: steer_rx,
+        goal_actions: mpsc::channel(1).1,
+        interrupt: CancellationToken::new(),
+    };
+    let mut req = request("scenario:askuser-cancel");
+    req.cwd = cwd.path().to_string_lossy().into_owned();
+    let mut stream = harness().run(req, controls).await.unwrap();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .expect("fixture emitted cancellation marker")
+            .expect("stream remains open")
+            .expect("valid event");
+        if matches!(event, AgentEvent::TextDelta { ref text } if text == "native control request cancelled")
+        {
+            break;
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(oneshot::Sender::is_closed)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("matching control_cancel_request closes the bridge receiver");
+    drop(steer_tx);
+}
+
+#[tokio::test]
+async fn run_teardown_aborts_unanswered_control_waiters() {
+    let cwd = tempfile::tempdir().unwrap();
+    let bridge_ready = cwd.path().join(".bridge-ready");
+    let pending: Arc<Mutex<Option<oneshot::Sender<Vec<UserInputAnswer>>>>> =
+        Arc::new(Mutex::new(None));
+    let pending_for_bridge = Arc::clone(&pending);
+    let (_steer_tx, steer_rx) = mpsc::channel(1);
+    let controls = RunControls {
+        request_input: Box::new(move |_| {
+            let (tx, rx) = oneshot::channel();
+            *pending_for_bridge.lock().unwrap() = Some(tx);
+            std::fs::write(&bridge_ready, b"ready").unwrap();
+            rx
+        }),
+        steering: steer_rx,
+        goal_actions: mpsc::channel(1).1,
+        interrupt: CancellationToken::new(),
+    };
+    let mut req = request("scenario:askuser-teardown");
+    req.cwd = cwd.path().to_string_lossy().into_owned();
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        }
+    )));
+    assert!(
+        pending
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(oneshot::Sender::is_closed),
+        "run teardown must close unanswered control bridge receivers"
     );
 }
 
@@ -688,6 +780,35 @@ async fn title_run_disables_tools_and_denies_unexpected_permissions() {
             e,
             AgentEvent::Done {
                 status: DoneStatus::Completed,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn plan_mode_reaches_the_cli_and_implementation_uses_the_question_bridge() {
+    let mut req = request("scenario:plan");
+    req.model_options
+        .insert(zeron_proto::AGENT_MODE_OPTION.into(), "plan".into());
+    let (controls, _steer, _token) = controls("Implement plan");
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Done {
+                status: DoneStatus::Errored,
                 ..
             }
         )),

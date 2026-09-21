@@ -22,6 +22,9 @@ while read -r line; do
   if has "$line" '"method":"initialize"'; then
     emit "{\"id\":$id,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"loadSession\":true},\"authMethods\":[{\"id\":\"oauth-personal\",\"name\":\"Log in with Google\"}]}}"
   elif has "$line" '"method":"session/new"'; then
+    if has "$line" 'reject-mode'; then
+      REJECT_MODE=1
+    fi
     if has "$line" 'reject-model'; then
       REJECT_MODEL=1
     fi
@@ -41,7 +44,9 @@ while read -r line; do
     AUTHED=0
     emit "{\"id\":$id,\"result\":{}}"
   elif has "$line" '"method":"session/set_config_option"'; then
-    if [ "$REJECT_MODEL" -eq 1 ] && has "$line" '"configId":"model"'; then
+    if [ "${REJECT_MODE:-0}" -eq 1 ] && has "$line" '"configId":"mode"'; then
+      emit "{\"id\":$id,\"error\":{\"code\":-32602,\"message\":\"mode unavailable\"}}"
+    elif [ "$REJECT_MODEL" -eq 1 ] && has "$line" '"configId":"model"'; then
       emit "{\"id\":$id,\"error\":{\"code\":-32602,\"message\":\"model unavailable\"}}"
     else
       set=$(printf '%s' "$line" | sed 's/.*"configId":"\([^"]*\)".*"value":"\([^"]*\)".*/\1=\2/')

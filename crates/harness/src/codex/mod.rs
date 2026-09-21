@@ -53,13 +53,14 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
-    RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
+    AgentEvent, DoneStatus, GoalAction, GoalState, HarnessId, Model, ModelOption,
+    ModelOptionChoice, ReasoningLevel, RunRequest, SlashCommand, SteeringMode, UserInputAnswer,
+    UserInputQuestion,
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::process::{Child, Command, Stdio};
-use crate::{Harness, HarnessError, RunControls};
+use crate::{Harness, HarnessError, RunControls, SteerMessage};
 use catalog::{REASONING_LEVELS, sandbox_mode, sandbox_policy_value, static_models, to_effort};
 use normalize::{
     ChildRoute, Phase, ReasoningStream, delta_text, item_id, item_type, notification_thread_id,
@@ -288,6 +289,41 @@ impl CodexHarness {
                 cursor = Some(next);
             }
 
+            // Capability discovery is authoritative, including feature enablement.
+            // A static model fallback must not promise experimental protocol support.
+            let modes = client
+                .request("collaborationMode/list", json!({}))
+                .await
+                .ok();
+            let mut goals_enabled = false;
+            let mut cursor: Option<String> = None;
+            let mut seen = HashSet::new();
+            loop {
+                let mut params = json!({"limit": 100});
+                if let Some(value) = &cursor {
+                    params["cursor"] = Value::String(value.clone());
+                }
+                let Ok(features) = client.request("experimentalFeature/list", params).await else {
+                    break;
+                };
+                goals_enabled |= features["data"].as_array().is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|f| f["name"] == "goals" && f["enabled"] == true)
+                });
+                let Some(next) = features["nextCursor"].as_str().filter(|s| !s.is_empty()) else {
+                    break;
+                };
+                if !seen.insert(next.to_owned()) {
+                    break;
+                }
+                cursor = Some(next.to_owned());
+            }
+            let mode = advertised_mode_option(modes.as_ref(), goals_enabled);
+            for model in &mut models {
+                model.options.extend(mode.clone());
+            }
+
             if let Some(default_id) = default_model_id
                 && let Some(index) = models.iter().position(|model| model.id == default_id)
                 && index != 0
@@ -304,6 +340,27 @@ impl CodexHarness {
             Err(_) => Err(HarnessError::Protocol("model discovery timed out".into())),
         }
     }
+}
+
+fn advertised_mode_option(
+    modes: Option<&Value>,
+    goals_enabled: bool,
+) -> Option<zeron_proto::ModelOption> {
+    let has = |mode: &str| {
+        modes
+            .and_then(|m| m["data"].as_array())
+            .is_some_and(|items| items.iter().any(|item| item["mode"] == mode))
+    };
+    if !has("default") {
+        return None;
+    }
+    let mut option = zeron_proto::agent_mode_option(HarnessId::Codex)?;
+    option.choices.retain(|choice| match choice.id.as_str() {
+        "plan" => has("plan"),
+        "goal" => goals_enabled,
+        _ => true,
+    });
+    (option.choices.len() > 1).then_some(option)
 }
 
 fn reasoning_level(value: &str) -> Option<ReasoningLevel> {
@@ -545,6 +602,9 @@ impl Harness for CodexHarness {
     fn deterministic_turn_end(&self) -> bool {
         true
     }
+    fn validate_request(&self, request: &RunRequest) -> Result<(), HarnessError> {
+        validate_agent_mode(request)
+    }
 
     /// The signed-in account's visible `model/list` is authoritative. A
     /// curated snapshot keeps the picker operational when the experimental
@@ -603,6 +663,7 @@ impl CodexHarness {
         controls: RunControls,
         title_only: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        validate_agent_mode(&request)?;
         let exe = self.resolve_executable()?;
         // Yolo mode: danger-full-access + approvalPolicy "never" (set below) —
         // codex's --dangerously-bypass-approvals-and-sandbox equivalent.
@@ -762,10 +823,220 @@ async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, ev: AgentEven
     tx.send(Ok(ev)).await.is_ok()
 }
 
+fn prompt_input(text: &str) -> Value {
+    json!([{ "type": "text", "text": text }])
+}
+
+fn validate_agent_mode(request: &RunRequest) -> Result<(), HarnessError> {
+    let Some(value) = request.model_options.get(zeron_proto::AGENT_MODE_OPTION) else {
+        return Ok(());
+    };
+    let Some(mode) = value.as_str() else {
+        return Err(HarnessError::Protocol("Codex mode must be a string".into()));
+    };
+    if matches!(mode, "default" | "plan" | "goal") {
+        Ok(())
+    } else {
+        Err(HarnessError::Protocol(format!(
+            "Unsupported Codex mode: {mode}"
+        )))
+    }
+}
+
 /// `turn/start` and return the new turn id from the response.
-async fn start_turn(client: &RpcClient, params: Value) -> Result<String, HarnessError> {
+async fn start_turn(client: &RpcClient, mut params: Value) -> Result<String, HarnessError> {
+    let goal_mode = params
+        .as_object_mut()
+        .and_then(|map| map.remove("zeronGoalMode"))
+        .and_then(|value| value.as_bool());
+    if goal_mode == Some(true) {
+        let thread_id = params["threadId"].clone();
+        let current = client
+            .request("thread/goal/get", json!({"threadId": thread_id}))
+            .await?;
+        let status = current["goal"]["status"].as_str();
+        if status.is_none() || status == Some("complete") {
+            let objective = params
+                .pointer("/input/0/text")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            client
+                .request(
+                    "thread/goal/set",
+                    json!({"threadId": thread_id, "objective": objective, "status": "paused"}),
+                )
+                .await?;
+            let started = client.request("turn/start", params).await?;
+            let turn_id = started["turn"]["id"].as_str().unwrap_or("").to_owned();
+            if let Err(error) = client
+                .request(
+                    "thread/goal/set",
+                    json!({"threadId": thread_id, "status": "active"}),
+                )
+                .await
+            {
+                if !turn_id.is_empty() {
+                    let _ = client
+                        .request(
+                            "turn/interrupt",
+                            json!({"threadId": thread_id, "turnId": turn_id}),
+                        )
+                        .await;
+                }
+                return Err(error);
+            }
+            return Ok(turn_id);
+        }
+        return Err(HarnessError::Protocol(format!(
+            "A Codex goal is already {status}; use its Resume, Edit, or Clear control before creating another goal",
+            status = status.unwrap_or("active")
+        )));
+    }
     let started = client.request("turn/start", params).await?;
     Ok(started["turn"]["id"].as_str().unwrap_or("").to_owned())
+}
+
+fn parse_goal(value: &Value) -> Result<GoalState, HarnessError> {
+    let goal = value.get("goal").unwrap_or(value);
+    let objective = goal
+        .get("objective")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HarnessError::Protocol("Codex goal response has no objective".into()))?;
+    let status = goal
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HarnessError::Protocol("Codex goal response has no status".into()))?;
+    Ok(GoalState {
+        objective: objective.to_owned(),
+        status: status.to_owned(),
+        tokens_used: goal
+            .get("tokensUsed")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        token_budget: goal.get("tokenBudget").and_then(Value::as_u64),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GoalNotificationEcho {
+    Updated(GoalState),
+    Cleared,
+}
+
+impl GoalNotificationEcho {
+    fn matches(&self, method: &str, params: &Value) -> bool {
+        match self {
+            Self::Updated(expected) => {
+                method == "thread/goal/updated"
+                    && parse_goal(params).as_ref().ok() == Some(expected)
+            }
+            Self::Cleared => method == "thread/goal/cleared",
+        }
+    }
+
+    fn activity(&self, thread_id: &str) -> (&'static str, Value) {
+        match self {
+            Self::Updated(goal) => (
+                "thread/goal/updated",
+                json!({
+                    "threadId": thread_id,
+                    "goal": {
+                        "objective": goal.objective.clone(),
+                        "status": goal.status.clone(),
+                        "tokensUsed": goal.tokens_used,
+                        "tokenBudget": goal.token_budget,
+                    },
+                }),
+            ),
+            Self::Cleared => (
+                "thread/goal/cleared",
+                json!({"threadId": thread_id, "goal": null}),
+            ),
+        }
+    }
+}
+
+async fn apply_goal_action(
+    client: &RpcClient,
+    thread_id: &str,
+    action: GoalAction,
+    objective: Option<String>,
+    active_turn: Option<&str>,
+) -> Result<Option<GoalState>, HarnessError> {
+    let response = match action {
+        GoalAction::Pause => {
+            let response = client
+                .request(
+                    "thread/goal/set",
+                    json!({"threadId": thread_id, "status": "paused"}),
+                )
+                .await?;
+            if let Some(turn_id) = active_turn {
+                // Pausing the persistent goal must also stop the current goal
+                // turn. Otherwise it can finish and enqueue another automatic
+                // continuation after the UI already says Paused.
+                if let Err(error) = client
+                    .request(
+                        "turn/interrupt",
+                        json!({"threadId": thread_id, "turnId": turn_id}),
+                    )
+                    .await
+                    && !error.to_string().contains("expected active turn id")
+                {
+                    return Err(error);
+                }
+            }
+            Some(parse_goal(&response)?)
+        }
+        GoalAction::Resume => {
+            let response = client
+                .request(
+                    "thread/goal/set",
+                    json!({"threadId": thread_id, "status": "active"}),
+                )
+                .await?;
+            // Setting an idle goal active is the provider's native resume: it
+            // schedules the next goal turn without injecting a user prompt.
+            Some(parse_goal(&response)?)
+        }
+        GoalAction::Edit => {
+            let objective = objective
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| HarnessError::Protocol("Goal objective cannot be empty".into()))?;
+            if objective.chars().count() > 4_000 {
+                return Err(HarnessError::Protocol(
+                    "Goal objective cannot exceed 4000 characters".into(),
+                ));
+            }
+            let response = client
+                .request(
+                    "thread/goal/set",
+                    json!({"threadId": thread_id, "objective": objective}),
+                )
+                .await?;
+            Some(parse_goal(&response)?)
+        }
+        GoalAction::Clear => {
+            client
+                .request("thread/goal/clear", json!({"threadId": thread_id}))
+                .await?;
+            if let Some(turn_id) = active_turn {
+                if let Err(error) = client
+                    .request(
+                        "turn/interrupt",
+                        json!({"threadId": thread_id, "turnId": turn_id}),
+                    )
+                    .await
+                    && !error.to_string().contains("expected active turn id")
+                {
+                    return Err(error);
+                }
+            }
+            None
+        }
+    };
+    Ok(response)
 }
 
 /// The per-run event loop: one task multiplexing app-server messages, the
@@ -786,6 +1057,7 @@ async fn run_session(session: Session) {
     let RunControls {
         request_input,
         mut steering,
+        mut goal_actions,
         interrupt,
     } = controls;
     let request_input = Arc::new(request_input);
@@ -808,6 +1080,11 @@ async fn run_session(session: Session) {
         .and_then(Value::as_str)
         .filter(|t| *t != "default")
         .map(str::to_owned);
+    let control_only = request
+        .model_options
+        .get(zeron_proto::GOAL_CONTROL_ONLY_OPTION)
+        .and_then(Value::as_bool)
+        == Some(true);
 
     let start_params = {
         let mut p = serde_json::Map::new();
@@ -883,6 +1160,15 @@ async fn run_session(session: Session) {
                 }
             }
         }
+        if control_only {
+            let thread_id = request.resume.clone().ok_or_else(|| {
+                HarnessError::Protocol("Goal control requires a persisted Codex thread".into())
+            })?;
+            return Ok::<_, HarnessError>((
+                thread_id.clone(),
+                subagents::Subagents::new(thread_id),
+            ));
+        }
         let thread = if let Some(resume) = &request.resume {
             let mut p = start_params.clone();
             p.insert("threadId".into(), Value::String(resume.clone()));
@@ -953,6 +1239,22 @@ async fn run_session(session: Session) {
         // nothing renders and the UI's 45s staleness gate flips Working off
         // (user report: "not streaming, doesn't say it's working").
         p.insert("summary".into(), "auto".into());
+        {
+            let mode = request
+                .model_options
+                .get(zeron_proto::AGENT_MODE_OPTION)
+                .and_then(Value::as_str)
+                .unwrap_or("default");
+            if request
+                .model_options
+                .contains_key(zeron_proto::AGENT_MODE_OPTION)
+            {
+                p.insert("collaborationMode".into(), json!({
+                    "mode": if mode == "plan" { "plan" } else { "default" },
+                    "settings": { "model": request.model.as_deref(), "reasoning_effort": effort, "developer_instructions": null },
+                }));
+            }
+        }
         if let Some(model) = &request.model {
             p.insert("model".into(), Value::String(model.clone()));
         }
@@ -984,19 +1286,30 @@ async fn run_session(session: Session) {
     }
 
     let mut router = TurnRouter::default();
-    match start_turn(&client, turn_params(&request.prompt)).await {
-        Ok(id) => router.adopt_started(id),
-        Err(e) => {
-            let _ = event_tx
-                .send(Ok(AgentEvent::Done {
-                    status: DoneStatus::Errored,
-                    result: None,
-                    error: Some(e.to_string()),
-                    session_id: Some(thread_id.clone()),
-                }))
-                .await;
-            shutdown_child(&mut child, kill_grace).await;
-            return;
+    if !control_only {
+        let mut initial_turn = turn_params(&request.prompt);
+        let fresh_goal = request
+            .model_options
+            .get(zeron_proto::FRESH_GOAL_OPTION)
+            .and_then(Value::as_bool)
+            == Some(true);
+        if fresh_goal {
+            initial_turn["zeronGoalMode"] = Value::Bool(true);
+        }
+        match start_turn(&client, initial_turn).await {
+            Ok(id) => router.adopt_started(id),
+            Err(e) => {
+                let _ = event_tx
+                    .send(Ok(AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: Some(e.to_string()),
+                        session_id: Some(thread_id.clone()),
+                    }))
+                    .await;
+                shutdown_child(&mut child, kill_grace).await;
+                return;
+            }
         }
     }
 
@@ -1004,19 +1317,33 @@ async fn run_session(session: Session) {
     // Deltas seen per agent-message item, so a model that never streams
     // (item/completed only) still emits its text exactly once.
     let mut streamed_text: HashSet<String> = HashSet::new();
+    let mut plan_text: HashMap<String, String> = HashMap::new();
+    let (answer_tx, mut answer_rx) = mpsc::unbounded_channel::<SteerMessage>();
     let mut reasoning_streams: HashMap<String, ReasoningStream> = HashMap::new();
     // Token usage is held until the turn ends, emitted just before Done.
     let mut pending_usage: Option<AgentEvent> = None;
     // Steers whose `turn/steer` lost the turn-completed race; delivered as the
     // next `turn/start` when the expected turn's end notification arrives.
     let mut queued_steers: VecDeque<String> = VecDeque::new();
+    // Native requests can expire before the user answers. Keep their bridge
+    // waiters cancellable by `serverRequest/resolved` so dropping the receiver
+    // becomes observable to the engine's pending-input cleanup.
+    let mut pending_server_requests = HashMap::<String, tokio::task::AbortHandle>::new();
+    // Assistant-message questions are not JSON-RPC requests and have no
+    // provider cancellation notification, so their bridge waits are owned by
+    // the run and must end with it.
+    let mut assistant_question_waiters = Vec::<tokio::task::AbortHandle>::new();
     let mut steering_open = true;
+    let mut goal_actions_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;
     // A Done has been emitted for the turn currently/last in flight.
-    let mut done_current = false;
+    let mut done_current = control_only;
     let mut done_after_interrupt = false;
     let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
+    let mut goal_notification_echoes = VecDeque::<GoalNotificationEcho>::new();
+    let mut resume_activation_pending = false;
+    let mut resume_activation_deadline: Option<tokio::time::Instant> = None;
 
     'main: loop {
         tokio::select! {
@@ -1047,7 +1374,41 @@ async fn run_session(session: Session) {
                     }
                 }
                 match method.as_str() {
-                    "turn/started" => router.note_started(turn_id(&params)),
+                    "serverRequest/resolved" => {
+                        if let Some(key) = request_id_key(params.get("requestId"))
+                            && let Some(waiter) = pending_server_requests.remove(&key)
+                        {
+                            waiter.abort();
+                        }
+                    }
+                    "turn/started" => {
+                        let id = turn_id(&params);
+                        let autonomous = done_current && !router.is_completed(&id);
+                        if autonomous {
+                            resume_activation_pending = false;
+                            resume_activation_deadline = None;
+                        }
+                        if !router.is_completed(&id) { done_current = false; }
+                        router.note_started(id);
+                        if autonomous {
+                            // Native Goal resume starts a provider-owned turn,
+                            // without a user prompt or `turn/start` response.
+                            // Publish a boundary so the parked engine reopens
+                            // immediately and cannot discard fast first output.
+                            let (prev, next) = rotate(&mut assistant_message_id);
+                            if !send(
+                                &event_tx,
+                                AgentEvent::AutonomousTurnStarted {
+                                    assistant_message_id: Some(prev),
+                                    next_assistant_message_id: Some(next),
+                                },
+                            )
+                            .await
+                            {
+                                break 'main;
+                            }
+                        }
+                    }
 
                     "item/agentMessage/delta" => {
                         streamed_text.insert(item_id(&params));
@@ -1069,6 +1430,12 @@ async fn run_session(session: Session) {
                         }
                     }
 
+                    "item/plan/delta" => {
+                        let id = item_id(&params);
+                        let text = plan_text.entry(id.clone()).or_default();
+                        if let Some(delta) = delta_text(&params) { text.push_str(&delta); }
+                        if !send(&event_tx, AgentEvent::ToolCall { id, call: zeron_proto::ToolCall::Plan { text: text.clone() } }).await { break 'main; }
+                    }
                     "item/started" | "item/completed" => {
                         let phase = if method == "item/started" {
                             Phase::Started
@@ -1078,6 +1445,68 @@ async fn run_session(session: Session) {
                         let item = params.get("item").unwrap_or(&Value::Null);
                         if matches!(item_type(item), "agentMessage" | "agent_message") {
                             if phase == Phase::Completed {
+                                if let Some(questions) = item
+                                    .get("questions")
+                                    .and_then(Value::as_array)
+                                    .filter(|questions| !questions.is_empty())
+                                {
+                                    let questions: Vec<UserInputQuestion> = questions
+                                        .iter()
+                                        .map(|question| UserInputQuestion {
+                                            id: new_message_id(),
+                                            header: "Question".into(),
+                                            question: question["title"]
+                                                .as_str()
+                                                .unwrap_or_default()
+                                                .into(),
+                                            options: question["options"]
+                                                .as_array()
+                                                .into_iter()
+                                                .flatten()
+                                                .filter_map(Value::as_str)
+                                                .map(str::to_owned)
+                                                .collect(),
+                                            multi_select: false,
+                                            option_descriptions: Vec::new(),
+                                            allow_custom: true,
+                                            non_blocking: true,
+                                        })
+                                        .collect();
+                                    let ask = Arc::clone(&request_input);
+                                    let answers = answer_tx.clone();
+                                    let waiter = tokio::spawn(async move {
+                                        let response =
+                                            (ask)(questions.clone()).await.unwrap_or_default();
+                                        let lines: Vec<String> = questions
+                                            .iter()
+                                            .filter_map(|question| {
+                                                response
+                                                    .iter()
+                                                    .find(|answer| {
+                                                        answer.question_id == question.id
+                                                            && !answer.labels.is_empty()
+                                                    })
+                                                    .map(|answer| {
+                                                        format!(
+                                                            "{}: {}",
+                                                            question.question,
+                                                            answer.labels.join(", ")
+                                                        )
+                                                    })
+                                            })
+                                            .collect();
+                                        if !lines.is_empty() {
+                                            let _ = answers.send(SteerMessage {
+                                                prompt: format!(
+                                                    "Answers to your questions:\n{}",
+                                                    lines.join("\n")
+                                                ),
+                                                message_id: None,
+                                            });
+                                        }
+                                    });
+                                    assistant_question_waiters.push(waiter.abort_handle());
+                                }
                                 // Fallback for non-streamed messages only.
                                 let id = item.get("id").and_then(Value::as_str).unwrap_or("");
                                 let text = item.get("text").and_then(Value::as_str).unwrap_or("");
@@ -1128,6 +1557,46 @@ async fn run_session(session: Session) {
                         }
                     }
 
+                    "turn/plan/updated" | "thread/goal/updated" | "thread/goal/cleared" => {
+                        let matching_echo = goal_notification_echoes
+                            .iter()
+                            .position(|echo| echo.matches(&method, &params));
+                        if let Some(index) = matching_echo {
+                            goal_notification_echoes.remove(index);
+                            // The authoritative response was already emitted.
+                            // In particular, a delayed Pause echo must not
+                            // cancel a later Resume while its native turn is
+                            // still waiting to announce `turn/started`.
+                            continue;
+                        } else {
+                            for event in normalize::activity_events(&method, &params) {
+                                if !send(&event_tx, event).await { break 'main; }
+                            }
+                        }
+                        if resume_activation_pending
+                            && params
+                                .pointer("/goal/status")
+                                .and_then(Value::as_str)
+                                .is_some_and(|status| status != "active")
+                        {
+                            resume_activation_pending = false;
+                            resume_activation_deadline = None;
+                            if let Some(text) = queued_steers.pop_front()
+                                && !steer_as_new_turn(
+                                    &client,
+                                    turn_params(&text),
+                                    &mut router,
+                                    &event_tx,
+                                    &mut assistant_message_id,
+                                    &mut done_current,
+                                )
+                                .await
+                            {
+                                break 'main;
+                            }
+                        }
+                    }
+
                     "thread/tokenUsage/updated" => {
                         if let Some(usage) = normalize::context_usage_event(&params)
                             && !send(&event_tx, usage).await { break 'main; }
@@ -1142,6 +1611,7 @@ async fn run_session(session: Session) {
                         // Item ids never span turns; without this the set grew
                         // one entry per message for a persistent session's life.
                         streamed_text.clear();
+                        plan_text.clear();
                         if let Some(usage) = pending_usage.take()
                             && !send(&event_tx, usage).await
                         {
@@ -1177,6 +1647,12 @@ async fn run_session(session: Session) {
                         }
                         if interrupted {
                             done_after_interrupt = true;
+                            break 'main;
+                        }
+                        if status == DoneStatus::Errored {
+                            // The engine stops consuming this run at the error.
+                            // Preserve queued user text for its durable orphan
+                            // redispatch instead of starting it invisibly here.
                             break 'main;
                         }
                         // Persistent session: a steer that lost the race with
@@ -1271,28 +1747,38 @@ async fn run_session(session: Session) {
                 }
 
                 Some(Incoming::Request { id, method, params }) => {
-                    handle_server_request(
+                    if let Some((key, waiter)) = handle_server_request(
                         &client,
                         id,
                         &method,
                         &params,
                         request.auto_approve,
                         &request_input,
-                    );
+                    ) {
+                        if let Some(previous) = pending_server_requests.insert(key, waiter) {
+                            previous.abort();
+                        }
+                    }
                 }
 
                 // stdout EOF or reader gone: the app server exited.
                 Some(Incoming::Eof) | None => break 'main,
             },
 
-            steer = steering.recv(), if steering_open && !interrupted => match steer {
+            steer = async {
+                tokio::select! { steer = steering.recv() => steer, answer = answer_rx.recv() => answer }
+            }, if steering_open && !interrupted => match steer {
                 Some(msg) => {
                     let text = msg.prompt;
+                    if resume_activation_pending {
+                        queued_steers.push_back(text);
+                        continue 'main;
+                    }
                     if let Some(expected) = router.active.clone() {
                         let steer_params = json!({
                             "threadId": thread_id,
                             "expectedTurnId": expected,
-                            "input": [{ "type": "text", "text": text }],
+                            "input": prompt_input(&text),
                         });
                         match client.request("turn/steer", steer_params).await {
                             Ok(_) => {
@@ -1356,10 +1842,126 @@ async fn run_session(session: Session) {
                     // once nothing is in flight — mirrors codex.ts's steer loop
                     // `finish()` on a null take.
                     steering_open = false;
-                    if router.active.is_none() && queued_steers.is_empty() {
+                    if done_current && router.active.is_none() && queued_steers.is_empty() {
                         break 'main;
                     }
                 }
+            },
+
+            request = goal_actions.recv(), if goal_actions_open && !interrupted => match request {
+                Some(request) => {
+                    let action = request.action.clone();
+                    let control_was_idle = router.active.is_none() && done_current;
+                    let activation_was_pending = resume_activation_pending;
+                    let result = apply_goal_action(
+                        &client,
+                        &thread_id,
+                        request.action,
+                        request.objective,
+                        router.active.as_deref(),
+                    ).await;
+                    let resume_activated = action == GoalAction::Resume
+                        && matches!(
+                            result.as_ref(),
+                            Ok(Some(goal)) if goal.status == "active"
+                        );
+                    if resume_activated && control_was_idle {
+                        resume_activation_pending = true;
+                        resume_activation_deadline = Some(
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+                        );
+                    }
+                    let authoritative_echo = match result.as_ref() {
+                        Ok(Some(goal)) => Some(GoalNotificationEcho::Updated(goal.clone())),
+                        Ok(None) => Some(GoalNotificationEcho::Cleared),
+                        Err(_) => None,
+                    };
+                    if let Some(echo) = authoritative_echo {
+                        // Mutation responses are authoritative and can precede
+                        // or outlive notifications (notably Pause interrupting
+                        // the current turn). Publish every successful action
+                        // immediately, then suppress only its exact echo.
+                        let (method, params) = echo.activity(&thread_id);
+                        for event in normalize::activity_events(method, &params) {
+                            let _ = send(&event_tx, event).await;
+                        }
+                        goal_notification_echoes.push_back(echo);
+                    }
+                    if result.is_ok()
+                        && control_only
+                        && (action != GoalAction::Resume || !resume_activated)
+                        && control_was_idle
+                        && (!activation_was_pending
+                            || matches!(action, GoalAction::Pause | GoalAction::Clear)
+                            || (action == GoalAction::Resume && !resume_activated))
+                    {
+                        let _ = send(
+                            &event_tx,
+                            AgentEvent::Done {
+                                status: DoneStatus::Completed,
+                                result: Some(zeron_proto::GOAL_CONTROL_DONE_RESULT.into()),
+                                error: None,
+                                session_id: Some(thread_id.clone()),
+                            },
+                        )
+                        .await;
+                    } else if control_only && let Err(error) = &result {
+                        let _ = send(
+                            &event_tx,
+                            AgentEvent::Done {
+                                status: DoneStatus::Errored,
+                                result: Some(zeron_proto::GOAL_CONTROL_DONE_RESULT.into()),
+                                error: Some(error.to_string()),
+                                session_id: Some(thread_id.clone()),
+                            },
+                        )
+                        .await;
+                    }
+                    if result.is_ok()
+                        && (matches!(action, GoalAction::Pause | GoalAction::Clear)
+                            || (action == GoalAction::Resume && !resume_activated))
+                    {
+                        resume_activation_pending = false;
+                        resume_activation_deadline = None;
+                    }
+                    let _ = request.response.send(result);
+                }
+                None => goal_actions_open = false,
+            },
+
+            _ = tokio::time::sleep_until(
+                resume_activation_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if resume_activation_deadline.is_some() => {
+                resume_activation_pending = false;
+                resume_activation_deadline = None;
+                // A successful active response promises a provider-owned turn.
+                // Starting queued user text after an arbitrary timeout can race
+                // a late native turn and acknowledge text the provider never
+                // consumed. Disarm the goal and let the engine's durable steer
+                // ledger redeliver that text in a fresh run instead.
+                let paused = client.request(
+                    "thread/goal/set",
+                    json!({"threadId": thread_id, "status": "paused"}),
+                ).await;
+                if let Ok(response) = &paused
+                    && let Ok(goal) = parse_goal(response)
+                {
+                    let echo = GoalNotificationEcho::Updated(goal);
+                    let (method, params) = echo.activity(&thread_id);
+                    for event in normalize::activity_events(method, &params) {
+                        let _ = send(&event_tx, event).await;
+                    }
+                }
+                let _ = send(
+                    &event_tx,
+                    AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: Some("Codex did not start the resumed goal turn".into()),
+                        session_id: Some(thread_id.clone()),
+                    },
+                ).await;
+                break 'main;
             },
 
             _ = interrupt.cancelled(), if !interrupt_sent => {
@@ -1398,6 +2000,15 @@ async fn run_session(session: Session) {
 
             _ = event_tx.closed() => break 'main,
         }
+    }
+
+    // Detached request waiters otherwise outlive a crashed/interrupted app
+    // server and keep the engine response channels falsely open.
+    for waiter in pending_server_requests.into_values() {
+        waiter.abort();
+    }
+    for waiter in assistant_question_waiters {
+        waiter.abort();
     }
 
     // Terminal bookkeeping: never end the stream without a Done unless the
@@ -1498,33 +2109,63 @@ fn handle_server_request(
     params: &Value,
     auto_approve: bool,
     request_input: &Arc<RequestInputFn>,
-) {
+) -> Option<(String, tokio::task::AbortHandle)> {
     // A tool's user-input request (EXPERIMENTAL, codex 0.146.x) is a CONTENT
     // question, never auto-approvable — route it to the input bridge and
     // answer keyed by question id, `{ answers: { <id>: { answers: [..] } } }`.
     if method == "item/tool/requestUserInput" {
+        if params["questions"].as_array().is_some_and(|questions| {
+            questions
+                .iter()
+                .any(|question| question["isSecret"] == true)
+        }) {
+            client.respond_error(
+                &id,
+                -32602,
+                "Secret input is not supported by this client; use an external credential flow",
+            );
+            return None;
+        }
         let questions = user_input_questions(params);
         if questions.is_empty() {
             client.respond(&id, json!({ "answers": {} }));
-            return;
+            return None;
+        }
+        if questions
+            .iter()
+            .any(|(_, question)| !question.allow_custom && question.options.is_empty())
+        {
+            // An impossible choice-only request is a native cancellation, not
+            // a free-text prompt whose answer cannot be represented faithfully.
+            client.respond(&id, json!({ "answers": {} }));
+            return None;
+        }
+        if !valid_user_input_request(&questions) {
+            client.respond_error(&id, -32602, "Invalid or ambiguous question payload");
+            return None;
         }
         let client = client.clone();
         let request_input = Arc::clone(request_input);
-        tokio::spawn(async move {
+        let key = request_id_key(Some(&id));
+        let waiter = tokio::spawn(async move {
             let asked: Vec<UserInputQuestion> = questions.iter().map(|(_, q)| q.clone()).collect();
-            let answers = (request_input)(asked).await.unwrap_or_default();
-            let mut by_id = serde_json::Map::new();
-            for (wire_id, q) in &questions {
-                let labels: Vec<Value> = answers
-                    .iter()
-                    .find(|a| a.question_id == q.id)
-                    .map(|a| a.labels.iter().cloned().map(Value::String).collect())
-                    .unwrap_or_default();
-                by_id.insert(wire_id.clone(), json!({ "answers": labels }));
+            let answers = match (request_input)(asked).await {
+                Ok(answers) => answers,
+                Err(_) => {
+                    client.respond_error(
+                        &id,
+                        -32603,
+                        "The question response channel closed before an answer was delivered",
+                    );
+                    return;
+                }
+            };
+            match user_input_response(&questions, &answers) {
+                Ok(response) => client.respond(&id, response),
+                Err(message) => client.respond_error(&id, -32602, message),
             }
-            client.respond(&id, json!({ "answers": by_id }));
         });
-        return;
+        return key.map(|key| (key, waiter.abort_handle()));
     }
     let is_approval = matches!(
         method,
@@ -1536,17 +2177,18 @@ fn handle_server_request(
             "unhandled server request: {method}"
         );
         client.respond_error(&id, -32601, &format!("unsupported method: {method}"));
-        return;
+        return None;
     }
     if auto_approve {
         client.respond(&id, json!({ "decision": "accept" }));
-        return;
+        return None;
     }
 
     let question = approval_question(method, params);
     let client = client.clone();
     let request_input = Arc::clone(request_input);
-    tokio::spawn(async move {
+    let key = request_id_key(Some(&id));
+    let waiter = tokio::spawn(async move {
         // The engine's input bridge owns the `InputRequested`/`InputResolved`
         // lifecycle (it mints the request id the resolver is parked under);
         // emitting our own copy here doubled the doc's input part with an id
@@ -1565,6 +2207,56 @@ fn handle_server_request(
             json!({ "decision": if accept { "accept" } else { "decline" } }),
         );
     });
+    key.map(|key| (key, waiter.abort_handle()))
+}
+
+/// JSON-RPC request ids may be strings or numbers. Their JSON representation
+/// is stable across the request and its `serverRequest/resolved` notification.
+fn request_id_key(id: Option<&Value>) -> Option<String> {
+    serde_json::to_string(id?).ok()
+}
+
+fn valid_user_input_request(questions: &[(String, UserInputQuestion)]) -> bool {
+    let mut wire_ids = HashSet::new();
+    questions
+        .iter()
+        .all(|(wire_id, _)| !wire_id.trim().is_empty() && wire_ids.insert(wire_id.clone()))
+        && zeron_proto::valid_input_questions(
+            &questions
+                .iter()
+                .map(|(_, question)| question.clone())
+                .collect::<Vec<_>>(),
+        )
+}
+
+/// Keep UI question identity separate from native wire identity. Never turn an
+/// unknown/missing answer into a successful empty answer for the provider.
+fn user_input_response(
+    questions: &[(String, UserInputQuestion)],
+    answers: &[zeron_proto::UserInputAnswer],
+) -> Result<Value, &'static str> {
+    let asked: Vec<_> = questions
+        .iter()
+        .map(|(_, question)| question.clone())
+        .collect();
+    if !zeron_proto::valid_input_answers(&asked, answers) {
+        return Err("Invalid answer IDs, choices, or cardinality");
+    }
+    if answers.is_empty() {
+        return Ok(json!({"answers": {}}));
+    }
+    let by_id: serde_json::Map<String, Value> = questions
+        .iter()
+        .map(|(wire_id, question)| {
+            let labels = answers
+                .iter()
+                .find(|answer| answer.question_id == question.id)
+                .map(|answer| answer.labels.clone())
+                .unwrap_or_default();
+            (wire_id.clone(), json!({"answers": labels}))
+        })
+        .collect();
+    Ok(json!({"answers":by_id}))
 }
 
 /// Parse `item/tool/requestUserInput` questions into (wire id, question)
@@ -1576,18 +2268,17 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
         .map(|a| a.as_slice())
         .unwrap_or_default()
         .iter()
-        .enumerate()
-        .map(|(ix, q)| {
+        .map(|q| {
             let field = |keys: [&str; 3]| {
                 keys.iter()
                     .find_map(|k| q.get(*k).and_then(Value::as_str))
                     .unwrap_or("")
                     .to_owned()
             };
-            let wire_id = {
-                let id = field(["id", "questionId", "question_id"]);
-                if id.is_empty() { format!("q{ix}") } else { id }
-            };
+            // Preserve a missing or blank provider id so validation rejects
+            // the malformed native request instead of inventing a key that
+            // Codex never sent and cannot match in the response.
+            let wire_id = field(["id", "questionId", "question_id"]);
             let question = UserInputQuestion {
                 id: new_message_id(),
                 header: {
@@ -1615,6 +2306,25 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
                             .into(),
                     })
                     .collect(),
+                option_descriptions: q
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(|option| {
+                        option
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned()
+                    })
+                    .collect(),
+                allow_custom: q
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .is_none_or(Vec::is_empty)
+                    || q.get("isOther").and_then(Value::as_bool).unwrap_or(true),
+                non_blocking: params.get("isBlocking").and_then(Value::as_bool) == Some(false),
                 multi_select: ["multiSelect", "multi_select"]
                     .iter()
                     .find_map(|k| q.get(*k).and_then(Value::as_bool))
@@ -1668,6 +2378,9 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
         header,
         question,
         options: vec!["Yes".into(), "No".into()],
+        option_descriptions: Vec::new(),
+        allow_custom: false,
+        non_blocking: false,
         multi_select: false,
     }
 }
@@ -1676,8 +2389,131 @@ use crate::{Signal, send_signal, shutdown_child};
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn question_answers_preserve_native_ids_and_never_silently_drop_text() {
+        let questions = user_input_questions(
+            &json!({"questions":[{"id":"native-id","question":"What next?","isOther":true,"options":[{"label":"Plan"}]}]}),
+        );
+        let answer = zeron_proto::UserInputAnswer {
+            question_id: questions[0].1.id.clone(),
+            labels: vec!["Build a feature with café 日本語".into()],
+        };
+        assert_eq!(
+            user_input_response(&questions, &[answer]).unwrap(),
+            json!({"answers":{"native-id":{"answers":["Build a feature with café 日本語"]}}})
+        );
+        assert!(
+            user_input_response(
+                &questions,
+                &[zeron_proto::UserInputAnswer {
+                    question_id: "wrong-id".into(),
+                    labels: vec!["Plan".into()]
+                }]
+            )
+            .is_err()
+        );
+        assert_eq!(
+            user_input_response(&questions, &[]).unwrap(),
+            json!({"answers":{}})
+        );
+    }
+
+    #[test]
+    fn question_payload_rejects_ambiguous_native_keys_and_labels() {
+        let duplicate_ids = user_input_questions(&json!({"questions":[
+            {"id":"same","question":"First","isOther":true},
+            {"id":"same","question":"Second","isOther":true}
+        ]}));
+        assert!(!valid_user_input_request(&duplicate_ids));
+
+        let duplicate_labels = user_input_questions(&json!({"questions":[{
+            "id":"q","question":"Choose","isOther":false,
+            "options":[{"label":"Same"},{"label":"Same"}]
+        }]}));
+        assert!(!valid_user_input_request(&duplicate_labels));
+
+        for malformed in [
+            json!({"questions":[{"id":"  ","question":"Blank","isOther":true}]}),
+            json!({"questions":[{"question":"Missing","isOther":true}]}),
+        ] {
+            let questions = user_input_questions(&malformed);
+            assert!(!valid_user_input_request(&questions));
+            assert_eq!(
+                questions[0].0,
+                malformed["questions"][0]["id"].as_str().unwrap_or("")
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_unknown_mode_is_rejected() {
+        let mut request = RunRequest {
+            prompt: "test".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: String::new(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            resume: None,
+            attachments: Vec::new(),
+            worktree: None,
+        };
+        request
+            .model_options
+            .insert(zeron_proto::AGENT_MODE_OPTION.into(), "invented".into());
+        assert!(validate_agent_mode(&request).is_err());
+    }
+
+    #[test]
+    fn question_capability_contract() {
+        let mapped = user_input_questions(
+            &serde_json::json!({"questions":[{"id":"q","question":"Choose","isOther":false,"options":[{"label":"One","description":"First option"}]}]}),
+        );
+        assert!(!mapped[0].1.allow_custom);
+        assert_eq!(mapped[0].1.option_descriptions, ["First option"]);
+        assert!(
+            !approval_question(
+                "item/commandExecution/requestApproval",
+                &serde_json::json!({})
+            )
+            .allow_custom
+        );
+    }
+
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn modes_require_live_protocol_and_enabled_goal_feature() {
+        assert!(advertised_mode_option(None, true).is_none());
+        let modes = json!({"data":[{"mode":"default"},{"mode":"plan"}]});
+        let option = advertised_mode_option(Some(&modes), false).unwrap();
+        assert_eq!(
+            option
+                .choices
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["default", "plan"]
+        );
+        assert_eq!(
+            advertised_mode_option(Some(&modes), true)
+                .unwrap()
+                .choices
+                .len(),
+            3
+        );
+        assert!(
+            advertised_mode_option(Some(&json!({"data":[{"mode":"default"}]})), false).is_none()
+        );
+        assert!(catalog::static_models().iter().all(|m| {
+            m.options
+                .iter()
+                .all(|o| o.id != zeron_proto::AGENT_MODE_OPTION)
+        }));
+    }
 
     #[test]
     fn approval_questions_are_yes_no() {

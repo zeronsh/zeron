@@ -402,6 +402,8 @@ function withAuthHint(message) {
   return text;
 }
 
+let conversationMode;
+
 async function runTurn(prompt, ready) {
   if (closing) return;
   try {
@@ -412,6 +414,7 @@ async function runTurn(prompt, ready) {
       return;
     }
     run = await agent.send(prompt, {
+      ...(conversationMode ? {mode: conversationMode} : {}),
       onDelta: ({ update }) => {
         try {
           mapUpdate(update);
@@ -454,7 +457,7 @@ function modelSelection(msg) {
   const id = msg.model || "auto";
   const params = [];
   for (const [key, value] of Object.entries(msg.modelOptions ?? {})) {
-    if (typeof value !== "string" || !value) continue;
+    if (key === "agentMode" || typeof value !== "string" || !value) continue;
     if (key === "optimizeFor") {
       params.push({ id: "optimize_for", value: value === "speed" ? "cost" : value });
     } else {
@@ -465,6 +468,11 @@ function modelSelection(msg) {
 }
 
 async function start(msg) {
+  const selectedMode = msg.modelOptions?.agentMode;
+  if (selectedMode !== undefined && !["default", "plan"].includes(selectedMode)) {
+    throw new Error(`Unsupported Cursor mode: ${selectedMode}`);
+  }
+  conversationMode = selectedMode === "plan" ? "plan" : selectedMode === "default" ? "agent" : undefined;
   const model = modelSelection(msg);
   const local = { cwd: msg.cwd || process.cwd(), enableAgentRetries: true };
   // Isolated per-run store (see the header above). Resume looks the agent's
@@ -487,6 +495,7 @@ async function start(msg) {
   }
   const options = {
     model,
+    ...(conversationMode ? {mode: conversationMode} : {}),
     // askQuestion has no public answer channel in this SDK (SDKRequestMessage
     // carries only a request id) — a question would block the run forever.
     // generateImage has nowhere to land in a zeron session (ACP parity).

@@ -1417,10 +1417,17 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
                 .collect()
         })
         .unwrap_or_default();
-    let wire_options: Vec<ModelOption> = config_options
+    let mut wire_options: Vec<ModelOption> = config_options
         .iter()
         .filter_map(trait_from_config_option)
         .collect();
+
+    if !wire_options
+        .iter()
+        .any(|o| o.id == zeron_proto::AGENT_MODE_OPTION)
+    {
+        wire_options.extend(legacy_mode_option(session_response));
+    }
 
     let exact = |id: &str| catalog.iter().find(|m| norm_id(&m.id) == norm_id(id));
     // Family-alias catalog row: the claude adapter advertises bare aliases
@@ -1540,24 +1547,47 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
                 id,
                 m.get("name").and_then(Value::as_str),
                 m.get("description").and_then(Value::as_str),
-                exact(id).map(|k| k.options.clone()).unwrap_or_default(),
+                {
+                    let mut options = exact(id).map(|k| k.options.clone()).unwrap_or_default();
+                    options.retain(|o| o.id != zeron_proto::AGENT_MODE_OPTION);
+                    for option in &wire_options {
+                        options.retain(|o| o.id != option.id);
+                        options.push(option.clone());
+                    }
+                    options
+                },
             ))
         })
         .collect()
 }
 
-/// A session config option surfaced as a Traits-dropdown section. Mode is
-/// zeron's own (forced to the no-prompts choice), model rides the model rows,
+/// A session config option surfaced in the composer. Native modes use the
+/// shared agentMode key, model rides the model rows,
 /// and thought_level is the Reasoning ladder — everything else the agent
 /// advertises (fast mode, collaboration mode, agent persona, …) passes
 /// through. `currentValue` doubles as the default: it is the state the
 /// session opens in. Booleans render as an off/on select, mirroring the
 /// catalogs (zeron never declares the boolean config capability, so adapters
 /// send selects, but handle the shape defensively).
+fn config_choices(option: &Value) -> Vec<&Value> {
+    option["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|choice| {
+            if let Some(group) = choice["options"].as_array() {
+                group.iter().collect::<Vec<_>>()
+            } else {
+                vec![choice]
+            }
+        })
+        .collect()
+}
+
 fn trait_from_config_option(option: &Value) -> Option<ModelOption> {
     if matches!(
         option.get("category").and_then(Value::as_str),
-        Some("mode" | "model" | "thought_level")
+        Some("model" | "thought_level")
     ) {
         return None;
     }
@@ -1565,10 +1595,8 @@ fn trait_from_config_option(option: &Value) -> Option<ModelOption> {
     let label = option.get("name").and_then(Value::as_str).unwrap_or(id);
     match option.get("type").and_then(Value::as_str)? {
         "select" => {
-            let choices: Vec<ModelOptionChoice> = option
-                .get("options")
-                .and_then(Value::as_array)?
-                .iter()
+            let choices: Vec<ModelOptionChoice> = config_choices(option)
+                .into_iter()
                 .filter_map(|c| {
                     let id = c.get("value").and_then(Value::as_str)?;
                     Some(ModelOptionChoice {
@@ -1587,7 +1615,11 @@ fn trait_from_config_option(option: &Value) -> Option<ModelOption> {
                 .map(str::to_owned)
                 .or_else(|| choices.first().map(|c| c.id.clone()))?;
             (choices.len() > 1).then(|| ModelOption {
-                id: id.to_owned(),
+                id: if option["category"] == "mode" {
+                    zeron_proto::AGENT_MODE_OPTION.to_owned()
+                } else {
+                    id.to_owned()
+                },
                 label: label.to_owned(),
                 choices,
                 default_choice,
@@ -1638,6 +1670,16 @@ impl Harness for AcpHarness {
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         self.spec.reasoning_levels
+    }
+    fn validate_request(&self, request: &RunRequest) -> Result<(), HarnessError> {
+        if request
+            .model_options
+            .get(zeron_proto::AGENT_MODE_OPTION)
+            .is_some_and(|mode| !mode.is_string())
+        {
+            return Err(HarnessError::Protocol("Invalid agent mode".into()));
+        }
+        Ok(())
     }
 
     /// The agent's own CLI, not the adapter: `claude` counts as installed even
@@ -2066,12 +2108,8 @@ fn config_option_sets(
         let kind = option.get("type").and_then(Value::as_str).unwrap_or("");
         let category = option.get("category").and_then(Value::as_str);
         let current = option.get("currentValue");
-        let available: Vec<&str> = option
-            .get("options")
-            .and_then(Value::as_array)
-            .map(|a| a.as_slice())
-            .unwrap_or_default()
-            .iter()
+        let available: Vec<&str> = config_choices(option)
+            .into_iter()
             .filter_map(|o| o.get("value").and_then(Value::as_str))
             .collect();
 
@@ -2079,32 +2117,14 @@ fn config_option_sets(
             ("select", Some("model")) => model
                 .and_then(|m| pick_model_value(m, &available, context_1m))
                 .map(Value::String),
-            // Unattended parity with the retired custom adapters (claude
-            // bypassPermissions / codex approvalPolicy never): pick the
-            // no-prompts mode when the agent offers one. claude-agent-acp
-            // calls it `bypassPermissions`, codex-acp `agent-full-access`
-            // (approvalPolicy "never" + danger-full-access sandbox), Devin
-            // `bypass`. Cursor instead exposes agent/plan/ask — those arrive
-            // as a Traits "Mode" option and win when the run selected one.
+            // Preserve the advertised current mode unless the user selects one.
+            // Switching to bypass here would contradict the composer selection.
             ("select", Some("mode")) => model_options
-                .get("mode")
+                .get(zeron_proto::AGENT_MODE_OPTION)
+                .or_else(|| model_options.get(config_id))
                 .and_then(Value::as_str)
                 .filter(|c| available.contains(c))
-                .map(|c| Value::String(c.to_owned()))
-                .or_else(|| {
-                    [
-                        "bypassPermissions",
-                        "bypass_permissions",
-                        "bypass",
-                        "yolo",
-                        "agent-full-access",
-                        "danger-full-access",
-                        "full-access",
-                    ]
-                    .into_iter()
-                    .find(|v| available.contains(v))
-                    .map(|v| Value::String(v.to_owned()))
-                }),
+                .map(|c| Value::String(c.to_owned())),
             ("select", Some("thought_level")) => efforts
                 .iter()
                 .find(|c| available.contains(*c))
@@ -2142,6 +2162,105 @@ fn config_option_sets(
         }
     }
     sets
+}
+
+/// ACP mode IDs are opaque. Preserve the agent's labels and choices rather
+/// than guessing which names mean plan, build or goal.
+fn legacy_mode_option(session: &Value) -> Option<ModelOption> {
+    if session["configOptions"]
+        .as_array()
+        .is_some_and(|options| options.iter().any(|o| o["category"] == "mode"))
+        || legacy_modes_mirror_thought_level(session)
+    {
+        return None;
+    }
+    let modes = &session["modes"];
+    let choices: Vec<ModelOptionChoice> = modes["availableModes"]
+        .as_array()?
+        .iter()
+        .filter_map(|mode| {
+            Some(ModelOptionChoice {
+                id: mode["id"].as_str()?.to_owned(),
+                label: mode["name"].as_str()?.to_owned(),
+            })
+        })
+        .collect();
+    (!choices.is_empty()).then(|| ModelOption {
+        id: zeron_proto::AGENT_MODE_OPTION.into(),
+        label: "Mode".into(),
+        default_choice: modes["currentModeId"]
+            .as_str()
+            .unwrap_or(&choices[0].id)
+            .to_owned(),
+        choices,
+    })
+}
+
+/// Some adapters publish the same reasoning selector on both ACP's deprecated
+/// `modes` surface and the current `thought_level` config option. Treat the
+/// legacy surface as a duplicate only when its complete value set and current
+/// value match, so agents with independent opaque modes keep their native mode
+/// picker.
+fn legacy_modes_mirror_thought_level(session: &Value) -> bool {
+    let Some(modes) = session["modes"]["availableModes"].as_array() else {
+        return false;
+    };
+    let Some(thought) = session["configOptions"].as_array().and_then(|options| {
+        options
+            .iter()
+            .find(|option| option["category"] == "thought_level")
+    }) else {
+        return false;
+    };
+    let Some(thought_options) = thought["options"].as_array() else {
+        return false;
+    };
+    if modes.is_empty() || modes.len() != thought_options.len() {
+        return false;
+    }
+    let same_values = modes.iter().all(|mode| {
+        mode["id"].as_str().is_some_and(|id| {
+            thought_options
+                .iter()
+                .any(|option| option["value"].as_str() == Some(id))
+        })
+    });
+    same_values && session["modes"]["currentModeId"].as_str() == thought["currentValue"].as_str()
+}
+
+/// Validate explicit intent before any prompt; stale or rejected choices must
+/// never silently run with the agent's default permissions.
+fn requested_mode_change(
+    session: &Value,
+    options: &serde_json::Map<String, Value>,
+) -> Result<Option<(String, String)>, HarnessError> {
+    let Some(wanted) = options.get(zeron_proto::AGENT_MODE_OPTION) else {
+        return Ok(None);
+    };
+    let wanted = wanted
+        .as_str()
+        .ok_or_else(|| HarnessError::Protocol("Invalid agent mode".into()))?;
+    if let Some(config) = session["configOptions"]
+        .as_array()
+        .and_then(|options| options.iter().find(|o| o["category"] == "mode"))
+    {
+        let mode = trait_from_config_option(config);
+        if !mode.is_some_and(|m| m.choices.iter().any(|c| c.id == wanted)) {
+            return Err(HarnessError::Protocol(format!(
+                "Agent does not advertise mode {wanted}"
+            )));
+        }
+        return Ok(Some((
+            config["id"].as_str().unwrap_or_default().into(),
+            wanted.into(),
+        )));
+    }
+    if !legacy_mode_option(session).is_some_and(|m| m.choices.iter().any(|c| c.id == wanted)) {
+        return Err(HarnessError::Protocol(format!(
+            "Agent does not advertise mode {wanted}"
+        )));
+    }
+    Ok(Some((String::new(), wanted.into())))
 }
 
 /// Per-agent subagent correlation: Devin maps tagged ACP updates inline
@@ -2286,6 +2405,10 @@ fn handle_server_request(
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
+            if params["toolCall"]["kind"] == "switch_mode" || is_user_question(&options) {
+                client.respond(&id, json!({"outcome": {"outcome": "cancelled"}}));
+                return Vec::new();
+            }
             match preferred_allow_option(&options) {
                 Some(option_id) => client.respond(
                     &id,
@@ -2325,38 +2448,102 @@ fn is_user_question(options: &[Value]) -> bool {
     })
 }
 
-/// The live-run request handler: tool permissions auto-accept like
-/// [`handle_server_request`], but question-shaped requests block on the
+/// The composer response contract addresses choices by their displayed label,
+/// while ACP resolves them by opaque `optionId`. Agents are allowed to repeat
+/// or omit display names, so make the UI labels non-empty and unique and keep
+/// their positional mapping back to the exact native option.
+fn permission_option_labels(options: &[Value]) -> Vec<String> {
+    let mut labels = Vec::with_capacity(options.len());
+    for (index, option) in options.iter().enumerate() {
+        let base = option
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Option {}", index + 1));
+        let mut label = base.clone();
+        let mut suffix = 2;
+        while labels.contains(&label) {
+            label = format!("{base} ({suffix})");
+            suffix += 1;
+        }
+        labels.push(label);
+    }
+    labels
+}
+
+fn answerable_permission_options(options: Vec<Value>) -> Vec<Value> {
+    let mut ids = std::collections::HashSet::new();
+    options
+        .into_iter()
+        .filter(|option| {
+            option
+                .get("optionId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .is_some_and(|id| ids.insert(id.to_owned()))
+        })
+        .collect()
+}
+
+/// Native mode permissions, mode exits and question-shaped requests use the
+/// input bridge. Only agents without modes retain unattended permissions.
+/// Questions block on the
 /// engine's input bridge (in a subtask so the message loop keeps flowing)
-/// and answer with the option whose name matches the chosen label. A dropped
-/// resolver degrades to `cancelled` — never a silent allow.
+/// and map the chosen, disambiguated display label back to its opaque native
+/// option id. A dropped resolver degrades to `cancelled` — never a silent allow.
 fn handle_server_request_live(
     client: &RpcClient,
     id: Value,
     method: &str,
     params: &Value,
+    session_id: &str,
     request_input: &std::sync::Arc<RequestInputFn>,
+    mut input_cancel: tokio::sync::watch::Receiver<bool>,
+    honor_mode_permissions: bool,
 ) -> Vec<AgentEvent> {
     if method != "session/request_permission" {
         return handle_server_request(client, id, method, params);
     }
-    let options: Vec<Value> = params
+    // A request can race in after the run-level interrupt broadcast. A watch
+    // receiver cloned after that broadcast has already observed the current
+    // version, so `changed()` alone would wait forever; reject it before the
+    // engine creates another pending composer request.
+    if *input_cancel.borrow() {
+        client.respond(&id, json!({ "outcome": { "outcome": "cancelled" } }));
+        return Vec::new();
+    }
+    // A single ACP process can multiplex sessions. Replayed or concurrent
+    // requests for another session must never open the active conversation's
+    // question tray. Cancel the native request so the foreign session is not
+    // left waiting, but do not involve this run's input bridge.
+    if params.get("sessionId").and_then(Value::as_str) != Some(session_id) {
+        client.respond(&id, json!({ "outcome": { "outcome": "cancelled" } }));
+        return Vec::new();
+    }
+    let raw_options = params
         .get("options")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if !is_user_question(&options) {
+    // Classify the native request before dropping malformed/unanswerable
+    // choices. A kind-less choice is user-facing even when it omitted an
+    // optionId; filtering it first could turn the remaining allow option into
+    // an unattended tool approval.
+    let user_question = is_user_question(&raw_options);
+    let options = answerable_permission_options(raw_options);
+    // The composer cannot answer a choice-only request with no choices. This
+    // can occur on extension/version skew; cancel immediately instead of
+    // presenting an input page that has no valid completion path.
+    if options.is_empty() {
+        client.respond(&id, json!({ "outcome": { "outcome": "cancelled" } }));
+        return Vec::new();
+    }
+    if !honor_mode_permissions && !user_question && params["toolCall"]["kind"] != "switch_mode" {
         return handle_server_request(client, id, method, params);
     }
-    let names: Vec<String> = options
-        .iter()
-        .map(|o| {
-            o.get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned()
-        })
-        .collect();
+    let names = permission_option_labels(&options);
     let question = UserInputQuestion {
         id: new_message_id(),
         header: "Agent question".into(),
@@ -2364,26 +2551,30 @@ fn handle_server_request_live(
             .get("toolCall")
             .and_then(|t| t.get("title"))
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
             .unwrap_or("The agent needs your input.")
             .to_owned(),
         options: names.clone(),
+        option_descriptions: Vec::new(),
+        allow_custom: false,
+        non_blocking: false,
         multi_select: false,
     };
     let client = client.clone();
     let request_input = std::sync::Arc::clone(request_input);
     tokio::spawn(async move {
-        let answers = (request_input)(vec![question.clone()])
-            .await
-            .unwrap_or_default();
+        let answer_rx = (request_input)(vec![question.clone()]);
+        let answers = tokio::select! {
+            answers = answer_rx => answers.unwrap_or_default(),
+            _ = input_cancel.changed() => Vec::new(),
+        };
         let picked = answers
             .iter()
             .find(|a| a.question_id == question.id)
             .and_then(|a| a.labels.first())
-            .and_then(|label| {
-                options
-                    .iter()
-                    .find(|o| o.get("name").and_then(Value::as_str) == Some(label.as_str()))
-            })
+            .and_then(|label| names.iter().position(|name| name == label))
+            .and_then(|index| options.get(index))
             .and_then(|o| o.get("optionId").and_then(Value::as_str));
         match picked {
             Some(option_id) => client.respond(
@@ -2394,6 +2585,37 @@ fn handle_server_request_live(
         }
     });
     Vec::new()
+}
+
+fn advertises_modes(value: &Value) -> bool {
+    legacy_mode_option(value).is_some()
+        || value["configOptions"]
+            .as_array()
+            .is_some_and(|options| options.iter().any(|option| option["category"] == "mode"))
+}
+
+/// Apply a live config snapshot only when it belongs to this session. ACP
+/// agents may refresh configuration after `session/new` (login/model rollout,
+/// or a resumed session finishing hydration), so permission routing must track
+/// the newest advertised mode surface rather than freezing the handshake.
+fn live_mode_capability(params: &Value, session_id: &str) -> Option<bool> {
+    (params.get("sessionId").and_then(Value::as_str) == Some(session_id)
+        && params["update"]["sessionUpdate"] == "config_option_update"
+        && params["update"]["configOptions"].is_array())
+    .then(|| advertises_modes(&params["update"]))
+}
+
+fn live_mode_state_changed(params: &Value, session_id: &str) -> bool {
+    if params.get("sessionId").and_then(Value::as_str) != Some(session_id) {
+        return false;
+    }
+    match params["update"]["sessionUpdate"].as_str() {
+        Some("current_mode_update") => true,
+        // Treat the whole config snapshot as authoritative even when it no
+        // longer contains a mode category: removal is the important case.
+        Some("config_option_update") => params["update"]["configOptions"].is_array(),
+        _ => false,
+    }
 }
 
 /// `session/new`. Agents that sign in from Settings never start a browser
@@ -2696,9 +2918,11 @@ async fn run_session(session: Session) {
     let RunControls {
         request_input,
         mut steering,
+        goal_actions: _goal_actions,
         interrupt,
     } = controls;
     let request_input = std::sync::Arc::new(request_input);
+    let (input_cancel_tx, input_cancel_rx) = tokio::sync::watch::channel(false);
 
     // ---- handshake + session (interruptible) ------------------------------
     let setup = async {
@@ -2815,6 +3039,19 @@ async fn run_session(session: Session) {
         // runs.
         let efforts = effort_values(request.reasoning, request.model.as_deref());
         let options_snapshot = session_response;
+        let requested_mode = requested_mode_change(&options_snapshot, &request.model_options)?;
+        if let Some((config_id, mode)) = &requested_mode
+            && config_id.is_empty()
+            && options_snapshot["modes"]["currentModeId"].as_str() != Some(mode)
+        {
+            request_draining(
+                &client,
+                &mut incoming,
+                "session/set_mode",
+                json!({"sessionId": session_id, "modeId": mode}),
+            )
+            .await?;
+        }
         for (config_id, payload) in config_option_sets(
             &options_snapshot,
             requested_model.as_deref(),
@@ -2837,6 +3074,14 @@ async fn run_session(session: Session) {
             )
             .await
             {
+                if requested_mode
+                    .as_ref()
+                    .is_some_and(|(id, _)| id == &config_id)
+                {
+                    return Err(HarnessError::Protocol(format!(
+                        "Agent rejected requested mode: {e}"
+                    )));
+                }
                 if matches!(harness, HarnessId::Antigravity | HarnessId::Devin)
                     && requested_model.is_some()
                     && is_model_config_option(&options_snapshot, &config_id)
@@ -2852,13 +3097,15 @@ async fn run_session(session: Session) {
                 );
             }
         }
-        Ok::<(String, bool, Vec<SlashCommand>), HarnessError>((
+        let honor_mode_permissions = advertises_modes(&options_snapshot);
+        Ok::<(String, bool, Vec<SlashCommand>, bool), HarnessError>((
             session_id,
             steer_ext,
             init_commands,
+            honor_mode_permissions,
         ))
     };
-    let (session_id, steer_ext, init_commands) = tokio::select! {
+    let (session_id, steer_ext, init_commands, mut honor_mode_permissions) = tokio::select! {
         res = tokio::time::timeout(handshake_timeout, setup) => {
             let res = res.unwrap_or_else(|_| {
                 // A hung handshake (agent waiting on a login it can never
@@ -2923,6 +3170,16 @@ async fn run_session(session: Session) {
             return;
         }
     };
+    // ACP mode/config catalogs are live session state. The engine's warm
+    // mailbox carries prompt text only, so it cannot revalidate or reapply an
+    // explicit opaque mode after a live mode update. If one arrives, close the
+    // runtime after this turn; the next message resumes through setup, where
+    // the current catalog is authoritative and the exact native config id/value
+    // is validated and applied before prompting.
+    let has_explicit_mode = request
+        .model_options
+        .contains_key(zeron_proto::AGENT_MODE_OPTION);
+    let mut live_mode_changed = false;
 
     let mut assistant_message_id = new_message_id();
     if !send(
@@ -3115,6 +3372,15 @@ async fn run_session(session: Session) {
                 while let Ok(inc) = incoming.try_recv() {
                     match inc {
                         Incoming::Notification { method, params } => {
+                            if method == "session/update" {
+                                if let Some(advertised) =
+                                    live_mode_capability(&params, &session_id)
+                                {
+                                    honor_mode_permissions = advertised;
+                                }
+                                live_mode_changed |=
+                                    live_mode_state_changed(&params, &session_id);
+                            }
                             let events =
                                 session_update_events(&method, &params, &session_id, &mut subagents);
                             for ev in events {
@@ -3130,7 +3396,10 @@ async fn run_session(session: Session) {
                                 id,
                                 &method,
                                 &params,
+                                &session_id,
                                 &request_input,
+                                input_cancel_rx.clone(),
+                                honor_mode_permissions,
                             ) {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -3184,6 +3453,9 @@ async fn run_session(session: Session) {
                 if interrupted || res.is_err() {
                     break 'main;
                 }
+                if has_explicit_mode && live_mode_changed {
+                    break 'main;
+                }
                 // Persistent session: a queued steer becomes the next turn;
                 // otherwise stay alive for the mailbox — the caller owns
                 // teardown (mirrors the codex harness).
@@ -3222,6 +3494,14 @@ async fn run_session(session: Session) {
             inc = incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
                     last_update_at = tokio::time::Instant::now();
+                    if method == "session/update"
+                        && let Some(advertised) = live_mode_capability(&params, &session_id)
+                    {
+                        honor_mode_permissions = advertised;
+                    }
+                    if method == "session/update" {
+                        live_mode_changed |= live_mode_state_changed(&params, &session_id);
+                    }
                     // Wire traffic is a sign of life for the prompt-stall
                     // watchdog — EXCEPT session boilerplate: opencode emits
                     // available_commands_update right after session/new on
@@ -3302,7 +3582,10 @@ async fn run_session(session: Session) {
                         id,
                         &method,
                         &params,
+                        &session_id,
                         &request_input,
+                        input_cancel_rx.clone(),
+                        honor_mode_permissions,
                     ) {
                         if !send(&event_tx, ev).await {
                             break 'main;
@@ -3396,6 +3679,15 @@ async fn run_session(session: Session) {
                         while let Ok(inc) = incoming.try_recv() {
                             match inc {
                                 Incoming::Notification { method, params } => {
+                                    if method == "session/update" {
+                                        if let Some(advertised) =
+                                            live_mode_capability(&params, &session_id)
+                                        {
+                                            honor_mode_permissions = advertised;
+                                        }
+                                        live_mode_changed |=
+                                            live_mode_state_changed(&params, &session_id);
+                                    }
                                     let events =
                                         session_update_events(&method, &params, &session_id, &mut subagents);
                                     for ev in events {
@@ -3411,7 +3703,10 @@ async fn run_session(session: Session) {
                                         id,
                                         &method,
                                         &params,
+                                        &session_id,
                                         &request_input,
+                                        input_cancel_rx.clone(),
+                                        honor_mode_permissions,
                                     ) {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -3589,6 +3884,9 @@ async fn run_session(session: Session) {
                 {
                     break 'main;
                 }
+                if has_explicit_mode && live_mode_changed {
+                    break 'main;
+                }
                 if let Some(text) = queued_steers.pop_front() {
                     let (prev, next) = rotate(&mut assistant_message_id);
                     if !send(
@@ -3625,6 +3923,14 @@ async fn run_session(session: Session) {
 
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
+                    if turn.is_none() && has_explicit_mode && live_mode_changed {
+                        // Do not acknowledge a text-only warm turn after the
+                        // native mode surface changed. The engine retains its
+                        // routed-steer ledger and re-dispatches this message
+                        // when the stream closes, so setup can validate/apply
+                        // the selected opaque mode against current state.
+                        break 'main;
+                    }
                     // Same transform as the initial prompt: Claude's
                     // Ultrathink prefix rides every steer too.
                     let text = prompt_transform(request.reasoning, &msg.prompt);
@@ -3706,6 +4012,9 @@ async fn run_session(session: Session) {
             _ = interrupt.cancelled(), if !interrupt_sent => {
                 interrupt_sent = true;
                 interrupted = true;
+                // ACP requires every pending permission request to receive a
+                // cancelled response when its prompt turn is cancelled.
+                let _ = input_cancel_tx.send(true);
                 if turn.is_some() {
                     client.notify("session/cancel", Some(json!({ "sessionId": session_id })));
                     // Escalate if the agent doesn't wind down (stopReason
@@ -3766,6 +4075,10 @@ async fn run_session(session: Session) {
             _ = event_tx.closed() => break 'main,
         }
     }
+
+    // Also release native input if the transport ends through EOF, a prompt
+    // error, or consumer teardown instead of an explicit interrupt.
+    let _ = input_cancel_tx.send(true);
 
     // A vanished Devin process cannot send subagent_completed. Settle every
     // open nested transcript before the parent's terminal Done.
@@ -4103,6 +4416,158 @@ mod tests {
     }
 
     #[test]
+    fn native_modes_preserve_opaque_ids_and_reject_stale_intent() {
+        let session = json!({"modes":{"currentModeId":"code", "availableModes":[
+            {"id":"architect", "name":"Plan"}, {"id":"code", "name":"Build"}]},
+            "models":{"availableModels":[{"modelId":"x", "name":"X"}]}});
+        let mut choices = serde_json::Map::new();
+        choices.insert(zeron_proto::AGENT_MODE_OPTION.into(), json!("architect"));
+        assert_eq!(
+            requested_mode_change(&session, &choices).unwrap(),
+            Some((String::new(), "architect".into()))
+        );
+        assert_eq!(
+            models_from_session(&session, &[])[0].options[0].choices[0].id,
+            "architect"
+        );
+        choices.insert(zeron_proto::AGENT_MODE_OPTION.into(), json!("goal"));
+        assert!(requested_mode_change(&session, &choices).is_err());
+        assert!(requested_mode_change(&json!({}), &choices).is_err());
+        let config = json!({"id":"execution-style", "name":"Mode", "category":"mode", "type":"select", "currentValue":"code",
+            "options":[{"value":"code", "name":"Build"},{"value":"architect","name":"Plan"}]});
+        let session = json!({"configOptions":[config]});
+        choices.insert(zeron_proto::AGENT_MODE_OPTION.into(), json!("architect"));
+        assert_eq!(
+            requested_mode_change(&session, &choices).unwrap(),
+            Some(("execution-style".into(), "architect".into()))
+        );
+        assert_eq!(
+            config_option_sets(&session, None, &[], &choices),
+            vec![("execution-style".into(), json!({"value":"architect"}))]
+        );
+        let mut grouped = session.clone();
+        grouped["configOptions"][0]["options"] = json!([{"group":"modes", "name":"Modes", "options": session["configOptions"][0]["options"]}]);
+        assert_eq!(
+            config_option_sets(&grouped, None, &[], &choices),
+            config_option_sets(&session, None, &[], &choices)
+        );
+        assert_eq!(
+            requested_mode_change(&grouped, &choices).unwrap(),
+            requested_mode_change(&session, &choices).unwrap()
+        );
+    }
+
+    #[test]
+    fn pi_thinking_modes_are_not_exposed_as_agent_modes() {
+        // pi-acp 0.0.33 mirrors its thinking selector onto both the deprecated
+        // ACP modes block and the current thought_level config option.
+        let thinking = ["off", "minimal", "low", "medium", "high", "xhigh"];
+        let session = json!({
+            "modes": {
+                "currentModeId": "medium",
+                "availableModes": thinking.map(|id| json!({
+                    "id": id,
+                    "name": format!("Thinking: {id}"),
+                    "description": null
+                }))
+            },
+            "models": {
+                "currentModelId": "openai/gpt-5.2-codex",
+                "availableModels": [{
+                    "modelId": "openai/gpt-5.2-codex",
+                    "name": "GPT-5.2 Codex"
+                }]
+            },
+            "configOptions": [{
+                "type": "select",
+                "id": "thought_level",
+                "category": "thought_level",
+                "name": "Thinking",
+                "currentValue": "medium",
+                "options": thinking.map(|value| json!({
+                    "value": value,
+                    "name": format!("Thinking: {value}"),
+                    "description": null
+                }))
+            }]
+        });
+
+        assert!(legacy_mode_option(&session).is_none());
+        assert!(!advertises_modes(&session));
+        let model = &models_from_session(&session, &[])[0];
+        assert_eq!(
+            model.reasoning_levels,
+            vec![
+                ReasoningLevel::Minimal,
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+            ]
+        );
+        assert!(
+            model
+                .options
+                .iter()
+                .all(|option| option.id != zeron_proto::AGENT_MODE_OPTION)
+        );
+    }
+
+    #[test]
+    fn independent_legacy_modes_survive_a_thought_level_option() {
+        let session = json!({
+            "modes": {
+                "currentModeId": "build",
+                "availableModes": [
+                    {"id": "architect", "name": "Plan"},
+                    {"id": "build", "name": "Build"}
+                ]
+            },
+            "models": {
+                "availableModels": [{"modelId": "x", "name": "X"}]
+            },
+            "configOptions": [{
+                "type": "select",
+                "id": "thought_level",
+                "category": "thought_level",
+                "name": "Thinking",
+                "currentValue": "high",
+                "options": [
+                    {"value": "low", "name": "Low"},
+                    {"value": "high", "name": "High"}
+                ]
+            }]
+        });
+
+        let mode = legacy_mode_option(&session).expect("independent agent mode");
+        assert_eq!(mode.default_choice, "build");
+        assert_eq!(
+            mode.choices
+                .iter()
+                .map(|choice| choice.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["architect", "build"]
+        );
+        assert!(advertises_modes(&session));
+    }
+
+    #[test]
+    fn advertised_plan_mode_is_exposed_and_sent_to_the_native_config() {
+        let option = serde_json::json!({"id":"mode", "name":"Mode", "category":"mode", "type":"select", "currentValue":"agent",
+            "options":[{"value":"agent","name":"Build"},{"value":"plan","name":"Plan"}]});
+        let mode = trait_from_config_option(&option).unwrap();
+        assert_eq!(mode.choices[1].id, "plan");
+        let session = serde_json::json!({"configOptions":[option]});
+        let mut choices = serde_json::Map::new();
+        choices.insert("mode".into(), serde_json::json!("plan"));
+        let sets = config_option_sets(&session, None, &[], &choices);
+        assert!(
+            sets.iter()
+                .any(|(id, value)| id == "mode" && value["value"] == "plan")
+        );
+    }
+
+    #[test]
     fn config_option_sets_map_model_effort_and_model_options() {
         let response = json!({
             "sessionId": "s-1",
@@ -4316,9 +4781,9 @@ mod tests {
                 .iter()
                 .map(|o| o.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["fast-mode"]
+            vec![zeron_proto::AGENT_MODE_OPTION, "fast-mode"]
         );
-        assert_eq!(models[0].options[0].default_choice, "off");
+        assert_eq!(models[0].options[1].default_choice, "off");
     }
 
     #[test]
@@ -4486,7 +4951,7 @@ mod tests {
     }
 
     #[test]
-    fn mode_config_option_prefers_a_no_prompt_mode_per_adapter_naming() {
+    fn mode_config_preserves_the_advertised_default() {
         let codex = json!({
             "sessionId": "s-1",
             "configOptions": [{
@@ -4504,7 +4969,7 @@ mod tests {
         let no_opts = serde_json::Map::new();
         assert_eq!(
             config_option_sets(&codex, None, &[], &no_opts),
-            vec![("mode".to_owned(), json!({ "value": "agent-full-access" }))]
+            Vec::<(String, Value)>::new()
         );
     }
 

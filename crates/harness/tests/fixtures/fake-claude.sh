@@ -12,6 +12,21 @@ read -r first || exit 1
 emit() { printf '%s\n' "$1"; }
 
 case "$first" in
+*scenario:plan*)
+  mode=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --permission-mode) shift; mode="$1" ;;
+      --dangerously-skip-permissions) exit 1 ;;
+    esac
+    shift
+  done
+  [ "$mode" = "plan" ] || exit 1
+  emit '{"type":"control_request","request_id":"exit-plan","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"Inspect and implement."}}}'
+  read -r answer || exit 1
+  case "$answer" in *'"behavior":"allow"'*) ;; *) exit 1 ;; esac
+  emit '{"type":"result","subtype":"success","result":"Plan approved","session_id":"sess-plan"}'
+  ;;
 
 *scenario:title*)
   tools_off=false
@@ -73,6 +88,33 @@ case "$first" in
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-wake"}'
   emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"subagent finished"}}}'
   emit '{"type":"result","subtype":"success","result":"wrapped up","errors":[],"usage":{"input_tokens":3,"output_tokens":3},"session_id":"sess-wake"}'
+  ;;
+
+*scenario:askuser-cancel*)
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["AskUserQuestion"],"cwd":"/tmp","session_id":"sess-cancel"}'
+  emit '{"type":"control_request","request_id":"cr-cancel-exact","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"header":"Choice","question":"Wait for answer?","options":["A"],"multiSelect":false}]}}}'
+  tries=0
+  while [ ! -f .bridge-ready ] && [ "$tries" -lt 300 ]; do
+    tries=$((tries + 1))
+    sleep 0.01
+  done
+  [ -f .bridge-ready ] || exit 1
+  emit '{"type":"control_cancel_request","request_id":"cr-cancel-exact"}'
+  emit '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"native control request cancelled"}}}'
+  sleep 1
+  emit '{"type":"result","subtype":"success","result":"cancelled input","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-cancel"}'
+  ;;
+
+*scenario:askuser-teardown*)
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["AskUserQuestion"],"cwd":"/tmp","session_id":"sess-teardown"}'
+  emit '{"type":"control_request","request_id":"cr-teardown-exact","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"header":"Choice","question":"Still open?","options":["A"],"multiSelect":false}]}}}'
+  tries=0
+  while [ ! -f .bridge-ready ] && [ "$tries" -lt 300 ]; do
+    tries=$((tries + 1))
+    sleep 0.01
+  done
+  [ -f .bridge-ready ] || exit 1
+  emit '{"type":"result","subtype":"success","result":"ended with input open","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-teardown"}'
   ;;
 
 *scenario:askuser*)

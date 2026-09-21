@@ -21,6 +21,7 @@ async fn turn(
     let token = CancellationToken::new();
     let controls = RunControls {
         steering,
+        goal_actions: mpsc::channel(1).1,
         interrupt: token.clone(),
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
@@ -138,6 +139,7 @@ async fn parked(harness: &CursorHarness, count: usize) {
     let (tx, steering) = mpsc::channel(8);
     let controls = RunControls {
         steering,
+        goal_actions: mpsc::channel(1).1,
         interrupt: CancellationToken::new(),
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
@@ -247,6 +249,7 @@ async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
     let token = CancellationToken::new();
     let controls = RunControls {
         steering,
+        goal_actions: mpsc::channel(1).1,
         interrupt: token.clone(),
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
@@ -382,6 +385,7 @@ async fn history(harness: &CursorHarness, count: usize) {
     let (tx, steering) = mpsc::channel(8);
     let controls = RunControls {
         steering,
+        goal_actions: mpsc::channel(1).1,
         interrupt: CancellationToken::new(),
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();

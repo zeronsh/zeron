@@ -192,6 +192,10 @@ icon_assets![
     (HARD_DRIVE, "hard-drive"),
     (HOME, "home"),
     (STOP, "stop"),
+    // Goal lifecycle controls, drawn in the same 24px/1.5px linear family as
+    // the queue actions so the compact activity row reads as shared chrome.
+    (PAUSE, "pause"),
+    (PLAY, "play"),
     (CHECK, "check"),
     (COPY, "copy"),
     // Project Action icon family (Solar Linear-compatible strokes).

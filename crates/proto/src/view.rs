@@ -422,6 +422,13 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
         ToolCall::Glob { pattern } => ("Glob", pattern.clone()),
         ToolCall::WebFetch { url, .. } => ("Fetch", url.clone()),
         ToolCall::WebSearch { query } => ("Web", query.clone()),
+        ToolCall::TodoPatch { text, status, .. } => (
+            "Task",
+            text.clone().or_else(|| status.clone()).unwrap_or_default(),
+        ),
+        ToolCall::Plan { text } => ("Plan", text.clone()),
+        ToolCall::Compaction {} => ("Compaction", "Conversation context".into()),
+        ToolCall::Goal { objective, .. } => ("Goal", objective.clone()),
         ToolCall::Todo { items } => {
             let done = items.iter().filter(|i| i.done).count();
             ("Todo", format!("{done}/{} done", items.len()))
@@ -475,8 +482,13 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
                 searches += 1
             }
             ToolCall::WebFetch { .. } => fetches += 1,
-            ToolCall::Todo { .. } => todos += 1,
-            ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => other += 1,
+            ToolCall::Todo { .. } | ToolCall::TodoPatch { .. } | ToolCall::Plan { .. } => {
+                todos += 1
+            }
+            ToolCall::Compaction {}
+            | ToolCall::Mcp { .. }
+            | ToolCall::Unknown { .. }
+            | ToolCall::Goal { .. } => other += 1,
         }
     }
     let mut segments: Vec<String> = Vec::new();

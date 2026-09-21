@@ -204,6 +204,10 @@ pub struct Chat {
     /// "do not resume" tombstone after a rejected resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_session_id: Option<String>,
+    /// Provider that owns `harness_session_id`. Native IDs are provider-local;
+    /// feeding one provider's ID to another can fail or resume unrelated state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_session_harness: Option<HarnessId>,
     /// Cwd the harness session was created under. Harness session stores are
     /// cwd-scoped (claude keys conversations by project directory), so resume
     /// is only injected when the next run launches from the same cwd.

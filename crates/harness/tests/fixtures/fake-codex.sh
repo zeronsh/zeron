@@ -26,6 +26,18 @@ has "$line" '"method":"initialized"' || exit 1
 
 # ---- thread start / resume -------------------------------------------------
 read -r line || exit 1
+if has "$line" '"method":"thread/goal/set"' && has "$line" '"threadId":"cold-goal-limited"'; then
+  has "$line" '"status":"active"' || exit 1
+  emit "{\"id\":$(rid "$line"),\"result\":{\"goal\":{\"objective\":\"limited goal\",\"status\":\"budgetLimited\",\"tokensUsed\":11721,\"tokenBudget\":1800}}}"
+  emit '{"method":"thread/goal/updated","params":{"threadId":"cold-goal-limited","goal":{"objective":"limited goal","status":"budgetLimited","tokensUsed":11721,"tokenBudget":1800}}}'
+  exec sleep 30
+fi
+if has "$line" '"method":"thread/goal/set"' && has "$line" '"threadId":"cold-goal"'; then
+  has "$line" '"status":"paused"' || exit 1
+  emit "{\"id\":$(rid "$line"),\"result\":{\"goal\":{\"objective\":\"persisted goal\",\"status\":\"paused\",\"tokensUsed\":7}}}"
+  emit '{"method":"thread/goal/updated","params":{"threadId":"cold-goal","goal":{"objective":"persisted goal","status":"paused","tokensUsed":7}}}'
+  exec sleep 30
+fi
 if has "$line" '"method":"config/read"'; then
   emit "{\"id\":$(rid "$line"),\"result\":{\"config\":{\"mcp_servers\":{\"test\":{\"enabled\":true}}}}}"
   read -r line || exit 1
@@ -47,6 +59,12 @@ if has "$line" '"method":"model/list"'; then
   has "$line" '"method":"model/list"' || exit 1
   has "$line" '"cursor":"page-2"' || exit 1
   emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"id\":\"gpt-5.6-sol\",\"model\":\"gpt-5.6-sol\",\"displayName\":\"GPT-5.6-Sol\",\"description\":\"Reliable agentic workhorse for everyday tasks.\",\"hidden\":false,\"supportedReasoningEfforts\":[{\"reasoningEffort\":\"low\"},{\"reasoningEffort\":\"ultra\"}],\"additionalSpeedTiers\":[],\"serviceTiers\":[],\"defaultServiceTier\":null,\"isDefault\":false}],\"nextCursor\":null}}"
+  read -r line || exit 1
+  has "$line" '"method":"collaborationMode/list"' || exit 1
+  emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"mode\":\"default\"},{\"mode\":\"plan\"}]}}"
+  read -r line || exit 1
+  has "$line" '"method":"experimentalFeature/list"' || exit 1
+  emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"name\":\"goals\",\"enabled\":true}],\"nextCursor\":null}}"
   exec sleep 30
 fi
 if has "$line" '"method":"thread/resume"'; then
@@ -71,9 +89,137 @@ fi
 
 # ---- first turn ------------------------------------------------------------
 read -r turnline || exit 1
+if has "$turnline" '"method":"thread/goal/get"'; then
+  emit "{\"id\":$(rid "$turnline"),\"result\":{\"goal\":null}}"
+  read -r turnline || exit 1
+  if has "$turnline" '"method":"thread/goal/set"'; then
+    has "$turnline" '"objective":"scenario:goal' || exit 1
+    has "$turnline" '"status":"paused"' || exit 1
+    emit "{\"id\":$(rid "$turnline"),\"result\":{\"goal\":{\"objective\":\"scenario:goal\",\"status\":\"paused\"}}}"
+    emit '{"method":"thread/goal/updated","params":{"threadId":"th-1","goal":{"objective":"scenario:goal","status":"paused","tokensUsed":0,"tokenBudget":null}}}'
+    read -r turnline || exit 1
+  fi
+fi
 tid=$(rid "$turnline")
 
 case "$turnline" in
+*scenario:blank-question-id*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"id":106,"method":"item/tool/requestUserInput","params":{"threadId":"th-1","turnId":"t-1","itemId":"q-blank","questions":[{"id":"","question":"Malformed question","isOther":true,"options":null}]}}'
+  read -r answer || exit 1
+  has "$answer" '"id":106' || { fail_turn "$tid" "question error used the wrong request id"; exit 0; }
+  has "$answer" '"code":-32602' || { fail_turn "$tid" "blank question id was accepted"; exit 0; }
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"blank question rejected"}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+*scenario:native-question-resolved*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"id":105,"method":"item/tool/requestUserInput","params":{"threadId":"th-1","turnId":"t-1","itemId":"q-expiring","isBlocking":false,"questions":[{"id":"native-expiring","header":"Choice","question":"Answer before timeout?","isOther":true,"isSecret":false,"options":null}],"autoResolutionMs":1}}'
+  tries=0
+  while [ ! -f .bridge-ready ] && [ "$tries" -lt 300 ]; do
+    tries=$((tries + 1))
+    sleep 0.01
+  done
+  [ -f .bridge-ready ] || { fail_turn "$tid" "bridge receiver was not established"; exit 0; }
+  emit '{"method":"serverRequest/resolved","params":{"threadId":"th-1","requestId":105}}'
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"native request resolved"}}'
+  # Keep the server alive so the test observes native-resolution cancellation,
+  # rather than teardown incidentally dropping the response receiver.
+  sleep 1
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+*scenario:typed-question*|*scenario:closed-question*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"id":104,"method":"item/tool/requestUserInput","params":{"threadId":"th-1","turnId":"t-1","itemId":"q-typed","questions":[{"id":"native-question","question":"What next?","isOther":true,"options":[{"label":"Plan"}]}]}}'
+  read -r answer || exit 1
+  if has "$turnline" 'scenario:closed-question'; then
+    has "$answer" '"code":-32603' || { fail_turn "$tid" "closed channel was disguised as an empty answer"; exit 0; }
+  else
+    has "$answer" '"native-question":{"answers":["Build a feature"]}' || { fail_turn "$tid" "typed answer was lost"; exit 0; }
+  fi
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"typed answer received"}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+*scenario:async-message-question-teardown*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"item/completed","params":{"item":{"id":"question-message","type":"agentMessage","text":"Choose next step","questions":[{"title":"What next?","options":["Review"]}]}}}'
+  tries=0
+  while [ ! -f .bridge-ready ] && [ "$tries" -lt 300 ]; do
+    tries=$((tries + 1))
+    sleep 0.01
+  done
+  [ -f .bridge-ready ] || { fail_turn "$tid" "assistant question receiver was not established"; exit 0; }
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+*scenario:async-message-question*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"item/completed","params":{"item":{"id":"question-message","type":"agentMessage","text":"Choose next step","questions":[{"title":"What next?","options":["Review"]}]}}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  read -r reply || exit 1
+  has "$reply" 'What next?: Review' || { fail_turn "$(rid "$reply")" "missing async answer"; exit 0; }
+  emit "{\"id\":$(rid "$reply"),\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"async answer received"}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-2","status":"completed"}}}'
+  ;;
+*scenario:plan*|*scenario:goal*)
+  if has "$turnline" 'scenario:plan'; then
+    has "$turnline" '"mode":"plan"' || { fail_turn "$tid" "missing native plan mode"; exit 0; }
+  else
+    has "$turnline" '"mode":"default"' || { fail_turn "$tid" "goal must use build mode"; exit 0; }
+  fi
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  if has "$turnline" 'scenario:goal'; then
+    read -r activate || exit 1
+    has "$activate" '"method":"thread/goal/set"' || exit 1
+    has "$activate" '"status":"active"' || exit 1
+    emit "{\"id\":$(rid "$activate"),\"result\":{\"goal\":{\"objective\":\"scenario:goal\",\"status\":\"active\",\"tokensUsed\":0}}}"
+    emit '{"method":"thread/goal/updated","params":{"threadId":"th-1","goal":{"objective":"scenario:goal","status":"active","tokensUsed":0,"tokenBudget":null}}}'
+  fi
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"method":"turn/plan/updated","params":{"threadId":"th-1","plan":[{"step":"Inspect the project","status":"completed"},{"step":"Implement changes","status":"pending"}]}}'
+  emit '{"method":"item/completed","params":{"item":{"id":"proposed-plan","type":"plan","text":"## Plan\nInspect, then implement."}}}'
+  emit '{"id":103,"method":"item/tool/requestUserInput","params":{"threadId":"th-1","turnId":"t-1","itemId":"q-1","isBlocking":false,"questions":[{"id":"choice","header":"Approach","question":"Which approach?","options":[{"label":"Yes","description":"Proceed"}]}]}}'
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"continuing while awaiting input"}}'
+  read -r answer || exit 1
+  has "$answer" '"choice":{"answers":["Yes"]}' || { fail_turn "$tid" "input answer missing"; exit 0; }
+  if has "$turnline" 'scenario:goal-lifecycle'; then
+    emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+    read -r pause || exit 1
+    has "$pause" '"method":"thread/goal/set"' && has "$pause" '"status":"paused"' || exit 1
+    emit "{\"id\":$(rid "$pause"),\"result\":{\"goal\":{\"objective\":\"scenario:goal-lifecycle\",\"status\":\"paused\",\"tokensUsed\":42}}}"
+    emit '{"method":"thread/goal/updated","params":{"threadId":"th-1","goal":{"objective":"scenario:goal-lifecycle","status":"paused","tokensUsed":42}}}'
+    read -r resume || exit 1
+    has "$resume" '"method":"thread/goal/set"' && has "$resume" '"status":"active"' || exit 1
+    emit "{\"id\":$(rid "$resume"),\"result\":{\"goal\":{\"objective\":\"scenario:goal-lifecycle\",\"status\":\"active\",\"tokensUsed\":42}}}"
+    emit '{"method":"thread/goal/updated","params":{"threadId":"th-1","goal":{"objective":"scenario:goal-lifecycle","status":"active","tokensUsed":42}}}'
+    emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-2"}}}'
+    emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","delta":"autonomous continuation"}}'
+    emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-2","status":"completed"}}}'
+    read -r followup || exit 1
+    has "$followup" '"method":"turn/start"' && has "$followup" 'immediate follow-up' || exit 1
+    emit "{\"id\":$(rid "$followup"),\"result\":{\"turn\":{\"id\":\"t-3\"}}}"
+    emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-3"}}}'
+    emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","delta":"follow-up after continuation"}}'
+    emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-3","status":"completed"}}}'
+    read -r edit || exit 1
+    has "$edit" '"method":"thread/goal/set"' && has "$edit" '"objective":"Revised objective"' || exit 1
+    emit "{\"id\":$(rid "$edit"),\"result\":{\"goal\":{\"objective\":\"Revised objective\",\"status\":\"paused\",\"tokensUsed\":42}}}"
+    emit '{"method":"thread/goal/updated","params":{"threadId":"th-1","goal":{"objective":"Revised objective","status":"paused","tokensUsed":42}}}'
+    read -r clear || exit 1
+    has "$clear" '"method":"thread/goal/clear"' || exit 1
+    emit "{\"id\":$(rid "$clear"),\"result\":{}}"
+    emit '{"method":"thread/goal/cleared","params":{"threadId":"th-1","goal":null}}'
+    exec sleep 30
+  elif has "$turnline" 'scenario:goal'; then
+    emit '{"method":"thread/goal/updated","params":{"threadId":"th-1","goal":{"objective":"scenario:goal","status":"complete","tokensUsed":42,"tokenBudget":null}}}'
+    emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  else
+    emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  fi
+  ;;
 
 *scenario:image-*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
