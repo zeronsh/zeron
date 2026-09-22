@@ -7265,7 +7265,7 @@ impl Shell {
         if self.user_menu.get().is_some() {
             let closing = self.user_menu.closing_since();
             let menu = popover::popover_card(theme)
-                .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
+                .w(px(216.0))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.close_user_menu(cx);
                 }))
@@ -7336,17 +7336,18 @@ impl Shell {
                         AccountMenuAction::SignOut => {
                             popover::menu_row(theme, false, "user-menu-signout")
                                 .id("user-menu-signout")
+                                .text_color(theme.danger)
                                 .on_click(cx.listener(|this, _, _, cx| this.request_sign_out(cx)))
                                 .child(
                                     icon(icons::LOGOUT_2)
                                         .size(px(16.0))
-                                        .text_color(theme.text_muted),
+                                        .text_color(theme.danger),
                                 )
                                 .child(SharedString::from("Sign out"))
                                 .into_any_element()
                         }
                     };
-                    menu.child(popover::menu_separator()).child(row)
+                    menu.child(row)
                 })
                 .into_any_element();
             trigger = trigger.child(popover::anchored_menu_right(
