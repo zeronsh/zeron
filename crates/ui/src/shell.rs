@@ -7282,6 +7282,19 @@ impl Shell {
                         .truncate()
                         .child(menu_identity),
                 )
+                .child(
+                    popover::menu_row(theme, false, "user-menu-settings")
+                        .id("user-menu-settings")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_settings(SettingsSection::Devices, cx)
+                        }))
+                        .child(
+                            icon(icons::SETTINGS_MINIMALISTIC)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from("Settings")),
+                )
                 .when_some(action, |menu, action| {
                     let row = match action {
                         AccountMenuAction::EnableSync => {
@@ -7333,21 +7346,8 @@ impl Shell {
                                 .into_any_element()
                         }
                     };
-                    menu.child(row).child(popover::menu_separator())
+                    menu.child(popover::menu_separator()).child(row)
                 })
-                .child(
-                    popover::menu_row(theme, false, "user-menu-settings")
-                        .id("user-menu-settings")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.open_settings(SettingsSection::Devices, cx)
-                        }))
-                        .child(
-                            icon(icons::SETTINGS_MINIMALISTIC)
-                                .size(px(16.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .child(SharedString::from("Settings")),
-                )
                 .into_any_element();
             trigger = trigger.child(popover::anchored_menu_right(
                 "user-menu-popover",
