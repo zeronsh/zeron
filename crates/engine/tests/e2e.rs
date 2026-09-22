@@ -37,6 +37,7 @@ fn run_request(prompt: &str) -> RunRequest {
         auto_approve: true,
         attachments: Vec::new(),
         worktree: None,
+        message_id: None,
         resume: None,
     }
 }
@@ -1919,6 +1920,7 @@ async fn real_claude_sees_uploaded_image_inline() {
         attachments: vec![path],
         resume: None,
         worktree: None,
+        message_id: None,
     };
     core.doc_host
         .queue_command(

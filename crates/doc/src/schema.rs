@@ -43,7 +43,15 @@ pub enum MessageRole {
 ///
 /// Mirrors the fork-boundary vocabulary of established agent CLIs: a fork can
 /// branch off the source's latest state, or off an earlier point so the child
+/// How much of a session's history a [`crate::SessionDoc::fork_into`] child inherits.
+///
+/// Mirrors the fork-boundary vocabulary of established agent CLIs: a fork can
+/// branch off the source's latest state, or off an earlier point so the child
 /// re-runs the conversation from there.
+///
+/// `kind`-tagged with a NAMED payload field: the wire shape the composer
+/// sends (and the only one a JSON round trip preserves) is
+/// `{"kind":"beforeMessage","messageId":"…"}`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ForkBoundary {
@@ -52,7 +60,11 @@ pub enum ForkBoundary {
     Latest,
     /// Inherit history strictly preceding the message with this id — the child
     /// branches *before* that turn, so the next run replaces it.
-    BeforeMessage(String),
+    BeforeMessage { message_id: String },
+    /// Inherit history up to and including the message with this id. Unlike
+    /// [`Self::BeforeMessage`] the child keeps that turn and continues past
+    /// it; used when the branch point is picked as "keep this much".
+    ThroughMessage { message_id: String },
 }
 
 /// One entry in the doc's `messages` list (`SessionMessageEntry` in TS).
@@ -791,7 +803,7 @@ impl SessionDoc {
     /// like a git branch off a commit.
     ///
     /// `boundary` trims the inherited history: `Latest` keeps everything,
-    /// `BeforeMessage(id)` keeps entries strictly before the first visible
+    /// `BeforeMessage { message_id }` keeps entries strictly before the first visible
     /// occurrence of that message id.
     pub fn fork_into(&self, new_chat_id: &str, boundary: &ForkBoundary) -> Result<Self, DocError> {
         let forked = LoroDoc::new();
@@ -807,8 +819,10 @@ impl SessionDoc {
 
     /// Trim the child doc's history down to `boundary`. No-op for [`ForkBoundary::Latest`].
     fn apply_fork_boundary(&self, boundary: &ForkBoundary) -> Result<(), DocError> {
-        let ForkBoundary::BeforeMessage(before_id) = boundary else {
-            return Ok(());
+        let (before_id, keep_match) = match boundary {
+            ForkBoundary::Latest => return Ok(()),
+            ForkBoundary::BeforeMessage { message_id } => (message_id, false),
+            ForkBoundary::ThroughMessage { message_id } => (message_id, true),
         };
         let messages = self.doc.get_list("messages");
         let len = messages.len();
@@ -828,7 +842,7 @@ impl SessionDoc {
             // History keeps everything before the *first* visible occurrence;
             // a continuation reuses ids, so stop at the earliest match.
             if matches {
-                cut = Some(index);
+                cut = Some(if keep_match { index + 1 } else { index });
                 break;
             }
         }
@@ -1462,7 +1476,12 @@ mod tests {
         }
 
         let child = source
-            .fork_into("child", &ForkBoundary::BeforeMessage("m2".into()))
+            .fork_into(
+                "child",
+                &ForkBoundary::BeforeMessage {
+                    message_id: "m2".into(),
+                },
+            )
             .unwrap();
 
         let ids: Vec<String> = child
@@ -1488,7 +1507,12 @@ mod tests {
         }
 
         let child = source
-            .fork_into("child", &ForkBoundary::BeforeMessage("nope".into()))
+            .fork_into(
+                "child",
+                &ForkBoundary::BeforeMessage {
+                    message_id: "nope".into(),
+                },
+            )
             .unwrap();
 
         assert_eq!(child.read_entries().unwrap().len(), 2);

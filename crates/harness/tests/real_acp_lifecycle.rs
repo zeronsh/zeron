@@ -28,6 +28,7 @@ async fn live_run(cancel: bool) {
         model_options: serde_json::Map::new(), cwd: cwd.path().display().to_string(),
         sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true,
         attachments: Vec::new(), worktree: None, resume: None,
+        message_id: None,
     };
     let mut stream = AcpHarness::pi()
         .run(request, controls)

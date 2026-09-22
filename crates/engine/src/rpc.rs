@@ -881,7 +881,14 @@ impl EngineRpc {
         }
     }
 
-    fn mutate(&self, params: MutateParams) -> Result<(), RpcError> {
+    /// Apply a `Mutate` op.
+    ///
+    /// Async because one op waits on external work: `forkChat` branches the
+    /// AGENT's session (an HTTP call that may boot the agent's server), and
+    /// the child must carry that session id BEFORE its first turn — a
+    /// fire-and-forget fork raced the user's immediate follow-up question and
+    /// the agent answered without any of the branched history.
+    async fn mutate(&self, params: MutateParams) -> Result<(), RpcError> {
         let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
         match params {
             MutateParams::CreateChat {
@@ -943,6 +950,75 @@ impl EngineRpc {
                 self.doc_host
                     .fork_chat(&source_chat_id, &new_chat_id, &boundary)
                     .map_err(failed)?;
+                // Branch the AGENT's own session too. Zeron's transcript copy
+                // gives the child the text, but the agent's memory lives in
+                // its own store: without this the branch's first turn would
+                // start from nothing. Only harnesses with a native fork (see
+                // `Harness::fork_session`) do this; the rest keep the old
+                // behavior, where the child simply starts fresh.
+                //
+                // Awaited, not spawned: the id must be stamped before this
+                // RPC returns, or the user's first follow-up question races
+                // the fork and the agent answers with no branched history.
+                if let (Some(session_id), Some(harness)) = (
+                    source
+                        .harness_session_id
+                        .as_deref()
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned),
+                    source.config.as_ref().map(|c| c.harness),
+                ) {
+                    let fork_cwd = source.cwd.clone().unwrap_or_default();
+                    // The branch point travels as the Zeron message id the
+                    // agent recorded this turn under (`RunRequest::message_id`
+                    // is forwarded on opencode's wire), so the agent can cut
+                    // its copy at the same turn the transcript cut at.
+                    let at_message = match &boundary {
+                        zeron_doc::ForkBoundary::Latest => None,
+                        zeron_doc::ForkBoundary::BeforeMessage { message_id }
+                        | zeron_doc::ForkBoundary::ThroughMessage { message_id } => {
+                            Some(message_id.clone())
+                        }
+                    };
+                    match self.registry.resolve(harness) {
+                        Ok(agent) => {
+                            match agent
+                                .fork_session(&session_id, &fork_cwd, at_message.as_deref())
+                                .await
+                            {
+                                Ok(Some(child_session)) => self.workspace.set_chat_harness_session(
+                                    &new_chat_id,
+                                    &child_session,
+                                    &fork_cwd,
+                                ),
+                                // No native fork on this agent: the child is a
+                                // fresh conversation, exactly as before.
+                                Ok(None) => tracing::warn!(
+                                    chat = %new_chat_id,
+                                    harness = ?harness,
+                                    "agent reported no fork; the child starts without agent memory"
+                                ),
+                                Err(err) => tracing::warn!(
+                                    chat = %new_chat_id,
+                                    error = %err,
+                                    "agent session fork failed; the child starts without agent memory"
+                                ),
+                            }
+                        }
+                        Err(err) => tracing::warn!(
+                            harness = ?harness,
+                            error = %err,
+                            "harness unavailable for agent session fork"
+                        ),
+                    }
+                } else {
+                    tracing::info!(
+                        chat = %source_chat_id,
+                        has_session = source.harness_session_id.is_some(),
+                        has_harness = source.config.is_some(),
+                        "fork: source carries no agent session id; child starts fresh"
+                    );
+                }
                 // Carry the source's branch label across so the sidebar's
                 // "project · branch" sub-line matches the work it continues.
                 if let Some(branch) = source.branch.as_deref().filter(|b| !b.is_empty()) {
@@ -1879,7 +1955,7 @@ impl RpcService for EngineRpc {
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;
                 let sidebar_pins = matches!(&p, MutateParams::ChangeSidebarPin { .. });
-                self.mutate(p)?;
+                self.mutate(p).await?;
                 if sidebar_pins {
                     return RpcReply::value(&serde_json::json!({
                         "ok": true, "sidebarPreferences": self.workspace.sidebar_preferences_snapshot(),

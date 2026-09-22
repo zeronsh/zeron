@@ -183,6 +183,7 @@ async fn exercise_projectless(command_first: bool) {
                         attachments: Vec::new(),
                         worktree: None,
                         resume: None,
+                        message_id: None,
                     },
                     message_id: message_id.into(),
                 },

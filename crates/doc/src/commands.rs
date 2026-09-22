@@ -359,6 +359,7 @@ mod tests {
             auto_approve: false,
             attachments: Vec::new(),
             worktree: None,
+            message_id: None,
             resume: None,
         }
     }

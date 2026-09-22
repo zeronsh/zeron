@@ -628,6 +628,7 @@ fn prompt_body_carries_model_variant_and_attachments() {
         Some(("anthropic", "claude-opus-5")),
         Some("high"),
         &["/tmp/shot.png".to_owned()],
+        None,
     );
     assert_eq!(body["model"]["providerID"], "anthropic");
     assert_eq!(body["model"]["modelID"], "claude-opus-5");
@@ -637,6 +638,38 @@ fn prompt_body_carries_model_variant_and_attachments() {
     assert_eq!(body["parts"][1]["type"], "file");
     assert_eq!(body["parts"][1]["mime"], "image/png");
     assert_eq!(body["parts"][1]["url"], "file:///tmp/shot.png");
+}
+
+#[test]
+fn a_supplied_message_id_is_namespaced_into_opencode_id_space() {
+    // opencode brands message ids with a mandatory `msg` prefix; Zeron's doc
+    // ids are plain UUIDs, so the adapter prefixes them. This is what keeps
+    // the agent's transcript addressable by Zeron ids (fork branch points).
+    let body = prompt_body(
+        "hello",
+        None,
+        None,
+        &[],
+        Some("0f2a4c1e-9d3b-4a55-9d1a-77e0a1b2c3d4"),
+    );
+    assert_eq!(
+        body["messageID"],
+        "msg_0f2a4c1e-9d3b-4a55-9d1a-77e0a1b2c3d4"
+    );
+    // Already-namespaced ids pass through untouched.
+    let body = prompt_body("hello", None, None, &[], Some("msg_already"));
+    assert_eq!(body["messageID"], "msg_already");
+    // Absent id: the field is omitted, letting opencode mint its own.
+    let body = prompt_body("hello", None, None, &[], None);
+    assert!(body.get("messageID").is_none());
+
+    let body = prompt_body_v2("hello", &[], Some("0f2a4c1e-9d3b-4a55-9d1a-77e0a1b2c3d4"));
+    assert_eq!(
+        body["messageID"],
+        "msg_0f2a4c1e-9d3b-4a55-9d1a-77e0a1b2c3d4"
+    );
+    let body = prompt_body_v2("hello", &[], None);
+    assert!(body.get("messageID").is_none());
 }
 
 fn feed_with_assistant(message: &str) -> SessionFeed {
@@ -1093,7 +1126,7 @@ fn v2_model_list_folds_into_provider_catalog() {
 
 #[test]
 fn prompt_body_v2_carries_text_and_files_only() {
-    let body = prompt_body_v2("hello", &["/tmp/shot.png".to_owned()]);
+    let body = prompt_body_v2("hello", &["/tmp/shot.png".to_owned()], None);
     assert_eq!(body["text"], "hello");
     assert_eq!(body["files"][0]["uri"], "file:///tmp/shot.png");
     assert_eq!(body["files"][0]["name"], "shot.png");

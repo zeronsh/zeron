@@ -695,6 +695,11 @@ pub struct AppState {
     /// the local device.
     pub selected_device: Option<String>,
     pub selected_chat: Option<String>,
+    /// A chat id just created (fork) whose registry row has not appeared in a
+    /// `WatchChats` frame yet. The vanished-selection heal in [`apply_chats`]
+    /// must tolerate it, or the frame carrying the pre-create list would read
+    /// the fresh selection as "deleted elsewhere" and clear it.
+    pub(crate) pending_selection: Option<String>,
     /// Boot auto-select happened (or a manual selection superseded it).
     pub auto_selected: bool,
     /// First chats / spaces watch frame has landed — device-local state that
@@ -806,6 +811,7 @@ impl AppState {
             no_project: false,
             selected_device: None,
             selected_chat: None,
+            pending_selection: None,
             transcript: Vec::new(),
             queue: Vec::new(),
             context_usage: None,
@@ -952,11 +958,24 @@ impl AppState {
         sort_chats(&mut chats);
         self.chats = chats;
         self.chats_synced = true;
+        // The freshly-created chat's row has landed: it is an ordinary row now.
+        if let Some(pending) = &self.pending_selection
+            && self.chats.iter().any(|c| &c.id == pending)
+        {
+            self.pending_selection = None;
+        }
         self.transcript_cache
             .retain(|cached| self.chats.iter().any(|c| c.id == cached.chat_id));
         if let Some(selected) = &self.selected_chat
             && !self.chats.iter().any(|c| &c.id == selected)
         {
+            // A chat the user just created (fork): its row is created by the
+            // same RPC that selected it, and the `WatchChats` frame carrying
+            // it may not have landed yet. Hold the selection until either the
+            // row arrives or a later frame proves it is really gone.
+            if self.pending_selection.as_deref() == Some(selected.as_str()) {
+                return;
+            }
             // Selected chat vanished (deleted elsewhere): drop selection + transcript.
             self.transcript_baselines.remove(selected);
             self.prepared_transcripts.remove(selected);
@@ -4056,6 +4075,37 @@ mod tests {
         state.selected_chat = Some("b".into());
         state.apply_chats(vec![chat("b", 1, None), chat("c", 2, None)]);
         assert_eq!(state.selected_chat.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn apply_chats_keeps_a_fresh_fork_selection_until_its_row_arrives() {
+        // The fork RPC selects the child, but the child's row only appears in a
+        // later `WatchChats` frame. A frame that still lacks the row (or any
+        // stale frame overtaking the create) must not read the selection as
+        // "deleted elsewhere" and drop the forked transcript.
+        let mut state = AppState::new();
+        state.apply_chats(vec![chat("source", 0, None)]);
+
+        state.pending_selection = Some("child".into());
+        state.selected_chat = Some("child".into());
+        state.transcript = Vec::new();
+
+        // A frame from before the create: no child row yet.
+        state.apply_chats(vec![chat("source", 0, None)]);
+        assert_eq!(
+            state.selected_chat.as_deref(),
+            Some("child"),
+            "a fresh fork selection was cleared by a stale chats frame"
+        );
+
+        // The row lands: the pending marker clears and the selection sticks.
+        state.apply_chats(vec![chat("source", 0, None), chat("child", 1, None)]);
+        assert_eq!(state.selected_chat.as_deref(), Some("child"));
+        assert_eq!(state.pending_selection, None);
+
+        // From here it behaves like any other selection: a vanish clears it.
+        state.apply_chats(vec![chat("source", 0, None)]);
+        assert_eq!(state.selected_chat, None);
     }
 
     #[test]

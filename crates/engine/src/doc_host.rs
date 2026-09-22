@@ -4773,6 +4773,7 @@ impl DocHost {
             attachments: Vec::new(),
             resume: None,
             worktree: None,
+            message_id: None,
         })
     }
 

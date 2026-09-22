@@ -760,6 +760,7 @@ impl SessionsEngine {
                             attachments: Vec::new(),
                             resume: None,
                             worktree: None,
+                            message_id: None,
                         })
                     });
                 let Some(mut request) = request else {
@@ -1501,6 +1502,12 @@ async fn drive_run(
         resume: None,
         ..request.clone()
     });
+    // Tell the harness which doc message carries this turn, so an agent that
+    // accepts caller-supplied ids (opencode) records it under the same id
+    // Zeron does — the shared id space a later fork branches at.
+    if request.message_id.is_none() {
+        request.message_id = Some(resume_state.user_message_id.clone());
+    }
     // Startup can stop before the SDK saves user text, with no new session
     // ID or receipt. Bridge that unacknowledged tail from our transcript;
     // a fresh session needs all prior user text, not just the latest tail.
@@ -2589,6 +2596,7 @@ mod tests {
             resume: None,
             attachments: Vec::new(),
             worktree: None,
+            message_id: None,
         }
     }
 

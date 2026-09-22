@@ -34,6 +34,7 @@ async fn main() {
         attachments: Vec::new(),
         resume: None,
         worktree: None,
+        message_id: None,
     };
     let mut harness = OpencodeHarness::new();
     if let Some(exe) = exe {

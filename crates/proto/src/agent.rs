@@ -126,6 +126,13 @@ pub struct RunRequest {
     /// host ignores it and runs in `cwd` (the repo's main checkout).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeSpec>,
+    /// The doc-side message id this turn is recorded under. Harnesses whose
+    /// agent accepts a caller-supplied id (opencode's `PromptInput.messageID`)
+    /// pass it through, so the agent's own transcript and Zeron's share one
+    /// id space — which is what lets a fork branch at a Zeron message.
+    /// Additive + serde-defaulted for wire compat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
 }
 
 /// Isolated-worktree directive riding [`RunRequest`]. The worktree is created

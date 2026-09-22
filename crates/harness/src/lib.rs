@@ -91,6 +91,29 @@ pub trait Harness: Send + Sync {
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
         Ok(Vec::new())
     }
+    /// Branch an agent-native session, returning the id of the copy.
+    ///
+    /// Zeron's chat fork copies the transcript it owns; the agent's own memory
+    /// lives in ITS store, so without this the forked chat's agent starts
+    /// blank and cannot see anything said before the branch. Harnesses whose
+    /// agent has a native fork (opencode's `session.fork`) implement this so
+    /// the child inherits the agent's context too.
+    ///
+    /// `at_message` branches before that agent-side message id: the child
+    /// keeps history up to it and re-runs from there. `None` inherits
+    /// everything the source has.
+    ///
+    /// The default reports "not supported", and callers must treat that as
+    /// "skip the agent fork, keep Zeron's own copy" rather than an error.
+    async fn fork_session(
+        &self,
+        _source_session_id: &str,
+        _cwd: &str,
+        _at_message: Option<&str>,
+    ) -> Result<Option<String>, HarnessError> {
+        Ok(None)
+    }
+
     /// Run an isolated title request. Drivers must opt in with title-specific
     /// instructions and restrictions; never fall back to an ordinary coding run.
     async fn run_title(

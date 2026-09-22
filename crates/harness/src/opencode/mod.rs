@@ -344,6 +344,66 @@ impl Harness for OpencodeHarness {
         true
     }
 
+    /// Branch the agent's own session so a forked chat's agent keeps the
+    /// conversation it is continuing (see [`Harness::fork_session`]).
+    ///
+    /// opencode's `POST /session/{id}/fork` clones the session row and copies
+    /// every message (and part) up to the branch point; the copy is a fully
+    /// independent session, so the two halves can diverge without either
+    /// rewriting the other's history.
+    async fn fork_session(
+        &self,
+        source_session_id: &str,
+        cwd: &str,
+        at_message: Option<&str>,
+    ) -> Result<Option<String>, HarnessError> {
+        if source_session_id.is_empty() {
+            return Ok(None);
+        }
+        let dir = (!cwd.is_empty()).then_some(cwd);
+        let server = self.server(dir).await?;
+        let body = match at_message.filter(|m| !m.is_empty()) {
+            // Branch BEFORE this message: the child keeps everything earlier
+            // and re-runs from here. The id is a Zeron doc id, so it needs the
+            // same namespacing prompts use.
+            Some(message_id) => json!({ "messageID": oc_message_id(message_id) }),
+            None => json!({}),
+        };
+        let path = match server.protocol().await {
+            Protocol::V1 => format!("/session/{source_session_id}/fork"),
+            Protocol::V2 => format!("/api/session/{source_session_id}/fork"),
+        };
+        let forked = server.post_json(&path, dir, &body).await?;
+        let id = forked
+            .pointer("/data/id")
+            .or_else(|| forked.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        match id {
+            Some(id) => {
+                tracing::info!(
+                    target: "zeron_harness::opencode",
+                    source = %source_session_id,
+                    child = %id,
+                    "forked agent session"
+                );
+                Ok(Some(id))
+            }
+            // A server that answered without an id (an older generation that
+            // lacks the route) must not fail the fork: Zeron still owns its
+            // own transcript copy, the agent just starts without memory.
+            None => {
+                tracing::warn!(
+                    target: "zeron_harness::opencode",
+                    source = %source_session_id,
+                    response = %forked,
+                    "agent fork answered without an id; child starts without agent memory"
+                );
+                Ok(None)
+            }
+        }
+    }
+
     /// Live discovery off `GET /provider` (what the desktop app populates its
     /// picker from). Only overlapping calls share a result, so provider/auth
     /// changes are visible on the next request. Failures remain retryable.
@@ -1375,6 +1435,7 @@ async fn run_session(session: Session) {
             model: model.as_ref(),
             variant: variant.as_deref(),
             attachments: &request.attachments,
+            message_id: request.message_id.as_deref(),
         },
     )
     .await
@@ -1463,6 +1524,7 @@ async fn run_session(session: Session) {
                         model: model.as_ref(),
                         variant: variant.as_deref(),
                         attachments: &[],
+                        message_id: None,
                     },
                 )
                 .await
@@ -1583,6 +1645,7 @@ async fn run_session(session: Session) {
                                     model: model.as_ref(),
                                     variant: variant.as_deref(),
                                     attachments: &[],
+                                    message_id: None,
                                 },
                             )
                             .await
@@ -1830,6 +1893,7 @@ fn prompt_body(
     model: Option<(&str, &str)>,
     variant: Option<&str>,
     attachments: &[String],
+    message_id: Option<&str>,
 ) -> Value {
     let mut parts = vec![json!({ "type": "text", "text": prompt })];
     for path in attachments {
@@ -1854,13 +1918,33 @@ fn prompt_body(
     if let Some(variant) = variant {
         body.insert("variant".into(), Value::String(variant.to_owned()));
     }
+    // Let the caller pin the message id so the agent's transcript shares
+    // Zeron's id space (see `fork_session`): a fork can then branch at a
+    // message the UI picked off Zeron's own transcript.
+    if let Some(id) = message_id {
+        body.insert("messageID".into(), Value::String(oc_message_id(id)));
+    }
     Value::Object(body)
+}
+
+/// Map a Zeron doc message id into opencode's id space.
+///
+/// opencode brands message ids with a mandatory `msg` prefix (and reuses ids
+/// verbatim when the caller supplies one). Zeron's own ids are plain UUIDs, so
+/// the adapter namespaces them instead of forcing every harness onto one
+/// format: the transform is reversible and touches only this wire.
+fn oc_message_id(zeron_id: &str) -> String {
+    if zeron_id.starts_with("msg") {
+        zeron_id.to_owned()
+    } else {
+        format!("msg_{zeron_id}")
+    }
 }
 
 /// 2.x prompt body: plain text plus `{uri, name}` file attachments. Model
 /// and variant do NOT ride here — they were set on the session at run
 /// start (`POST /api/session/{id}/model`).
-fn prompt_body_v2(prompt: &str, attachments: &[String]) -> Value {
+fn prompt_body_v2(prompt: &str, attachments: &[String], message_id: Option<&str>) -> Value {
     let files: Vec<Value> = attachments
         .iter()
         .map(|path| {
@@ -1873,7 +1957,13 @@ fn prompt_body_v2(prompt: &str, attachments: &[String]) -> Value {
             })
         })
         .collect();
-    json!({ "text": prompt, "files": files })
+    let mut body = json!({ "text": prompt, "files": files });
+    if let Some(id) = message_id
+        && let Some(obj) = body.as_object_mut()
+    {
+        obj.insert("messageID".into(), Value::String(oc_message_id(id)));
+    }
+    body
 }
 
 fn mime_for(path: &str) -> &'static str {
@@ -1898,6 +1988,9 @@ struct TurnSpec<'a> {
     model: Option<&'a (String, String)>,
     variant: Option<&'a str>,
     attachments: &'a [String],
+    /// Doc message id for this turn, so the agent records it under the same
+    /// id Zeron does (see [`oc_message_id`] and [`Harness::fork_session`]).
+    message_id: Option<&'a str>,
 }
 
 /// Send a turn: a leading `/command` known to the agent routes through the
@@ -1918,6 +2011,7 @@ async fn post_prompt(
         model,
         variant,
         attachments,
+        message_id,
     } = spec;
     let protocol = server.protocol().await;
     if let Some(rest) = prompt.strip_prefix('/') {
@@ -1974,6 +2068,7 @@ async fn post_prompt(
                 model.map(|(provider, model)| (provider.as_str(), model.as_str())),
                 variant,
                 attachments,
+                message_id,
             );
             let path = format!("/session/{session_id}/prompt_async");
             server.post_json(&path, dir, &body).await.map(|_| ())
@@ -1981,7 +2076,7 @@ async fn post_prompt(
         Protocol::V2 => {
             // 2.x prompts carry text + `{uri, name}` files; model/variant
             // were set on the session at run start.
-            let body = prompt_body_v2(prompt, attachments);
+            let body = prompt_body_v2(prompt, attachments, message_id);
             let path = format!("/api/session/{session_id}/prompt");
             server.post_json(&path, dir, &body).await.map(|_| ())
         }

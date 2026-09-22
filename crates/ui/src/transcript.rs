@@ -2935,6 +2935,12 @@ pub enum TranscriptEvent {
         title: String,
         frozen: bool,
     },
+    /// The per-message "Fork here" action: branch the conversation BEFORE the
+    /// message the user picked, so the child keeps everything earlier and
+    /// re-runs from that point. Carries the doc entry id — the same id the
+    /// agent records the turn under, which is what lets an agent that
+    /// supports forking cut its own session at the same place.
+    ForkFromMessage { chat_id: String, message_id: String },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -6088,7 +6094,47 @@ impl Transcript {
                 .flex_row()
                 .items_center()
                 .gap(px(Theme::SPACE_SM));
-            let metadata = metadata.child(timestamp).children(copy);
+            // "Fork here": branch the chat BEFORE this turn. Only user turns
+            // are branch points — an assistant reply is the output of the turn
+            // the user already sent, and forking before it would drop that
+            // turn's work. Primary transcripts only: a subagent tab has no
+            // chat of its own to branch.
+            let fork = (is_user_row && self.doc_override.is_none())
+                .then(|| {
+                    let chat_id = self.chat_id.clone()?;
+                    let message_id = copy_entry_id.clone();
+                    let fade_key = format!("fork-message-hover-{message_id}");
+                    Some(
+                        div()
+                            .id(SharedString::from(format!("fork-message-{message_id}")))
+                            .size(px(Theme::SPACE_MD * 2.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(Theme::CONTROL_RADIUS))
+                            .cursor_pointer()
+                            .bg(motion::hover_blend(
+                                &fade_key,
+                                gpui::transparent_black(),
+                                crate::theme::ink(0.08),
+                            ))
+                            .on_hover(motion::hover_listener(fade_key))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(TranscriptEvent::ForkFromMessage {
+                                    chat_id: chat_id.clone(),
+                                    message_id: message_id.to_string(),
+                                });
+                            }))
+                            .child(
+                                crate::icons::icon(crate::icons::GIT_BRANCH)
+                                    .size(px(14.0))
+                                    .text_color(theme.text_muted),
+                            ),
+                    )
+                })
+                .flatten();
+            let metadata = metadata.child(timestamp).children(copy).children(fork);
             div()
                 .h(px(Theme::SPACE_SM + Theme::SPACE_MD * 2.0))
                 .pt(px(Theme::SPACE_SM))

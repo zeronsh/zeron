@@ -131,6 +131,7 @@ fn run_payload(message_id: &str, pending_ref: &str) -> SessionCommandPayload {
             attachments: vec![pending_ref.to_string()],
             worktree: None,
             resume: None,
+            message_id: None,
         },
         message_id: message_id.into(),
     }

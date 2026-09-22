@@ -1555,6 +1555,10 @@ pub struct Shell {
     delete_confirm: Option<String>,
     /// Chat id awaiting fork confirmation (branch the conversation).
     fork_confirm: Option<String>,
+    /// Branch point for the pending fork: the doc message the user picked via
+    /// a transcript's "Fork here". `None` = the sidebar's plain Fork (inherit
+    /// the whole conversation).
+    fork_from_message: Option<String>,
     /// Space-row context menu (dropdown rows): (space id, window position).
     space_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_space_dialog: Option<RenameSpaceDialog>,
@@ -1953,6 +1957,7 @@ impl Shell {
             rename_dialog: None,
             delete_confirm: None,
             fork_confirm: None,
+            fork_from_message: None,
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
             sidebar_section_migration: None,
@@ -3180,6 +3185,20 @@ impl Shell {
                     *frozen,
                     cx,
                 );
+            }
+            // A per-message "Fork here": branch the chat BEFORE that turn.
+            // Same confirmation dialog as the sidebar's Fork, with the branch
+            // point carried through so the transcript (and, where the agent
+            // supports it, the agent's own session) cut at the same place.
+            TranscriptEvent::ForkFromMessage {
+                chat_id,
+                message_id,
+            } => {
+                if self.state.read(cx).chats.iter().any(|c| &c.id == chat_id) {
+                    self.fork_confirm = Some(chat_id.clone());
+                    self.fork_from_message = Some(message_id.clone());
+                    cx.notify();
+                }
             }
         }
     }
@@ -4449,23 +4468,55 @@ impl Shell {
     }
 
     /// Branch a chat: mint a new chat id, then ask the engine to fork the
-    /// transcript into it. The child opens immediately after the RPC lands —
-    /// select it optimistically so the user lands in the new session rather
-    /// than watching the source do nothing.
+    /// transcript into it. Selects the child only AFTER the RPC lands: the
+    /// child's registry row is created by that call, and selecting earlier
+    /// races the `WatchChats` frame that still lacks the row — a selection
+    /// absent from the frame reads as "deleted elsewhere" and gets cleared,
+    /// dropping the user back onto the new-session canvas with the forked
+    /// transcript seemingly gone.
     fn fork_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.fork_confirm = None;
+        // The branch point, when the user picked one off the transcript.
+        // Taken here so a cancelled dialog cannot leak it into the next fork.
+        let branch_point = self.fork_from_message.take();
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.sidebar_notice = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
         let new_chat_id = uuid::Uuid::new_v4().to_string();
         let child = new_chat_id.clone();
-        self.state
-            .update(cx, |s, cx| s.select_chat(Some(child), cx));
-        self.mutate(
-            serde_json::json!({
+        self.mutate_task = Some(cx.spawn(async move |this, cx| {
+            let mut params = serde_json::json!({
                 "op": "forkChat",
                 "sourceChatId": chat_id,
                 "newChatId": new_chat_id,
-            }),
-            cx,
-        );
+            });
+            // Branch BEFORE the picked turn: the child keeps everything
+            // earlier and re-runs from here. Absent = inherit everything.
+            if let Some(message_id) = branch_point {
+                params["boundary"] = serde_json::json!({
+                    "kind": "beforeMessage",
+                    "message_id": message_id,
+                });
+            }
+            if let Err(err) = engine.client().call(methods::MUTATE, params).await {
+                this.update(cx, |shell, cx| {
+                    shell.sidebar_notice = Some(format!("{err}").into());
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
+            this.update(cx, |shell, cx| {
+                shell.state.update(cx, |s, cx| {
+                    s.pending_selection = Some(child.clone());
+                    s.select_chat(Some(child), cx);
+                });
+                cx.notify();
+            })
+            .ok();
+        }));
         cx.notify();
     }
 
@@ -7944,6 +7995,10 @@ impl Shell {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.close_chat_menu(cx);
                                 this.fork_confirm = Some(fork_id.clone());
+                                // The sidebar's Fork branches the whole
+                                // conversation; drop any branch point a
+                                // previous transcript pick left behind.
+                                this.fork_from_message = None;
                                 cx.notify();
                             }))
                             .child(
@@ -8201,6 +8256,7 @@ impl Shell {
                                 .id("fork-chat-cancel")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.fork_confirm = None;
+                                    this.fork_from_message = None;
                                     cx.notify();
                                 })),
                         )

@@ -926,6 +926,7 @@ impl Tools {
                     resume: None,
                     attachments: Vec::new(),
                     worktree: None,
+                    message_id: None,
                 };
                 self.zeron
                     .queue_command(
