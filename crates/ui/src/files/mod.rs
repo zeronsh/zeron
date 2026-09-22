@@ -257,6 +257,19 @@ impl FilesSurface {
         theme: &crate::theme::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        let projectless_root = {
+            let state = self.state.read(cx);
+            state
+                .chats
+                .iter()
+                .find(|chat| chat.id == self.chat_id && chat.space_id.is_none())
+                .map(|chat| {
+                    let device = state
+                        .device_name(&chat.device_id)
+                        .unwrap_or(&chat.device_id);
+                    format!("Files in {} · {device}", chat.cwd.as_deref().unwrap_or("~"))
+                })
+        };
         let phase = self.tree.node("").map(|root| root.load.clone());
         let content = if !self.search_state.query.is_empty() {
             self.render_search_results(cx)
@@ -311,6 +324,19 @@ impl FilesSurface {
             .min_w_0()
             .flex()
             .flex_col()
+            .when_some(projectless_root, |element, label| {
+                element.child(
+                    div()
+                        .id("files-projectless-root")
+                        .flex_none()
+                        .px(px(10.0))
+                        .py(px(5.0))
+                        .text_size(px(10.0))
+                        .text_color(theme.text_faint)
+                        .truncate()
+                        .child(SharedString::from(label)),
+                )
+            })
             .when_some(self.git_status_notice(cx), |element, notice| {
                 element.child(
                     div()

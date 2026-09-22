@@ -24,7 +24,10 @@ pub struct FilesRequestContext {
 impl FilesRequestContext {
     pub fn for_chat(state: &AppState, chat_id: &str) -> Option<Self> {
         let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
-        let cwd = chat.cwd.clone()?;
+        let cwd = chat
+            .cwd
+            .clone()
+            .or_else(|| chat.space_id.is_none().then(|| "~".to_string()))?;
         let target_device_id = (state.local_device_id.as_deref() != Some(&chat.device_id))
             .then(|| chat.device_id.clone());
         Some(Self {
@@ -35,7 +38,9 @@ impl FilesRequestContext {
             },
             target_device_id,
             cwd,
-            checkout_id: chat.checkout_id.clone(),
+            // A projectless tree is rooted at the chat's directory, even if
+            // that directory happens to live inside a Git checkout.
+            checkout_id: chat.space_id.as_ref().and(chat.checkout_id.clone()),
         })
     }
 }

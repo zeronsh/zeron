@@ -1,6 +1,6 @@
 //! Authorized filesystem access for the file tree and editor RPC surface.
 //!
-//! Every operation resolves a synced chat or space to a checkout owned by this
+//! Every operation resolves a synced chat or space to a folder owned by this
 //! device before accepting a workspace-relative path.
 
 use std::collections::{HashMap, HashSet};
@@ -245,11 +245,35 @@ impl WorkspaceFiles {
                         "chat belongs to another device".into(),
                     ));
                 }
+                let Some(space_id) = chat.space_id else {
+                    // The chat's cwd is the browsing boundary, even when it
+                    // happens to be a subdirectory of a Git checkout.
+                    let cwd = chat
+                        .cwd
+                        .as_deref()
+                        .map(crate::sessions::expand_home)
+                        .map(PathBuf::from)
+                        .unwrap_or_else(crate::repos::home_dir);
+                    if !cwd.is_absolute() {
+                        return Err(WorkspaceFilesError::BadParams(
+                            "chat folder must be absolute".into(),
+                        ));
+                    }
+                    let root = std::fs::canonicalize(&cwd).map_err(|error| {
+                        WorkspaceFilesError::Io(format!("chat folder is unavailable: {error}"))
+                    })?;
+                    if !root.is_dir() {
+                        return Err(WorkspaceFilesError::BadParams(
+                            "chat folder is not a directory".into(),
+                        ));
+                    }
+                    return Ok(ResolvedWorkspace {
+                        checkout_id: plain_folder_identity(&self.inner.device_id, &root),
+                        root,
+                    });
+                };
                 let cwd = chat.cwd.map(PathBuf::from).ok_or_else(|| {
                     WorkspaceFilesError::NotFound("chat has no workspace folder".into())
-                })?;
-                let space_id = chat.space_id.ok_or_else(|| {
-                    WorkspaceFilesError::NotFound("chat has no workspace space".into())
                 })?;
                 let space = self
                     .inner
