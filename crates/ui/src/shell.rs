@@ -7293,7 +7293,8 @@ impl Shell {
                                 .size(px(16.0))
                                 .text_color(theme.text_muted),
                         )
-                        .child(SharedString::from("Settings")),
+                        .child(div().flex_1().child(SharedString::from("Settings")))
+                        .child(popover::kbd_hint(theme, &badge_combo("mod-,"))),
                 )
                 .when_some(action, |menu, action| {
                     let row = match action {
