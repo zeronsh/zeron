@@ -723,7 +723,18 @@ impl FilesSurface {
         if self.request_context.is_none() {
             return;
         }
-        self.ensure_watch(cx);
+        // A projectless explorer may not have a resolvable home on its host.
+        // Start its watcher only after the root listing succeeds.
+        let projectless_explorer = !self.presentation.is_editor()
+            && self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .any(|chat| chat.id == self.chat_id && chat.space_id.is_none());
+        if !projectless_explorer {
+            self.ensure_watch(cx);
+        }
         if self.presentation.is_editor()
             && !self.preview.has_active()
             && let Some(path) = self.editor_path.clone()
@@ -903,6 +914,9 @@ impl FilesSurface {
                     Ok(page) => {
                         surface.error = None;
                         surface.tree.apply_page(page, generation);
+                        if directory.is_empty() {
+                            surface.ensure_watch(cx);
+                        }
                     }
                     Err(error) => {
                         let message = error.to_string();

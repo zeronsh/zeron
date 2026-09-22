@@ -486,6 +486,81 @@ async fn projectless_files_stay_inside_a_chat_directory_within_a_git_repo() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn projectless_home_is_required_for_files_catalogs_and_terminal() {
+    const CHILD: &str = "ZERON_MISSING_HOME_FIXTURE";
+    if std::env::var_os(CHILD).is_none() {
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "projectless_home_is_required_for_files_catalogs_and_terminal",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .output()
+            .await
+            .expect("isolated missing-home fixture");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let core = assemble(&temp.path().join("data"), "device-missing-home");
+    core.workspace
+        .create_chat("chat-missing-home", None, Some(&core.device_id), None, None)
+        .unwrap();
+    let explicit = temp.path().join("explicit-folder");
+    std::fs::create_dir(&explicit).unwrap();
+    core.workspace
+        .create_chat(
+            "chat-explicit-folder",
+            None,
+            Some(&core.device_id),
+            None,
+            Some(explicit.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    for (method, params) in [
+        (
+            methods::LIST_WORKSPACE_DIRECTORY,
+            serde_json::json!({ "chatId": "chat-missing-home" }),
+        ),
+        (methods::LIST_FOLDERS, serde_json::json!({})),
+        (
+            methods::LIST_COMMANDS,
+            serde_json::json!({ "chatId": "chat-missing-home", "harness": "mock" }),
+        ),
+        (
+            methods::OPEN_TERMINAL,
+            serde_json::json!({ "chatId": "chat-missing-home", "cols": 80, "rows": 24 }),
+        ),
+    ] {
+        let error = client.call(method, params).await.expect_err(method);
+        assert!(
+            error
+                .to_string()
+                .contains("User home directory unavailable"),
+            "{method}: {error}"
+        );
+    }
+    client
+        .call(
+            methods::LIST_WORKSPACE_DIRECTORY,
+            serde_json::json!({ "chatId": "chat-explicit-folder" }),
+        )
+        .await
+        .expect("an explicit folder remains usable without a home variable");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_rejects_changed_checkout_even_when_contents_match() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
