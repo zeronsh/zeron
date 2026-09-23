@@ -139,17 +139,18 @@ nucleo-matcher = "0.3"
 lto = "thin"
 strip = "symbols"
 
+# Testing-only trackpad experiment plus upstream's per-pixel text fade changes,
+# combined on jsgrrchg/zui's feat/trackpad-scroll-lifecycle branch. Pin direct and
+# gpui-base transitive dependencies together so the experiment is reproducible.
+[patch."https://github.com/zeronsh/zui"]
+gpui = { git = "https://github.com/jsgrrchg/zui", rev = "3cffdb09de66288f55f22928549d7fd449acfddd" }
+gpui_macros = { git = "https://github.com/jsgrrchg/zui", rev = "3cffdb09de66288f55f22928549d7fd449acfddd" }
+gpui_platform = { git = "https://github.com/jsgrrchg/zui", rev = "3cffdb09de66288f55f22928549d7fd449acfddd" }
+gpui_tokio = { git = "https://github.com/jsgrrchg/zui", rev = "3cffdb09de66288f55f22928549d7fd449acfddd" }
+
 [profile.dev]
 # gpui is slow unoptimized; match zed's approach for deps
 opt-level = 0
 
 [profile.dev.package."*"]
 opt-level = 2
-
-# Temporary renderer override for the companion per-pixel text fade PR.
-# Replace with an upstream revision once it merges.
-[patch."https://github.com/zeronsh/zui"]
-gpui = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }
-gpui_macros = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }
-gpui_platform = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }
-gpui_tokio = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }

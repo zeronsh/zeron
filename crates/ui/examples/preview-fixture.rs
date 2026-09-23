@@ -135,8 +135,14 @@ fn main() -> anyhow::Result<()> {
         core.previews
             .start(Arc::new(move || vec![root.clone()]), None),
     );
-    let ipc_port = port();
-    let _ipc = runtime.block_on(zeron_engine::serve_ipc(ipc_port, core.rpc_service()))?;
+    // Keep the OS-assigned port bound. Probing a free port and closing it before
+    // serve_ipc binds races the child servers and preview discovery sockets.
+    let (ipc_port, _ipc) = runtime.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let task = tokio::spawn(zeron_rpc::serve_ws_listener(listener, core.rpc_service()));
+        Ok::<_, std::io::Error>((port, task))
+    })?;
     let data = temp.path().join("ui");
     std::fs::create_dir(&data)?;
     let boot = EngineBootConfig {

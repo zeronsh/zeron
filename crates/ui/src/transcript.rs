@@ -36,7 +36,8 @@ use gpui::{
     AnyElement, BorderStyle, Bounds, ClipboardItem, ContentMask, Context, Entity, ListAlignment,
     ListOffset, ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit,
     PathBuilder, Pixels, Point, SharedString, StyledImage as _, StyledText, Subscription, Task,
-    TextAlign, TextRun, Window, canvas, div, img, list, point, prelude::*, px, quad, size,
+    TextAlign, TextRun, TouchPhase, Window, canvas, div, img, list, point, prelude::*, px, quad,
+    size,
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
@@ -3150,6 +3151,12 @@ pub struct Transcript {
     /// tick) — restick and escape are direction-aware
     /// (see [`Transcript::should_restick`]).
     last_scroll_distance: f32,
+    /// Native contact and momentum own the viewport until both have finished.
+    scroll_gesture_active: bool,
+    scroll_restick_pending: bool,
+    scroll_restore_hold: bool,
+    scroll_gesture_end: Option<Task<()>>,
+    scroll_gesture_generation: u64,
     /// The stick-to-bottom pin. Broken only by user input (wheel/touch up);
     /// re-engaged inside the 70px band, after an own-send first overflows, and
     /// on the jump button.
@@ -3396,6 +3403,11 @@ impl Transcript {
             highlights: HighlightStore::default(),
             show_jump_button: false,
             last_scroll_distance: 0.0,
+            scroll_gesture_active: false,
+            scroll_restick_pending: false,
+            scroll_restore_hold: false,
+            scroll_gesture_end: None,
+            scroll_gesture_generation: 0,
             pinned,
             own_turn: None,
             pending_queued_turns: PendingQueuedTurns::default(),
@@ -3575,6 +3587,7 @@ impl Transcript {
     /// Hand viewport ownership to explicit rail/navigation input before its
     /// reduced-motion or animated branch moves the list.
     pub(crate) fn begin_scroll_navigation(&mut self) {
+        self.cancel_scroll_gesture();
         self.discard_pending_viewport();
         self.cancel_user_hold();
         self.user_collapse_scroll = None;
@@ -3629,12 +3642,75 @@ impl Transcript {
         distance <= STICK_THRESHOLD_PX && distance < previous_distance
     }
 
-    fn handle_scroll(&mut self, _event: &ListScrollEvent, cx: &mut Context<Self>) {
+    fn cancel_scroll_gesture(&mut self) {
+        self.scroll_gesture_generation = self.scroll_gesture_generation.wrapping_add(1);
+        self.scroll_gesture_active = false;
+        self.scroll_restick_pending = false;
+        self.scroll_restore_hold = false;
+        self.scroll_gesture_end = None;
+    }
+
+    fn finish_scroll_gesture(&mut self, cx: &mut Context<Self>) {
+        let restick =
+            self.scroll_restick_pending && self.distance_from_bottom() <= STICK_THRESHOLD_PX;
+        let restore_hold = self.scroll_restore_hold;
+        self.cancel_scroll_gesture();
+        if restick {
+            let at_hold = self.own_turn_anchor_ix().is_some_and(|ix| {
+                self.list.bounds_for_item(ix).is_some_and(|bounds| {
+                    f32::from(bounds.top() - self.list.viewport_bounds().top())
+                        >= Self::own_send_inset(ix) - OWN_SEND_SCROLL_SLACK_PX - 2.0
+                })
+            });
+            if restore_hold && at_hold {
+                if let Some(anchor) = self.own_turn.as_mut() {
+                    anchor.held = true;
+                    anchor.positioned = false;
+                }
+                self.own_turn_kick = true;
+            } else {
+                self.pinned = true;
+                self.wake_spring();
+            }
+            self.show_jump_button = false;
+            cx.notify();
+        }
+    }
+
+    fn handle_scroll(&mut self, event: &ListScrollEvent, cx: &mut Context<Self>) {
+        if !self.scroll_gesture_active
+            && event.delta.y == px(0.)
+            && matches!(
+                event.gesture.momentum_phase.or(event.gesture.touch_phase),
+                Some(TouchPhase::Ended | TouchPhase::Cancelled)
+            )
+        {
+            // The pointer may have entered this list at another gesture's end.
+            return;
+        }
         // Cancel synchronously, before a queued animation frame can undo the
         // wheel/touch input. Neither operation reads the borrowed ListState.
         self.user_collapse_scroll = None;
         self.cancel_user_hold();
         let released_own_turn = self.own_turn.as_ref().is_some_and(|anchor| anchor.held);
+        let native_gesture = event.gesture.is_phased();
+        if native_gesture {
+            if self.scroll_gesture_end.take().is_some() {
+                self.scroll_gesture_generation = self.scroll_gesture_generation.wrapping_add(1);
+            }
+            if !self.scroll_gesture_active {
+                self.scroll_gesture_active = true;
+                self.scroll_restick_pending = self.pinned;
+                self.scroll_restore_hold = !released_own_turn;
+            }
+            self.pinned = false;
+            self.spring.reset();
+            self.spring_last_tick = None;
+            self.spring_kick = false;
+            self.scroll_anim = None;
+        } else {
+            self.cancel_scroll_gesture();
+        }
         self.release_own_turn_hold();
         if self.own_turn.is_some() {
             // Cancel any tail spring synchronously too; the deferred input
@@ -3649,9 +3725,55 @@ impl Transcript {
         // synchronously panics with "already mutably borrowed". Defer to the
         // end of the effect cycle, after the list has released its borrow.
         let this = cx.weak_entity();
+        let event = event.clone();
+        let generation = self.scroll_gesture_generation;
         cx.defer(move |cx| {
             this.update(cx, |this: &mut Transcript, cx| {
+                if generation != this.scroll_gesture_generation {
+                    return;
+                }
                 this.discard_pending_viewport();
+                let old_show_jump_button = this.show_jump_button;
+                if native_gesture {
+                    let distance = this.distance_from_bottom();
+                    this.last_scroll_distance = distance;
+                    // Use input direction, including input clamped at an edge.
+                    // Zero-delta phase transitions preserve the last intent.
+                    if event.delta.y > px(0.) {
+                        this.scroll_restick_pending = false;
+                    } else if event.delta.y < px(0.) {
+                        this.scroll_restick_pending = distance <= STICK_THRESHOLD_PX;
+                        this.scroll_restore_hold |= !released_own_turn;
+                    }
+                    this.show_jump_button = jump_visibility(this.show_jump_button, distance);
+                    match event.gesture.momentum_phase.or(event.gesture.touch_phase) {
+                        Some(TouchPhase::Cancelled) => this.finish_scroll_gesture(cx),
+                        Some(TouchPhase::Ended) if event.gesture.momentum_phase.is_some() => {
+                            this.finish_scroll_gesture(cx);
+                        }
+                        Some(TouchPhase::Ended) => {
+                            // macOS sends contact-end before momentum-begin.
+                            // One cancellable wakeup bridges that gap; no frame
+                            // loop or synthetic inertia runs while waiting.
+                            this.scroll_gesture_end = Some(cx.spawn(async move |this, cx| {
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(50))
+                                    .await;
+                                this.update(cx, |this, cx| {
+                                    if this.scroll_gesture_generation == generation {
+                                        this.finish_scroll_gesture(cx);
+                                    }
+                                })
+                                .ok();
+                            }));
+                        }
+                        _ => {}
+                    }
+                    if old_show_jump_button != this.show_jump_button || released_own_turn {
+                        cx.notify();
+                    }
+                    return;
+                }
                 // Input owns the viewport immediately, including wheel-down
                 // after background streaming. A held turn can be stale while
                 // frame callbacks are paused; reasserting its old prompt here
@@ -3688,7 +3810,14 @@ impl Transcript {
                     }
                     this.show_jump_button = jump_visibility(this.show_jump_button, distance)
                         && !this.own_turn.as_ref().is_some_and(|a| a.held);
-                    cx.notify();
+                    if event.position_changed
+                        || old_show_jump_button != this.show_jump_button
+                        || released_own_turn
+                        || this.pinned
+                        || this.own_turn_kick
+                    {
+                        cx.notify();
+                    }
                     return;
                 }
                 let distance = this.distance_from_bottom();
@@ -3714,7 +3843,9 @@ impl Transcript {
                 if show != this.show_jump_button {
                     this.show_jump_button = show;
                 }
-                cx.notify();
+                if old_show_jump_button != this.show_jump_button || this.spring_kick {
+                    cx.notify();
+                }
             })
             .ok();
         });
@@ -3836,6 +3967,7 @@ impl Transcript {
     /// [`Self::step_own_turn`] sizes the reservation and eases the prompt to
     /// its top inset. Replacing a previous anchor starts a new glide.
     pub fn on_own_send(&mut self, chat_id: String, message_id: String, cx: &mut Context<Self>) {
+        self.cancel_scroll_gesture();
         self.user_collapse_scroll = None;
         self.cancel_user_hold();
         self.discard_pending_viewport();
@@ -4079,10 +4211,11 @@ impl Transcript {
             let held = self.own_turn.take().is_some_and(|a| a.held);
             self.own_turn_last_tick = None;
             self.list.set_tail_reservation(None);
-            if held
-                || self.pinned
-                || (self.selection_drag_position.is_none()
-                    && self.distance_from_bottom() <= AT_BOTTOM_PX)
+            if !self.scroll_gesture_active
+                && (held
+                    || self.pinned
+                    || (self.selection_drag_position.is_none()
+                        && self.distance_from_bottom() <= AT_BOTTOM_PX))
             {
                 self.engage_pin(cx);
             } else {
@@ -4261,6 +4394,7 @@ impl Transcript {
 
     /// The scroll-to-bottom pill's click: glide back to the end and re-pin.
     pub fn jump_to_bottom(&mut self, cx: &mut Context<Self>) {
+        self.cancel_scroll_gesture();
         self.user_collapse_scroll = None;
         self.cancel_user_hold();
         self.discard_pending_viewport();
@@ -4328,7 +4462,8 @@ impl Transcript {
     /// A layout kick needs one observation; otherwise only unfinished motion
     /// needs another frame. The settle grace retains state without repainting.
     fn spring_should_run(&self) -> bool {
-        self.spring_kick || StickSpring::needs_frame(self.distance_from_bottom())
+        !self.scroll_gesture_active
+            && (self.spring_kick || StickSpring::needs_frame(self.distance_from_bottom()))
     }
 
     /// Whether the scroll offset is in a bottom-glued representation (`None`
@@ -4346,7 +4481,7 @@ impl Transcript {
             return;
         }
         self.spring_kick = false;
-        if !self.pinned {
+        if !self.pinned || self.scroll_gesture_active {
             self.spring_last_tick = None;
             return;
         }
@@ -4469,6 +4604,7 @@ impl Transcript {
             self.veil_attach_pending = true;
         }
         if attached {
+            self.cancel_scroll_gesture();
             // Read the incoming snapshot before inserting the outgoing one:
             // a full bounded cache may evict its oldest entry, which can be
             // exactly the chat the user is reopening.
@@ -8840,6 +8976,118 @@ impl Render for Transcript {
 mod tests {
     use super::*;
 
+    fn scroll_test_transcript(
+        cx: &mut gpui::TestAppContext,
+    ) -> (tempfile::TempDir, Entity<Transcript>) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        transcript.update(cx, |this, _| this.pinned = true);
+        (dir, transcript)
+    }
+
+    fn native_scroll(
+        transcript: &Entity<Transcript>,
+        touch_phase: Option<TouchPhase>,
+        momentum_phase: Option<TouchPhase>,
+        delta: f32,
+        cx: &mut gpui::TestAppContext,
+    ) {
+        transcript.update(cx, |this, cx| {
+            this.handle_scroll(
+                &ListScrollEvent {
+                    delta: point(px(0.), px(delta)),
+                    gesture: gpui::ScrollGesture {
+                        touch_phase,
+                        momentum_phase,
+                    },
+                    ..Default::default()
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn trackpad_inertia_keeps_follow_spring_parked_until_momentum_ends(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_dir, transcript) = scroll_test_transcript(cx);
+        native_scroll(&transcript, Some(TouchPhase::Started), None, -1., cx);
+        native_scroll(&transcript, Some(TouchPhase::Ended), None, 0., cx);
+        transcript.read_with(cx, |this, _| {
+            assert!(this.scroll_gesture_active);
+            assert!(!this.pinned);
+            assert!(!this.spring_should_run());
+        });
+        native_scroll(&transcript, None, Some(TouchPhase::Started), -0.25, cx);
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        transcript.update(cx, |this, cx| {
+            this.step_spring(cx); // A callback queued before input cannot move the list.
+            assert!(this.scroll_gesture_active);
+            assert!(!this.pinned);
+            assert!(!this.spring_should_run());
+        });
+        native_scroll(&transcript, None, Some(TouchPhase::Ended), 0., cx);
+        transcript.read_with(cx, |this, _| {
+            assert!(!this.scroll_gesture_active);
+            assert!(this.pinned);
+        });
+    }
+
+    #[gpui::test]
+    fn trackpad_release_without_inertia_restores_follow_once(cx: &mut gpui::TestAppContext) {
+        let (_dir, transcript) = scroll_test_transcript(cx);
+        native_scroll(&transcript, Some(TouchPhase::Started), None, 0., cx);
+        native_scroll(&transcript, Some(TouchPhase::Ended), None, 0., cx);
+        cx.executor().advance_clock(Duration::from_millis(60));
+        cx.run_until_parked();
+        transcript.read_with(cx, |this, _| {
+            assert!(!this.scroll_gesture_active);
+            assert!(this.pinned);
+            assert!(this.scroll_gesture_end.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn trackpad_upward_input_and_navigation_do_not_restore_follow(cx: &mut gpui::TestAppContext) {
+        let (_dir, transcript) = scroll_test_transcript(cx);
+        native_scroll(&transcript, Some(TouchPhase::Started), None, 0.25, cx);
+        native_scroll(&transcript, None, Some(TouchPhase::Ended), 0., cx);
+        transcript.read_with(cx, |this, _| assert!(!this.pinned));
+
+        native_scroll(&transcript, Some(TouchPhase::Started), None, -1., cx);
+        native_scroll(&transcript, Some(TouchPhase::Ended), None, 0., cx);
+        transcript.update(cx, |this, _| this.begin_scroll_navigation());
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        transcript.read_with(cx, |this, _| {
+            assert!(!this.scroll_gesture_active);
+            assert!(!this.pinned);
+        });
+    }
+
+    #[gpui::test]
+    fn resting_fingers_then_cancelling_does_not_break_follow(cx: &mut gpui::TestAppContext) {
+        let (_dir, transcript) = scroll_test_transcript(cx);
+        native_scroll(&transcript, Some(TouchPhase::Started), None, 0., cx);
+        native_scroll(&transcript, Some(TouchPhase::Cancelled), None, 0., cx);
+        transcript.read_with(cx, |this, _| {
+            assert!(this.pinned);
+            assert!(!this.scroll_gesture_active);
+        });
+        transcript.update(cx, |this, _| this.begin_scroll_navigation());
+        native_scroll(&transcript, None, Some(TouchPhase::Ended), 0., cx);
+        transcript.read_with(cx, |this, _| assert!(!this.pinned));
+    }
+
     #[test]
     fn jump_button_stays_available_when_scrolling_down_until_near_bottom() {
         let mut shown = false;
@@ -12900,6 +13148,7 @@ mod tests {
                         count: 2,
                         is_scrolled: true,
                         is_following_tail: false,
+                        ..Default::default()
                     },
                     cx,
                 );
@@ -13064,6 +13313,7 @@ mod tests {
                                 count: 0,
                                 is_scrolled: true,
                                 is_following_tail: false,
+                                ..Default::default()
                             },
                             cx,
                         ),

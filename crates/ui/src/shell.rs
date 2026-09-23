@@ -13387,6 +13387,7 @@ mod right_tab_mouse_regressions {
                     delta: gpui::ScrollDelta::Pixels(gpui::point(px(-100.), px(0.))),
                     modifiers: gpui::Modifiers::default(),
                     touch_phase: gpui::TouchPhase::Moved,
+                    ..Default::default()
                 }),
                 cx,
             );

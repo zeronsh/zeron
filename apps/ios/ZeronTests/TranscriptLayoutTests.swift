@@ -316,6 +316,42 @@ final class TranscriptLayoutTests: XCTestCase {
         XCTAssertEqual(rendered["next-block"], 1)
     }
 
+    func testKeyboardAnimationReplacementWithoutResizeUpdatesTranscriptMotion() async {
+        await mount(turns: 6)
+        let table = harness.scroll.nativeScrollView as! TranscriptTableView
+        let viewport = table.superview as! TranscriptViewport
+        let animationKey = "keyboard-resize-regression"
+        let positionKey = "viewport-position-" + animationKey
+        defer { viewport.layer.removeAnimation(forKey: animationKey) }
+
+        func keyboardAnimation(beginTime: CFTimeInterval) -> CABasicAnimation {
+            let animation = CABasicAnimation(keyPath: "bounds.size")
+            animation.fromValue = NSValue(cgSize: CGSize(width: viewport.bounds.width,
+                                                       height: viewport.bounds.height + 300))
+            animation.toValue = NSValue(cgSize: viewport.bounds.size)
+            animation.beginTime = beginTime
+            animation.duration = 1
+            return animation
+        }
+
+        let initialTime = CACurrentMediaTime()
+        viewport.layer.add(keyboardAnimation(beginTime: initialTime), forKey: animationKey)
+        viewport.setNeedsLayout()
+        window.layoutIfNeeded()
+        XCTAssertEqual(table.layer.animation(forKey: positionKey)?.beginTime, initialTime)
+
+        // UIKit can replace a keyboard spring while the destination bounds
+        // remain unchanged. No geometry setter requests a new layout pass.
+        let replacementTime = initialTime + 0.2
+        viewport.layer.add(keyboardAnimation(beginTime: replacementTime), forKey: animationKey)
+        window.layoutIfNeeded()
+        XCTAssertEqual(table.layer.animation(forKey: positionKey)?.beginTime, replacementTime)
+
+        viewport.layer.removeAnimation(forKey: animationKey)
+        window.layoutIfNeeded()
+        XCTAssertNil(table.layer.animation(forKey: positionKey))
+    }
+
     func testRealKeyboardAndComposerMoveWithPinnedTranscript() async {
         await mount(turns: 600, useEditor: true)
         let editor = findNativeEditor(window)!
