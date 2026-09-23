@@ -2109,6 +2109,16 @@ impl FilesSurface {
         Some(self.render_breadcrumb(&path, theme, cx))
     }
 
+    /// Where the system's default app can open `path`. Only a workspace on
+    /// this device shares the viewport's filesystem; remote spaces live on
+    /// another device, so they get no path.
+    fn system_open_path(&self, path: &str) -> Option<std::path::PathBuf> {
+        self.request_context
+            .as_ref()
+            .filter(|context| context.target_device_id.is_none())
+            .map(|context| std::path::Path::new(&context.cwd).join(path))
+    }
+
     fn render_breadcrumb(
         &mut self,
         path: &str,
@@ -2123,6 +2133,7 @@ impl FilesSurface {
             .is_some_and(|d| d.show_markdown);
         let parts = path.split('/').collect::<Vec<_>>();
         let reveal_path = path.to_string();
+        let system_path = self.system_open_path(path);
         let tooltip_path: SharedString = path.to_string().into();
         let can_save = !self.target_change_pending
             && self
@@ -2311,6 +2322,17 @@ impl FilesSurface {
                             .text_color(theme.text_muted),
                     ),
             )
+            .when_some(system_path, |element, system_path| {
+                element.child(
+                    toolbar_button("files-open-with-system", "Open in default editor")
+                        .on_click(move |_, _, cx| cx.open_with_system(&system_path))
+                        .child(
+                            icon(icons::ARROW_UP_RIGHT)
+                                .size(px(crate::surface_chrome::ICON_SIZE))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+            })
             .child(
                 toolbar_button(
                     "files-toggle-word-wrap",
@@ -3971,6 +3993,41 @@ mod markdown_buffer_tests {
                 assert!(surface.staged_file_comments("a.rs", cx).is_empty());
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn default_editor_opens_only_files_on_this_device(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let surface = cx.new(|cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new(state, "chat".into(), false, 1000, 13.0, false, false, cx)
+        });
+        surface.update(cx, |surface, _| {
+            assert_eq!(surface.system_open_path("src/lib.rs"), None);
+            let local = FilesRequestContext {
+                target: zeron_proto::WorkspaceTarget {
+                    chat_id: Some("chat".into()),
+                    space_id: None,
+                    checkout_path: None,
+                },
+                target_device_id: None,
+                cwd: "/workspace".into(),
+                checkout_id: Some("checkout".into()),
+            };
+            surface.request_context = Some(local.clone());
+            assert_eq!(
+                surface.system_open_path("src/lib.rs"),
+                Some(std::path::PathBuf::from("/workspace/src/lib.rs"))
+            );
+            surface.request_context = Some(FilesRequestContext {
+                target_device_id: Some("other-device".into()),
+                ..local
+            });
+            assert_eq!(surface.system_open_path("src/lib.rs"), None);
+        });
     }
 
     #[gpui::test]
