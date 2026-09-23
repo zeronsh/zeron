@@ -83,6 +83,35 @@ fn option_is_on(options: &serde_json::Map<String, Value>, key: &str) -> bool {
     }
 }
 
+/// Bound on [`ClaudeHarness::fork_session`]: the CLI copies the transcript and
+/// may call the model, so allow well past a plain process spawn while still
+/// failing a wedged run instead of hanging the fork RPC forever.
+const FORK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Pull the session id out of a `--output-format json` result frame.
+///
+/// Claude prints one JSON object per run; `--print --output-format json` emits
+/// a single `{"type":"result", …, "session_id":"<uuid>"}` line. Scanning for
+/// the key rather than parsing a fixed shape keeps this working if the frame
+/// gains fields.
+fn parse_session_id(stdout: &str) -> Option<String> {
+    for line in stdout.lines().rev() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(id) = value.get("session_id").and_then(Value::as_str)
+            && !id.is_empty()
+        {
+            return Some(id.to_owned());
+        }
+    }
+    None
+}
+
 /// The Claude Code harness. Construct with [`ClaudeHarness::new`]; tests point
 /// it at a fake CLI with [`ClaudeHarness::with_executable`].
 pub struct ClaudeHarness {
@@ -409,6 +438,92 @@ impl Harness for ClaudeHarness {
         request.model_options.clear();
         request.auto_approve = false;
         self.run_with_mode(request, controls, true).await
+    }
+
+    /// Branch the agent's own conversation (see [`Harness::fork_session`]).
+    ///
+    /// Claude Code forks with `--resume=<id> --fork-session`: it loads the
+    /// source transcript, writes a NEW session with a fresh UUID, and prints
+    /// that id on the result frame. Running it with a trivial prompt is how
+    /// the id is obtained — the CLI has no side-effect-free way to ask, and
+    /// the copied conversation is what we want anyway.
+    ///
+    /// Only the single id is needed, so the run asks for JSON output and reads
+    /// `session_id`; the prompt's own reply is discarded.
+    async fn fork_session(
+        &self,
+        source_session_id: &str,
+        cwd: &str,
+        at_message: Option<&str>,
+    ) -> Result<Option<String>, HarnessError> {
+        if source_session_id.is_empty() {
+            return Ok(None);
+        }
+        // Claude has no "branch at a message" flag: `--fork-session` always
+        // copies the whole transcript. A caller that asked for a mid-history
+        // branch still gets a full copy — the alternative is refusing the
+        // fork outright, which would leave the chat with no agent memory at
+        // all. Zeron's own transcript is trimmed to the branch point either
+        // way, so the visible conversation still starts where the user asked.
+        if at_message.is_some() {
+            tracing::debug!(
+                target: "zeron_harness::claude",
+                "claude has no mid-history branch; copying the full transcript"
+            );
+        }
+        let exe = self.resolve_executable()?;
+        let mut cmd = Command::new(&exe);
+        crate::compose_child_path(&mut cmd, &exe);
+        cmd.args([
+            "--print",
+            "--output-format",
+            "json",
+            "--fork-session",
+            &format!("--resume={source_session_id}"),
+            // The turn is only a vehicle for the fork; keep it inert.
+            "--permission-mode",
+            "default",
+        ]);
+        cmd.arg("--").arg("Continue from this conversation.");
+        if !cwd.is_empty() {
+            cmd.current_dir(cwd);
+        }
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(FORK_TIMEOUT, cmd.output())
+            .await
+            .map_err(|_| HarnessError::Protocol("claude fork timed out".into()))?
+            .map_err(HarnessError::Io)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(HarnessError::Protocol(format!(
+                "claude --fork-session failed: {}",
+                stderr.trim()
+            )));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let id = parse_session_id(&stdout);
+        match id {
+            Some(id) => {
+                tracing::info!(
+                    target: "zeron_harness::claude",
+                    source = %source_session_id,
+                    child = %id,
+                    "forked agent session"
+                );
+                Ok(Some(id))
+            }
+            None => {
+                tracing::warn!(
+                    target: "zeron_harness::claude",
+                    source = %source_session_id,
+                    "claude fork answered without a session id; child starts without agent memory"
+                );
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -932,5 +1047,33 @@ mod tests {
         assert_eq!(updated["answers"]["Pick one"], json!("B"));
         // Original input is preserved alongside the answers.
         assert!(updated["questions"].is_array());
+    }
+
+    #[test]
+    fn session_id_is_read_from_the_result_frame() {
+        // The shape `claude --print --output-format json` prints.
+        let stdout = r#"{"type":"result","subtype":"success","result":"OK","session_id":"7d9640ca-59c2-47e6-a92b-ada4be5acd8a"}"#;
+        assert_eq!(
+            parse_session_id(stdout).as_deref(),
+            Some("7d9640ca-59c2-47e6-a92b-ada4be5acd8a")
+        );
+    }
+
+    #[test]
+    fn session_id_parse_tolerates_extra_lines_and_is_last_wins() {
+        // Banner noise before the frame, and an earlier id superseded later.
+        let stdout = "\
+warning: something\n\
+{\"session_id\":\"first\"}\n\
+not json\n\
+{\"session_id\":\"second\"}\n";
+        assert_eq!(parse_session_id(stdout).as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn session_id_parse_reports_none_when_absent() {
+        assert!(parse_session_id("").is_none());
+        assert!(parse_session_id("{\"type\":\"result\"}").is_none());
+        assert!(parse_session_id("{\"session_id\":\"\"}").is_none());
     }
 }
