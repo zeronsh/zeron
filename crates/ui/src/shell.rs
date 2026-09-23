@@ -420,6 +420,7 @@ pub fn apply_keymap(
             None,
         ))
     }));
+    crate::remote_desktop::input::bind_keys(cx);
 }
 
 /// The settings sections (feature-inventory §1.5 routes).
@@ -498,6 +499,7 @@ pub enum RightSurface {
     Picker,
     File(u64),
     Browser(u64),
+    RemoteDesktop(u64),
     Diff(u64),
     Terminal(u64),
     /// A subagent's transcript, read-only (per-subagent viz) — the handle
@@ -1505,6 +1507,8 @@ pub struct Shell {
     right_terminal: Option<Entity<TerminalPanel>>,
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
+    #[cfg(feature = "browser-fixture")]
+    right_plus_fixture_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
     /// Host-owned project Actions cached per (device, space).
     project_actions: crate::project_actions::ProjectActionsController,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
@@ -1533,6 +1537,13 @@ pub struct Shell {
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
+    remote_desktops:
+        std::collections::HashMap<u64, Entity<crate::remote_desktop::RemoteDesktopSurface>>,
+    remote_desktop_subs: std::collections::HashMap<u64, Subscription>,
+    remote_desktop_owners: std::collections::HashMap<u64, String>,
+    remote_desktop_seq: u64,
+    remote_desktop_context: Option<String>,
+    remote_desktop_retire: std::collections::HashSet<u64>,
     browser_context: crate::browser::BrowserContext,
     browser_profile: Option<String>,
     /// Ordered surface tabs per panel key (drag-reorderable; stale entries —
@@ -1926,6 +1937,8 @@ impl Shell {
             terminal: None,
             right_terminal: None,
             right_plus: popover::Popup::default(),
+            #[cfg(feature = "browser-fixture")]
+            right_plus_fixture_bounds: Default::default(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
@@ -1944,6 +1957,12 @@ impl Shell {
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
+            remote_desktops: Default::default(),
+            remote_desktop_subs: Default::default(),
+            remote_desktop_owners: Default::default(),
+            remote_desktop_seq: 0,
+            remote_desktop_context: None,
+            remote_desktop_retire: Default::default(),
             browser_context: crate::browser::BrowserContext::default(),
             browser_profile: None,
             right_tabs: std::collections::HashMap::new(),
@@ -2651,6 +2670,10 @@ impl Shell {
                         browser.page.url.clone().map(Into::into),
                     )
                 }),
+                RightSurface::RemoteDesktop(id) => self.remote_desktops.get(id).map(|view| {
+                    let view = view.read(cx);
+                    (*surface, view.title(), false, view.endpoint())
+                }),
                 RightSurface::Picker => None,
             })
             .collect()
@@ -2667,7 +2690,8 @@ impl Shell {
             | RightSurface::Diff(_)
             | RightSurface::Terminal(_)
             | RightSurface::Subagent(_)
-            | RightSurface::Browser(_) => {
+            | RightSurface::Browser(_)
+            | RightSurface::RemoteDesktop(_) => {
                 return None;
             }
         };
@@ -2764,7 +2788,9 @@ impl Shell {
             }
             // The tab's feed (watch or snapshot) runs from open to close —
             // activation needs no revalidation.
-            RightSurface::Subagent(_) | RightSurface::Browser(_) => {}
+            RightSurface::Subagent(_)
+            | RightSurface::Browser(_)
+            | RightSurface::RemoteDesktop(_) => {}
             RightSurface::Picker => {}
         }
         self.sync_explorer_selection(cx);
@@ -2969,6 +2995,105 @@ impl Shell {
                 browser.focus_address(window, cx);
             }
         });
+    }
+
+    fn retire_remote_desktop_owner(&mut self, owner: &str, cx: &mut Context<Self>) {
+        for (id, key) in &self.remote_desktop_owners {
+            if key == owner {
+                self.remote_desktop_retire.insert(*id);
+                if let Some(view) = self.remote_desktops.get(id) {
+                    view.update(cx, |view, cx| view.stop(cx));
+                }
+            }
+        }
+        cx.notify();
+    }
+    fn reconcile_remote_desktops(
+        &mut self,
+        context: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if context != self.remote_desktop_context {
+            self.remote_desktop_retire
+                .extend(self.remote_desktops.keys().copied());
+            self.remote_desktop_context = context;
+        }
+        let state = self.state.read(cx);
+        if state.chats_synced {
+            let live: std::collections::HashSet<&str> =
+                state.visible_chats().map(|chat| chat.id.as_str()).collect();
+            self.remote_desktop_retire.extend(
+                self.remote_desktop_owners
+                    .iter()
+                    .filter_map(|(id, owner)| (!live.contains(owner.as_str())).then_some(*id)),
+            );
+        }
+        for id in self.remote_desktop_retire.drain() {
+            if let Some(view) = self.remote_desktops.remove(&id) {
+                view.update(cx, |view, cx| view.close(window, cx));
+            }
+            self.remote_desktop_subs.remove(&id);
+            if let Some(owner) = self.remote_desktop_owners.remove(&id)
+                && let Some(tabs) = self.right_tabs.get_mut(&owner)
+            {
+                tabs.retain(|s| *s != RightSurface::RemoteDesktop(id));
+            }
+        }
+    }
+
+    fn add_remote_desktop_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_chat.is_empty() {
+            return;
+        }
+        let owner = self.panel_key(cx);
+        let state = self.state.read(cx);
+        self.remote_desktop_context = crate::links::workspace_locator(
+            state.workspace_scope,
+            state.auth.as_ref(),
+            state.local_device_id.as_deref(),
+        );
+        self.remote_desktop_seq += 1;
+        let id = self.remote_desktop_seq;
+        let view = cx.new(|cx| {
+            crate::remote_desktop::RemoteDesktopSurface::new(self.data_dir.clone(), window, cx)
+        });
+        let event_owner = owner.clone();
+        let sub = cx.subscribe_in(
+            &view,
+            window,
+            move |this, _, event, window, cx| match event {
+                crate::remote_desktop::SurfaceEvent::Changed => cx.notify(),
+                crate::remote_desktop::SurfaceEvent::OpenProfile(profile) => {
+                    if this.panel_key(cx) != event_owner
+                        || this.resolved_right_active(cx) != RightSurface::RemoteDesktop(id)
+                    {
+                        return;
+                    }
+                    let existing = this
+                        .remote_desktops
+                        .iter()
+                        .find(|(other, view)| {
+                            this.remote_desktop_owners.get(other) == Some(&event_owner)
+                                && view.read(cx).profile_id() == Some(*profile)
+                        })
+                        .map(|(id, _)| *id);
+                    if let Some(existing) = existing.filter(|existing| *existing != id) {
+                        this.set_right_active(RightSurface::RemoteDesktop(existing), cx);
+                    } else if let Some(view) = this.remote_desktops.get(&id).cloned() {
+                        view.update(cx, |view, cx| view.open_profile(*profile, window, cx));
+                    }
+                }
+            },
+        );
+        self.remote_desktops.insert(id, view);
+        self.remote_desktop_subs.insert(id, sub);
+        self.remote_desktop_owners.insert(id, owner.clone());
+        self.right_tabs
+            .entry(owner)
+            .or_default()
+            .push(RightSurface::RemoteDesktop(id));
+        self.set_right_active(RightSurface::RemoteDesktop(id), cx);
     }
 
     /// The picker's Diffs card / the `+` menu's Diff row: every click opens a
@@ -3347,6 +3472,16 @@ impl Shell {
         }
         match surface {
             RightSurface::File(_) => {}
+            RightSurface::RemoteDesktop(id) => {
+                if let Some(view) = self.remote_desktops.remove(&id) {
+                    view.update(cx, |view, cx| view.close(window, cx));
+                }
+                self.remote_desktop_subs.remove(&id);
+                self.remote_desktop_owners.remove(&id);
+                if was_active {
+                    window.focus(&self.composer.focus_handle(cx), cx);
+                }
+            }
             RightSurface::Browser(id) => {
                 if let Some(browser) = self.browsers.remove(&id) {
                     browser.update(cx, |browser, cx| browser.close(cx));
@@ -3735,6 +3870,8 @@ impl Shell {
         self.settings.terminal_font_size = current.terminal_font_size;
         self.settings.code_font_family = current.code_font_family;
         self.settings.code_font_size = current.code_font_size;
+        self.settings.remote_desktop_profiles = current.remote_desktop_profiles;
+        self.settings.remote_desktop_credential_cleanup = current.remote_desktop_credential_cleanup;
         self.settings.transcript_width = current.transcript_width;
         self.settings.skill_completion_by_harness = current.skill_completion_by_harness;
         self.settings.skills_in_slash_menu = current.skills_in_slash_menu;
@@ -4385,6 +4522,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.close_chat_menu(cx);
+        if archived {
+            self.retire_remote_desktop_owner(&chat_id, cx);
+        }
         self.mutate(
             serde_json::json!({ "op": "setChatArchived", "chatId": chat_id, "archived": archived }),
             cx,
@@ -4453,6 +4593,7 @@ impl Shell {
 
     fn delete_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.delete_confirm = None;
+        self.retire_remote_desktop_owner(&chat_id, cx);
         if let Some(tabs) = self.right_tabs.get(&chat_id) {
             for surface in tabs {
                 if let RightSurface::Browser(id) = surface {
@@ -8954,6 +9095,11 @@ impl Shell {
                         .child(div().flex_1().min_h_0().child(changes))
                         .into_any_element()
                 }
+                RightSurface::RemoteDesktop(id) => self
+                    .remote_desktops
+                    .get(&id)
+                    .map(|view| view.clone().into_any_element())
+                    .unwrap_or_else(|| self.render_surface_picker(cx)),
                 RightSurface::Browser(id) => self
                     .browsers
                     .get(&id)
@@ -9119,6 +9265,16 @@ impl Shell {
                                 this.add_terminal_surface(cx);
                             }),
                         ),
+                    )
+                    .child(
+                        row(
+                            "surface-card-remote-desktop",
+                            icons::MONITOR,
+                            "Remote Desktop",
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.add_remote_desktop_surface(window, cx)
+                        })),
                     )
                     // Git surfaces only where there IS git — the pane itself
                     // no longer gates on it (terminals work anywhere).
@@ -9326,6 +9482,7 @@ impl Shell {
                 RightSurface::Subagent(_) => icons::BOT,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
+                RightSurface::RemoteDesktop(_) => icons::MONITOR,
                 RightSurface::Picker => icons::PLUS,
             };
             // A live subagent tab swaps its icon for the mini working
@@ -9625,6 +9782,20 @@ impl Shell {
                                 .child(SharedString::from("Browser")),
                         )
                         .child(
+                            popover::menu_row(&theme, false, "right-plus-remote-desktop")
+                                .id("right-plus-remote-desktop-row")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_remote_desktop_surface(window, cx);
+                                    this.close_right_plus(cx);
+                                }))
+                                .child(
+                                    icon(icons::MONITOR)
+                                        .size(px(13.))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from("Remote Desktop")),
+                        )
+                        .child(
                             popover::menu_row(&theme, false, "right-plus-terminal")
                                 .id("right-plus-terminal-row")
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -9668,8 +9839,18 @@ impl Shell {
                                     .child(SharedString::from("History")),
                             )
                         }),
+                );
+            #[cfg(feature = "browser-fixture")]
+            let menu = menu.relative().child({
+                let measured = self.right_plus_fixture_bounds.clone();
+                gpui::canvas(
+                    move |bounds, _, _| measured.set(Some(bounds)),
+                    |_, _, _, _| {},
                 )
-                .into_any_element();
+                .absolute()
+                .inset_0()
+            });
+            let menu = menu.into_any_element();
             plus = plus.relative().child(popover::anchored_menu_below_gap(
                 "right-plus-menu",
                 menu,
@@ -10512,6 +10693,7 @@ impl Render for Shell {
                 state.local_device_id.as_deref(),
             )
         };
+        self.reconcile_remote_desktops(browser_profile.clone(), window, cx);
         if browser_profile.is_some() && browser_profile != self.browser_profile {
             if self.browser_profile.is_some() {
                 for browser in self.browsers.values() {
@@ -10560,6 +10742,24 @@ impl Render for Shell {
                 }
                 browser.set_shortcuts(&self.settings.keymap);
                 browser.set_presentation(presentation, cx);
+            });
+        }
+
+        let resize_paused = self.tween_active(self.right_tween) || cx.has_active_drag();
+        let remote_modal = self.overlay_owns_keyboard(cx)
+            || self.right_plus.get().is_some()
+            || self.user_menu.get().is_some()
+            || self.chat_menu.get().is_some()
+            || self.rename_dialog.is_some()
+            || self.delete_confirm.is_some();
+        for (id, view) in &self.remote_desktops {
+            let visible = browser_active
+                && !remote_modal
+                && selected_surface == RightSurface::RemoteDesktop(*id)
+                && window.is_window_active();
+            view.update(cx, |view, cx| {
+                view.set_resize_paused(resize_paused);
+                view.set_visible(visible, window, cx);
             });
         }
 
@@ -12427,6 +12627,11 @@ mod exit_regressions {
                         settings.terminal_font_size = terminal_size;
                         settings.code_font_family = code_family.clone();
                         settings.code_font_size = code_size;
+                        settings.remote_desktop_profiles =
+                            vec![crate::remote_desktop::profiles::Profile {
+                                name: format!("Desktop {index}"),
+                                ..Default::default()
+                            }];
                         settings.transcript_width = transcript_width;
                         settings.skill_completion_by_harness.insert(
                             zeron_proto::HarnessId::ClaudeCode,
@@ -12471,6 +12676,10 @@ mod exit_regressions {
                     assert_eq!(loaded.terminal_font_size, terminal_size);
                     assert_eq!(loaded.code_font_family, code_family);
                     assert_eq!(loaded.code_font_size, code_size);
+                    assert_eq!(
+                        loaded.remote_desktop_profiles[0].name,
+                        format!("Desktop {index}")
+                    );
                     assert_eq!(loaded.transcript_width, transcript_width);
                     assert_eq!(loaded.sidebar_width, 292.0);
                     assert_eq!(loaded.right_pane_width, 542.0);
@@ -13160,6 +13369,13 @@ mod exit_regressions {
                 cx,
             )
         });
+        let remote = window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "test".into();
+                shell.add_remote_desktop_surface(window, cx);
+                shell.remote_desktops[&shell.remote_desktop_seq].downgrade()
+            })
+            .unwrap();
         for failed in [false, true] {
             window
                 .update(cx, |shell, window, cx| {
@@ -13193,6 +13409,11 @@ mod exit_regressions {
                     assert!(!shell.all_file_edits_flushed(cx));
                     shell.cancel_file_close(RightSurface::File(0), cx);
                     assert!(shell.pending_exit.is_none());
+                    // CloseWindow normally closes an active pane first. Hide it
+                    // to exercise actual window closure and its dirty-file guard.
+                    if shell.right_pane_open(cx) {
+                        shell.toggle_right_pane(cx);
+                    }
                 })
                 .unwrap();
             cx.update(|cx| cx.dispatch_action(&crate::app_menus::CloseWindow));
@@ -13200,6 +13421,11 @@ mod exit_regressions {
             window
                 .update(cx, |shell, _, cx| {
                     assert!(matches!(shell.pending_exit, Some(PendingExit::CloseWindow)));
+                    assert!(
+                        remote.upgrade().is_some(),
+                        "A pending file confirmation must retain the desktop"
+                    );
+                    assert_eq!(shell.remote_desktops.len(), 1);
                     shell.quit_for_runtime_change(cx);
                     assert!(matches!(
                         shell.pending_exit,
@@ -13264,6 +13490,9 @@ impl Shell {
         } else {
             self.close_right_plus(cx);
         }
+    }
+    pub fn fixture_browser_menu_bounds(&self) -> Option<gpui::Bounds<Pixels>> {
+        self.right_plus_fixture_bounds.get()
     }
     pub fn fixture_browser_menu_mounted(&self) -> bool {
         self.right_plus.get().is_some()
@@ -13636,5 +13865,181 @@ impl Shell {
     pub fn fixture_appshots_transcript_start(&self, cx: &mut Context<Self>) {
         self.transcript
             .update(cx, |t, cx| t.fixture_appshots_start(cx));
+    }
+}
+
+#[cfg(test)]
+mod remote_desktop_tests {
+    use super::*;
+    #[gpui::test]
+    fn remote_desktop_open_events_deduplicate_only_within_the_owning_chat(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = crate::remote_desktop::profiles::Profile {
+            name: "Lab".into(),
+            host: "127.0.0.1".into(),
+            username: "test".into(),
+            ..Default::default()
+        };
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(Default::default(), dir.path(), cx);
+            settings::update(settings::SavePolicy::Immediate, cx, |s| {
+                s.remote_desktop_profiles = vec![profile.clone()]
+            });
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let first = window
+            .update(cx, |shell, w, cx| {
+                shell.active_chat = "a".into();
+                shell.add_remote_desktop_surface(w, cx);
+                let first = shell.remote_desktop_seq;
+                shell.remote_desktops[&first]
+                    .clone()
+                    .update(cx, |view, cx| view.open_profile(profile.id, w, cx));
+                shell.add_remote_desktop_surface(w, cx);
+                let next = shell.remote_desktop_seq;
+                shell.remote_desktops[&next].clone().update(cx, |_, cx| {
+                    cx.emit(crate::remote_desktop::SurfaceEvent::OpenProfile(profile.id))
+                });
+                first
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, w, cx| {
+                assert_eq!(
+                    shell.resolved_right_active(cx),
+                    RightSurface::RemoteDesktop(first)
+                );
+                assert_eq!(
+                    shell
+                        .remote_desktops
+                        .values()
+                        .filter(|v| v.read(cx).profile_id() == Some(profile.id))
+                        .count(),
+                    1
+                );
+                shell.active_chat = "b".into();
+                shell.add_remote_desktop_surface(w, cx);
+                let second = shell.remote_desktop_seq;
+                shell.remote_desktops[&second].clone().update(cx, |_, cx| {
+                    cx.emit(crate::remote_desktop::SurfaceEvent::OpenProfile(profile.id))
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert_ne!(
+                    shell.resolved_right_active(cx),
+                    RightSurface::RemoteDesktop(first)
+                );
+                assert_eq!(
+                    shell
+                        .remote_desktops
+                        .values()
+                        .filter(|v| v.read(cx).profile_id() == Some(profile.id))
+                        .count(),
+                    2
+                );
+            })
+            .unwrap();
+    }
+    #[gpui::test]
+    fn remote_desktop_tabs_are_local_owned_and_close_without_retained_entities(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(Default::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let weak = window
+            .update(cx, |shell, window, cx| {
+                shell.add_remote_desktop_surface(window, cx);
+                assert!(shell.remote_desktops.is_empty());
+                shell.active_chat = "owner-a".into();
+                shell.add_remote_desktop_surface(window, cx);
+                let first = shell.remote_desktop_seq;
+                let weak = shell.remote_desktops[&first].downgrade();
+                assert_eq!(shell.right_surface_rows(cx).len(), 1);
+                assert_eq!(
+                    shell.workspace_path_for_surface(RightSurface::RemoteDesktop(first), cx),
+                    None
+                );
+                shell.active_chat = "owner-b".into();
+                assert!(shell.right_surface_rows(cx).is_empty());
+                shell.add_remote_desktop_surface(window, cx);
+                let second = shell.remote_desktop_seq;
+                shell.active_chat = "owner-a".into();
+                assert_eq!(
+                    shell.resolved_right_active(cx),
+                    RightSurface::RemoteDesktop(first)
+                );
+                shell.close_right_surface(RightSurface::RemoteDesktop(first), window, cx);
+                assert_eq!(shell.resolved_right_active(cx), RightSurface::Picker);
+                assert!(shell.remote_desktops.contains_key(&second));
+                shell.active_chat = "owner-b".into();
+                shell.close_right_surface(RightSurface::RemoteDesktop(second), window, cx);
+                assert!(shell.remote_desktops.is_empty());
+                assert!(shell.remote_desktop_subs.is_empty());
+                assert!(shell.remote_desktop_owners.is_empty());
+                // Archiving retires the owner immediately; reconciliation removes
+                // its tabs/entities even when that owner is no longer selected.
+                shell.active_chat = "owner-c".into();
+                shell.add_remote_desktop_surface(window, cx);
+                shell.retire_remote_desktop_owner("owner-c", cx);
+                shell.reconcile_remote_desktops(shell.remote_desktop_context.clone(), window, cx);
+                assert!(shell.remote_desktops.is_empty());
+                assert!(shell.remote_desktop_subs.is_empty());
+                shell.add_remote_desktop_surface(window, cx);
+                shell.reconcile_remote_desktops(Some("different-workspace".into()), window, cx);
+                assert!(shell.remote_desktops.is_empty());
+                shell.add_remote_desktop_surface(window, cx);
+                shell.remote_desktop_context = Some("old-workspace".into());
+                shell.reconcile_remote_desktops(None, window, cx);
+                assert!(shell.remote_desktops.is_empty());
+                weak
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(weak.upgrade().is_none());
     }
 }

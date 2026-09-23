@@ -658,6 +658,9 @@ pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 9] = [
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
+    pub remote_desktop_profiles: Vec<crate::remote_desktop::profiles::Profile>,
+    /// Retryable keyring deletions; contains identifiers, never passwords.
+    pub remote_desktop_credential_cleanup: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_geometry: Option<WindowGeometry>,
     /// Submit using Enter or the platform modifier plus Enter.
@@ -817,6 +820,8 @@ pub struct UiSettings {
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
+            remote_desktop_profiles: Vec::new(),
+            remote_desktop_credential_cleanup: Vec::new(),
             window_geometry: None,
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
@@ -1556,7 +1561,12 @@ impl UiSettings {
                     }
                     serde_json::from_value::<UiSettings>(value)
                 }) {
-                    Ok(settings) => settings.migrated().clamped(),
+                    Ok(mut settings) => {
+                        crate::remote_desktop::profiles::repair_duplicate_ids(
+                            &mut settings.remote_desktop_profiles,
+                        );
+                        settings.migrated().clamped()
+                    }
                     Err(err) => {
                         tracing::warn!(error = %err, "ui-settings corrupt; using defaults");
                         Self::default()
@@ -2143,6 +2153,8 @@ mod tests {
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
+            remote_desktop_profiles: Vec::new(),
+            remote_desktop_credential_cleanup: Vec::new(),
             window_geometry: None,
             sidebar_width: 300.0,
             sidebar_collapsed: true,

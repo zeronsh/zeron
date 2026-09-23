@@ -10,6 +10,7 @@ project-palette-fixture = []
 
 browser-fixture = []
 windows-render-fixture = []
+remote-desktop-fixture = []
 appshots-fixture = ["gpui_platform/test-support"]
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
 
@@ -38,12 +39,17 @@ name = "new-project-fixture"
 required-features = ["project-palette-fixture"]
 
 [[example]]
+name = "remote-desktop-fixture"
+required-features = ["remote-desktop-fixture"]
+
+[[example]]
 name = "sidebar-fixture"
 required-features = ["project-palette-fixture"]
 
 [dependencies]
 url = "2"
 zeron-proto.workspace = true
+zeron-rdp.workspace = true
 similar.workspace = true
 zeron-doc.workspace = true
 zeron-engine.workspace = true
