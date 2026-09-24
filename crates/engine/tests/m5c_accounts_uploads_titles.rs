@@ -1100,17 +1100,7 @@ exit 0
         "https://cursor.com/loginDeepControl?challenge=fake"
     );
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        let poll = accounts.poll_login(&start.login_id).await.expect("poll");
-        match poll.status {
-            AgentLoginStatus::Done => break,
-            AgentLoginStatus::Pending => {}
-            AgentLoginStatus::Error => panic!("login errored: {:?}", poll.message),
-        }
-        assert!(tokio::time::Instant::now() < deadline, "login never landed");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    poll_until_done(&accounts, &start.login_id).await;
 
     // First connect on a device with no live login: the minted key was
     // auto-activated, so runs work immediately.
@@ -1122,5 +1112,155 @@ exit 0
     assert_eq!(
         account_emails(&snapshot, HarnessId::Cursor),
         vec![("grace@example.com".to_string(), true)]
+    );
+
+    // Re-connecting the LIVE account (still usable, older key) replaces the
+    // live key — it is not re-snapshotted back over the fresh one.
+    write_cursor_login(&config, "grace@example.com", 60_000);
+    accounts.list(false).await.expect("list old key");
+    login_until_done(&accounts, HarnessId::Cursor).await;
+    assert_eq!(
+        read_json_file(&config.cursor_sdk_auth_file)["apiKey"],
+        "key-minted"
+    );
+    let snapshot = accounts.list(false).await.expect("list");
+    let slot = snapshot
+        .accounts
+        .iter()
+        .find(|a| a.harness == HarnessId::Cursor)
+        .unwrap();
+    assert!(slot.active);
+
+    // Connecting while ANOTHER usable account is live leaves it live.
+    write_cursor_login(&config, "hopper@example.com", 60_000);
+    accounts.list(false).await.expect("list hopper");
+    login_until_done(&accounts, HarnessId::Cursor).await;
+    assert_eq!(
+        read_json_file(&config.cursor_sdk_auth_file)["email"],
+        "hopper@example.com"
+    );
+
+    // The live login is removable: the SDK store goes, so it isn't re-detected.
+    let snapshot = accounts.list(false).await.expect("list");
+    let hopper = snapshot
+        .accounts
+        .iter()
+        .find(|a| a.email.as_deref() == Some("hopper@example.com"))
+        .unwrap();
+    let snapshot = accounts
+        .forget(HarnessId::Cursor, &hopper.id)
+        .await
+        .expect("forget live hopper");
+    assert!(!config.cursor_sdk_auth_file.exists());
+    assert_eq!(
+        account_emails(&snapshot, HarnessId::Cursor),
+        vec![("grace@example.com".to_string(), false)]
+    );
+}
+
+fn read_json_file(path: &Path) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+async fn poll_until_done(accounts: &AgentAccounts, login_id: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let poll = accounts.poll_login(login_id).await.expect("poll");
+        match poll.status {
+            AgentLoginStatus::Done => break,
+            AgentLoginStatus::Pending => {}
+            AgentLoginStatus::Error => panic!("login errored: {:?}", poll.message),
+        }
+        assert!(tokio::time::Instant::now() < deadline, "login never landed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn login_until_done(accounts: &AgentAccounts, harness: HarnessId) {
+    let start = accounts.start_login(harness).await.expect("start");
+    poll_until_done(accounts, &start.login_id).await;
+}
+
+/// Codex's `codex login` against a fake CLI that writes whatever
+/// `next-auth.json` holds into the throwaway `CODEX_HOME`.
+#[tokio::test]
+async fn codex_relogin_revives_the_live_account_and_live_is_removable() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let (accounts, config) = test_accounts(dir.path());
+    let codex = dir.path().join("fake-codex.sh");
+    let next_auth = dir.path().join("next-auth.json");
+    std::fs::write(
+        &codex,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = \"login\" ] || exit 1\ncp '{}' \"$CODEX_HOME/auth.json\"\nexit 0\n",
+            next_auth.display()
+        ),
+    )
+    .expect("fake codex");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    unsafe { std::env::set_var("CODEX_EXECUTABLE", &codex) };
+    let fresh_auth = |email: &str, account_id: &str| {
+        serde_json::json!({
+            "tokens": {
+                "id_token": fake_id_token(email, account_id, "plus"),
+                "access_token": format!("fresh-{account_id}"),
+                "account_id": account_id,
+            }
+        })
+        .to_string()
+    };
+
+    // Live ada with dead tokens; signing ada in again makes the fresh ones live.
+    write_codex_login(&config, "ada@example.com", "acct-ada");
+    accounts.list(false).await.expect("list ada");
+    std::fs::write(&next_auth, fresh_auth("ada@example.com", "acct-ada")).unwrap();
+    login_until_done(&accounts, HarnessId::Codex).await;
+    let live_file = config.codex_home.join("auth.json");
+    assert_eq!(
+        read_json_file(&live_file)["tokens"]["access_token"],
+        "fresh-acct-ada"
+    );
+    let snapshot = accounts.list(false).await.expect("list");
+    assert_eq!(
+        account_emails(&snapshot, HarnessId::Codex),
+        vec![("ada@example.com".to_string(), true)]
+    );
+
+    // Another account signs in as a spare — ada stays live.
+    std::fs::write(&next_auth, fresh_auth("bea@example.com", "acct-bea")).unwrap();
+    login_until_done(&accounts, HarnessId::Codex).await;
+    assert_eq!(
+        read_json_file(&live_file)["tokens"]["access_token"],
+        "fresh-acct-ada"
+    );
+
+    // Removing live ada signs codex out; bea remains as a saved login.
+    let snapshot = accounts.list(false).await.expect("list");
+    let ada = snapshot
+        .accounts
+        .iter()
+        .find(|a| a.email.as_deref() == Some("ada@example.com"))
+        .unwrap();
+    let snapshot = accounts
+        .forget(HarnessId::Codex, &ada.id)
+        .await
+        .expect("forget live ada");
+    assert!(!live_file.exists());
+    assert_eq!(
+        account_emails(&snapshot, HarnessId::Codex),
+        vec![("bea@example.com".to_string(), false)]
+    );
+
+    // With nothing live, a sign-in goes live at once.
+    std::fs::write(&next_auth, fresh_auth("bea@example.com", "acct-bea")).unwrap();
+    login_until_done(&accounts, HarnessId::Codex).await;
+    let snapshot = accounts.list(false).await.expect("list");
+    assert_eq!(
+        account_emails(&snapshot, HarnessId::Codex),
+        vec![("bea@example.com".to_string(), true)]
     );
 }
