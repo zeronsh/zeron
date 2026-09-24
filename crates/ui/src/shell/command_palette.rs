@@ -329,11 +329,10 @@ impl Shell {
             };
             rows.push(row.child(div().px(px(8.0)).child(content)));
         }
-        let height = (f32::from(viewport.height) - 180.0).clamp(100.0, 360.0);
         let body = div()
             .id("command-results")
             .min_h_0()
-            .max_h(px(height))
+            .max_h(px(palette_results_height(viewport)))
             .overflow_y_scroll()
             .track_scroll(&scroll)
             .flex()
@@ -341,38 +340,14 @@ impl Shell {
             .gap(px(SIDEBAR_LIST_GAP))
             .children(rows)
             .when(entries.is_empty(), |el| {
-                el.child(
-                    div()
-                        .w_full()
-                        .py(px(24.0))
-                        .px(px(16.0))
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap(px(6.0))
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .child("No results")
-                        .child(
-                            div()
-                                .text_color(theme.text_muted)
-                                .child("Try a command, chat title, project, or device."),
-                        ),
-                )
+                el.child(palette_empty(
+                    &theme,
+                    "No results",
+                    "Try a command, chat title, project, or device.",
+                ))
             });
-        let body = crate::edge_fade::edge_faded(RESULTS_FADE_BAND, true, true, body)
-            .fade_overflow_y(&scroll);
-        let card = div()
-            .id("command-palette")
-            .track_focus(&focus)
-            .w(px(560.0_f32.min(f32::from(viewport.width) - 32.0)))
-            .flex()
-            .flex_col()
-            .rounded(px(16.0))
-            .border_1()
-            .border_color(theme.border)
-            .when(!theme.is_frost(), |el| el.shadow_lg())
-            .bg(popover::surface_bg(&theme))
-            .text_color(theme.text)
+        let body = palette_results_fade(body, &scroll);
+        let card = palette_card("command-palette", &focus, viewport, &theme)
             .on_key_down(
                 cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
                     match event.keystroke.key.as_str() {
@@ -426,73 +401,138 @@ impl Shell {
             .on_mouse_down_out(
                 cx.listener(|this, _, window, cx| this.close_command_palette(window, cx)),
             )
-            .child(
-                div()
-                    .min_h(px(44.0))
-                    .flex_none()
-                    .px(px(16.0))
-                    .py(px(8.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .border_b_1()
-                    .border_color(crate::theme::hairline(0.06))
-                    .child(popover::palette_search_icon(&theme))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(crate::typography::ui_rems(14.0))
-                            .child(search),
-                    )
-                    .child(popover::kbd_hint(
-                        &theme,
-                        &crate::settings::badge_combo("mod-k"),
-                    )),
-            )
+            .child(palette_header(
+                &theme,
+                search.into_any_element(),
+                popover::kbd_hint(&theme, &crate::settings::badge_combo("mod-k")),
+            ))
             .child(body)
             .child(
-                div()
-                    .flex_none()
-                    .px(px(16.0))
-                    .py(px(7.0))
-                    .border_t_1()
-                    .border_color(crate::theme::hairline(0.06))
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(12.0))
+                palette_footer()
                     .child(command_key_hint(&theme, "↑ ↓", "Navigate"))
                     .child(command_key_hint(&theme, "↵", "Select"))
                     .child(command_key_hint(&theme, "Esc", "Close")),
             );
-        // Match the composer's 16px backdrop blur, including its opaque fallback.
-        let card = crate::frost::frosted(16.0, crate::frost::MENU_BLUR, card);
-        Some(
-            gpui::deferred(
-                gpui::anchored()
-                    .position(gpui::point(px(0.0), px(0.0)))
-                    .child(
-                        div()
-                            .occlude()
-                            .w(viewport.width)
-                            .h(viewport.height)
-                            // Match glass modals: quiet the background while
-                            // preserving its color through the frosted palette.
-                            .bg(popover::scrim_alpha(0.35))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(card),
-                    ),
-            )
-            .priority(2)
-            .into_any_element(),
-        )
+        Some(palette_overlay(viewport, card))
     }
 }
 
-fn command_key_hint(theme: &Theme, keys: &str, label: &'static str) -> gpui::Div {
+/// The results list's max height; shared so every palette sits at one size.
+pub(super) fn palette_results_height(viewport: gpui::Size<Pixels>) -> f32 {
+    (f32::from(viewport.height) - 180.0).clamp(100.0, 360.0)
+}
+
+/// Scroll fades at whichever list edge hides rows.
+pub(super) fn palette_results_fade(
+    body: impl IntoElement,
+    scroll: &gpui::ScrollHandle,
+) -> crate::edge_fade::EdgeFaded {
+    crate::edge_fade::edge_faded(RESULTS_FADE_BAND, true, true, body).fade_overflow_y(scroll)
+}
+
+pub(super) fn palette_empty(
+    theme: &Theme,
+    title: impl Into<SharedString>,
+    hint: impl Into<SharedString>,
+) -> gpui::Div {
+    div()
+        .w_full()
+        .py(px(24.0))
+        .px(px(16.0))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(crate::typography::ui_rems(13.0))
+        .child(title.into())
+        .child(div().text_color(theme.text_muted).child(hint.into()))
+}
+
+/// The palette's glass card; callers add key handling and sections.
+pub(super) fn palette_card(
+    id: &'static str,
+    focus: &FocusHandle,
+    viewport: gpui::Size<Pixels>,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .track_focus(focus)
+        .w(px(560.0_f32.min(f32::from(viewport.width) - 32.0)))
+        .flex()
+        .flex_col()
+        .rounded(px(16.0))
+        .border_1()
+        .border_color(theme.border)
+        .when(!theme.is_frost(), |el| el.shadow_lg())
+        .bg(popover::surface_bg(theme))
+        .text_color(theme.text)
+}
+
+pub(super) fn palette_header(theme: &Theme, search: AnyElement, hint: gpui::Div) -> gpui::Div {
+    div()
+        .min_h(px(44.0))
+        .flex_none()
+        .px(px(16.0))
+        .py(px(8.0))
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .border_b_1()
+        .border_color(crate::theme::hairline(0.06))
+        .child(popover::palette_search_icon(theme))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(crate::typography::ui_rems(14.0))
+                .child(search),
+        )
+        .child(hint)
+}
+
+pub(super) fn palette_footer() -> gpui::Div {
+    div()
+        .flex_none()
+        .px(px(16.0))
+        .py(px(7.0))
+        .border_t_1()
+        .border_color(crate::theme::hairline(0.06))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(12.0))
+}
+
+/// Mount a palette card over the scrimmed window, frosted like the composer.
+pub(super) fn palette_overlay(
+    viewport: gpui::Size<Pixels>,
+    card: gpui::Stateful<gpui::Div>,
+) -> AnyElement {
+    // Match the composer's 16px backdrop blur, including its opaque fallback.
+    let card = crate::frost::frosted(16.0, crate::frost::MENU_BLUR, card);
+    gpui::deferred(
+        gpui::anchored()
+            .position(gpui::point(px(0.0), px(0.0)))
+            .child(
+                div()
+                    .occlude()
+                    .w(viewport.width)
+                    .h(viewport.height)
+                    // Match glass modals: quiet the background while
+                    // preserving its color through the frosted palette.
+                    .bg(popover::scrim_alpha(0.35))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(card),
+            ),
+    )
+    .priority(2)
+    .into_any_element()
+}
+
+pub(super) fn command_key_hint(theme: &Theme, keys: &str, label: &'static str) -> gpui::Div {
     div()
         .flex()
         .items_center()

@@ -2031,11 +2031,23 @@ pub(super) struct AddSpaceFlow {
     /// Folder-list scroll — keyboard navigation keeps the highlighted row in
     /// view (`scroll_to_item`).
     list_scroll: gpui::ScrollHandle,
+    /// Horizontal breadcrumb strip; `crumb_key` is the path it last revealed.
+    crumb_scroll: gpui::ScrollHandle,
+    crumb_key: String,
     focus_pending: bool,
     load_task: Option<Task<()>>,
     drives_task: Option<Task<()>>,
     submit_task: Option<Task<()>>,
     _search_events: Subscription,
+}
+
+fn device_glyph(platform: &str) -> &'static str {
+    match platform {
+        "macos" | "darwin" => icons::LAPTOP,
+        "web" => icons::GLOBAL,
+        "ios" | "android" => icons::SMARTPHONE,
+        _ => icons::MONITOR,
+    }
 }
 
 /// Segment-aware "is `path` at or under `base`" (`/media/a` is not under
@@ -5032,6 +5044,8 @@ impl Shell {
             error: None,
             focus: cx.focus_handle(),
             list_scroll: gpui::ScrollHandle::new(),
+            crumb_scroll: gpui::ScrollHandle::new(),
+            crumb_key: String::new(),
             focus_pending: true,
             load_task: None,
             drives_task: None,
@@ -5678,37 +5692,50 @@ impl Shell {
             input.set_ghost(ghost, cx);
         });
         let query = search.read(cx).text().to_string();
+        // Cmd+K's row rhythm: 30px rows, 16px muted glyphs, 8px list gutters.
         let row = |ix: usize| {
             popover::menu_row(&theme, ix == active, format!("project-result-{ix}"))
                 .id(("project-result", ix))
                 .rounded(px(popover::PALETTE_ITEM_RADIUS))
-                .h(px(32.0))
-                .flex_none()
+                .min_h(px(30.0))
+                .py(px(4.0))
         };
-        let mut rows = Vec::new();
+        let glyph_el = |glyph: &'static str| {
+            icon(glyph)
+                .size(px(16.0))
+                .flex_none()
+                .text_color(theme.text_muted)
+        };
+        let label_el = |label: String| {
+            div().flex_1().min_w_0().child(popover::search_highlight(
+                label.into(),
+                Some(&query),
+                &theme,
+            ))
+        };
+        let mut rows: Vec<AnyElement> = Vec::new();
         match step {
             ProjectStep::Devices => {
                 for (ix, device) in self.add_space_devices(cx).into_iter().enumerate() {
-                    let glyph = match device.platform.as_str() {
-                        "macos" | "darwin" => icons::LAPTOP,
-                        "web" => icons::GLOBAL,
-                        "ios" | "android" => icons::SMARTPHONE,
-                        _ => icons::MONITOR,
-                    };
                     let online = self.state.read(cx).device_online(&device.id, Utc::now());
                     let name = device.name.clone();
                     rows.push(
                         row(ix)
+                            .child(glyph_el(device_glyph(&device.platform)))
+                            .child(label_el(name))
+                            .child(
+                                div()
+                                    .size(px(5.0))
+                                    .flex_none()
+                                    .rounded_full()
+                                    .bg(if online {
+                                        theme.success
+                                    } else {
+                                        theme.text_faint
+                                    }),
+                            )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.add_space_pick_device(device.clone(), cx)
-                            }))
-                            .child(icon(glyph).size(px(17.0)).text_color(theme.text_muted))
-                            .child(popover::search_highlight(name.into(), Some(&query), &theme))
-                            .child(div().flex_1())
-                            .child(div().size(px(5.0)).rounded_full().bg(if online {
-                                theme.success
-                            } else {
-                                theme.text_faint
                             }))
                             .into_any_element(),
                     );
@@ -5724,15 +5751,11 @@ impl Shell {
                     let label = name.clone();
                     rows.push(
                         row(ix)
+                            .child(glyph_el(glyph))
+                            .child(label_el(label))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.add_space_goto_location(name.clone(), path.clone(), cx)
                             }))
-                            .child(icon(glyph).size(px(17.0)).text_color(theme.text_muted))
-                            .child(popover::search_highlight(
-                                label.into(),
-                                Some(&query),
-                                &theme,
-                            ))
                             .into_any_element(),
                     );
                 }
@@ -5745,27 +5768,19 @@ impl Shell {
                         let is_repo = entry.is_repo;
                         rows.push(
                             row(ix)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.add_space_descend(full.clone(), is_repo, cx)
-                                }))
-                                .child(
-                                    icon(icons::FOLDER)
-                                        .size(px(17.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(popover::search_highlight(
-                                    entry.name.into(),
-                                    Some(&query),
-                                    &theme,
-                                ))
-                                .child(div().flex_1())
+                                .child(glyph_el(icons::FOLDER))
+                                .child(label_el(entry.name))
                                 .when(is_repo, |el| {
                                     el.child(
                                         icon(icons::GIT_BRANCH)
                                             .size(px(14.0))
+                                            .flex_none()
                                             .text_color(theme.text_muted),
                                     )
                                 })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.add_space_descend(full.clone(), is_repo, cx)
+                                }))
                                 .into_any_element(),
                         );
                     }
@@ -5775,28 +5790,38 @@ impl Shell {
         if let Some(flow) = self.add_space.as_mut() {
             flow.active = flow.active.min(rows.len().saturating_sub(1));
         }
-        let empty = rows.is_empty();
+        let count = rows.len();
+        // End spacing belongs to the content, so it scrolls out of the fade
+        // instead of leaving a permanent gutter beside the chrome (Cmd+K).
+        let rows = rows.into_iter().enumerate().map(|(ix, content)| {
+            div()
+                .flex_none()
+                .px(px(8.0))
+                .when(ix == 0, |row| row.pt(px(8.0)))
+                .when(ix + 1 == count, |row| row.pb(px(8.0)))
+                .child(content)
+        });
         let mut results = div()
             .id("project-results")
-            .max_h(px((f32::from(viewport.height) - 220.0).clamp(100.0, 424.0)))
+            .min_h_0()
+            .max_h(px(command_palette::palette_results_height(viewport)))
             .overflow_y_scroll()
             .track_scroll(&scroll)
-            .px(px(popover::CARD_INSET))
             .flex()
             .flex_col()
             .gap(px(SIDEBAR_LIST_GAP))
             .children(rows);
         if step == ProjectStep::Folders && loading {
-            results = results.child(popover::skeleton_rows(
+            results = results.child(div().p(px(8.0)).child(popover::skeleton_rows(
                 "project-loading",
                 &theme,
                 5,
                 cx.entity_id(),
                 cx,
-            ));
+            )));
         } else if let Some(message) = load_error.filter(|_| step == ProjectStep::Folders) {
             results = results.child(
-                popover::error_row(&theme, &message).p(px(14.0)).child(
+                popover::error_row(&theme, &message).p(px(16.0)).child(
                     popover::btn_ghost(&theme, "Retry", "project-retry")
                         .id("project-retry")
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -5805,107 +5830,100 @@ impl Shell {
                         })),
                 ),
             );
-        } else if empty {
-            results = results.child(div().p(px(24.0)).text_color(theme.text_muted).child(
-                match step {
-                    ProjectStep::Devices => "No devices found",
-                    ProjectStep::Locations => "No locations found",
-                    ProjectStep::Folders if query.is_empty() => "No folders here",
-                    ProjectStep::Folders => "No folders match",
-                },
-            ));
+        } else if count == 0 && !(step == ProjectStep::Locations && drives_loading) {
+            let (title, hint) = match step {
+                ProjectStep::Devices => ("No devices found", "Try another device name.".into()),
+                ProjectStep::Locations => {
+                    ("No locations found", "Try Home or a drive name.".into())
+                }
+                ProjectStep::Folders if query.is_empty() => (
+                    "No folders here",
+                    format!(
+                        "Add this folder with {}, or go back with ←.",
+                        crate::settings::badge_combo("mod-enter")
+                    ),
+                ),
+                ProjectStep::Folders => (
+                    "No folders match",
+                    "Type a path like ~/code or /mnt to jump there.".to_string(),
+                ),
+            };
+            results = results.child(command_palette::palette_empty(&theme, title, hint));
         }
         if step == ProjectStep::Locations && drives_loading {
             results = results.child(
                 div()
-                    .px(px(8.0))
-                    .py(px(6.0))
+                    .px(px(16.0))
+                    .pb(px(8.0))
                     .text_color(theme.text_muted)
                     .text_size(crate::typography::ui_rems(11.0))
                     .child("Loading locations…"),
             );
         }
+        let results = command_palette::palette_results_fade(results, &scroll);
+
+        // Breadcrumbs: one line that scrolls sideways under edge fades rather
+        // than wrapping, and follows the open folder as the path grows.
         let crumb =
             |id: SharedString, name: SharedString, glyph: Option<&'static str>, current: bool| {
+                let color = if current {
+                    theme.text
+                } else {
+                    theme.text_muted
+                };
                 div()
                     .id(id)
-                    .h(px(26.0))
-                    .px(px(7.0))
+                    .flex_none()
+                    .h(px(24.0))
+                    .px(px(6.0))
                     .rounded(px(6.0))
                     .flex()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(5.0))
                     .cursor_pointer()
-                    .text_color(if current {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    })
-                    .when(current, |el| el.bg(theme.element_hover))
+                    .text_color(color)
                     .hover(|s| s.bg(theme.element_hover).text_color(theme.text))
                     .when_some(glyph, |el, glyph| {
-                        el.child(
-                            icon(glyph)
-                                .size(px(14.0))
-                                .flex_none()
-                                .text_color(if current {
-                                    theme.text
-                                } else {
-                                    theme.text_muted
-                                }),
-                        )
+                        el.child(icon(glyph).size(px(14.0)).flex_none().text_color(color))
                     })
-                    .child(div().max_w(px(140.0)).truncate().child(name))
+                    .child(div().max_w(px(180.0)).truncate().child(name))
             };
-        // Keep each chevron with its destination when a long path wraps.
-        let segment = |item: gpui::Stateful<gpui::Div>| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(2.0))
-                .child(
-                    icon(icons::ALT_ARROW_RIGHT)
-                        .size(px(12.0))
-                        .text_color(theme.text_faint),
-                )
-                .child(item)
+        let chevron = || {
+            icon(icons::ALT_ARROW_RIGHT)
+                .size(px(12.0))
+                .flex_none()
+                .text_color(theme.text_faint)
         };
-        let mut trail = div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(2.0))
-            .child(
+        let mut trail: Vec<AnyElement> = vec![
+            crumb(
+                "project-crumb-root".into(),
+                "New project".into(),
+                None,
+                step == ProjectStep::Devices,
+            )
+            .on_click(
+                cx.listener(|this, _, _, cx| this.add_space_back_to(ProjectStep::Devices, cx)),
+            )
+            .into_any_element(),
+        ];
+        let mut crumb_key = String::new();
+        if let Some(device) = device {
+            crumb_key.push_str(&device.id);
+            trail.push(chevron().into_any_element());
+            trail.push(
                 crumb(
-                    "project-crumb-root".into(),
-                    "New project".into(),
-                    None,
-                    step == ProjectStep::Devices,
+                    "project-crumb-device".into(),
+                    device.name.into(),
+                    Some(device_glyph(&device.platform)),
+                    step == ProjectStep::Locations,
                 )
                 .on_click(
-                    cx.listener(|this, _, _, cx| this.add_space_back_to(ProjectStep::Devices, cx)),
-                ),
-            );
-        if let Some(device) = device {
-            let glyph = match device.platform.as_str() {
-                "macos" | "darwin" => icons::LAPTOP,
-                "ios" | "android" => icons::SMARTPHONE,
-                _ => icons::MONITOR,
-            };
-            trail =
-                trail.child(segment(
-                    crumb(
-                        "project-crumb-device".into(),
-                        device.name.into(),
-                        Some(glyph),
-                        step == ProjectStep::Locations,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    cx.listener(|this, _, _, cx| {
                         this.add_space_back_to(ProjectStep::Locations, cx)
-                    })),
-                ));
+                    }),
+                )
+                .into_any_element(),
+            );
         }
         if let Some((name, path)) = location {
             let glyph = if path.is_none() {
@@ -5917,7 +5935,9 @@ impl Shell {
             let at_root = listing
                 .as_ref()
                 .is_none_or(|l| root.as_deref() == Some(l.path.as_str()));
-            trail = trail.child(segment(
+            crumb_key.push_str(&name);
+            trail.push(chevron().into_any_element());
+            trail.push(
                 crumb(
                     "project-crumb-location".into(),
                     name.clone().into(),
@@ -5926,46 +5946,75 @@ impl Shell {
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.add_space_goto_location(name.clone(), path.clone(), cx)
-                })),
-            ));
+                }))
+                .into_any_element(),
+            );
             if let Some(listing) = listing.as_ref() {
+                crumb_key.push_str(&listing.path);
                 for (ix, (name, full)) in breadcrumbs(&listing.path).into_iter().enumerate() {
                     if root.as_deref().is_some_and(|root| path_under(root, &full)) {
                         continue;
                     }
-                    trail = trail.child(segment(
+                    trail.push(chevron().into_any_element());
+                    trail.push(
                         crumb(
                             format!("project-crumb-folder-{ix}").into(),
                             name.into(),
-                            Some(icons::FOLDER),
+                            None,
                             full == listing.path,
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.add_space_descend(full.clone(), false, cx)
-                        })),
-                    ));
+                        }))
+                        .into_any_element(),
+                    );
                 }
             }
         }
-        let crumbs = div()
-            .px(px(14.0))
-            .py(px(8.0))
+        let crumb_scroll = self.add_space.as_mut().map(|flow| {
+            // Reveal the open folder whenever the path changes; otherwise
+            // leave the strip where the user scrolled it.
+            if flow.crumb_key != crumb_key {
+                flow.crumb_key = crumb_key;
+                flow.crumb_scroll
+                    .scroll_to_item(trail.len().saturating_sub(1));
+            }
+            flow.crumb_scroll.clone()
+        })?;
+        let trail = div()
+            .id("project-crumbs")
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .flex()
-            .items_start()
-            .gap(px(8.0))
+            .items_center()
+            .gap(px(2.0))
+            .overflow_x_scroll()
+            .track_scroll(&crumb_scroll)
+            .children(trail);
+        let crumbs = div()
+            .h(px(36.0))
+            .flex_none()
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .border_b_1()
+            .border_color(crate::theme::hairline(0.06))
             .text_size(crate::typography::ui_rems(12.0))
             .child(
                 div()
                     .id("project-crumb-back")
-                    .size(px(26.0))
+                    .size(px(24.0))
                     .flex_none()
                     .flex()
                     .items_center()
                     .justify_center()
                     .rounded(px(6.0))
                     .cursor_pointer()
-                    .text_color(theme.text_muted)
-                    .hover(|s| s.bg(theme.element_hover).text_color(theme.text))
+                    .role(gpui::Role::Button)
+                    .aria_label("Back to commands")
+                    .hover(|s| s.bg(theme.element_hover))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.add_space = None;
                         this.toggle_command_palette(window, cx);
@@ -5977,87 +6026,69 @@ impl Shell {
                     ),
             )
             .child(
-                div()
-                    .w(px(1.0))
-                    .h(px(16.0))
-                    .mt(px(5.0))
-                    .flex_none()
-                    .bg(theme.border),
-            )
-            .child(trail);
-        let header = div()
-            .h(px(58.0))
-            .flex_none()
-            .px(px(18.0))
-            .flex()
-            .items_center()
-            .gap(px(12.0))
-            .border_b_1()
-            .border_color(theme.border)
-            .child(popover::palette_search_icon(&theme))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(crate::typography::ui_rems(15.0))
-                    .child(search),
-            )
-            .child(popover::key_hint_text(&theme, "esc", ""));
-        let footer = div()
-            .flex_none()
-            .px(px(18.0))
-            .py(px(12.0))
-            .border_t_1()
-            .border_color(theme.border)
-            .flex()
-            .items_center()
-            .gap(px(18.0))
-            .child(popover::key_hint_pair(
+                crate::edge_fade::edge_faded(18.0, false, false, trail)
+                    .fade_left(true)
+                    .fade_right(true)
+                    .fade_overflow_x(&crumb_scroll),
+            );
+
+        let shortcut = {
+            let id = ShortcutId::NewProject;
+            let combo = self.settings.keymap.get(id);
+            let valid = Keystroke::parse(&platform_combo(combo)).is_ok();
+            crate::settings::badge_combo(if valid { combo } else { id.default_combo() })
+        };
+        let can_add = !busy && listing.is_some();
+        let footer = command_palette::palette_footer()
+            .child(command_palette::command_key_hint(&theme, "↑ ↓", "Navigate"))
+            .child(command_palette::command_key_hint(
                 &theme,
-                icons::ARROW_UP,
-                icons::ARROW_DOWN,
-                "Navigate",
+                "↵",
+                if step == ProjectStep::Folders {
+                    "Open"
+                } else {
+                    "Select"
+                },
             ))
-            .child(popover::key_hint_text(&theme, "↵", "Open"))
-            .child(popover::key_hint_text(&theme, "esc", "Close"))
-            .child(div().flex_1())
+            .when(step != ProjectStep::Devices, |el| {
+                el.child(command_palette::command_key_hint(&theme, "←", "Back"))
+            })
+            .child(command_palette::command_key_hint(&theme, "Esc", "Close"))
             .when(step == ProjectStep::Folders, |el| {
-                el.child(
-                    popover::btn_ghost(
-                        &theme,
-                        if busy { "Adding…" } else { "Add project" },
-                        "project-add",
-                    )
-                    .id("project-add")
-                    .h(px(22.0))
-                    .py(px(0.0))
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .when(busy || listing.is_none(), |el| el.opacity(0.5))
-                    .on_click(cx.listener(|this, _, _, cx| this.submit_add_space(cx)))
-                    .child(
-                        popover::key_cap(&theme)
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .child(crate::settings::badge_combo("mod-enter")),
-                    ),
+                el.child(div().flex_1()).child(
+                    div()
+                        .id("project-add")
+                        .flex()
+                        .items_center()
+                        .gap(px(5.0))
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .my(px(-2.0))
+                        .mr(px(-6.0))
+                        .rounded(px(6.0))
+                        .role(gpui::Role::Button)
+                        .aria_label("Add project")
+                        .when(can_add, |el| {
+                            el.cursor_pointer()
+                                .hover(|s| s.bg(theme.element_hover))
+                                .on_click(cx.listener(|this, _, _, cx| this.submit_add_space(cx)))
+                        })
+                        .when(!can_add, |el| el.opacity(0.5))
+                        .child(popover::kbd_hint(
+                            &theme,
+                            &crate::settings::badge_combo("mod-enter"),
+                        ))
+                        .child(
+                            div()
+                                .text_size(crate::typography::ui_rems(10.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(if busy { "Adding…" } else { "Add project" }),
+                        ),
                 )
             });
         let card =
-            div()
-                .id("add-space-palette")
-                .track_focus(&focus)
-                .w(px(600.0_f32.min(f32::from(viewport.width) - 32.0)))
-                .flex()
-                .flex_col()
-                .rounded(px(14.0))
-                .border_1()
-                .border_color(theme.border)
-                .when(!theme.is_frost(), |el| el.shadow_lg())
-                .bg(popover::surface_bg(&theme))
-                .text_color(theme.text)
+            command_palette::palette_card("add-space-palette", &focus, viewport, &theme)
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                     this.add_space_key(event, cx)
                 }))
@@ -6065,37 +6096,25 @@ impl Shell {
                     this.add_space = None;
                     cx.notify();
                 }))
-                .child(header)
+                .child(command_palette::palette_header(
+                    &theme,
+                    search.into_any_element(),
+                    popover::kbd_hint(&theme, &shortcut),
+                ))
                 .child(crumbs)
-                .child(div().min_h_0().py(px(popover::CARD_INSET)).child(results))
+                .child(results)
                 .when_some(error, |el, error| {
                     el.child(
                         div()
-                            .px(px(18.0))
+                            .px(px(16.0))
                             .pb(px(8.0))
+                            .text_size(crate::typography::ui_rems(12.0))
                             .text_color(theme.danger)
                             .child(error),
                     )
                 })
                 .child(footer);
-        Some(
-            gpui::deferred(
-                gpui::anchored()
-                    .position(gpui::point(px(0.0), px(0.0)))
-                    .child(
-                        div()
-                            .occlude()
-                            .w(viewport.width)
-                            .h(viewport.height)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(crate::frost::frosted(14.0, crate::frost::MENU_BLUR, card)),
-                    ),
-            )
-            .priority(2)
-            .into_any_element(),
-        )
+        Some(command_palette::palette_overlay(viewport, card))
     }
 
     // ---- space context menu / rename / delete overlays ----
@@ -6418,7 +6437,20 @@ impl Shell {
                 flow.home = Some(path.clone());
             }
             let names = match path.as_str() {
-                "/home/alex" => vec!["Desktop", "Documents", "Downloads", "Projects"],
+                "/home/alex" => vec![
+                    "Desktop",
+                    "Documents",
+                    "Downloads",
+                    "Movies",
+                    "Music",
+                    "Pictures",
+                    "Projects",
+                    "Public",
+                    "dotfiles",
+                    "notes",
+                    "sandbox",
+                    "scratch",
+                ],
                 "/projects" | "/home/alex/Projects" => vec!["fieldnotes", "mobile-app", "website"],
                 _ => vec!["assets", "docs", "src", "tests"],
             };
