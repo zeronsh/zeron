@@ -461,14 +461,6 @@ async fn forget_guards_and_removes_slots() {
             .await
             .is_err()
     );
-    // The live login can't be forgotten (it would just be re-detected).
-    assert!(
-        accounts
-            .forget(HarnessId::ClaudeCode, &alice_id)
-            .await
-            .is_err()
-    );
-
     // A non-active slot forgets cleanly.
     write_claude_login(&config, "bob@example.com", "uuid-bob", "token-bob");
     accounts.list(false).await.expect("list bob");
@@ -480,6 +472,25 @@ async fn forget_guards_and_removes_slots() {
         account_emails(&snapshot, HarnessId::ClaudeCode),
         vec![("bob@example.com".to_string(), true)]
     );
+
+    // The live (and only) login forgets too — by signing the CLI out, so it
+    // isn't re-detected; the rest of ~/.claude.json survives.
+    let bob_id = snapshot.accounts[0].id.clone();
+    let snapshot = accounts
+        .forget(HarnessId::ClaudeCode, &bob_id)
+        .await
+        .expect("forget live bob");
+    assert!(account_emails(&snapshot, HarnessId::ClaudeCode).is_empty());
+    let cfg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config.claude_config_file).unwrap())
+            .unwrap();
+    assert!(cfg.get("oauthAccount").is_none());
+    assert!(cfg["projects"].get("/keep/me").is_some());
+    let creds: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(config.claude_config_dir.join(".credentials.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(creds.get("claudeAiOauth").is_none());
 }
 
 #[test]
