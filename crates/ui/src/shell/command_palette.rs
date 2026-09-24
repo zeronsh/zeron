@@ -4,6 +4,7 @@ use crate::appearance::AppearanceMode;
 
 const HISTORY_RESULT_LIMIT: usize = 30;
 const RESULTS_FADE_BAND: f32 = 18.0;
+const TRANSCRIPT_SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(80);
 
 pub(super) struct CommandPalette {
     search: Entity<ComposerInput>,
@@ -15,6 +16,9 @@ pub(super) struct CommandPalette {
     // while this input is still absent from the dispatch tree.
     focus_pending: bool,
     scroll: gpui::ScrollHandle,
+    // Kept across keystrokes until the next reply lands, so rows don't flicker.
+    transcript_hits: Vec<zeron_proto::TranscriptSearchHit>,
+    transcript_search: Option<gpui::Task<()>>,
     _search_events: Subscription,
 }
 
@@ -42,7 +46,11 @@ enum Entry {
     NewProject,
     Settings,
     Theme(AppearanceMode),
-    Chat(String),
+    /// `snippet` is set when only the transcript matched, not the title or metadata.
+    Chat {
+        id: String,
+        snippet: Option<SharedString>,
+    },
 }
 
 impl Entry {
@@ -59,7 +67,7 @@ impl Entry {
                 },
                 mode.icon(),
             )),
-            Self::Chat(_) => None,
+            Self::Chat { .. } => None,
         }
     }
 }
@@ -101,12 +109,17 @@ impl Shell {
         let search = cx.new(|cx| {
             ComposerInput::with_context("Search commands and chats…", "PaletteSearch", cx)
         });
-        let events = cx.subscribe(&search, |this, _, event, cx| {
+        let events = cx.subscribe(&search, |this, search, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
+                let query = search.read(cx).text().trim().to_string();
                 if let Some(palette) = this.command_palette.as_mut() {
                     palette.active = 0;
                     palette.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+                    if query.is_empty() {
+                        palette.transcript_hits.clear();
+                    }
                 }
+                this.search_transcripts(query, TRANSCRIPT_SEARCH_DEBOUNCE, cx);
                 cx.notify();
             }
         });
@@ -119,9 +132,60 @@ impl Shell {
             enter_press: EnterPress::default(),
             focus_pending: true,
             scroll: gpui::ScrollHandle::new(),
+            transcript_hits: Vec::new(),
+            transcript_search: None,
             _search_events: events,
         });
+        // An empty query refreshes the engine's index before the first keystroke.
+        self.search_transcripts(String::new(), std::time::Duration::ZERO, cx);
         cx.notify();
+    }
+
+    /// Replacing the task drops the previous request, so only the latest query lands.
+    fn search_transcripts(
+        &mut self,
+        query: String,
+        delay: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let Some(palette) = self.command_palette.as_mut() else {
+            return;
+        };
+        palette.transcript_search = Some(cx.spawn(async move |this, cx| {
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
+            let request = zeron_proto::SearchTranscriptsRequest {
+                query: query.clone(),
+                limit: HISTORY_RESULT_LIMIT as u16,
+            };
+            let Ok(params) = serde_json::to_value(&request) else {
+                return;
+            };
+            // Older engines lack the method; the palette keeps metadata matches.
+            let hits = match engine
+                .client()
+                .call(methods::SEARCH_TRANSCRIPTS, params)
+                .await
+                .map(serde_json::from_value::<Vec<zeron_proto::TranscriptSearchHit>>)
+            {
+                Ok(Ok(hits)) => hits,
+                _ => return,
+            };
+            if query.is_empty() {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                if let Some(palette) = this.command_palette.as_mut() {
+                    palette.transcript_hits = hits;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
     }
 
     pub(super) fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -172,12 +236,29 @@ impl Shell {
             })
             .collect();
         chats.sort_by(|a, b| spaces::compare_sidebar_chats(self.settings.sidebar_sort, a, b));
+        let mut shown: std::collections::HashSet<&str> =
+            chats.iter().map(|chat| chat.id.as_str()).collect();
+        // Metadata matches lead; transcript-only matches follow in relevance order.
+        let transcript_only = palette
+            .transcript_hits
+            .iter()
+            .filter(|_| !query.is_empty())
+            .filter(|hit| state.chats.iter().any(|chat| chat.id == hit.chat_id))
+            .filter(|hit| shown.insert(hit.chat_id.as_str()))
+            .map(|hit| Entry::Chat {
+                id: hit.chat_id.clone(),
+                snippet: Some(transcript::single_line(&hit.snippet).into()),
+            });
         // Limit after filtering and sorting so every chat remains searchable.
         entries.extend(
             chats
                 .into_iter()
-                .take(HISTORY_RESULT_LIMIT)
-                .map(|chat| Entry::Chat(chat.id.clone())),
+                .map(|chat| Entry::Chat {
+                    id: chat.id.clone(),
+                    snippet: None,
+                })
+                .chain(transcript_only)
+                .take(HISTORY_RESULT_LIMIT),
         );
         entries
     }
@@ -195,7 +276,7 @@ impl Shell {
             Entry::NewProject => self.open_add_space(cx),
             Entry::Settings => self.open_settings(SettingsSection::General, cx),
             Entry::Theme(_) => unreachable!(),
-            Entry::Chat(id) => self.open_chat(id, cx),
+            Entry::Chat { id, .. } => self.open_chat(id, cx),
         }
     }
 
@@ -275,7 +356,7 @@ impl Shell {
                         row.child(popover::kbd_hint(&theme, &shortcut))
                     })
                     .into_any_element()
-            } else if let Entry::Chat(id) = entry {
+            } else if let Entry::Chat { id, snippet } = entry {
                 let state = self.state.read(cx);
                 let chat = state.chats.iter().find(|chat| &chat.id == id)?;
                 let project = match (state.space_for_chat(chat), chat.space_id.as_deref()) {
@@ -321,6 +402,7 @@ impl Shell {
                     None,
                     None,
                     Some(&query),
+                    snippet.clone(),
                     &theme,
                     cx,
                 )
@@ -352,11 +434,9 @@ impl Shell {
                         .gap(px(6.0))
                         .text_size(crate::typography::ui_rems(13.0))
                         .child("No results")
-                        .child(
-                            div()
-                                .text_color(theme.text_muted)
-                                .child("Try a command, chat title, project, or device."),
-                        ),
+                        .child(div().text_color(theme.text_muted).child(
+                            "Try a command, chat title, project, device, or words from a chat.",
+                        )),
                 )
             });
         let body = crate::edge_fade::edge_faded(RESULTS_FADE_BAND, true, true, body)
@@ -585,5 +665,199 @@ mod tests {
         ));
         assert!(matches_query("  ", "Any chat"));
         assert!(!matches_query("mac windows", "Zeron @ MacBook"));
+    }
+
+    fn chat_ids(entries: &[Entry]) -> Vec<(String, bool)> {
+        entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Chat { id, snippet } => Some((id.clone(), snippet.is_some())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Drives the real palette against a real engine. Three chats run
+    /// mock-harness turns. Typing a word that appears only in a transcript
+    /// lists that chat after the title matches, with a snippet. A query that
+    /// gets replaced before its reply arrives never reaches the palette.
+    #[gpui::test]
+    fn palette_lists_chats_whose_transcripts_match(cx: &mut gpui::TestAppContext) {
+        use crate::settings;
+        use crate::state::{AppState, EngineBootConfig, EngineHandle};
+        use crate::theme::Theme;
+        use gpui::AppContext as _;
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let registry = zeron_engine::HarnessRegistry::new();
+        registry.register(std::sync::Arc::new(zeron_harness::mock::MockHarness {
+            script: vec![
+                zeron_proto::AgentEvent::TextDelta {
+                    text: "Sure, here is what I found.".into(),
+                },
+                zeron_proto::AgentEvent::Done {
+                    status: zeron_proto::DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                },
+            ],
+        }));
+        let core = zeron_engine::EngineCore::assemble(
+            &dir.path().join("engine"),
+            std::sync::Arc::new(registry),
+            zeron_proto::HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let chats = [
+            ("c-deploy", "Friday cleanup", "the helm configmap is stale"),
+            ("c-lunch", "Team offsite", "find a vegetarian ramen place"),
+            ("c-ramen", "Ramen notes", "summarize the agenda"),
+        ];
+        runtime.block_on(async {
+            let client = zeron_rpc::memory_client(core.rpc_service());
+            for (chat, title, prompt) in chats {
+                client
+                    .call(
+                        methods::MUTATE,
+                        serde_json::json!({"op": "createChat", "chatId": chat, "deviceId": core.device_id}),
+                    )
+                    .await
+                    .unwrap();
+                core.workspace.rename_chat(chat, title).unwrap();
+                client
+                    .call(
+                        methods::QUEUE_COMMAND,
+                        serde_json::json!({"chatId": chat, "command": {
+                            "kind": "run", "messageId": format!("{chat}-m1"),
+                            "request": {"prompt": prompt, "cwd": "/tmp",
+                                "sandbox": "workspace-write", "autoApprove": true},
+                        }}),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let search = serde_json::json!({"query": "found", "limit": 30});
+            for _ in 0..300 {
+                let hits = client.call(methods::SEARCH_TRANSCRIPTS, search.clone()).await;
+                if hits.is_ok_and(|hits| hits.as_array().is_some_and(|h| h.len() == 3)) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("every turn reaches the index");
+        });
+
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let engine = EngineHandle::from_test_client(zeron_rpc::memory_client(core.rpc_service()));
+        let rows = core.workspace.read_chats().unwrap();
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.chats = rows;
+                    state.set_test_engine(engine);
+                });
+                shell.toggle_command_palette(window, cx);
+            })
+            .unwrap();
+
+        let type_query = |cx: &mut gpui::TestAppContext, query: &str| {
+            window
+                .update(cx, |shell, _, cx| {
+                    let search = shell.command_palette.as_ref().unwrap().search.clone();
+                    search.update(cx, |search, cx| search.set_text(query, cx));
+                })
+                .unwrap();
+        };
+        let settle = |cx: &mut gpui::TestAppContext, want: &[(&str, bool)]| {
+            for _ in 0..200 {
+                cx.executor().advance_clock(TRANSCRIPT_SEARCH_DEBOUNCE);
+                cx.run_until_parked();
+                let got = window
+                    .update(cx, |shell, _, cx| chat_ids(&shell.command_entries(cx)))
+                    .unwrap();
+                if got
+                    .iter()
+                    .map(|(id, snippet)| (id.as_str(), *snippet))
+                    .eq(want.iter().copied())
+                {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let got = window
+                .update(cx, |shell, _, cx| chat_ids(&shell.command_entries(cx)))
+                .unwrap();
+            panic!("wanted {want:?}, palette shows {got:?}");
+        };
+
+        type_query(cx, "configmap");
+        settle(cx, &[("c-deploy", true)]);
+
+        type_query(cx, "ramen");
+        settle(cx, &[("c-ramen", false), ("c-lunch", true)]);
+
+        type_query(cx, "vegetarian");
+        type_query(cx, "helm");
+        settle(cx, &[("c-deploy", true)]);
+        window
+            .update(cx, |shell, _, _| {
+                let hits = &shell.command_palette.as_ref().unwrap().transcript_hits;
+                assert_eq!(hits.len(), 1);
+                assert!(hits[0].snippet.contains("helm"), "{hits:?}");
+            })
+            .unwrap();
+
+        type_query(cx, "");
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                let mut got = chat_ids(&shell.command_entries(cx));
+                got.sort();
+                assert_eq!(
+                    got,
+                    [("c-deploy", false), ("c-lunch", false), ("c-ramen", false)]
+                        .map(|(id, snippet)| (id.to_string(), snippet)),
+                    "clearing the query drops transcript snippets"
+                );
+            })
+            .unwrap();
+        runtime.block_on(core.shutdown());
     }
 }

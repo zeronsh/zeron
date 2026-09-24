@@ -99,6 +99,9 @@ pub mod methods {
     /// the sending thumbnail's percent-ring feed. No params; IPC-only.
     pub const WATCH_TRANSFERS: &str = "WatchTransfers";
     pub const WATCH_CHATS: &str = "WatchChats";
+    /// Full-text search over transcripts stored on this engine.
+    /// `SearchTranscriptsRequest` → `TranscriptSearchHit[]`. Never relay-forwarded.
+    pub const SEARCH_TRANSCRIPTS: &str = "SearchTranscripts";
     pub const WATCH_SIDEBAR_PREFERENCES: &str = "WatchSidebarPreferences";
     pub const WATCH_DEVICES: &str = "WatchDevices";
     pub const WATCH_SESSIONS: &str = "WatchSessions";

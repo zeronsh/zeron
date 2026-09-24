@@ -66,6 +66,14 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE snapshots ADD COLUMN cursor_verified INTEGER NOT NULL DEFAULT 0;",
 ];
 
+/// Idempotent and outside `MIGRATIONS`, so it claims no migration version: a
+/// build without it (an older release, or one whose next migration reuses the
+/// slot) neither needs it nor skips a migration because of it. Covering,
+/// because `saved_at` sits after the blob and reading it from the table walks
+/// every snapshot's overflow pages.
+const SNAPSHOT_FRESHNESS_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS snapshots_saved_at ON snapshots(doc_id, saved_at);";
+
 /// SQLite-backed store under a data directory (`{data_dir}/docs.sqlite3`).
 ///
 /// Holds warm-open doc snapshots (the DO room is authoritative; these make
@@ -415,6 +423,17 @@ impl DocsStore {
         Ok(())
     }
 
+    /// `saved_at` for every snapshot row, read from the covering index.
+    pub fn snapshot_saved_at(&self) -> Result<std::collections::HashMap<String, i64>, StoreError> {
+        store_blocking(|| {
+            let conn = self.conn();
+            let mut stmt = conn
+                .prepare("SELECT doc_id, saved_at FROM snapshots INDEXED BY snapshots_saved_at")?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            Ok(rows.collect::<Result<_, _>>()?)
+        })
+    }
+
     /// Whether a snapshot row exists for `doc_id` — presence only, no blob read.
     pub fn has_snapshot(&self, doc_id: &str) -> Result<bool, StoreError> {
         store_blocking(|| self.has_snapshot_blocking(doc_id))
@@ -554,6 +573,7 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
         )?;
         tx.commit()?;
     }
+    conn.execute_batch(SNAPSHOT_FRESHNESS_INDEX)?;
     Ok(())
 }
 

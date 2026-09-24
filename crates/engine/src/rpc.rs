@@ -551,6 +551,7 @@ pub struct EngineRpc {
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<zeron_update::Updater>,
     local_import: Option<crate::local_import::LocalImporter>,
+    transcript_search: Option<crate::transcript_search::TranscriptSearch>,
     engine_info: EngineInfo,
 }
 
@@ -595,6 +596,7 @@ impl EngineRpc {
             links: None,
             updater: None,
             local_import: None,
+            transcript_search: None,
             engine_info,
         }
     }
@@ -625,6 +627,14 @@ impl EngineRpc {
     /// Attach the local→synced profile importer (synced runtimes only).
     pub fn with_local_import(mut self, importer: crate::local_import::LocalImporter) -> Self {
         self.local_import = Some(importer);
+        self
+    }
+
+    pub fn with_transcript_search(
+        mut self,
+        search: crate::transcript_search::TranscriptSearch,
+    ) -> Self {
+        self.transcript_search = Some(search);
         self
     }
 
@@ -2030,6 +2040,18 @@ impl RpcService for EngineRpc {
             }
             methods::WATCH_CHATS => {
                 Ok(RpcReply::Stream(watch_stream(self.workspace.watch_chats())))
+            }
+            methods::SEARCH_TRANSCRIPTS => {
+                let request: zeron_proto::SearchTranscriptsRequest = parse_params(params)?;
+                let search = self
+                    .transcript_search
+                    .as_ref()
+                    .ok_or_else(|| RpcError::Failed("transcript search unavailable".into()))?;
+                let hits = search
+                    .search(request.query, request.limit)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&hits)
             }
             methods::WATCH_SIDEBAR_PREFERENCES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_sidebar_preferences(),
