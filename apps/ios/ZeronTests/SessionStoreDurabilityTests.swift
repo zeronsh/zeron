@@ -509,7 +509,10 @@ final class SessionStoreDurabilityTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("zeron-lease-wipe-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        DocDisk.directoryOverride = root
+        let blockerFile = root.appendingPathComponent("blocker")
+        let failingDirectory = blockerFile.appendingPathComponent("dir")
+        try Data("not a directory".utf8).write(to: blockerFile)
+        DocDisk.directoryOverride = failingDirectory
         defer {
             DocDisk.directoryOverride = nil
             try? FileManager.default.removeItem(at: root)
@@ -536,6 +539,7 @@ final class SessionStoreDurabilityTests: XCTestCase {
             if store.outbox.count == 1 { break }
         }
         store.stop()
+        DocDisk.directoryOverride = root
         DocDisk.wipeAll()
         gate.signal()
         _ = await blocker.value
