@@ -1,16 +1,11 @@
 //! Context occupancy is read from the replicated chat snapshot, never local CLI state.
 use crate::theme::Theme;
-use gpui::{
-    Context, IntoElement, PathBuilder, Render, SharedString, Window, canvas, div, point,
-    prelude::*, px,
-};
+use gpui::{IntoElement, PathBuilder, SharedString, canvas, div, point, prelude::*, px};
 use zeron_proto::ContextUsage;
 
-pub fn render(
-    usage: Option<ContextUsage>,
-    state: gpui::Entity<crate::state::AppState>,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
+/// The context ring's trigger chip; the footer ([`crate::account_usage`])
+/// opens [`card`] from it on click.
+pub fn chip(usage: Option<ContextUsage>, open: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let fraction = usage.and_then(ContextUsage::fraction);
     let color = match fraction {
         Some(f) if f >= 0.9 => theme.danger,
@@ -18,12 +13,34 @@ pub fn render(
         Some(_) => theme.text_muted,
         None => theme.text_faint,
     };
-    let ring = ring(fraction.unwrap_or(0.0) as f32, color, theme);
     let label = fraction
         .map(|f| format!("{:.0}%", f * 100.0))
         .unwrap_or_else(|| "—".into());
+    ring_chip(
+        "context-usage",
+        fraction.unwrap_or(0.0) as f32,
+        color,
+        color,
+        label,
+        open,
+        theme,
+    )
+}
+
+/// One footer ring indicator: ring + percent, identical geometry for every
+/// ring so they sit side by side as equals. `arc` colours the ring's fill,
+/// `text` the label; `open` holds the hover wash while its popover is up.
+pub(crate) fn ring_chip(
+    id: &'static str,
+    fraction: f32,
+    arc: gpui::Hsla,
+    text: gpui::Hsla,
+    label: String,
+    open: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
     div()
-        .id("context-usage")
+        .id(id)
         .flex_none()
         .flex()
         .items_center()
@@ -32,17 +49,12 @@ pub fn render(
         .px(px(6.0))
         .rounded(px(6.0))
         .text_size(px(11.0))
-        .text_color(color)
+        .text_color(text)
+        .cursor_pointer()
+        .when(open, |s| s.bg(crate::theme::ink(0.05)))
         .hover(|s| s.bg(crate::theme::ink(0.05)))
-        .child(ring)
+        .child(ring(fraction, arc, theme))
         .child(SharedString::from(label))
-        .tooltip(move |_, cx| {
-            cx.new(|cx| UsageCard {
-                _subscription: cx.observe(&state, |_, _, cx| cx.notify()),
-                state: state.clone(),
-            })
-            .into()
-        })
 }
 
 /// The footer's 16px progress ring: a faint full track under a `fraction` arc
@@ -81,11 +93,6 @@ pub(crate) fn ring(fraction: f32, color: gpui::Hsla, theme: &Theme) -> impl Into
         },
     )
     .size(px(16.0))
-}
-
-struct UsageCard {
-    state: gpui::Entity<crate::state::AppState>,
-    _subscription: gpui::Subscription,
 }
 
 fn with_separators(count: u64) -> String {
@@ -140,35 +147,22 @@ fn details(usage: Option<ContextUsage>) -> String {
     }
 }
 
-impl Render for UsageCard {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = &Theme::of(cx).for_popup();
-        let card = crate::popover::popover_card(theme)
-            .p(px(12.0))
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child("Context window"),
-            )
-            .child(
-                // the lines break only at their own newlines: a tooltip sizes
-                // from the unwrapped text, so soft wrapping clipped the last line
-                div()
-                    .text_size(px(12.0))
-                    .line_height(px(19.0))
-                    .whitespace_nowrap()
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(details(
-                        self.state.read(cx).context_usage,
-                    ))),
-            );
-        crate::frost::frosted(crate::popover::CARD_RADIUS, crate::frost::MENU_BLUR, card)
-    }
+/// The context ring's popover content.
+pub fn card(usage: Option<ContextUsage>, theme: &Theme) -> gpui::Div {
+    crate::popover::popover_card(theme)
+        .flex()
+        .flex_col()
+        .child(crate::popover::menu_heading(theme, "Context window"))
+        .child(
+            div()
+                .px(px(8.0))
+                .pb(px(6.0))
+                .text_size(px(12.0))
+                .line_height(px(19.0))
+                .whitespace_nowrap()
+                .text_color(theme.text_muted)
+                .child(SharedString::from(details(usage))),
+        )
 }
 
 #[cfg(test)]

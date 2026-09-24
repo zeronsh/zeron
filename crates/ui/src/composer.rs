@@ -5380,9 +5380,9 @@ pub struct Composer {
     route_snap_until: Option<Instant>,
     _observe: Subscription,
     _pickers_observe: Subscription,
-    /// The footer's plan-usage ring (the session harness's live account).
+    /// The footer's rings: plan usage of the session harness's live
+    /// account, and context occupancy — each opening a popover.
     account_usage: Entity<crate::account_usage::AccountUsage>,
-    _account_usage_observe: Subscription,
     _picker_focus: Subscription,
     _input_events: Subscription,
 }
@@ -5455,7 +5455,6 @@ impl Composer {
         });
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
         let account_usage = cx.new(|cx| crate::account_usage::AccountUsage::new(state.clone(), cx));
-        let account_usage_observe = cx.observe(&account_usage, |_, _, cx| cx.notify());
         // The footer toolbar (checkout kind + ref picker) is rendered INLINE
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
@@ -5596,7 +5595,6 @@ impl Composer {
             _observe: observe,
             _pickers_observe: pickers_observe,
             account_usage,
-            _account_usage_observe: account_usage_observe,
             _picker_focus: picker_focus,
             _input_events: input_events,
         };
@@ -9566,22 +9564,18 @@ impl Render for Composer {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
-            let usage = self.state.read(cx).context_usage;
-            let account_usage = (session_chrome_opacity > 0.0)
-                .then(|| {
-                    let harness = self.pickers.read(cx).resolved(cx).harness;
-                    let target = {
-                        let state = self.state.read(cx);
-                        state
-                            .selected_chat_row()
-                            .map(|chat| chat.device_id.clone())
-                            .filter(|device| state.local_device_id.as_ref() != Some(device))
-                    };
-                    self.account_usage
-                        .update(cx, |usage, cx| usage.track(harness, target, cx));
-                    crate::account_usage::AccountUsage::render(&self.account_usage, &theme, cx)
-                })
-                .flatten();
+            if session_chrome_opacity > 0.0 {
+                let harness = self.pickers.read(cx).resolved(cx).harness;
+                let target = {
+                    let state = self.state.read(cx);
+                    state
+                        .selected_chat_row()
+                        .map(|chat| chat.device_id.clone())
+                        .filter(|device| state.local_device_id.as_ref() != Some(device))
+                };
+                self.account_usage
+                    .update(cx, |usage, cx| usage.track(harness, target, cx));
+            }
             container.child(
                 div()
                     .w_full()
@@ -9613,21 +9607,14 @@ impl Render for Composer {
                                 .opacity(session_chrome_opacity)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
                                 .child(
+                                    // The footer row's own 4px gap: the PR badge
+                                    // ends flush with the row, so the rings keep
+                                    // their distance here.
                                     div()
                                         .flex_none()
-                                        .flex()
-                                        .items_center()
+                                        .pl(px(4.0))
                                         .pr(px(10.0))
-                                        .children(account_usage)
-                                        .children(crate::context_usage::has_window(usage).then(
-                                            || {
-                                                crate::context_usage::render(
-                                                    usage,
-                                                    self.state.clone(),
-                                                    &theme,
-                                                )
-                                            },
-                                        )),
+                                        .child(self.account_usage.clone()),
                                 ),
                         )
                     }),
