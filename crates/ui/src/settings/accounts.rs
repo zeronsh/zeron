@@ -160,12 +160,18 @@ pub fn format_reset(resets_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Opt
 
 /// The providers zeron can sign into, in display order: (harness, name, CLI
 /// command — named in the empty-state copy, zeron settings.agents.tsx
-/// `PROVIDERS`).
-pub const PROVIDERS: [(HarnessId, &str, &str); 4] = [
+/// `PROVIDERS`). Every agent with a login of its own is here; what each one
+/// supports is documented engine-side (`agent_accounts` module docs).
+pub const PROVIDERS: [(HarnessId, &str, &str); 9] = [
     (HarnessId::ClaudeCode, "Claude Code", "claude"),
     (HarnessId::Codex, "Codex", "codex"),
     (HarnessId::Cursor, "Cursor", "cursor-agent"),
     (HarnessId::Antigravity, "Antigravity", "Antigravity"),
+    (HarnessId::Grok, "Grok", "grok login"),
+    (HarnessId::Devin, "Devin", "devin auth login"),
+    (HarnessId::Opencode, "OpenCode", "opencode auth login"),
+    (HarnessId::Pi, "Pi", "pi"),
+    (HarnessId::Hermes, "Hermes", "hermes auth add"),
 ];
 
 /// Whether `harness` has an Accounts section (and sign-in flow). Pure.
@@ -194,6 +200,45 @@ pub fn keeps_one_login(harness: HarnessId) -> bool {
     harness == HarnessId::Antigravity
 }
 
+/// Whether zeron switches this agent's logins. Hermes rotates through its
+/// own credential pool (listed, never reordered); Antigravity keeps one.
+pub fn switches_accounts(harness: HarnessId) -> bool {
+    !matches!(harness, HarnessId::Hermes | HarnessId::Antigravity)
+}
+
+/// One way to add an account: agents that keep a login PER model provider
+/// (OpenCode, Pi, Hermes) sign in to a named provider; the rest have one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoginOption {
+    /// The engine's `provider` param (`None` = the agent's only login).
+    pub provider: Option<&'static str>,
+    /// Who the user signs in to.
+    pub label: &'static str,
+}
+
+/// The sign-ins zeron offers for `harness`, in button order. Pure.
+pub fn login_options(harness: HarnessId) -> Vec<LoginOption> {
+    let option = |provider, label| LoginOption {
+        provider: Some(provider),
+        label,
+    };
+    match harness {
+        HarnessId::Opencode => vec![
+            option("openai", "ChatGPT"),
+            option("github-copilot", "GitHub Copilot"),
+        ],
+        HarnessId::Pi => vec![option("openai-codex", "ChatGPT")],
+        HarnessId::Hermes => vec![
+            option("openai-codex", "ChatGPT"),
+            option("nous", "Nous Portal"),
+        ],
+        _ => vec![LoginOption {
+            provider: None,
+            label: provider_name(harness),
+        }],
+    }
+}
+
 /// The list's last row: connect the first account, or add another. Pure.
 pub fn add_account_label(harness: HarnessId, empty: bool) -> String {
     if empty {
@@ -203,25 +248,55 @@ pub fn add_account_label(harness: HarnessId, empty: bool) -> String {
     }
 }
 
+/// [`add_account_label`] for one [`LoginOption`]: a per-provider sign-in
+/// names its provider ("Connect ChatGPT", "Add GitHub Copilot account"). Pure.
+pub fn add_option_label(harness: HarnessId, option: LoginOption, empty: bool) -> String {
+    match option.provider {
+        None => add_account_label(harness, empty),
+        Some(_) if empty => format!("Connect {}", option.label),
+        Some(_) => format!("Add {} account", option.label),
+    }
+}
+
 /// What the sign-in dialog says while the browser finishes — one sentence
 /// per provider, same shape. Pure.
-fn login_copy(harness: HarnessId) -> &'static str {
-    match harness {
-        HarnessId::ClaudeCode => {
+fn login_copy(harness: HarnessId, provider: Option<&str>) -> &'static str {
+    match (harness, provider) {
+        (HarnessId::ClaudeCode, _) => {
             "Finish signing in to Claude in your browser. The new login is saved next to \
              your current one — nothing changes until you switch."
         }
-        HarnessId::Codex => {
+        (HarnessId::Codex, _) => {
             "Finish signing in to ChatGPT in your browser. The new login is saved next to \
              your current one — nothing changes until you switch."
         }
-        HarnessId::Cursor => {
+        (HarnessId::Cursor, _) => {
             "Finish signing in to Cursor in your browser. This mints a zeron-named API key \
              you can revoke any time from Cursor's dashboard."
         }
-        HarnessId::Antigravity => {
+        (HarnessId::Antigravity, _) => {
             "Finish signing in to Google in your browser. Antigravity keeps one login on \
              this device; if it is already signed in, this just confirms it."
+        }
+        (HarnessId::Grok, _) => {
+            "Finish signing in to Grok in your browser — approve the code shown below. The \
+             new login is saved next to your current one — nothing changes until you switch."
+        }
+        (HarnessId::Devin, _) => {
+            "Finish signing in to Devin in your browser. The new login is saved next to your \
+             current one — nothing changes until you switch."
+        }
+        (HarnessId::Opencode, Some("github-copilot")) => {
+            "Finish signing in to GitHub in your browser — enter the code shown below. The \
+             new login is saved next to your current one — nothing changes until you switch."
+        }
+        (HarnessId::Opencode | HarnessId::Pi, _) => {
+            "Finish signing in to ChatGPT in your browser. The agent gets its own login, saved \
+             next to any current one — nothing changes until you switch."
+        }
+        (HarnessId::Hermes, _) => {
+            "Finish signing in in your browser — enter the code shown below. Hermes adds the \
+             login to its own credential pool and rotates through it itself."
         }
         _ => "Finish signing in in your browser.",
     }
@@ -242,6 +317,17 @@ pub fn provider_accounts(
         .collect()
 }
 
+/// The optimistic half of a switch: `account` becomes the live login of its
+/// group — its agent, or for agents that keep a login per model provider,
+/// that provider — and every other group keeps its own. Pure.
+pub fn mark_switched(snapshot: &mut AgentAccountsSnapshot, account: &AgentAccount) {
+    for row in snapshot.accounts.iter_mut() {
+        if row.harness == account.harness && row.provider == account.provider {
+            row.active = row.id == account.id;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Entity
 // ---------------------------------------------------------------------------
@@ -250,6 +336,8 @@ pub fn provider_accounts(
 /// (or, Claude's fallback, on a pasted code), until it lands or fails.
 struct LoginFlow {
     harness: HarnessId,
+    /// The model provider signed in to, for per-provider agents.
+    provider: Option<&'static str>,
     /// Which start this is — replies to a cancelled or superseded attempt
     /// must not touch the current one.
     attempt: u64,
@@ -275,7 +363,16 @@ enum LoginStep {
 
 impl LoginFlow {
     fn title(&self) -> String {
-        format!("Sign in to {}", provider_name(self.harness))
+        let option = login_options(self.harness)
+            .into_iter()
+            .find(|option| option.provider == self.provider);
+        match option {
+            Some(LoginOption {
+                provider: Some(_),
+                label,
+            }) => format!("Sign in to {label} for {}", provider_name(self.harness)),
+            _ => format!("Sign in to {}", provider_name(self.harness)),
+        }
     }
 
     /// The Browser step's progress line.
@@ -599,11 +696,7 @@ impl AccountsPage {
         let previous = self.snapshot.ready().cloned();
         if let Loadable::Ready(snapshot) = &mut self.snapshot {
             if method == methods::ACTIVATE_AGENT_ACCOUNT {
-                for row in snapshot.accounts.iter_mut() {
-                    if row.harness == account.harness {
-                        row.active = row.id == account.id;
-                    }
-                }
+                mark_switched(snapshot, account);
             } else {
                 snapshot.accounts.retain(|row| row.id != account.id);
             }
@@ -647,7 +740,12 @@ impl AccountsPage {
     // ---- add-account flows ----
 
     /// Start (or Retry) a sign-in: the same dialog for every provider.
-    fn start_login(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+    fn start_login(
+        &mut self,
+        harness: HarnessId,
+        provider: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -655,6 +753,7 @@ impl AccountsPage {
         let attempt = self.login_attempts;
         self.login = Some(LoginFlow {
             harness,
+            provider,
             attempt,
             login_id: None,
             url: None,
@@ -662,7 +761,11 @@ impl AccountsPage {
         });
         self.poll_task = None;
         self.error = None;
-        let params = self.params(serde_json::json!({ "harness": harness }));
+        let mut params = serde_json::json!({ "harness": harness });
+        if let (Some(provider), Some(object)) = (provider, params.as_object_mut()) {
+            object.insert("provider".into(), serde_json::json!(provider));
+        }
+        let params = self.params(params);
         self.action_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -885,8 +988,8 @@ impl AccountsPage {
     }
 
     fn retry_login(&mut self, cx: &mut Context<Self>) {
-        if let Some(harness) = self.login.as_ref().map(|flow| flow.harness) {
-            self.start_login(harness, cx);
+        if let Some((harness, provider)) = self.login.as_ref().map(|f| (f.harness, f.provider)) {
+            self.start_login(harness, provider, cx);
         }
     }
 
@@ -964,8 +1067,13 @@ impl AccountsPage {
         if !reports_usage(account.harness) {
             return None;
         }
-        let note = if !account.switchable {
-            "Credentials unavailable".to_string()
+        let note = if !account.switchable && switches_accounts(account.harness) {
+            match account.harness {
+                // Keychain denied: the login is there, its secret isn't.
+                HarnessId::ClaudeCode => "Credentials unavailable".to_string(),
+                // An opaque token whose account couldn't be looked up.
+                _ => "Couldn't identify this login".to_string(),
+            }
         } else if let Some(reason) = &account.usage_error {
             // The engine's reason ("Rate limited by Anthropic — retrying in
             // 2m", "Signed out — sign in again"), not a bare shrug.
@@ -1350,7 +1458,7 @@ impl AccountsPage {
                  code Anthropic shows you below. Your current login is untouched until you \
                  switch."
             }
-            _ => login_copy(login.harness),
+            _ => login_copy(login.harness, login.provider),
         };
         // "Reopen the sign-in page" (zeron: `text-[12px]
         // text-muted-foreground/60 hover:underline`), once there is a page.
@@ -1618,27 +1726,32 @@ impl AccountsPage {
                             .py(px(8.0))
                             .flex()
                             .flex_row()
+                            .flex_wrap()
+                            .gap(px(4.0))
                             .when(!empty, |el| {
                                 el.border_t_1().border_color(widgets::row_divider(theme))
                             })
-                            .child(
-                                widgets::action_button(theme, widgets::ActionTone::Quiet)
-                                    .id("accounts-add")
-                                    .ml(px(-10.0))
-                                    .role(gpui::Role::Button)
-                                    .aria_label(add_account_label(harness, empty))
-                                    .tab_index(0)
-                                    .focus_visible(|s| s.border_2().border_color(theme.accent))
-                                    .on_click(cx.listener(move |page, _, _, cx| {
-                                        page.start_login(harness, cx)
-                                    }))
-                                    .child(
-                                        crate::icons::icon(crate::icons::PLUS)
-                                            .size(px(14.0))
-                                            .text_color(theme.text_muted),
-                                    )
-                                    .child(SharedString::from(add_account_label(harness, empty))),
-                            )
+                            .children(login_options(harness).into_iter().enumerate().map(
+                                |(ix, option)| {
+                                    let label = add_option_label(harness, option, empty);
+                                    widgets::action_button(theme, widgets::ActionTone::Quiet)
+                                        .id(("accounts-add", ix))
+                                        .when(ix == 0, |el| el.ml(px(-10.0)))
+                                        .role(gpui::Role::Button)
+                                        .aria_label(label.clone())
+                                        .tab_index(0)
+                                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                        .on_click(cx.listener(move |page, _, _, cx| {
+                                            page.start_login(harness, option.provider, cx)
+                                        }))
+                                        .child(
+                                            crate::icons::icon(crate::icons::PLUS)
+                                                .size(px(14.0))
+                                                .text_color(theme.text_muted),
+                                        )
+                                        .child(SharedString::from(label))
+                                },
+                            ))
                     });
                     div()
                         .flex()
@@ -1779,6 +1892,11 @@ impl Render for AccountsPage {
                         HarnessId::Codex => "accounts-skeleton-codex",
                         HarnessId::Cursor => "accounts-skeleton-cursor",
                         HarnessId::Antigravity => "accounts-skeleton-antigravity",
+                        HarnessId::Grok => "accounts-skeleton-grok",
+                        HarnessId::Devin => "accounts-skeleton-devin",
+                        HarnessId::Opencode => "accounts-skeleton-opencode",
+                        HarnessId::Pi => "accounts-skeleton-pi",
+                        HarnessId::Hermes => "accounts-skeleton-hermes",
                         _ => "accounts-skeleton-claude",
                     };
                     div()
@@ -1921,27 +2039,39 @@ impl Render for AccountsPage {
                                     )
                                     .child(div().flex_1())
                                     .when(can_add, |header| {
-                                        header.child(
-                                            widgets::ghost_action(&theme)
-                                                .id(add_id)
-                                                .tab_index(0)
-                                                .role(gpui::Role::Button)
-                                                .focus_visible(|s| {
-                                                    s.border_2()
-                                                        .border_color(theme.accent)
-                                                        .opacity(1.0)
-                                                })
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.start_login(harness, cx);
-                                                }))
-                                                .child(
-                                                    crate::icons::icon(crate::icons::ADD_CIRCLE)
-                                                        .size(px(16.0))
-                                                        .text_color(theme.text_muted),
-                                                )
-                                                .child(SharedString::from(add_account_label(
-                                                    harness, empty,
-                                                ))),
+                                        header.children(
+                                            login_options(harness).into_iter().enumerate().map(
+                                                |(ix, option)| {
+                                                    let label =
+                                                        add_option_label(harness, option, empty);
+                                                    widgets::ghost_action(&theme)
+                                                        .id((add_id.clone(), ix))
+                                                        .tab_index(0)
+                                                        .role(gpui::Role::Button)
+                                                        .focus_visible(|s| {
+                                                            s.border_2()
+                                                                .border_color(theme.accent)
+                                                                .opacity(1.0)
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.start_login(
+                                                                    harness,
+                                                                    option.provider,
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        ))
+                                                        .child(
+                                                            crate::icons::icon(
+                                                                crate::icons::ADD_CIRCLE,
+                                                            )
+                                                            .size(px(16.0))
+                                                            .text_color(theme.text_muted),
+                                                        )
+                                                        .child(SharedString::from(label))
+                                                },
+                                            ),
                                         )
                                     }),
                             )
@@ -2136,20 +2266,102 @@ mod tests {
             HarnessId::Codex,
             HarnessId::Cursor,
             HarnessId::Antigravity,
+            HarnessId::Grok,
+            HarnessId::Devin,
         ] {
             assert!(signs_in(harness), "{harness:?}");
             assert!(add_account_label(harness, true).starts_with("Connect a "));
             assert_eq!(add_account_label(harness, false), "Add account");
-            assert!(login_copy(harness).starts_with("Finish signing in to "));
+            assert!(login_copy(harness, None).starts_with("Finish signing in to "));
+            // One login per agent: one add button, no provider param.
+            let options = login_options(harness);
+            assert_eq!(options.len(), 1, "{harness:?}");
+            assert_eq!(options[0].provider, None);
+            assert_eq!(add_option_label(harness, options[0], false), "Add account");
         }
         assert_eq!(
             add_account_label(HarnessId::Antigravity, true),
             "Connect a Antigravity account"
         );
-        assert!(!signs_in(HarnessId::Pi));
+        // Every agent with a login of its own has an Accounts section.
+        for harness in [HarnessId::Opencode, HarnessId::Pi, HarnessId::Hermes] {
+            assert!(signs_in(harness), "{harness:?}");
+            assert!(reports_usage(harness));
+            for option in login_options(harness) {
+                assert!(option.provider.is_some(), "{harness:?} names its provider");
+                assert!(login_copy(harness, option.provider).starts_with("Finish signing in"));
+            }
+        }
+        assert!(!signs_in(HarnessId::Mock));
         // Antigravity has no quota to show and keeps a single login.
         assert!(!reports_usage(HarnessId::Antigravity) && reports_usage(HarnessId::Codex));
         assert!(keeps_one_login(HarnessId::Antigravity) && !keeps_one_login(HarnessId::Cursor));
+        // Hermes rotates its own pool; zeron never switches it.
+        assert!(!switches_accounts(HarnessId::Hermes) && switches_accounts(HarnessId::Grok));
+    }
+
+    #[test]
+    fn per_provider_agents_offer_one_sign_in_per_provider() {
+        let opencode = login_options(HarnessId::Opencode);
+        let labels: Vec<_> = opencode.iter().map(|o| o.label).collect();
+        assert_eq!(labels, ["ChatGPT", "GitHub Copilot"]);
+        assert_eq!(
+            add_option_label(HarnessId::Opencode, opencode[0], true),
+            "Connect ChatGPT"
+        );
+        assert_eq!(
+            add_option_label(HarnessId::Opencode, opencode[1], false),
+            "Add GitHub Copilot account"
+        );
+        let providers: Vec<_> = login_options(HarnessId::Hermes)
+            .iter()
+            .map(|o| o.provider.unwrap())
+            .collect();
+        assert_eq!(providers, ["openai-codex", "nous"]);
+        let flow = LoginFlow {
+            provider: Some("openai-codex"),
+            ..waiting(HarnessId::Pi, 1)
+        };
+        assert_eq!(flow.title(), "Sign in to ChatGPT for Pi");
+        assert_eq!(waiting(HarnessId::Grok, 1).title(), "Sign in to Grok");
+    }
+
+    #[test]
+    fn a_switch_only_moves_the_live_login_within_its_provider_group() {
+        let row = |id: &str, harness, provider: Option<&str>, active| AgentAccount {
+            id: id.into(),
+            harness,
+            email: None,
+            plan_label: None,
+            active,
+            usage_windows: vec![],
+            usage_fetched_at: None,
+            usage_error: None,
+            display_name: None,
+            organization: None,
+            auth_kind: None,
+            switchable: true,
+            saved_at: None,
+            provider: provider.map(str::to_string),
+        };
+        let mut snapshot = AgentAccountsSnapshot {
+            accounts: vec![
+                row("gpt-a", HarnessId::Opencode, Some("openai"), true),
+                row("gpt-b", HarnessId::Opencode, Some("openai"), false),
+                row("copilot", HarnessId::Opencode, Some("github-copilot"), true),
+                row("grok-a", HarnessId::Grok, None, true),
+            ],
+            warnings: vec![],
+        };
+        let target = snapshot.accounts[1].clone();
+        mark_switched(&mut snapshot, &target);
+        let live: Vec<&str> = snapshot
+            .accounts
+            .iter()
+            .filter(|a| a.active)
+            .map(|a| a.id.as_str())
+            .collect();
+        assert_eq!(live, ["gpt-b", "copilot", "grok-a"]);
     }
 
     fn page(cx: &mut gpui::TestAppContext) -> gpui::WindowHandle<AccountsPage> {
@@ -2169,6 +2381,7 @@ mod tests {
     fn waiting(harness: HarnessId, attempt: u64) -> LoginFlow {
         LoginFlow {
             harness,
+            provider: None,
             attempt,
             login_id: Some("login-1".into()),
             url: None,
@@ -2306,6 +2519,7 @@ mod tests {
             auth_kind: None,
             switchable: true,
             saved_at: None,
+            provider: None,
         };
         let snapshot = AgentAccountsSnapshot {
             accounts: vec![

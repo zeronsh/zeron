@@ -11803,6 +11803,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
+ "toml 0.8.23",
  "tracing",
  "uuid",
  "windows-sys 0.61.2",

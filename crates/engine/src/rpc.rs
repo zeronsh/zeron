@@ -381,6 +381,10 @@ struct StartAgentLoginParams {
     /// is served over P2P to that device alone.
     #[serde(default)]
     requester_device_id: Option<String>,
+    /// For agents that keep a login per model provider (OpenCode, Pi,
+    /// Hermes): which provider to sign in to; `None` = the agent's default.
+    #[serde(default)]
+    provider: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2919,7 +2923,7 @@ impl RpcService for EngineRpc {
                     .filter(|requester| !requester.is_empty() && *requester != own_id);
                 let start = self
                     .agent_accounts
-                    .start_login_for(p.harness, requester)
+                    .start_login_with(p.harness, p.provider.as_deref(), requester)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&start)

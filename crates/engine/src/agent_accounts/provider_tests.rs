@@ -1,0 +1,1230 @@
+//! Grok / Devin / OpenCode / Pi / Hermes accounts against fake credential
+//! stores in temp dirs, fake CLIs and a local mock of every provider
+//! endpoint — never a real login, token or network call.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use super::stores::*;
+use super::usage::*;
+use super::*;
+
+fn write(path: &Path, contents: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, contents).unwrap();
+}
+
+/// A JWT whose payload is `claims` (unsigned — only claims are mined).
+fn jwt(claims: serde_json::Value) -> String {
+    format!(
+        "e30.{}.sig",
+        BASE64_URL.encode(serde_json::to_vec(&claims).unwrap())
+    )
+}
+
+fn chatgpt_access(email: &str, account_id: &str, plan: &str) -> String {
+    jwt(serde_json::json!({
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id,
+            "chatgpt_plan_type": plan,
+        },
+        "https://api.openai.com/profile": { "email": email },
+    }))
+}
+
+type Handler = dyn Fn(&str, &str, &str) -> (u16, String) + Send + Sync;
+
+/// A local stand-in for provider endpoints: `handler(method, path+query,
+/// body)` answers every request; `hits` records `"METHOD path"`.
+struct MockServer {
+    base: String,
+    hits: Arc<Mutex<Vec<String>>>,
+    _task: tokio::task::JoinHandle<()>,
+}
+
+impl MockServer {
+    async fn start(
+        handler: impl Fn(&str, &str, &str) -> (u16, String) + Send + Sync + 'static,
+    ) -> Self {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let hits: Arc<Mutex<Vec<String>>> = Arc::default();
+        let handler: Arc<Handler> = Arc::new(handler);
+        let task_hits = hits.clone();
+        let task = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let handler = handler.clone();
+                let hits = task_hits.clone();
+                tokio::spawn(async move {
+                    let mut raw = Vec::new();
+                    let mut chunk = [0u8; 8192];
+                    let (head_end, length) = loop {
+                        let n = socket.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        raw.extend_from_slice(&chunk[..n]);
+                        if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&raw[..end]).to_ascii_lowercase();
+                            let length = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            break (end + 4, length);
+                        }
+                    };
+                    while raw.len() < head_end + length {
+                        let n = socket.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        raw.extend_from_slice(&chunk[..n]);
+                    }
+                    let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
+                    let body = String::from_utf8_lossy(&raw[head_end..]).to_string();
+                    let mut first = head.lines().next().unwrap_or("").split_whitespace();
+                    let method = first.next().unwrap_or("").to_string();
+                    let path = first.next().unwrap_or("").to_string();
+                    lock(&hits).push(format!("{method} {path}"));
+                    let (status, reply) = handler(&method, &path, &body);
+                    let response = http_response(
+                        &format!("{status} X"),
+                        &[("Content-Type", "application/json")],
+                        &reply,
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        Self {
+            base,
+            hits,
+            _task: task,
+        }
+    }
+
+    fn hits(&self, prefix: &str) -> usize {
+        lock(&self.hits)
+            .iter()
+            .filter(|h| h.starts_with(prefix))
+            .count()
+    }
+}
+
+fn accounts_with(root: &Path, endpoints: ProbeEndpoints) -> (AgentAccounts, AgentAccountsConfig) {
+    let config = AgentAccountsConfig::isolated(root);
+    (
+        AgentAccounts::with_endpoints(config.clone(), endpoints, Default::default()),
+        config,
+    )
+}
+
+/// Endpoints that all point at `base` (a mock), with slot refresh allowed.
+fn mocked(base: &str) -> ProbeEndpoints {
+    ProbeEndpoints {
+        claude_usage: format!("{base}/api/oauth/usage"),
+        claude_token: format!("{base}/v1/oauth/token"),
+        claude_loopback_token: format!("{base}/v1/oauth/token"),
+        claude_profile: format!("{base}/api/oauth/profile"),
+        codex_usage: format!("{base}/backend-api/wham/usage"),
+        grok_usage: format!("{base}/v1/billing?format=credits"),
+        github_api: base.to_string(),
+        github_login: base.to_string(),
+        openai_auth: base.to_string(),
+        openai_port: 0,
+        nous_portal: base.to_string(),
+        allow_slot_refresh: true,
+    }
+}
+
+fn rows(snapshot: &AgentAccountsSnapshot, harness: HarnessId) -> Vec<AgentAccount> {
+    snapshot
+        .accounts
+        .iter()
+        .filter(|a| a.harness == harness)
+        .cloned()
+        .collect()
+}
+
+async fn settle(accounts: &AgentAccounts, login_id: &str) -> Vec<AgentLoginPoll> {
+    let mut seen = Vec::new();
+    for _ in 0..300 {
+        let poll = accounts.poll_login(login_id).await.unwrap();
+        let done = poll.status != AgentLoginStatus::Pending;
+        seen.push(poll);
+        if done {
+            return seen;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("login never settled: {seen:?}");
+}
+
+async fn browser_get(port: u16, target: &str) -> String {
+    let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    socket
+        .write_all(format!("GET {target} HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut response = String::new();
+    let _ = socket.read_to_string(&mut response).await;
+    response
+}
+
+fn query_param(url: &str, name: &str) -> String {
+    reqwest::Url::parse(url)
+        .unwrap()
+        .query_pairs()
+        .find(|(k, _)| k == name)
+        .unwrap()
+        .1
+        .into_owned()
+}
+
+/// A fake CLI under `dir/bin` (the isolated config uses `dir/<agent>` as
+/// each agent's home).
+#[cfg(unix)]
+fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    let path = dir.join("bin").join(name);
+    std::fs::write(&path, body).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[cfg(unix)]
+fn mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+// ── Grok ────────────────────────────────────────────────────────────────────
+
+fn grok_auth(user: &str, email: &str, key: &str) -> serde_json::Value {
+    serde_json::json!({
+        "https://auth.x.ai::client-1": {
+            "key": key,
+            "auth_mode": "oidc",
+            "refresh_token": format!("refresh-{user}"),
+            "expires_at": "2030-01-01T00:00:00Z",
+            "oidc_issuer": "https://auth.x.ai",
+            "oidc_client_id": "client-1",
+            "user_id": user,
+            "email": email,
+            "first_name": "Ada",
+            "last_name": "L",
+            "subscription_tier": "SUBSCRIPTION_TIER_SUPER_GROK_HEAVY",
+        }
+    })
+}
+
+#[test]
+fn grok_auth_prefers_auth_x_ai_and_keys_by_identity() {
+    let mut auth = grok_auth("user-1", "ada@x.ai", "k1");
+    auth.as_object_mut().unwrap().insert(
+        "https://accounts.x.ai/sign-in::legacy".into(),
+        serde_json::json!({ "key": "legacy", "oidc_issuer": "https://accounts.x.ai" }),
+    );
+    let detected = parse_grok_auth(auth).unwrap();
+    assert_eq!(detected.account_key, "user-1");
+    assert_eq!(detected.profile.email, "ada@x.ai");
+    assert_eq!(detected.profile.display_name.as_deref(), Some("Ada L"));
+    assert_eq!(detected.profile.plan.as_deref(), Some("SuperGrok Heavy"));
+    assert!(detected.identity_known);
+
+    // No identity at all: keyed by the stable issuer::client map key, never
+    // the rotating access token.
+    let bare = serde_json::json!({ "https://auth.x.ai::c": { "key": "rotating" } });
+    let detected = parse_grok_auth(bare.clone()).unwrap();
+    assert_eq!(detected.account_key, "oidc:https://auth.x.ai::c");
+    let mut rotated = bare;
+    rotated["https://auth.x.ai::c"]["key"] = "rotated".into();
+    assert_eq!(
+        parse_grok_auth(rotated).unwrap().account_key,
+        detected.account_key
+    );
+    assert!(parse_grok_auth(serde_json::json!({ "x": { "refresh_token": "r" } })).is_none());
+    assert_eq!(grok_plan(Some("SUBSCRIPTION_TIER_FREE")), None);
+    assert_eq!(grok_plan(None), None);
+}
+
+#[test]
+fn grok_usage_uses_the_grok_build_share_of_the_period() {
+    let body = serde_json::json!({
+        "config": {
+            "creditUsagePercent": 12.0,
+            "productUsage": [
+                { "product": "Chat", "usagePercent": 80.0 },
+                { "product": "GrokBuild", "usagePercent": 45.0 },
+            ],
+            "currentPeriod": {
+                "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                "end": "2030-01-08T00:00:00Z",
+            },
+        }
+    });
+    let snapshot = grok_usage_snapshot(&body).unwrap();
+    assert_eq!(snapshot.windows.len(), 1);
+    assert_eq!(snapshot.windows[0].label, "Week");
+    assert!((snapshot.windows[0].used_fraction - 0.45).abs() < 1e-6);
+    assert!(snapshot.windows[0].resets_at.is_some());
+    // Blended percent when the product breakdown is missing.
+    let blended = serde_json::json!({ "config": { "creditUsagePercent": 12.0 } });
+    let snapshot = grok_usage_snapshot(&blended).unwrap();
+    assert_eq!(snapshot.windows[0].label, "Period");
+    assert!(grok_usage_snapshot(&serde_json::json!({ "config": {} })).is_none());
+}
+
+#[tokio::test]
+async fn grok_logins_snapshot_swap_and_forget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let live = config.grok_home.join("auth.json");
+    write(&live, &grok_auth("user-a", "a@x.ai", "key-a").to_string());
+    let snapshot = accounts.list(false).await.unwrap();
+    let grok = rows(&snapshot, HarnessId::Grok);
+    assert_eq!(grok.len(), 1);
+    assert!(grok[0].active && grok[0].switchable);
+    assert_eq!(grok[0].plan_label.as_deref(), Some("SuperGrok Heavy"));
+    let a_id = grok[0].id.clone();
+
+    // The CLI signs in as someone else: both are kept, B is live.
+    write(&live, &grok_auth("user-b", "b@x.ai", "key-b").to_string());
+    let grok = rows(&accounts.list(false).await.unwrap(), HarnessId::Grok);
+    assert_eq!(grok.len(), 2);
+    assert_eq!(grok.iter().filter(|a| a.active).count(), 1);
+    assert!(
+        grok.iter()
+            .any(|a| a.email.as_deref() == Some("b@x.ai") && a.active)
+    );
+
+    // Switching back rewrites the live store, 0600, and never leaves the
+    // lock file held.
+    let snapshot = accounts.activate(HarnessId::Grok, &a_id).await.unwrap();
+    assert!(
+        rows(&snapshot, HarnessId::Grok)
+            .iter()
+            .any(|a| a.id == a_id && a.active)
+    );
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&live).unwrap()).unwrap();
+    assert_eq!(written["https://auth.x.ai::client-1"]["key"], "key-a");
+    #[cfg(unix)]
+    assert_eq!(mode(&live), 0o600);
+
+    // The live login can't be forgotten; the other one can.
+    assert!(accounts.forget(HarnessId::Grok, &a_id).await.is_err());
+    let b_id = grok
+        .iter()
+        .find(|a| a.email.as_deref() == Some("b@x.ai"))
+        .unwrap()
+        .id
+        .clone();
+    let grok = rows(
+        &accounts.forget(HarnessId::Grok, &b_id).await.unwrap(),
+        HarnessId::Grok,
+    );
+    assert_eq!(grok.len(), 1);
+}
+
+#[tokio::test]
+async fn a_rejected_saved_grok_token_refreshes_once_against_its_issuer() {
+    let issuer_hits = Arc::new(AtomicUsize::new(0));
+    let hits = issuer_hits.clone();
+    let server = MockServer::start(move |method, path, body| match (method, path) {
+        ("GET", p) if p.starts_with("/v1/billing") => {
+            // Only the refreshed token is accepted.
+            (200, r#"{"config":{"creditUsagePercent":30}}"#.to_string())
+        }
+        ("POST", "/oauth2/token") => {
+            hits.fetch_add(1, Ordering::SeqCst);
+            assert!(body.contains("grant_type=refresh_token"), "{body}");
+            (
+                200,
+                r#"{"access_token":"fresh","refresh_token":"rotated","expires_in":60}"#.into(),
+            )
+        }
+        _ => (404, String::new()),
+    })
+    .await;
+    // Billing rejects every token but "fresh".
+    let billing = MockServer::start(|_, _, _| (401, String::new())).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut endpoints = mocked(&server.base);
+    endpoints.grok_usage = format!("{}/v1/billing?format=credits", billing.base);
+    let (accounts, _) = accounts_with(tmp.path(), endpoints);
+    let mut auth = grok_auth("user-a", "a@x.ai", "stale");
+    auth["https://auth.x.ai::client-1"]["oidc_issuer"] = server.base.clone().into();
+    let slot = Slot {
+        id: slot_id_for(HarnessId::Grok, "user-a"),
+        harness: HarnessId::Grok,
+        account_key: "user-a".into(),
+        profile: parse_grok_auth(auth.clone()).unwrap().profile,
+        credentials: auth,
+        claude_config: None,
+        saved_at: 1,
+        created_at: None,
+        store_key: None,
+    };
+    accounts.write_slot(&slot).unwrap();
+    // The LIVE login is never refreshed by zeron.
+    let live = accounts.grok_usage(&slot, true).await;
+    assert!(matches!(live, Err(ProbeError::Unauthorized { .. })));
+    assert_eq!(issuer_hits.load(Ordering::SeqCst), 0);
+    // A saved one is — once — and the rotated pair lands in its slot.
+    let saved = accounts.grok_usage(&slot, false).await;
+    assert_eq!(issuer_hits.load(Ordering::SeqCst), 1);
+    assert!(
+        matches!(saved, Err(ProbeError::Unauthorized { .. })),
+        "billing mock rejects all"
+    );
+    let stored = accounts.read_slot(HarnessId::Grok, &slot.id).unwrap();
+    assert_eq!(
+        stored.credentials["https://auth.x.ai::client-1"]["key"],
+        "fresh"
+    );
+    assert_eq!(
+        stored.credentials["https://auth.x.ai::client-1"]["refresh_token"],
+        "rotated"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn grok_add_account_runs_the_device_login_in_a_throwaway_home() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let cli = script(
+        tmp.path(),
+        "grok",
+        r#"#!/bin/sh
+case "$*" in *"login --device-auth"*) ;; *) echo "unexpected: $*" >&2; exit 3 ;; esac
+case "$GROK_HOME" in *".login-"*) ;; *) echo "not isolated" >&2; exit 4 ;; esac
+printf 'Open this URL in your browser to approve:\n  \033[1mhttps://accounts.x.ai/device?user_code=WXYZ-9876\033[0m\nCode: WXYZ-9876\nWaiting for approval\n'
+sleep 1
+printf '{"https://auth.x.ai::c":{"key":"k","refresh_token":"r","oidc_issuer":"https://auth.x.ai","oidc_client_id":"c","user_id":"u-new","email":"new@x.ai"}}' > "$GROK_HOME/auth.json"
+sleep 30
+"#,
+    );
+    accounts.override_cli(HarnessId::Grok, cli);
+    let start = accounts.start_login(HarnessId::Grok).await.unwrap();
+    assert_eq!(
+        start.url,
+        "https://accounts.x.ai/device?user_code=WXYZ-9876"
+    );
+    assert_eq!(start.callback_port, None, "a device code needs no tunnel");
+    let polls = settle(&accounts, &start.login_id).await;
+    let last = polls.last().unwrap();
+    assert_eq!(last.status, AgentLoginStatus::Done, "{polls:?}");
+    assert!(
+        polls
+            .iter()
+            .any(|p| p.message.as_deref() == Some("Enter the code WXYZ-9876 when asked."))
+    );
+    // No live login before: the new one is connected, and it's a slot.
+    let grok = rows(&accounts.list(false).await.unwrap(), HarnessId::Grok);
+    assert_eq!(grok.len(), 1);
+    assert!(grok[0].active && grok[0].email.as_deref() == Some("new@x.ai"));
+    assert!(config.grok_home.join("auth.json").exists());
+    // The throwaway home is reclaimed.
+    let leftovers = std::fs::read_dir(config.data_dir.join("agent-accounts"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".login-"))
+        .count();
+    assert_eq!(leftovers, 0);
+}
+
+// ── Devin ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn devin_credentials_round_trip_and_key_by_digest() {
+    let text = "windsurf_api_key = \"sk-devin-\\\"quoted\\\"-abcd\"\napi_server_url = \"https://server.codeium.com\"\ndangerously_skip_plugin_authentication = true\n";
+    let creds = parse_devin_toml(text).unwrap();
+    assert_eq!(creds["windsurf_api_key"], "sk-devin-\"quoted\"-abcd");
+    assert_eq!(creds["dangerously_skip_plugin_authentication"], true);
+    let back = parse_devin_toml(&devin_toml(&creds).unwrap()).unwrap();
+    assert_eq!(back, creds, "unknown keys and escapes survive a swap");
+    let detected = parse_devin_credentials(creds).unwrap();
+    assert!(detected.account_key.starts_with("api-key:"));
+    assert!(
+        !detected.account_key.contains("abcd"),
+        "never the key itself"
+    );
+    assert!(!detected.identity_known);
+    assert_eq!(detected.profile.email, "Devin account ·…abcd");
+    assert!(parse_devin_toml("").is_none());
+    assert!(parse_devin_credentials(serde_json::json!({ "api_server_url": "x" })).is_none());
+}
+
+#[test]
+fn devin_usage_inverts_remaining_quota_and_names_the_account() {
+    let body = serde_json::json!({
+        "userStatus": {
+            "email": "dev@example.com",
+            "name": "Dev",
+            "planStatus": {
+                "planInfo": { "teamsTier": "TEAMS_TIER_DEVIN_PRO", "planName": "Pro" },
+                "dailyQuotaRemainingPercent": 75,
+                "dailyQuotaResetAtUnix": "1893456000",
+                "weeklyQuotaRemainingPercent": 10.0,
+                "weeklyQuotaResetAtUnix": 1893888000,
+            }
+        }
+    });
+    let (snapshot, identity) = devin_usage_snapshot(&body).unwrap();
+    assert_eq!(identity.email.as_deref(), Some("dev@example.com"));
+    assert_eq!(snapshot.plan_label.as_deref(), Some("Devin Pro"));
+    let labels: Vec<_> = snapshot.windows.iter().map(|w| w.label.as_str()).collect();
+    assert_eq!(labels, ["Day", "Week"]);
+    assert!((snapshot.windows[0].used_fraction - 0.25).abs() < 1e-6);
+    assert!((snapshot.windows[1].used_fraction - 0.90).abs() < 1e-6);
+    assert!(snapshot.windows.iter().all(|w| w.resets_at.is_some()));
+    assert_eq!(
+        devin_plan_label(None, Some("Teams")).as_deref(),
+        Some("Devin Teams")
+    );
+    assert!(devin_usage_snapshot(&serde_json::json!({ "userStatus": {} })).is_none());
+}
+
+#[tokio::test]
+async fn devin_swaps_and_learns_its_identity_from_the_usage_probe() {
+    let server = MockServer::start(|method, path, body| {
+        assert_eq!(method, "POST");
+        assert!(
+            path.ends_with("SeatManagementService/GetUserStatus"),
+            "{path}"
+        );
+        let who = if body.contains("key-a") { "a" } else { "b" };
+        (
+            200,
+            serde_json::json!({ "userStatus": {
+                "email": format!("{who}@devin.ai"),
+                "planStatus": { "dailyQuotaRemainingPercent": 50 },
+            }})
+            .to_string(),
+        )
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    let live = &config.devin_credentials_file;
+    let creds = |key: &str| {
+        format!(
+            "windsurf_api_key = \"{key}\"\napi_server_url = \"{}\"\n",
+            server.base
+        )
+    };
+    write(live, &creds("key-a"));
+    let devin = rows(&accounts.list(true).await.unwrap(), HarnessId::Devin);
+    assert_eq!(devin.len(), 1);
+    assert_eq!(
+        devin[0].email.as_deref(),
+        Some("a@devin.ai"),
+        "identity written back"
+    );
+    assert!((devin[0].usage_windows[0].used_fraction - 0.5).abs() < 1e-6);
+    let a_id = devin[0].id.clone();
+    // A later detection of the same key keeps the learned identity.
+    let devin = rows(&accounts.list(false).await.unwrap(), HarnessId::Devin);
+    assert_eq!(devin[0].email.as_deref(), Some("a@devin.ai"));
+
+    write(live, &creds("key-b"));
+    assert_eq!(
+        rows(&accounts.list(false).await.unwrap(), HarnessId::Devin).len(),
+        2
+    );
+    accounts.activate(HarnessId::Devin, &a_id).await.unwrap();
+    let text = std::fs::read_to_string(live).unwrap();
+    assert!(text.contains("key-a") && !text.contains("key-b"));
+    #[cfg(unix)]
+    assert_eq!(mode(live), 0o600);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_add_account_authenticates_over_acp_in_a_throwaway_data_home() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let agent = script(
+        tmp.path(),
+        "devin",
+        r#"#!/bin/sh
+while read -r line; do
+  id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"agentInfo":{"name":"devin","website":"https://devin.ai/"},"authMethods":[{"id":"devin-browser","name":"Log in with browser"}]}}\n' "$id" ;;
+    *'"method":"authenticate"'*)
+      case "$line" in *'"methodId":"devin-browser"'*) ;; *) exit 5 ;; esac
+      case "$XDG_DATA_HOME" in *".login-"*) ;; *) exit 6 ;; esac
+      printf 'Opening https://app.devin.ai/auth/cli/continue?redirect_uri=http%%3A%%2F%%2F127.0.0.1%%3A45678%%2Fcallback&state=s\n' >&2
+      sleep 1
+      mkdir -p "$XDG_DATA_HOME/devin"
+      printf 'windsurf_api_key = "fresh-devin-key-9999"\n' > "$XDG_DATA_HOME/devin/credentials.toml"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
+    *'"id":'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
+  esac
+done
+"#,
+    );
+    accounts.override_cli(HarnessId::Devin, agent);
+    let routes = accounts.inner.callback_routes.clone();
+    let start = accounts
+        .start_login_for(HarnessId::Devin, Some("device-b"))
+        .await
+        .unwrap();
+    let polls = settle(&accounts, &start.login_id).await;
+    assert_eq!(
+        polls.last().unwrap().status,
+        AgentLoginStatus::Done,
+        "{polls:?}"
+    );
+    // The sign-in page (not the url in the handshake) reached the app, with
+    // its loopback port for the remote requester's tunnel.
+    let page = polls
+        .iter()
+        .find_map(|p| p.url.clone())
+        .expect("url reported");
+    assert!(page.contains("/auth/cli/continue"), "{page}");
+    assert!(polls.iter().any(|p| p.callback_port == Some(45678)));
+    assert!(
+        !routes.is_registered(&start.login_id),
+        "route dropped once done"
+    );
+    // No live login before → the fresh key is connected.
+    let text = std::fs::read_to_string(&config.devin_credentials_file).unwrap();
+    assert!(text.contains("fresh-devin-key-9999"));
+    let devin = rows(&accounts.list(false).await.unwrap(), HarnessId::Devin);
+    assert_eq!(devin.len(), 1);
+    assert!(devin[0].active);
+}
+
+// ── OpenCode / Pi ───────────────────────────────────────────────────────────
+
+fn openai_entry(email: &str, account: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "oauth",
+        "access": chatgpt_access(email, account, "plus"),
+        "refresh": format!("refresh-{account}"),
+        "expires": 1,
+        "accountId": account,
+    })
+}
+
+#[tokio::test]
+async fn opencode_swaps_one_provider_entry_and_leaves_the_rest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let file = &config.opencode_auth_file;
+    let store = |openai: serde_json::Value| {
+        serde_json::json!({
+            "openai": openai,
+            "anthropic": { "type": "api", "key": "sk-ant-keep" },
+            "zen": { "type": "wellknown", "key": "k", "token": "t" },
+        })
+        .to_string()
+    };
+    write(file, &store(openai_entry("a@example.com", "acct-a")));
+    let rows_a = rows(&accounts.list(false).await.unwrap(), HarnessId::Opencode);
+    assert_eq!(rows_a.len(), 1, "API-key entries aren't accounts");
+    assert_eq!(rows_a[0].provider.as_deref(), Some("openai"));
+    assert_eq!(rows_a[0].plan_label.as_deref(), Some("ChatGPT Plus"));
+    assert_eq!(rows_a[0].email.as_deref(), Some("a@example.com"));
+    let a_id = rows_a[0].id.clone();
+
+    write(file, &store(openai_entry("b@example.com", "acct-b")));
+    assert_eq!(
+        rows(&accounts.list(false).await.unwrap(), HarnessId::Opencode).len(),
+        2
+    );
+    accounts.activate(HarnessId::Opencode, &a_id).await.unwrap();
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+    assert_eq!(written["openai"]["accountId"], "acct-a");
+    assert_eq!(
+        written["anthropic"]["key"], "sk-ant-keep",
+        "other providers untouched"
+    );
+    assert_eq!(written["zen"]["token"], "t");
+    #[cfg(unix)]
+    assert_eq!(mode(file), 0o600);
+
+    // A store that no longer parses is never overwritten.
+    write(file, "{ not json");
+    let err = accounts
+        .write_keyed_entry(
+            HarnessId::Opencode,
+            "openai",
+            &openai_entry("a@example.com", "acct-a"),
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("could not be parsed"), "{err}");
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "{ not json");
+}
+
+#[tokio::test]
+async fn pi_swaps_under_its_lockfile_and_groups_rows_per_provider() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let file = config.pi_agent_dir.join("auth.json");
+    write(
+        &file,
+        &serde_json::json!({ "openai-codex": openai_entry("a@example.com", "acct-a") }).to_string(),
+    );
+    let a_id = rows(&accounts.list(false).await.unwrap(), HarnessId::Pi)[0]
+        .id
+        .clone();
+    write(
+        &file,
+        &serde_json::json!({ "openai-codex": openai_entry("b@example.com", "acct-b") }).to_string(),
+    );
+    accounts.list(false).await.unwrap();
+    accounts.activate(HarnessId::Pi, &a_id).await.unwrap();
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(written["openai-codex"]["accountId"], "acct-a");
+    assert!(
+        !config.pi_agent_dir.join("auth.json.lock").exists(),
+        "lock released"
+    );
+
+    // A lock held by pi makes the swap wait, then give up — never write
+    // underneath it.
+    std::fs::create_dir(config.pi_agent_dir.join("auth.json.lock")).unwrap();
+    let blocked = accounts.write_keyed_entry(
+        HarnessId::Pi,
+        "openai-codex",
+        &openai_entry("b@example.com", "acct-b"),
+    );
+    assert!(blocked.unwrap_err().to_string().contains("locked"));
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(written["openai-codex"]["accountId"], "acct-a");
+}
+
+#[tokio::test]
+async fn an_opaque_pi_claude_token_is_identified_once_then_matched_by_token() {
+    let server = MockServer::start(|_, path, _| match path {
+        "/api/oauth/profile" => (
+            200,
+            serde_json::json!({
+                "account": { "uuid": "acct-uuid", "email_address": "claude@example.com" },
+                "organization": { "name": "Org", "organization_type": "claude_max",
+                                  "rate_limit_tier": "default_claude_max_20x" },
+            })
+            .to_string(),
+        ),
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    let file = config.pi_agent_dir.join("auth.json");
+    let entry = |refresh: &str| {
+        serde_json::json!({ "anthropic": {
+            "type": "oauth", "access": "opaque-access", "refresh": refresh, "expires": 1,
+        }})
+        .to_string()
+    };
+    write(&file, &entry("r1"));
+    let pi = rows(&accounts.list(false).await.unwrap(), HarnessId::Pi);
+    assert_eq!(pi.len(), 1);
+    assert_eq!(pi[0].email.as_deref(), Some("claude@example.com"));
+    assert_eq!(pi[0].plan_label.as_deref(), Some("Claude Max 20×"));
+    assert!(pi[0].active && pi[0].switchable);
+    assert_eq!(server.hits("GET /api/oauth/profile"), 1);
+    // The same token again: matched to its slot, no network.
+    accounts.list(false).await.unwrap();
+    assert_eq!(server.hits("GET /api/oauth/profile"), 1);
+    // Pi refreshed (new pair): one more lookup, SAME account.
+    write(&file, &entry("r2"));
+    let pi = rows(&accounts.list(false).await.unwrap(), HarnessId::Pi);
+    assert_eq!(pi.len(), 1);
+    assert_eq!(server.hits("GET /api/oauth/profile"), 2);
+}
+
+#[tokio::test]
+async fn an_unidentifiable_live_token_is_listed_but_not_switchable() {
+    let server = MockServer::start(|_, _, _| (401, String::new())).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    write(
+        &config.opencode_auth_file,
+        &serde_json::json!({ "github-copilot": {
+            "type": "oauth", "access": "gho_x", "refresh": "gho_x", "expires": 0,
+        }})
+        .to_string(),
+    );
+    let rows = rows(&accounts.list(false).await.unwrap(), HarnessId::Opencode);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].active && !rows[0].switchable);
+    assert_eq!(rows[0].email.as_deref(), Some("GitHub account"));
+    assert_eq!(rows[0].provider.as_deref(), Some("github-copilot"));
+    // Nothing was snapshotted without an identity.
+    assert!(accounts.read_slots(HarnessId::Opencode).is_empty());
+    // A failed lookup isn't retried on every list.
+    accounts.list(false).await.unwrap();
+    assert_eq!(server.hits("GET /user"), 1);
+}
+
+#[tokio::test]
+async fn chatgpt_sign_in_for_pi_lands_on_the_loopback_and_connects_the_first_login() {
+    let server = MockServer::start(|method, path, body| match (method, path) {
+        ("POST", "/oauth/token") => {
+            assert!(body.contains("grant_type=authorization_code"), "{body}");
+            assert!(body.contains("code=good-code"), "{body}");
+            assert!(body.contains("code_verifier="), "{body}");
+            let who = if body.contains("second") { "b" } else { "a" };
+            (
+                200,
+                serde_json::json!({
+                    "access_token": chatgpt_access(&format!("{who}@example.com"), &format!("acct-{who}"), "pro"),
+                    "refresh_token": format!("refresh-{who}"),
+                    "id_token": jwt(serde_json::json!({ "email": format!("{who}@example.com") })),
+                    "expires_in": 3600,
+                })
+                .to_string(),
+            )
+        }
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    let sign_in = |code: &'static str| {
+        let accounts = accounts.clone();
+        async move {
+            let start = accounts.start_login(HarnessId::Pi).await.unwrap();
+            assert_eq!(start.mode, AgentLoginMode::Browser);
+            let port = start.callback_port.expect("loopback port reported");
+            assert_eq!(loopback_port(&start.url), Some(port));
+            assert_eq!(query_param(&start.url, "originator"), "pi");
+            let state = query_param(&start.url, "state");
+            // A stray without our state neither finishes nor kills it.
+            assert!(
+                browser_get(port, "/auth/callback?code=x&state=nope")
+                    .await
+                    .starts_with("HTTP/1.1 400")
+            );
+            let reply =
+                browser_get(port, &format!("/auth/callback?code={code}&state={state}")).await;
+            assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+            let polls = settle(&accounts, &start.login_id).await;
+            assert_eq!(
+                polls.last().unwrap().status,
+                AgentLoginStatus::Done,
+                "{polls:?}"
+            );
+        }
+    };
+    sign_in("good-code").await;
+    let file = config.pi_agent_dir.join("auth.json");
+    let live: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(
+        live["openai-codex"]["accountId"], "acct-a",
+        "first login connected"
+    );
+    assert_eq!(live["openai-codex"]["type"], "oauth");
+    // A second account is saved next to it — the live one stays.
+    sign_in("good-code-second").await;
+    let live: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(live["openai-codex"]["accountId"], "acct-a");
+    let pi = rows(&accounts.list(false).await.unwrap(), HarnessId::Pi);
+    assert_eq!(pi.len(), 2);
+    assert!(
+        pi.iter()
+            .any(|a| a.email.as_deref() == Some("b@example.com") && !a.active)
+    );
+    assert!(
+        pi.iter()
+            .all(|a| a.plan_label.as_deref() == Some("ChatGPT Pro"))
+    );
+    // Claude logins for Pi stay with pi.
+    let refused = accounts
+        .start_login_with(HarnessId::Pi, Some("anthropic"), None)
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("/login"), "{refused}");
+}
+
+#[tokio::test]
+async fn a_new_chatgpt_sign_in_supersedes_one_holding_the_same_port() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, _) = accounts_with(tmp.path(), mocked("http://127.0.0.1:9"));
+    let first = accounts.start_login(HarnessId::Opencode).await.unwrap();
+    let second = accounts.start_login(HarnessId::Pi).await.unwrap();
+    assert!(
+        accounts.poll_login(&first.login_id).await.is_err(),
+        "reaped"
+    );
+    assert_eq!(
+        accounts.poll_login(&second.login_id).await.unwrap().status,
+        AgentLoginStatus::Pending
+    );
+    accounts.cancel_login(&second.login_id);
+}
+
+#[tokio::test]
+async fn copilot_device_sign_in_for_opencode_shows_the_code_and_connects() {
+    let polls = Arc::new(AtomicUsize::new(0));
+    let polled = polls.clone();
+    let server = MockServer::start(move |method, path, body| match (method, path) {
+        ("POST", "/login/device/code") => {
+            assert!(body.contains("client_id=Ov23li8tweQw6odWQebz"), "{body}");
+            (
+                200,
+                r#"{"device_code":"dc","user_code":"ABCD-1234","verification_uri":"https://github.com/login/device","interval":1,"expires_in":900}"#.into(),
+            )
+        }
+        ("POST", "/login/oauth/access_token") => {
+            if polled.fetch_add(1, Ordering::SeqCst) == 0 {
+                (200, r#"{"error":"authorization_pending"}"#.into())
+            } else {
+                (200, r#"{"access_token":"gho_new","token_type":"bearer"}"#.into())
+            }
+        }
+        ("GET", "/user") => (200, r#"{"id":42,"login":"octo","name":"Octo Cat"}"#.into()),
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    let start = accounts
+        .start_login_with(HarnessId::Opencode, Some("github-copilot"), None)
+        .await
+        .unwrap();
+    assert_eq!(start.url, "https://github.com/login/device");
+    assert_eq!(start.callback_port, None);
+    let first = accounts.poll_login(&start.login_id).await.unwrap();
+    assert_eq!(
+        first.message.as_deref(),
+        Some("Enter the code ABCD-1234 on GitHub.")
+    );
+    let polls = settle(&accounts, &start.login_id).await;
+    assert_eq!(
+        polls.last().unwrap().status,
+        AgentLoginStatus::Done,
+        "{polls:?}"
+    );
+    let live: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config.opencode_auth_file).unwrap())
+            .unwrap();
+    assert_eq!(live["github-copilot"]["refresh"], "gho_new");
+    assert_eq!(live["github-copilot"]["access"], "gho_new");
+    let rows = rows(&accounts.list(false).await.unwrap(), HarnessId::Opencode);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].email.as_deref(), Some("octo"));
+    assert!(rows[0].active && rows[0].switchable);
+}
+
+#[test]
+fn copilot_usage_reads_metered_quotas_and_the_plan() {
+    let paid = serde_json::json!({
+        "login": "octo",
+        "copilot_plan": "individual",
+        "quota_reset_date_utc": "2030-02-01T00:00:00.000Z",
+        "quota_snapshots": {
+            "chat": { "unlimited": true, "percent_remaining": 100.0 },
+            "completions": { "unlimited": true },
+            "premium_interactions": { "entitlement": 300, "remaining": 75,
+                                      "percent_remaining": 25.0, "unlimited": false },
+        }
+    });
+    let snapshot = copilot_usage_snapshot(&paid).unwrap();
+    assert_eq!(snapshot.plan_label.as_deref(), Some("Copilot Pro"));
+    assert_eq!(snapshot.windows.len(), 1);
+    assert_eq!(snapshot.windows[0].label, "Premium");
+    assert!((snapshot.windows[0].used_fraction - 0.75).abs() < 1e-6);
+    assert!(snapshot.windows[0].resets_at.is_some());
+
+    let free = serde_json::json!({
+        "copilot_plan": "free",
+        "limited_user_reset_date": "2030-02-01",
+        "monthly_quotas": { "chat": 50, "completions": 2000 },
+        "limited_user_quotas": { "chat": 40, "completions": 500 },
+    });
+    let snapshot = copilot_usage_snapshot(&free).unwrap();
+    let labels: Vec<_> = snapshot.windows.iter().map(|w| w.label.as_str()).collect();
+    assert_eq!(labels, ["Chat", "Completions"]);
+    assert!((snapshot.windows[0].used_fraction - 0.2).abs() < 1e-6);
+    assert!((snapshot.windows[1].used_fraction - 0.75).abs() < 1e-6);
+    assert!(copilot_usage_snapshot(&serde_json::json!({})).is_none());
+}
+
+#[tokio::test]
+async fn keyed_logins_probe_the_vendor_behind_them() {
+    let server = MockServer::start(|method, path, _| match (method, path) {
+        ("GET", "/backend-api/wham/usage") => (
+            200,
+            r#"{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":40,"limit_window_seconds":18000}}}"#.into(),
+        ),
+        ("GET", "/copilot_internal/user") => (
+            200,
+            r#"{"copilot_plan":"business","quota_snapshots":{"premium_interactions":{"percent_remaining":90,"unlimited":false}}}"#.into(),
+        ),
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    write(
+        &config.opencode_auth_file,
+        &serde_json::json!({ "openai": openai_entry("a@example.com", "acct-a") }).to_string(),
+    );
+    let slot = accounts.read_slots(HarnessId::Opencode);
+    assert!(slot.is_empty());
+    let rows = rows(&accounts.list(true).await.unwrap(), HarnessId::Opencode);
+    assert!((rows[0].usage_windows[0].used_fraction - 0.4).abs() < 1e-6);
+    assert_eq!(rows[0].plan_label.as_deref(), Some("ChatGPT Plus"));
+    let copilot = Slot {
+        id: "0123456789abcdef".into(),
+        harness: HarnessId::Pi,
+        account_key: "github-copilot:1".into(),
+        profile: SlotProfile {
+            email: "octo".into(),
+            display_name: None,
+            organization: None,
+            plan: None,
+            auth_kind: AgentAuthKind::Oauth,
+        },
+        credentials: serde_json::json!({ "type": "oauth", "access": "copilot-session", "refresh": "gho_x" }),
+        claude_config: None,
+        saved_at: 1,
+        created_at: None,
+        store_key: Some("github-copilot".into()),
+    };
+    let usage = accounts.keyed_usage(HarnessId::Pi, &copilot).await.unwrap();
+    assert_eq!(usage.plan_label.as_deref(), Some("Copilot Business"));
+    assert!((usage.windows[0].used_fraction - 0.1).abs() < 1e-6);
+}
+
+// ── Hermes ──────────────────────────────────────────────────────────────────
+
+fn hermes_auth() -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "active_provider": "openai-codex",
+        "providers": {},
+        "credential_pool": {
+            "nous": [
+                { "id": "n1", "label": "nous@example.com", "auth_type": "oauth", "priority": 0,
+                  "source": "device_code", "access_token": "nous-access",
+                  "portal_base_url": "PORTAL" },
+            ],
+            "openai-codex": [
+                { "id": "c2", "label": "second@example.com", "auth_type": "oauth", "priority": 1,
+                  "access_token": chatgpt_access("second@example.com", "acct-2", "plus") },
+                { "id": "c1", "label": "first@example.com", "auth_type": "oauth", "priority": 0,
+                  "access_token": chatgpt_access("first@example.com", "acct-1", "pro") },
+            ],
+            "openrouter": [
+                { "id": "k1", "label": "OPENROUTER_API_KEY", "auth_type": "api_key", "priority": 0,
+                  "access_token": "sk-or" },
+            ],
+        }
+    })
+}
+
+#[tokio::test]
+async fn hermes_lists_its_own_pool_read_only() {
+    let server = MockServer::start(|_, path, _| match path {
+        "/api/oauth/account" => (
+            200,
+            r#"{"user":{"email":"nous@example.com"},"subscription":{"plan":"plus","monthly_credits":100,"credits_remaining":25,"current_period_end":"2030-02-01T00:00:00Z"}}"#.into(),
+        ),
+        "/backend-api/wham/usage" => (
+            200,
+            r#"{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000}}}"#.into(),
+        ),
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    let auth = hermes_auth().to_string().replace("PORTAL", &server.base);
+    let file = config.hermes_home.join("auth.json");
+    write(&file, &auth);
+    let hermes = rows(&accounts.list(true).await.unwrap(), HarnessId::Hermes);
+    let order: Vec<_> = hermes.iter().map(|a| a.email.clone().unwrap()).collect();
+    // The provider in use first, by priority; then the rest.
+    assert_eq!(
+        order,
+        [
+            "first@example.com",
+            "second@example.com",
+            "nous@example.com",
+            "OPENROUTER_API_KEY"
+        ]
+    );
+    assert!(hermes[0].active && !hermes[1].active && !hermes[2].active);
+    assert!(hermes.iter().all(|a| !a.switchable && a.saved_at.is_none()));
+    assert_eq!(hermes[0].plan_label.as_deref(), Some("ChatGPT Pro"));
+    assert!((hermes[0].usage_windows[0].used_fraction - 0.1).abs() < 1e-6);
+    let nous = &hermes[2];
+    assert_eq!(nous.plan_label.as_deref(), Some("Nous Plus"));
+    assert!((nous.usage_windows[0].used_fraction - 0.75).abs() < 1e-6);
+    assert_eq!(
+        hermes[3].usage_error.as_deref(),
+        Some("API keys have no plan usage")
+    );
+    // zeron never writes Hermes' pool: no switch, no forget, no slot files.
+    assert!(
+        accounts
+            .activate(HarnessId::Hermes, &hermes[1].id)
+            .await
+            .is_err()
+    );
+    assert!(
+        accounts
+            .forget(HarnessId::Hermes, &hermes[1].id)
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), auth);
+    assert!(accounts.read_slots(HarnessId::Hermes).is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hermes_add_account_runs_hermes_auth_add_and_relays_the_device_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let cli = script(
+        tmp.path(),
+        "hermes",
+        r#"#!/bin/sh
+[ "$*" = "auth add openai-codex --type oauth --no-browser" ] || { echo "bad args: $*" >&2; exit 3; }
+case "$HERMES_SHARED_AUTH_DIR" in *".login-"*) ;; *) exit 4 ;; esac
+printf 'To continue, follow these steps:\n\n  1. Open this URL in your browser:\n     \033[94mhttps://auth.openai.com/codex/device\033[0m\n\n  2. Enter this code:\n     \033[94mQRST-5678\033[0m\n\nWaiting for sign-in...\n'
+sleep 1
+mkdir -p "$HERMES_HOME"
+printf '{"active_provider":"openai-codex","credential_pool":{"openai-codex":[{"id":"abc123","label":"new@example.com","auth_type":"oauth","priority":0,"access_token":"x"}]}}' > "$HERMES_HOME/auth.json"
+echo 'Added openai-codex OAuth credential #1: "new@example.com"'
+"#,
+    );
+    accounts.override_cli(HarnessId::Hermes, cli);
+    let start = accounts.start_login(HarnessId::Hermes).await.unwrap();
+    assert_eq!(start.url, "https://auth.openai.com/codex/device");
+    let polls = settle(&accounts, &start.login_id).await;
+    assert_eq!(
+        polls.last().unwrap().status,
+        AgentLoginStatus::Done,
+        "{polls:?}"
+    );
+    assert!(
+        polls
+            .iter()
+            .any(|p| p.message.as_deref() == Some("Enter the code QRST-5678 when asked."))
+    );
+    let hermes = rows(&accounts.list(false).await.unwrap(), HarnessId::Hermes);
+    assert_eq!(hermes.len(), 1);
+    assert_eq!(hermes[0].email.as_deref(), Some("new@example.com"));
+    assert!(config.hermes_home.join("auth.json").exists());
+    // Only the device-code providers are offered.
+    assert!(
+        accounts
+            .start_login_with(HarnessId::Hermes, Some("anthropic"), None)
+            .await
+            .is_err()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_cli_sign_in_reports_the_clis_last_words() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, _) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let cli = script(
+        tmp.path(),
+        "hermes",
+        "#!/bin/sh\nprintf '\\033[31mDevice code request failed: 503\\033[0m\\n' >&2\nexit 1\n",
+    );
+    accounts.override_cli(HarnessId::Hermes, cli);
+    let start = accounts.start_login(HarnessId::Hermes).await.unwrap();
+    let polls = settle(&accounts, &start.login_id).await;
+    let last = polls.last().unwrap();
+    assert_eq!(last.status, AgentLoginStatus::Error);
+    assert_eq!(
+        last.message.as_deref(),
+        Some("Device code request failed: 503")
+    );
+}
+
+// ── output scanning + reasons ───────────────────────────────────────────────
+
+#[test]
+fn device_codes_and_urls_are_found_in_coloured_cli_output() {
+    let hermes = "  1. Open: \u{1b}[94mhttps://portal.nousresearch.com/device?code=AB12-CD34\u{1b}[0m\n  2. If prompted, enter code: AB12-CD34\n";
+    assert_eq!(scan_device_code(hermes).as_deref(), Some("AB12-CD34"));
+    assert_eq!(
+        scan_https_url(hermes, &["nousresearch.com"]).as_deref(),
+        Some("https://portal.nousresearch.com/device?code=AB12-CD34")
+    );
+    let codex_style = "2. Enter this code:\n     \u{1b}[94mQRST-5678\u{1b}[0m\n";
+    assert_eq!(scan_device_code(codex_style).as_deref(), Some("QRST-5678"));
+    // A loopback login's output has no code; foreign hosts don't match.
+    assert_eq!(
+        scan_device_code("open https://auth.openai.com/oauth?x in your browser"),
+        None
+    );
+    assert_eq!(
+        scan_device_code("error code: 503 Service Unavailable"),
+        None
+    );
+    assert_eq!(
+        scan_https_url("see https://evil.example/x.ai", &["x.ai"]),
+        None
+    );
+    assert_eq!(
+        strip_ansi("\u{1b}]8;;https://a\u{7}link\u{1b}]8;;\u{7} \u{1b}[1mbold\u{1b}[0m"),
+        "link bold"
+    );
+}
+
+#[test]
+fn usage_reasons_name_each_providers_vendor_and_cli() {
+    let entry = UsageEntry::default();
+    let reason = |harness, key: Option<&str>, active, error: ProbeError| {
+        usage_error_message(harness, key, active, &error, &entry, 0).unwrap()
+    };
+    let limited = ProbeError::RateLimited {
+        retry_after_secs: None,
+    };
+    let rejected = ProbeError::Unauthorized { status: 401 };
+    assert_eq!(
+        reason(HarnessId::Grok, None, true, limited.clone()),
+        "Rate limited by xAI"
+    );
+    assert_eq!(
+        reason(HarnessId::Opencode, Some("github-copilot"), false, limited),
+        "Rate limited by GitHub"
+    );
+    assert_eq!(
+        reason(HarnessId::Grok, None, true, rejected.clone()),
+        "Session expired — it refreshes the next time grok runs"
+    );
+    assert_eq!(
+        reason(HarnessId::Pi, Some("openai-codex"), false, rejected.clone()),
+        "Session expired — switch to it to refresh"
+    );
+    assert_eq!(
+        reason(HarnessId::Devin, None, true, rejected.clone()),
+        "Signed out — sign in again"
+    );
+    assert_eq!(
+        reason(HarnessId::Grok, None, false, rejected),
+        "Signed out — sign in again"
+    );
+}

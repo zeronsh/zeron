@@ -795,6 +795,25 @@ const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(330);
 /// start.
 const SIGN_OUT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How [`AcpHarness::sign_in_with`] runs the agent's own sign-in.
+#[derive(Debug, Clone, Default)]
+pub struct SignInOptions {
+    /// `$BROWSER` for the agent: a no-op keeps it from opening a second tab
+    /// when the caller opens the reported url itself; a recording script
+    /// captures a url the agent never prints.
+    pub browser: Option<PathBuf>,
+    /// The `authenticate` method, overriding the spec's default — Devin has
+    /// no default (`devin-browser` is its browser sign-in).
+    pub method: Option<String>,
+    /// Extra environment. A throwaway data home (`XDG_DATA_HOME`, …) lands a
+    /// NEW login there, leaving the live one untouched.
+    pub env: Vec<(String, std::ffi::OsString)>,
+    /// Which printed urls are the sign-in page. `None` = the first url the
+    /// agent prints (Antigravity prints nothing else); a filter keeps a url
+    /// in some unrelated handshake field from being announced instead.
+    pub url_filter: Option<fn(&str) -> bool>,
+}
+
 /// milestones of [`AcpHarness::sign_in`] a caller can surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignInProgress {
@@ -981,12 +1000,36 @@ impl AcpHarness {
         browser: Option<PathBuf>,
         on_progress: impl Fn(SignInProgress) + Send + Sync + 'static,
     ) -> Result<(), HarnessError> {
+        self.sign_in_with(
+            SignInOptions {
+                browser,
+                ..Default::default()
+            },
+            on_progress,
+        )
+        .await
+    }
+
+    /// [`Self::sign_in`] with an explicit method, extra environment and url
+    /// filter (see [`SignInOptions`]).
+    pub async fn sign_in_with(
+        &self,
+        options: SignInOptions,
+        on_progress: impl Fn(SignInProgress) + Send + Sync + 'static,
+    ) -> Result<(), HarnessError> {
+        let SignInOptions {
+            browser,
+            method,
+            env,
+            url_filter,
+        } = options;
         let display_name = self.spec.display_name;
-        let Some(default_method) = self.spec.auth_method else {
+        let Some(default_method) = method.as_deref().or(self.spec.auth_method) else {
             return Err(HarnessError::Protocol(format!(
                 "{display_name} has no sign-in flow"
             )));
         };
+        let accept_url = move |url: &str| url_filter.is_none_or(|accept| accept(url));
         let (exe, args) = self.resolve_program(false).await?;
         let gemini_home = (self.spec.id == HarnessId::Antigravity)
             .then(antigravity_paths::home)
@@ -1010,6 +1053,9 @@ impl AcpHarness {
         }
         if let Some(browser) = browser {
             cmd.env("BROWSER", browser);
+        }
+        for (key, value) in env {
+            cmd.env(key, value);
         }
         let scratch = self.adapter_scratch()?;
         if let Some(dir) = &scratch {
@@ -1035,7 +1081,7 @@ impl AcpHarness {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::debug!(target: "zeron_harness::acp", "sign-in stderr: {line}");
-                    if let Some(url) = sign_in_url(&line)
+                    if let Some(url) = sign_in_url(&line).filter(|url| accept_url(url))
                         && !announced.swap(true, std::sync::atomic::Ordering::AcqRel)
                     {
                         on_progress(SignInProgress::OpenBrowser(url));
@@ -1048,7 +1094,7 @@ impl AcpHarness {
                 stdin,
                 stdout,
                 Some(Box::new(move |line| {
-                    if let Some(url) = sign_in_url(line)
+                    if let Some(url) = sign_in_url(line).filter(|url| accept_url(url))
                         && !announced.swap(true, std::sync::atomic::Ordering::AcqRel)
                     {
                         on_progress(SignInProgress::OpenBrowser(url));
@@ -1253,6 +1299,21 @@ impl AcpHarness {
                 Ok((entry, args))
             }
         }
+    }
+
+    /// The agent's own CLI running `args` (`grok login`, `hermes auth add`),
+    /// resolved exactly as a launch resolves it — the env override, PATH, the
+    /// login shell, install dirs, the managed npm install — minus the ACP
+    /// server arguments. Only meaningful for agents whose server IS their CLI
+    /// (Grok, Devin, Hermes); Pi's server is a separate adapter.
+    pub async fn cli_command(&self, args: &[&str]) -> Result<Command, HarnessError> {
+        let (exe, mut launch_args) = self.resolve_program(false).await?;
+        let prefix = launch_args.len().saturating_sub(self.spec.args.len());
+        launch_args.truncate(prefix);
+        let mut cmd = Command::new(&exe);
+        cmd.args(launch_args).args(args);
+        crate::compose_child_path(&mut cmd, &exe);
+        Ok(cmd)
     }
 
     fn configure_adapter_environment(&self, cmd: &mut Command, executable: &Path) {

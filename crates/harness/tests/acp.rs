@@ -690,6 +690,80 @@ async fn antigravity_sign_in_reports_the_browser_url_and_authenticates() {
     );
 }
 
+fn devin_auth_fixture() -> PathBuf {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("fake-devin-auth.sh");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+    }
+    path
+}
+
+/// Zeron's "Add account" for Devin: an explicit method (Devin has no
+/// default), a throwaway data home the new login lands in, and a url filter
+/// that skips the handshake's unrelated link for the real sign-in page.
+#[tokio::test]
+async fn devin_sign_in_runs_the_given_method_in_the_given_environment() {
+    let data = tempfile::tempdir().unwrap();
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<SignInProgress>>> = Default::default();
+    let recorder = seen.clone();
+    AcpHarness::devin()
+        .with_executable(devin_auth_fixture())
+        .sign_in_with(
+            zeron_harness::acp::SignInOptions {
+                method: Some("devin-browser".into()),
+                env: vec![("XDG_DATA_HOME".into(), data.path().into())],
+                url_filter: Some(|url| url.contains("redirect_uri=")),
+                ..Default::default()
+            },
+            move |progress| recorder.lock().unwrap().push(progress),
+        )
+        .await
+        .expect("signed in");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![SignInProgress::OpenBrowser(
+            "https://app.devin.ai/auth/cli/continue?redirect_uri=http%3A%2F%2F127.0.0.1%3A45678%2Fcallback&state=s"
+                .into()
+        )]
+    );
+    assert!(data.path().join("devin/credentials.toml").is_file());
+}
+
+#[tokio::test]
+async fn an_agent_without_a_sign_in_method_refuses_a_default_sign_in() {
+    let error = AcpHarness::devin()
+        .with_executable(devin_auth_fixture())
+        .sign_in(None, |_| {})
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no sign-in flow"), "{error}");
+}
+
+/// `cli_command` runs the agent's CLI itself: the same program a launch
+/// resolves, without the ACP server arguments.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn cli_command_runs_the_cli_without_the_server_arguments() {
+    let fixture = fixture_path();
+    let command = AcpHarness::grok()
+        .with_executable(&fixture)
+        .cli_command(&["login", "--device-auth"])
+        .await
+        .unwrap();
+    let std = command.as_std();
+    assert_eq!(std.get_program(), fixture.as_os_str());
+    let args: Vec<_> = std
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(args, ["login", "--device-auth"]);
+}
+
 #[tokio::test]
 async fn antigravity_commands_include_logout() {
     let commands = antigravity_harness().commands().await.expect("commands");

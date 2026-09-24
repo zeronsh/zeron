@@ -915,6 +915,12 @@ pub struct AgentAccount {
     /// Epoch millis of the slot's last snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_at: Option<i64>,
+    /// The upstream login this row belongs to inside an agent that keeps one
+    /// login PER model provider (OpenCode's `openai`, Pi's `anthropic`,
+    /// Hermes' `nous`). Rows sharing it form one single-choice group — at
+    /// most one of them is in use. `None` for single-login agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

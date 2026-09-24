@@ -40,6 +40,8 @@ fn test_accounts(root: &Path) -> (AgentAccounts, AgentAccountsConfig) {
         claude_keychain_service: None,
         antigravity_home: Some(root.join("gemini")),
         antigravity_keychain: false,
+        // Grok / Devin / OpenCode / Pi / Hermes: temp homes too.
+        ..AgentAccountsConfig::isolated(root)
     };
     (AgentAccounts::new(config.clone()), config)
 }
@@ -482,6 +484,172 @@ async fn forget_guards_and_removes_slots() {
     );
 }
 
+/// Grok, Devin, OpenCode and Pi through the public API: each live login is
+/// snapshotted, a second login is kept beside it, and switching rewrites
+/// exactly that agent's store (for OpenCode/Pi: exactly that provider's
+/// entry) at 0600.
+#[tokio::test]
+async fn grok_devin_opencode_and_pi_logins_swap_round_trip() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (accounts, config) = test_accounts(tmp.path());
+    let write = |path: &Path, contents: String| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    };
+    let grok = |user: &str| {
+        serde_json::json!({ "https://auth.x.ai::c": {
+            "key": format!("key-{user}"), "refresh_token": "r", "oidc_issuer": "https://auth.x.ai",
+            "oidc_client_id": "c", "user_id": user, "email": format!("{user}@x.ai"),
+        }})
+        .to_string()
+    };
+    let devin = |key: &str| format!("windsurf_api_key = \"{key}\"\n");
+    let chatgpt = |account: &str| {
+        let claims = serde_json::json!({
+            "https://api.openai.com/auth": { "chatgpt_account_id": account, "chatgpt_plan_type": "plus" },
+            "https://api.openai.com/profile": { "email": format!("{account}@example.com") },
+        });
+        serde_json::json!({
+            "type": "oauth",
+            "access": format!("e30.{}.sig", BASE64_URL.encode(claims.to_string())),
+            "refresh": format!("refresh-{account}"),
+            "expires": 1,
+            "accountId": account,
+        })
+    };
+    let grok_file = config.grok_home.join("auth.json");
+    let opencode_file = config.opencode_auth_file.clone();
+    let pi_file = config.pi_agent_dir.join("auth.json");
+    let opencode = |account: &str| {
+        serde_json::json!({ "openai": chatgpt(account), "openrouter": { "type": "api", "key": "keep" } })
+            .to_string()
+    };
+    let pi = |account: &str| serde_json::json!({ "openai-codex": chatgpt(account) }).to_string();
+
+    write(&grok_file, grok("ann"));
+    write(&config.devin_credentials_file, devin("devin-ann"));
+    write(&opencode_file, opencode("ann"));
+    write(&pi_file, pi("ann"));
+    let first = accounts.list(false).await.expect("list");
+    let id_of = |snapshot: &AgentAccountsSnapshot, harness| {
+        snapshot
+            .accounts
+            .iter()
+            .find(|a| a.harness == harness && a.active)
+            .map(|a| a.id.clone())
+            .expect("live login listed")
+    };
+    let ann: Vec<(HarnessId, String)> = [
+        HarnessId::Grok,
+        HarnessId::Devin,
+        HarnessId::Opencode,
+        HarnessId::Pi,
+    ]
+    .into_iter()
+    .map(|h| (h, id_of(&first, h)))
+    .collect();
+
+    write(&grok_file, grok("bob"));
+    write(&config.devin_credentials_file, devin("devin-bob"));
+    write(&opencode_file, opencode("bob"));
+    write(&pi_file, pi("bob"));
+    let second = accounts.list(false).await.expect("list");
+    for (harness, _) in &ann {
+        let rows: Vec<_> = second
+            .accounts
+            .iter()
+            .filter(|a| a.harness == *harness)
+            .collect();
+        assert_eq!(rows.len(), 2, "{harness:?} keeps both logins");
+        assert_eq!(rows.iter().filter(|a| a.active).count(), 1);
+        assert!(rows.iter().all(|a| a.switchable));
+    }
+    for (harness, id) in &ann {
+        let snapshot = accounts.activate(*harness, id).await.expect("switch");
+        assert!(snapshot.accounts.iter().any(|a| a.id == *id && a.active));
+    }
+    assert!(
+        std::fs::read_to_string(&grok_file)
+            .unwrap()
+            .contains("key-ann")
+    );
+    assert!(
+        std::fs::read_to_string(&config.devin_credentials_file)
+            .unwrap()
+            .contains("devin-ann")
+    );
+    let opencode_live: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&opencode_file).unwrap()).unwrap();
+    assert_eq!(opencode_live["openai"]["accountId"], "ann");
+    assert_eq!(opencode_live["openrouter"]["key"], "keep");
+    let pi_live: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&pi_file).unwrap()).unwrap();
+    assert_eq!(pi_live["openai-codex"]["accountId"], "ann");
+    #[cfg(unix)]
+    for file in [
+        &grok_file,
+        &config.devin_credentials_file,
+        &opencode_file,
+        &pi_file,
+    ] {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{}", file.display());
+    }
+    // OpenCode / Pi rows name the provider they belong to.
+    let snapshot = accounts.list(false).await.expect("list");
+    assert!(
+        snapshot
+            .accounts
+            .iter()
+            .filter(|a| matches!(a.harness, HarnessId::Opencode | HarnessId::Pi))
+            .all(|a| a.provider.is_some())
+    );
+}
+
+/// Hermes keeps every account in its own pool: listed as-is, the active
+/// provider's first entry in use, never switched or forgotten from zeron.
+#[tokio::test]
+async fn hermes_credential_pool_is_listed_read_only() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (accounts, config) = test_accounts(tmp.path());
+    let file = config.hermes_home.join("auth.json");
+    std::fs::create_dir_all(&config.hermes_home).unwrap();
+    let pool = serde_json::json!({
+        "active_provider": "nous",
+        "credential_pool": { "nous": [
+            { "id": "b", "label": "second@nous.ai", "auth_type": "oauth", "priority": 1, "access_token": "t2" },
+            { "id": "a", "label": "first@nous.ai", "auth_type": "oauth", "priority": 0, "access_token": "t1" },
+        ]}
+    })
+    .to_string();
+    std::fs::write(&file, &pool).unwrap();
+    let snapshot = accounts.list(false).await.expect("list");
+    let hermes: Vec<_> = snapshot
+        .accounts
+        .iter()
+        .filter(|a| a.harness == HarnessId::Hermes)
+        .collect();
+    assert_eq!(hermes.len(), 2);
+    assert_eq!(hermes[0].email.as_deref(), Some("first@nous.ai"));
+    assert!(hermes[0].active && !hermes[1].active);
+    assert!(hermes.iter().all(|a| !a.switchable));
+    assert_eq!(hermes[0].provider.as_deref(), Some("nous"));
+    assert!(
+        accounts
+            .activate(HarnessId::Hermes, &hermes[1].id)
+            .await
+            .is_err()
+    );
+    assert!(
+        accounts
+            .forget(HarnessId::Hermes, &hermes[1].id)
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), pool);
+}
+
 #[test]
 fn snapshot_wire_shape() {
     let snapshot = AgentAccountsSnapshot::default();
@@ -885,6 +1053,17 @@ async fn rpc_dispatch_for_m5c_methods() {
         .expect("ListAgentAccounts");
     assert!(snapshot["accounts"].is_array());
     assert!(snapshot["warnings"].is_array());
+
+    // The provider param reaches the engine: Pi's Claude login is refused
+    // with its reason (no port bound, no network).
+    let refused = client
+        .call(
+            methods::START_AGENT_LOGIN,
+            serde_json::json!({ "harness": "pi", "provider": "anthropic" }),
+        )
+        .await
+        .expect_err("pi claude login is not offered");
+    assert!(refused.to_string().contains("/login"), "{refused}");
 
     // Login lifecycle: start (loopback browser flow, like the CLI's own
     // automatic login) → poll pending → cancel → gone.

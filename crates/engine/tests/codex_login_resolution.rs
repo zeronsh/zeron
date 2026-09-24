@@ -22,6 +22,7 @@ fn test_accounts(root: &Path) -> AgentAccounts {
         claude_keychain_service: None,
         antigravity_home: Some(root.join("gemini")),
         antigravity_keychain: false,
+        ..AgentAccountsConfig::isolated(root)
     };
     AgentAccounts::new(config)
 }
