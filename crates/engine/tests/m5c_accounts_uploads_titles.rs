@@ -12,6 +12,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL;
+use sha2::{Digest as _, Sha256};
 
 use zeron_engine::{
     AgentAccounts, AgentAccountsConfig, EngineCore, HarnessRegistry, Repos, Uploads,
@@ -95,6 +96,23 @@ fn fake_id_token(email: &str, account_id: &str, plan: &str) -> String {
     format!("{header}.{payload}.x")
 }
 
+fn fake_team_id_token(email: &str, user_id: &str, workspace_id: &str) -> String {
+    let header = BASE64_URL.encode(br#"{"alg":"none"}"#);
+    let payload = BASE64_URL.encode(
+        serde_json::json!({
+            "email": email,
+            "name": "Codex Team User",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": workspace_id,
+                "chatgpt_user_id": user_id,
+                "chatgpt_plan_type": "team",
+            },
+        })
+        .to_string(),
+    );
+    format!("{header}.{payload}.x")
+}
+
 fn write_codex_login(config: &AgentAccountsConfig, email: &str, account_id: &str) {
     std::fs::create_dir_all(&config.codex_home).expect("codex home");
     std::fs::write(
@@ -109,6 +127,27 @@ fn write_codex_login(config: &AgentAccountsConfig, email: &str, account_id: &str
         .to_string(),
     )
     .expect("codex auth");
+}
+
+fn write_codex_team_login(
+    config: &AgentAccountsConfig,
+    email: &str,
+    user_id: &str,
+    workspace_id: &str,
+) {
+    std::fs::create_dir_all(&config.codex_home).expect("codex home");
+    std::fs::write(
+        config.codex_home.join("auth.json"),
+        serde_json::json!({
+            "tokens": {
+                "id_token": fake_team_id_token(email, user_id, workspace_id),
+                "access_token": format!("at-{user_id}"),
+                "account_id": workspace_id,
+            }
+        })
+        .to_string(),
+    )
+    .expect("codex team auth");
 }
 
 fn account_emails(snapshot: &AgentAccountsSnapshot, harness: HarnessId) -> Vec<(String, bool)> {
@@ -438,6 +477,54 @@ async fn codex_slot_swap_and_api_key_detection() {
         .expect("api key account");
     assert_eq!(key_account.plan_label.as_deref(), Some("API key"));
     assert_eq!(key_account.email.as_deref(), Some("API key ·…abcd"));
+}
+
+#[tokio::test]
+async fn codex_team_seats_are_distinct_and_legacy_slots_are_migrated() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (accounts, config) = test_accounts(tmp.path());
+    write_codex_team_login(&config, "erin@team.com", "user-erin", "ws-team");
+    let snapshot = accounts.list(false).await.expect("list erin");
+    let erin_id = snapshot
+        .accounts
+        .iter()
+        .find(|a| a.email.as_deref() == Some("erin@team.com"))
+        .expect("erin")
+        .id
+        .clone();
+
+    // Simulate the workspace-only slot format written by older versions.
+    let slots = config.data_dir.join("agent-accounts").join("codex");
+    let mut legacy: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(slots.join(format!("{erin_id}.json"))).expect("erin slot"),
+    )
+    .expect("slot json");
+    let digest = Sha256::digest(b"codex:ws-team");
+    let legacy_id = digest[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    legacy["id"] = serde_json::json!(legacy_id);
+    legacy["accountKey"] = serde_json::json!("ws-team");
+    std::fs::write(slots.join(format!("{legacy_id}.json")), legacy.to_string())
+        .expect("legacy slot");
+    std::fs::remove_file(slots.join(format!("{erin_id}.json"))).expect("remove new slot");
+
+    // Another teammate in the same workspace must get a separate slot, and
+    // migration must preserve Erin's credentials under her stable new id.
+    write_codex_team_login(&config, "finn@team.com", "user-finn", "ws-team");
+    let snapshot = accounts.list(false).await.expect("list finn");
+    let mut emails = account_emails(&snapshot, HarnessId::Codex);
+    emails.sort();
+    assert_eq!(
+        emails,
+        vec![
+            ("erin@team.com".to_string(), false),
+            ("finn@team.com".to_string(), true),
+        ]
+    );
+    assert!(!slots.join(format!("{legacy_id}.json")).exists());
+    assert!(slots.join(format!("{erin_id}.json")).exists());
 }
 
 #[tokio::test]
