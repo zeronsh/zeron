@@ -175,7 +175,7 @@ pub fn signs_in(harness: HarnessId) -> bool {
         .any(|(provider, _, _)| *provider == harness)
 }
 
-fn provider_name(harness: HarnessId) -> &'static str {
+pub(crate) fn provider_name(harness: HarnessId) -> &'static str {
     PROVIDERS
         .iter()
         .find(|(provider, _, _)| *provider == harness)
@@ -242,6 +242,70 @@ pub fn provider_accounts(
         .collect()
 }
 
+/// One mini meter line of the usage column: label, a short bar, percent.
+/// The reset moment rides the row's tooltip instead of taking a column.
+pub(crate) fn render_usage_meter(
+    window: &zeron_proto::AgentUsageWindow,
+    theme: &Theme,
+) -> AnyElement {
+    let fraction = window.used_fraction.clamp(0.0, 1.0);
+    let level = usage_level(fraction);
+    let fill = usage_color(level, theme).opacity(match level {
+        UsageLevel::Normal => 0.8,
+        _ => 0.9,
+    });
+    div()
+        .h(px(16.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(crate::typography::ui_rems(11.5))
+        .child(
+            div()
+                .w(px(USAGE_LABEL_WIDTH))
+                .flex_none()
+                .truncate()
+                .text_color(theme.text_muted)
+                .child(SharedString::from(window.label.clone())),
+        )
+        .child(
+            div()
+                .w(px(USAGE_BAR_WIDTH))
+                .flex_none()
+                .h(px(4.0))
+                .rounded_full()
+                .overflow_hidden()
+                .bg(theme.wash(0.08))
+                .when(fraction > 0.0, |el| {
+                    el.child(
+                        div()
+                            .h_full()
+                            // A 1.5% floor keeps tiny non-zero usage
+                            // visible (zeron `max(used, 1.5)%`).
+                            .w(gpui::relative(fraction.max(0.015)))
+                            .rounded_full()
+                            .bg(fill),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .w(px(USAGE_PERCENT_WIDTH))
+                .flex_none()
+                .text_right()
+                .text_color(match level {
+                    UsageLevel::Normal => theme.text_muted,
+                    _ => usage_color(level, theme),
+                })
+                .child(SharedString::from(format!(
+                    "{}%",
+                    (fraction * 100.0).round() as u32
+                ))),
+        )
+        .into_any_element()
+}
+
 // ---------------------------------------------------------------------------
 // Entity
 // ---------------------------------------------------------------------------
@@ -296,7 +360,9 @@ impl LoginFlow {
 /// by every accounts view so a re-opened Settings paints instantly and
 /// revalidates in place instead of flashing a skeleton.
 #[derive(Default)]
-struct AccountsSnapshotCache(std::collections::HashMap<Option<String>, AgentAccountsSnapshot>);
+pub(crate) struct AccountsSnapshotCache(
+    pub(crate) std::collections::HashMap<Option<String>, AgentAccountsSnapshot>,
+);
 
 impl gpui::Global for AccountsSnapshotCache {}
 
@@ -902,71 +968,6 @@ impl AccountsPage {
 
     // ---- render pieces ----
 
-    /// One mini meter line of the usage column: label, a short bar, percent.
-    /// The reset moment rides the row's tooltip instead of taking a column.
-    fn render_usage_meter(
-        &self,
-        window: &zeron_proto::AgentUsageWindow,
-        theme: &Theme,
-    ) -> AnyElement {
-        let fraction = window.used_fraction.clamp(0.0, 1.0);
-        let level = usage_level(fraction);
-        let fill = usage_color(level, theme).opacity(match level {
-            UsageLevel::Normal => 0.8,
-            _ => 0.9,
-        });
-        div()
-            .h(px(16.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .text_size(crate::typography::ui_rems(11.5))
-            .child(
-                div()
-                    .w(px(USAGE_LABEL_WIDTH))
-                    .flex_none()
-                    .truncate()
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(window.label.clone())),
-            )
-            .child(
-                div()
-                    .w(px(USAGE_BAR_WIDTH))
-                    .flex_none()
-                    .h(px(4.0))
-                    .rounded_full()
-                    .overflow_hidden()
-                    .bg(theme.wash(0.08))
-                    .when(fraction > 0.0, |el| {
-                        el.child(
-                            div()
-                                .h_full()
-                                // A 1.5% floor keeps tiny non-zero usage
-                                // visible (zeron `max(used, 1.5)%`).
-                                .w(gpui::relative(fraction.max(0.015)))
-                                .rounded_full()
-                                .bg(fill),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .w(px(USAGE_PERCENT_WIDTH))
-                    .flex_none()
-                    .text_right()
-                    .text_color(match level {
-                        UsageLevel::Normal => theme.text_muted,
-                        _ => usage_color(level, theme),
-                    })
-                    .child(SharedString::from(format!(
-                        "{}%",
-                        (fraction * 100.0).round() as u32
-                    ))),
-            )
-            .into_any_element()
-    }
-
     /// The quiet note an account shows in its meta line instead of meters.
     /// Render hook for the usage data flow: a reason the probe came back
     /// empty belongs here. A provider without usage gets no note at all.
@@ -1086,7 +1087,7 @@ impl AccountsPage {
                         .usage_windows
                         .iter()
                         .take(2)
-                        .map(|window| self.render_usage_meter(window, theme)),
+                        .map(|window| render_usage_meter(window, theme)),
                 )
                 .into_any_element()
         };

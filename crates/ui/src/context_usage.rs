@@ -18,8 +18,38 @@ pub fn render(
         Some(_) => theme.text_muted,
         None => theme.text_faint,
     };
+    let ring = ring(fraction.unwrap_or(0.0) as f32, color, theme);
+    let label = fraction
+        .map(|f| format!("{:.0}%", f * 100.0))
+        .unwrap_or_else(|| "—".into());
+    div()
+        .id("context-usage")
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .h(px(24.0))
+        .px(px(6.0))
+        .rounded(px(6.0))
+        .text_size(px(11.0))
+        .text_color(color)
+        .hover(|s| s.bg(crate::theme::ink(0.05)))
+        .child(ring)
+        .child(SharedString::from(label))
+        .tooltip(move |_, cx| {
+            cx.new(|cx| UsageCard {
+                _subscription: cx.observe(&state, |_, _, cx| cx.notify()),
+                state: state.clone(),
+            })
+            .into()
+        })
+}
+
+/// The footer's 16px progress ring: a faint full track under a `fraction` arc
+/// starting at twelve o'clock. Shared with the account usage indicator.
+pub(crate) fn ring(fraction: f32, color: gpui::Hsla, theme: &Theme) -> impl IntoElement {
     let track = theme.text_faint.opacity(0.25);
-    let ring = canvas(
+    canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
             let center = bounds.center();
@@ -47,34 +77,10 @@ pub fn render(
                 }
             };
             arc(1.0, track);
-            arc(fraction.unwrap_or(0.0).clamp(0.0, 1.0) as f32, color);
+            arc(fraction.clamp(0.0, 1.0), color);
         },
     )
-    .size(px(16.0));
-    let label = fraction
-        .map(|f| format!("{:.0}%", f * 100.0))
-        .unwrap_or_else(|| "—".into());
-    div()
-        .id("context-usage")
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap(px(5.0))
-        .h(px(24.0))
-        .px(px(6.0))
-        .rounded(px(6.0))
-        .text_size(px(11.0))
-        .text_color(color)
-        .hover(|s| s.bg(crate::theme::ink(0.05)))
-        .child(ring)
-        .child(SharedString::from(label))
-        .tooltip(move |_, cx| {
-            cx.new(|cx| UsageCard {
-                _subscription: cx.observe(&state, |_, _, cx| cx.notify()),
-                state: state.clone(),
-            })
-            .into()
-        })
+    .size(px(16.0))
 }
 
 struct UsageCard {

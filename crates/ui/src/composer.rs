@@ -5380,6 +5380,9 @@ pub struct Composer {
     route_snap_until: Option<Instant>,
     _observe: Subscription,
     _pickers_observe: Subscription,
+    /// The footer's plan-usage ring (the session harness's live account).
+    account_usage: Entity<crate::account_usage::AccountUsage>,
+    _account_usage_observe: Subscription,
     _picker_focus: Subscription,
     _input_events: Subscription,
 }
@@ -5451,6 +5454,8 @@ impl Composer {
             input
         });
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        let account_usage = cx.new(|cx| crate::account_usage::AccountUsage::new(state.clone(), cx));
+        let account_usage_observe = cx.observe(&account_usage, |_, _, cx| cx.notify());
         // The footer toolbar (checkout kind + ref picker) is rendered INLINE
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
@@ -5590,6 +5595,8 @@ impl Composer {
             route_snap_until: None,
             _observe: observe,
             _pickers_observe: pickers_observe,
+            account_usage,
+            _account_usage_observe: account_usage_observe,
             _picker_focus: picker_focus,
             _input_events: input_events,
         };
@@ -9560,6 +9567,21 @@ impl Render for Composer {
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
             let usage = self.state.read(cx).context_usage;
+            let account_usage = (session_chrome_opacity > 0.0)
+                .then(|| {
+                    let harness = self.pickers.read(cx).resolved(cx).harness;
+                    let target = {
+                        let state = self.state.read(cx);
+                        state
+                            .selected_chat_row()
+                            .map(|chat| chat.device_id.clone())
+                            .filter(|device| state.local_device_id.as_ref() != Some(device))
+                    };
+                    self.account_usage
+                        .update(cx, |usage, cx| usage.track(harness, target, cx));
+                    crate::account_usage::AccountUsage::render(&self.account_usage, &theme, cx)
+                })
+                .flatten();
             container.child(
                 div()
                     .w_full()
@@ -9590,15 +9612,23 @@ impl Render for Composer {
                                 .items_center()
                                 .opacity(session_chrome_opacity)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
-                                .children(crate::context_usage::has_window(usage).then(|| {
-                                    div().flex_none().pr(px(10.0)).child(
-                                        crate::context_usage::render(
-                                            usage,
-                                            self.state.clone(),
-                                            &theme,
-                                        ),
-                                    )
-                                })),
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .pr(px(10.0))
+                                        .children(account_usage)
+                                        .children(crate::context_usage::has_window(usage).then(
+                                            || {
+                                                crate::context_usage::render(
+                                                    usage,
+                                                    self.state.clone(),
+                                                    &theme,
+                                                )
+                                            },
+                                        )),
+                                ),
                         )
                     }),
             )
