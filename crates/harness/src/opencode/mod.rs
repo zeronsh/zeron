@@ -2050,7 +2050,6 @@ async fn run_session(session: Session) {
                             dir,
                             event_tx: &event_tx,
                             request_input: &request_input,
-                            auto_approve: request.auto_approve,
                             main_feed: &mut main_feed,
                             children: &mut children,
                             pending_spawns: &mut pending_spawns,
@@ -2474,7 +2473,6 @@ struct BusCtx<'a> {
     dir: Option<&'a str>,
     event_tx: &'a mpsc::Sender<Result<AgentEvent, HarnessError>>,
     request_input: &'a Arc<RequestInput>,
-    auto_approve: bool,
     main_feed: &'a mut SessionFeed,
     children: &'a mut HashMap<String, ChildRun>,
     pending_spawns: &'a mut VecDeque<PendingSpawn>,
@@ -2526,7 +2524,6 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
         dir,
         event_tx,
         request_input,
-        auto_approve,
         main_feed,
         children,
         pending_spawns,
@@ -2879,14 +2876,6 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             } else {
                 "reply"
             };
-            let permission_input = Arc::clone(request_input);
-            let question = UserInputQuestion {
-                id: format!("permission:{id}"),
-                header: "Permission".into(),
-                question: format!("Allow this OpenCode request once? {}", props),
-                options: vec!["No".into(), "Yes".into()],
-                multi_select: false,
-            };
             tokio::spawn(async move {
                 let server = Server {
                     child: None,
@@ -2897,21 +2886,11 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     protocol: protocol_cell,
                     version: tokio::sync::OnceCell::new(),
                 };
-                let allowed = auto_approve
-                    || (permission_input)(vec![question.clone()])
-                        .await
-                        .unwrap_or_default()
-                        .iter()
-                        .any(|answer| {
-                            answer.question_id == question.id
-                                && answer
-                                    .labels
-                                    .iter()
-                                    .any(|label| label.eq_ignore_ascii_case("yes"))
-                        });
-                // V2 "always" writes durable project-wide permission rules.
-                // Approval of this request must not grant future runs access.
-                let reply = if allowed { "once" } else { "reject" };
+                // Like Claude and Codex, normal Zeron sessions run unattended,
+                // regardless of RunRequest.auto_approve. Approve each owned
+                // request without writing durable permission rules via "always".
+                // Genuine agent questions use the separate question.asked path.
+                let reply = "once";
                 if server
                     .post_json(
                         &reply_path,
