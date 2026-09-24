@@ -27,17 +27,15 @@ pub fn redact_output(text: &str) -> String {
         if word.is_empty() {
             return;
         }
-        let label = secret_label(word);
+        // `status code: 503` is a response code, not a secret: `code` after
+        // a status/exit word is not a secret label.
+        let label = secret_label(word).filter(|_| !is_status_code_label(word, previous));
         let bare_separator = matches!(word.as_str(), "=" | ":" | "=>");
-        let auth_scheme = matches!(
-            word.to_ascii_lowercase().as_str(),
-            "bearer" | "basic" | "digest"
-        );
-        if value_next && auth_scheme {
-            // `Authorization: Bearer <token>` — the scheme stays; the word
-            // after it is redacted by the `previous` rule in `redact_word`.
+        if value_next && is_auth_scheme(word) {
+            // `Authorization: Bearer <token>`, GitHub's `Authorization:
+            // token <token>`: the scheme word stays, and the pending
+            // redaction carries on to the credential after it.
             out.push_str(word);
-            value_next = false;
         } else if value_next && !bare_separator {
             out.push_str(&redact_labeled_value(word));
             value_next = false;
@@ -64,6 +62,29 @@ pub fn redact_output(text: &str) -> String {
     }
     flush(&mut word, &mut previous, &mut out);
     out
+}
+
+/// An HTTP authorization scheme word (`Bearer`, GitHub's `token`, …).
+fn is_auth_scheme(word: &str) -> bool {
+    let core = word.trim_matches(|c: char| matches!(c, '"' | '\'' | '`'));
+    matches!(
+        core.to_ascii_lowercase().as_str(),
+        "bearer" | "basic" | "digest" | "token" | "negotiate" | "ntlm" | "hawk" | "apikey"
+    )
+}
+
+/// `code` labelling a status (`status code: 503`, `exit code: 1`) rather
+/// than an authorization or device code.
+fn is_status_code_label(word: &str, previous: &str) -> bool {
+    let core = word
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_ascii_lowercase();
+    let previous = previous.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    core == "code"
+        && matches!(
+            previous,
+            "status" | "http" | "exit" | "error" | "response" | "return"
+        )
 }
 
 /// Whether `word` is a secret label on its own — `Some(true)` when it ends
@@ -95,12 +116,14 @@ fn secret_label(word: &str) -> Option<bool> {
 }
 
 /// The value after a secret label, with its quotes and trailing punctuation
-/// kept. Short plain numbers (`status code: 503`) stay readable.
+/// kept. Always redacted — a short PIN or OTP (`otp: 1234`) is still a
+/// secret; status codes stay readable because `status code` is not a label
+/// (see `is_status_code_label`).
 fn redact_labeled_value(word: &str) -> String {
     const EDGE: &[char] = &['"', '\'', '`', ',', ';', ')', '}', ']'];
     let start = word.len() - word.trim_start_matches(EDGE).len();
     let core = word[start..].trim_end_matches(EDGE);
-    if core.is_empty() || (core.len() <= 4 && core.chars().all(|c| c.is_ascii_digit())) {
+    if core.is_empty() {
         return word.to_string();
     }
     let end = start + core.len();
@@ -325,8 +348,32 @@ mod tests {
     }
 
     #[test]
+    fn short_labelled_secrets_and_other_auth_schemes_are_redacted() {
+        assert_eq!(redact_output("otp: 1234"), "otp: [redacted]");
+        assert_eq!(redact_output("state: 7"), "state: [redacted]");
+        assert_eq!(
+            redact_output("Authorization: token abc123def"),
+            "Authorization: token [redacted]"
+        );
+        assert_eq!(
+            redact_output("Authorization: Bearer abc123def"),
+            "Authorization: Bearer [redacted]"
+        );
+        assert_eq!(
+            redact_output("authorization: Negotiate YIIabc"),
+            "authorization: Negotiate [redacted]"
+        );
+        assert_eq!(
+            redact_output("Authorization: abc123def"),
+            "Authorization: [redacted]"
+        );
+    }
+
+    #[test]
     fn ordinary_labels_and_short_codes_stay_readable() {
         assert_eq!(redact_output("status code: 503"), "status code: 503");
+        assert_eq!(redact_output("HTTP code: 429"), "HTTP code: 429");
+        assert_eq!(redact_output("exit code: 1"), "exit code: 1");
         assert_eq!(redact_output("retry after: 30s"), "retry after: 30s");
         assert_eq!(
             redact_output("Sign-in failed: network"),
