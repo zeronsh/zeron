@@ -45,6 +45,7 @@ enum Out {
 
 #[derive(Default)]
 struct RelayState {
+    nudge_acks: Vec<serde_json::Value>,
     host: Option<mpsc::UnboundedSender<Out>>,
     clients: HashMap<String, mpsc::UnboundedSender<Out>>,
     /// Zombie-path simulation: the host stays "connected" (no bounce) but
@@ -101,8 +102,12 @@ impl FakeRelay {
 
     /// Deliver a nudge frame to the connected host (the DO's /nudge live path).
     fn nudge(&self, chat_id: &str) {
+        self.nudge_receipt(chat_id, None);
+    }
+
+    fn nudge_receipt(&self, chat_id: &str, token: Option<&str>) {
         let header = DeviceFrameHeader::new(chat_id, NUDGE_KIND);
-        let payload = serde_json::json!({ "chatId": chat_id }).to_string();
+        let payload = serde_json::json!({ "chatId": chat_id, "token": token }).to_string();
         let frame = encode_device_frame(&header, payload.as_bytes()).expect("encode nudge");
         let state = self.state.lock().expect("lock");
         state
@@ -186,7 +191,7 @@ async fn handle_socket(stream: tokio::net::TcpStream, state: Arc<Mutex<RelayStat
         let Ok((header, payload)) = decode_device_frame(&bytes) else {
             break;
         };
-        let st = state.lock().expect("lock");
+        let mut st = state.lock().expect("lock");
         if !is_host {
             if st.blackhole_host_bound {
                 continue; // zombie path: frame vanishes, no bounce
@@ -206,6 +211,11 @@ async fn handle_socket(stream: tokio::net::TcpStream, state: Arc<Mutex<RelayStat
                     ));
                 }
             }
+            continue;
+        }
+        if header.k == "nudgeAck" {
+            st.nudge_acks
+                .push(serde_json::from_slice(&payload).unwrap());
             continue;
         }
         // Host frame: route by `to`.
@@ -335,7 +345,7 @@ fn cache(edge_url: &str) -> Arc<LinkCache> {
 }
 
 fn noop_nudge() -> zeron_rpc::NudgeHandler {
-    Arc::new(|_| {})
+    Arc::new(|_| true)
 }
 
 struct RecoveringToken {
@@ -732,9 +742,7 @@ async fn nudges_reach_the_host_callback() {
     let relay = FakeRelay::start().await;
     let service = TestService::new("host-a");
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    let on_nudge: zeron_rpc::NudgeHandler = Arc::new(move |chat_id| {
-        let _ = tx.send(chat_id);
-    });
+    let on_nudge: zeron_rpc::NudgeHandler = Arc::new(move |chat_id| tx.send(chat_id).is_ok());
     let _host = HostRelay::spawn(relay_config(&relay.edge_url(), 100), service, on_nudge);
     relay.wait_host_connected().await;
 
@@ -820,4 +828,40 @@ async fn zombie_relay_path_trips_the_echo_deadline() {
     );
     // Restore the production clocks for the rest of the process's tests.
     zeron_rpc::device_room::set_client_liveness_for_tests(Duration::ZERO, Duration::ZERO);
+}
+
+#[tokio::test]
+async fn nudge_ack_requires_durable_acceptance_and_echoes_the_exact_token() {
+    let relay = FakeRelay::start().await;
+    let accept = Arc::new(AtomicBool::new(false));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let callback: zeron_rpc::NudgeHandler = Arc::new({
+        let accept = accept.clone();
+        move |id| {
+            let _ = tx.send(id);
+            accept.load(Ordering::SeqCst)
+        }
+    });
+    let _host = HostRelay::spawn(
+        relay_config(&relay.edge_url(), 100),
+        TestService::new("host"),
+        callback,
+    );
+    relay.wait_host_connected().await;
+    relay.nudge_receipt("chat", Some("receipt-v1"));
+    rx.recv().await.unwrap();
+    assert!(relay.state.lock().unwrap().nudge_acks.is_empty());
+    accept.store(true, Ordering::SeqCst);
+    relay.nudge_receipt("chat", Some("receipt-v2"));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while relay.state.lock().unwrap().nudge_acks.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        relay.state.lock().unwrap().nudge_acks[0],
+        serde_json::json!({"chatId":"chat","token":"receipt-v2"})
+    );
 }

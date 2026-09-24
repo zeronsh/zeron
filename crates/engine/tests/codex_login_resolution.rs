@@ -18,6 +18,10 @@ fn test_accounts(root: &Path) -> AgentAccounts {
         claude_config_file: root.join("claude.json"),
         codex_home: root.join("codex"),
         cursor_sdk_auth_file: root.join("cursor-sdk").join("auth.json"),
+        // File-only: a temp config must never reach the real Keychain login.
+        claude_keychain_service: None,
+        antigravity_home: Some(root.join("gemini")),
+        antigravity_keychain: false,
     };
     AgentAccounts::new(config)
 }

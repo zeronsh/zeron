@@ -24,7 +24,7 @@
 //!   {repoPath, worktreePath}`; `WatchCheckoutDiffs` → stream of `CheckoutDiff[]`
 //! - Workspace files: lazy directory listing, recursive path search, bounded text
 //!   reads, hash-guarded writes, and a checkout-scoped filesystem change stream.
-//! - Terminals (§3.4): `OpenTerminal {chatId, cols, rows}` → `TerminalSession`,
+//! - Terminals (§3.4): `OpenTerminal {chatId, cols, rows, cwd?}` → `TerminalSession`,
 //!   `SubscribeTerminal {terminalId, afterSeq?}` → stream of `TerminalEvent`
 //!   (replay then live tail), `WriteTerminal {terminalId, data}`, `ResizeTerminal`,
 //!   `CloseTerminal`. M5 is single-user local: per-user owner checks land with
@@ -326,6 +326,46 @@ struct OpenTerminalParams {
     chat_id: String,
     cols: u16,
     rows: u16,
+    /// Explicit working directory (new-chat canvas: the selected project
+    /// folder, or `~`). When omitted, the chat row's cwd is used, then the
+    /// space named by a `space-canvas:{spaceId}` chat id.
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+/// Matches the UI canvas panel key (`AppState::panel_session_key`).
+const CANVAS_TERMINAL_PREFIX: &str = "space-canvas:";
+
+/// A cwd the user (or a project-less chat) meant as "host home", not a folder.
+fn meaningful_cwd(cwd: Option<String>) -> Option<String> {
+    cwd.filter(|cwd| {
+        let trimmed = cwd.trim();
+        !trimmed.is_empty() && trimmed != "~"
+    })
+}
+
+/// Space id encoded in a new-chat canvas terminal key, if any.
+fn canvas_space_id(chat_id: &str) -> Option<&str> {
+    chat_id
+        .strip_prefix(CANVAS_TERMINAL_PREFIX)
+        .filter(|id| !id.is_empty())
+}
+
+/// Resolve the PTY cwd: a real explicit path wins, then the chat row, then
+/// the project folder named by `space-canvas:{spaceId}`, then `~`.
+/// The portable `~` marker is a fallback, not an override — otherwise a
+/// canvas OpenTerminal that still says `~` (spaces watch not landed in the
+/// UI) would ignore the selected project encoded in `chatId`.
+fn resolve_open_terminal_cwd(
+    explicit: Option<String>,
+    chat_cwd: Option<String>,
+    space_cwd: Option<String>,
+) -> String {
+    let raw = meaningful_cwd(explicit)
+        .or_else(|| meaningful_cwd(chat_cwd))
+        .or_else(|| meaningful_cwd(space_cwd))
+        .unwrap_or_else(|| "~".to_string());
+    crate::repos::expand_home(&raw)
 }
 
 #[derive(Debug, Deserialize)]
@@ -376,6 +416,11 @@ struct AgentAccountParams {
 #[serde(rename_all = "camelCase")]
 struct StartAgentLoginParams {
     harness: HarnessId,
+    /// Stamped by the requesting engine when it forwards the start: the
+    /// device whose browser finishes the sign-in. The login's callback port
+    /// is served over P2P to that device alone.
+    #[serde(default)]
+    requester_device_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -690,7 +735,7 @@ impl EngineRpc {
             if chat.space_id.is_none() {
                 return Ok(chat
                     .cwd
-                    .map(|cwd| std::path::PathBuf::from(crate::sessions::expand_home(&cwd)))
+                    .map(|cwd| std::path::PathBuf::from(crate::repos::expand_home(&cwd)))
                     .unwrap_or_else(home_dir));
             }
         }
@@ -794,6 +839,122 @@ impl EngineRpc {
             }
         }
         paths
+    }
+
+    /// An agent login runs on `target`, but the browser that finishes it runs
+    /// HERE: while the login waits on a loopback callback, this device's same
+    /// port forwards to it over P2P ([`zeron_preview::login`]). The forwarder
+    /// opens when a reply first names the port and closes when the login
+    /// finishes, fails, is cancelled or its time runs out; a port taken here
+    /// fails the login with that reason instead of stranding the browser.
+    async fn forward_agent_login(
+        &self,
+        target: &str,
+        method: &str,
+        mut params: serde_json::Value,
+    ) -> Result<RpcReply, RpcError> {
+        use zeron_proto::{AgentLoginPoll, AgentLoginStart, AgentLoginStatus};
+        let login_id = params
+            .get("loginId")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if method == methods::START_AGENT_LOGIN
+            && let Some(object) = params.as_object_mut()
+        {
+            object.insert(
+                "requesterDeviceId".into(),
+                serde_json::json!(self.doc_host.device_id()),
+            );
+        }
+        let reply = self.forward(target, method, params).await;
+        let Some(previews) = &self.previews else {
+            return reply;
+        };
+        let value = match &reply {
+            Ok(RpcReply::Value(value)) => Some(value.clone()),
+            _ => None,
+        };
+        match method {
+            methods::START_AGENT_LOGIN => {
+                let Some(start) =
+                    value.and_then(|v| serde_json::from_value::<AgentLoginStart>(v).ok())
+                else {
+                    return reply;
+                };
+                if let Some(port) = start.callback_port
+                    && let Err(error) = if crate::agent_accounts::tunnel_port_allowed(
+                        port,
+                        Some(start.url.as_str()),
+                    ) {
+                        previews
+                            .open_login_tunnel(&start.login_id, target, port, LOGIN_TUNNEL_TTL)
+                            .await
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "The other device reported an unexpected sign-in port."
+                        ))
+                    }
+                {
+                    self.cancel_remote_login(target, &start.login_id).await;
+                    return Err(RpcError::Failed(error.to_string()));
+                }
+                reply
+            }
+            methods::POLL_AGENT_LOGIN => {
+                let Some(login_id) = login_id else {
+                    return reply;
+                };
+                let poll = value.and_then(|v| serde_json::from_value::<AgentLoginPoll>(v).ok());
+                match poll {
+                    Some(poll) if poll.status == AgentLoginStatus::Pending => {
+                        if let Some(port) = poll.callback_port
+                            && let Err(error) = if crate::agent_accounts::tunnel_port_allowed(
+                                port,
+                                poll.url.as_deref(),
+                            ) {
+                                previews
+                                    .open_login_tunnel(&login_id, target, port, LOGIN_TUNNEL_TTL)
+                                    .await
+                            } else {
+                                Err(anyhow::anyhow!(
+                                    "The other device reported an unexpected sign-in port."
+                                ))
+                            }
+                        {
+                            self.cancel_remote_login(target, &login_id).await;
+                            return RpcReply::value(&AgentLoginPoll {
+                                status: AgentLoginStatus::Error,
+                                message: Some(error.to_string()),
+                                url: None,
+                                callback_port: None,
+                            });
+                        }
+                        reply
+                    }
+                    // Done, failed, expired, or unreachable: the login is over.
+                    _ => {
+                        previews.close_login_tunnel(&login_id);
+                        reply
+                    }
+                }
+            }
+            _ => {
+                if let Some(login_id) = login_id {
+                    previews.close_login_tunnel(&login_id);
+                }
+                reply
+            }
+        }
+    }
+
+    async fn cancel_remote_login(&self, target: &str, login_id: &str) {
+        let params = serde_json::json!({ "loginId": login_id, "targetDeviceId": target });
+        if let Err(error) = self
+            .forward(target, methods::CANCEL_AGENT_LOGIN, params)
+            .await
+        {
+            tracing::debug!(%error, "cancelling the remote login failed (best-effort)");
+        }
     }
 
     /// Forward a device-addressed call over the target device's relay. On transport
@@ -1104,6 +1265,10 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         _ => Duration::from_secs(30),
     }
 }
+
+/// How long this device forwards a remote login's callback at most — the
+/// running engine reaps an abandoned login after the same 15 minutes.
+const LOGIN_TUNNEL_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
@@ -1456,6 +1621,15 @@ impl RpcService for EngineRpc {
             && target != self.doc_host.device_id()
         {
             let target = target.to_string();
+            if matches!(
+                method,
+                methods::START_AGENT_LOGIN
+                    | methods::POLL_AGENT_LOGIN
+                    | methods::COMPLETE_AGENT_LOGIN
+                    | methods::CANCEL_AGENT_LOGIN
+            ) {
+                return self.forward_agent_login(&target, method, params).await;
+            }
             return self.forward(&target, method, params).await;
         }
         if AuthRpc::handles(method) {
@@ -1935,6 +2109,7 @@ impl RpcService for EngineRpc {
                         serde_json::json!({
                             "chatId": chat_id,
                             "room": room.as_ref().map(chat2_json),
+                            "state": self.doc_host.chat_sync_state(chat_id),
                         })
                     })
                     .collect();
@@ -1943,6 +2118,7 @@ impl RpcService for EngineRpc {
                     "nowMs": crate::now_ms(),
                     "workspace": workspace.as_ref().map(room_json),
                     "chats": chats,
+                    "resources": self.doc_host.sync_resources(),
                 }))
             }
             methods::WATCH_CONNECTIVITY => Ok(RpcReply::Stream(watch_stream(
@@ -2817,15 +2993,23 @@ impl RpcService for EngineRpc {
             }
             methods::OPEN_TERMINAL => {
                 let p: OpenTerminalParams = parse_params(params)?;
-                // The terminal runs in the chat's checkout; a chat with no cwd (or
-                // no row yet) gets the home directory.
-                let cwd = self
+                // Prefer an explicit real path (new-chat canvas has no row
+                // yet). `space-canvas:{spaceId}` names the selected project
+                // so a missing/tilde cwd still lands in that folder.
+                let chat_cwd = self
                     .workspace
                     .chat(&p.chat_id)
                     .ok()
                     .flatten()
-                    .and_then(|chat| chat.cwd)
-                    .unwrap_or_else(|| home_dir().to_string_lossy().to_string());
+                    .and_then(|chat| chat.cwd);
+                let space_cwd = canvas_space_id(&p.chat_id).and_then(|space_id| {
+                    self.workspace
+                        .space(space_id)
+                        .ok()
+                        .flatten()
+                        .map(|space| space.path)
+                });
+                let cwd = resolve_open_terminal_cwd(p.cwd, chat_cwd, space_cwd);
                 let session = self
                     .terminals
                     .open(&cwd, p.cols, p.rows)
@@ -2895,9 +3079,17 @@ impl RpcService for EngineRpc {
             }
             methods::START_AGENT_LOGIN => {
                 let p: StartAgentLoginParams = parse_params(params)?;
+                // A requester naming this device is no remote login at all:
+                // publishing a callback route for ourselves would be a no-op
+                // at best, so never register one.
+                let own_id = self.doc_host.device_id();
+                let requester = p
+                    .requester_device_id
+                    .as_deref()
+                    .filter(|requester| !requester.is_empty() && *requester != own_id);
                 let start = self
                     .agent_accounts
-                    .start_login(p.harness)
+                    .start_login_for(p.harness, requester)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&start)
@@ -3439,6 +3631,44 @@ mod tests {
             forward_deadline(methods::QUEUE_COMMAND),
             Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    fn open_terminal_cwd_prefers_explicit_then_chat_then_space_then_home() {
+        let home = crate::repos::home_dir().to_string_lossy().into_owned();
+        assert_eq!(
+            resolve_open_terminal_cwd(
+                Some("/proj".into()),
+                Some("/chat".into()),
+                Some("/space".into())
+            ),
+            "/proj"
+        );
+        assert_eq!(
+            resolve_open_terminal_cwd(None, Some("/chat".into()), Some("/space".into())),
+            "/chat"
+        );
+        assert_eq!(
+            resolve_open_terminal_cwd(Some("~".into()), None, Some("/space".into())),
+            "/space",
+            "tilde is a fallback, not an override of the selected project"
+        );
+        assert_eq!(
+            resolve_open_terminal_cwd(None, None, Some("/space".into())),
+            "/space"
+        );
+        assert_eq!(resolve_open_terminal_cwd(None, None, None), home);
+        assert_eq!(
+            resolve_open_terminal_cwd(Some("~".into()), Some("/chat".into()), None),
+            "/chat"
+        );
+        assert_eq!(
+            resolve_open_terminal_cwd(Some("  ".into()), Some("/chat".into()), None),
+            "/chat"
+        );
+        assert_eq!(canvas_space_id("space-canvas:s1"), Some("s1"));
+        assert_eq!(canvas_space_id("space-canvas:"), None);
+        assert_eq!(canvas_space_id("chat-1"), None);
     }
 
     #[test]

@@ -36,6 +36,33 @@ pub type BoxIo = Box<dyn Io>;
 #[async_trait::async_trait]
 pub trait Connector: Send + Sync + 'static {
     async fn connect(&self, service: &str) -> anyhow::Result<BoxIo>;
+    /// [`Self::connect`] for a stream a known peer device opened. Services
+    /// scoped to one device (sign-in callbacks) check `peer`; the rest ignore it.
+    async fn connect_from(&self, peer: Option<&str>, service: &str) -> anyhow::Result<BoxIo> {
+        let _ = peer;
+        self.connect(service).await
+    }
+}
+
+/// A connector serving one authenticated peer: every open it handles is
+/// attributed to that device.
+pub struct PeerScoped {
+    peer: String,
+    inner: Arc<dyn Connector>,
+}
+impl PeerScoped {
+    pub fn new(peer: &str, inner: Arc<dyn Connector>) -> Self {
+        Self {
+            peer: peer.to_owned(),
+            inner,
+        }
+    }
+}
+#[async_trait::async_trait]
+impl Connector for PeerScoped {
+    async fn connect(&self, service: &str) -> anyhow::Result<BoxIo> {
+        self.inner.connect_from(Some(&self.peer), service).await
+    }
 }
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync + 'static {

@@ -500,12 +500,17 @@ impl BrowserSurface {
                     return;
                 }
                 let generation = self.favicon_generation;
+                // reqwest's system proxy has no loopback exemption; a local dev
+                // server's favicon must be fetched directly.
+                let direct = url::Url::parse(&url).is_ok_and(|parsed| model::loopback(&parsed));
                 let download = gpui_tokio::Tokio::spawn(cx, async move {
-                    let client = reqwest::Client::builder()
+                    let mut builder = reqwest::Client::builder()
                         .timeout(std::time::Duration::from_secs(5))
-                        .redirect(reqwest::redirect::Policy::limited(3))
-                        .build()
-                        .ok()?;
+                        .redirect(reqwest::redirect::Policy::limited(3));
+                    if direct {
+                        builder = builder.no_proxy();
+                    }
+                    let client = builder.build().ok()?;
                     let mut response =
                         client.get(url).send().await.ok()?.error_for_status().ok()?;
                     if response.content_length().is_some_and(|n| n > 1024 * 1024) {

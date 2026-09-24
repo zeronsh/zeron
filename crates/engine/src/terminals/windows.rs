@@ -258,6 +258,51 @@ fn resolve_shell(shell: &str, path: Option<&OsStr>) -> io::Result<std::path::Pat
     std::path::absolute(candidate)
 }
 
+/// CreateProcessW current directories do not accept `\\?\`-prefixed verbatim
+/// paths: cmd.exe treats them as UNC and silently falls back to the Windows
+/// directory. Canonicalized drive and UNC paths (checkout resolution in the
+/// RPC layer) must be de-verbatimed so terminal sessions actually start in the
+/// checkout. Reject every other verbatim namespace instead of reinterpreting
+/// a validated device/volume path as a relative path.
+fn plain_current_dir(cwd: &str) -> io::Result<String> {
+    if cwd.starts_with(r"\\.\") || cwd.starts_with(r"\??\") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "device namespace is not a valid current directory",
+        ));
+    }
+    let Some(rest) = cwd.strip_prefix(r"\\?\") else {
+        return Ok(cwd.to_string());
+    };
+
+    if rest
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC\\"))
+    {
+        let share = &rest[4..];
+        let mut components = share.split('\\');
+        let valid_share = components.next().is_some_and(|server| !server.is_empty())
+            && components.next().is_some_and(|name| !name.is_empty());
+        if valid_share {
+            return Ok(format!(r"\\{share}"));
+        }
+    } else {
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\'
+        {
+            return Ok(rest.to_string());
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "unsupported verbatim current directory",
+    ))
+}
+
 #[cfg(test)]
 mod resolution_tests {
     use super::*;
@@ -283,6 +328,46 @@ mod resolution_tests {
         );
         assert_eq!(resolve_shell(exe.to_str().unwrap(), None).unwrap(), exe);
     }
+
+    #[test]
+    fn plain_current_dir_strips_verbatim_prefixes() {
+        assert_eq!(
+            plain_current_dir(r"\\?\C:\work\repo").unwrap(),
+            r"C:\work\repo"
+        );
+        assert_eq!(
+            plain_current_dir(r"\\?\UNC\server\share\repo").unwrap(),
+            r"\\server\share\repo"
+        );
+        assert_eq!(
+            plain_current_dir(r"\\?\unc\server\share\repo").unwrap(),
+            r"\\server\share\repo"
+        );
+        assert_eq!(plain_current_dir(r"C:\work\repo").unwrap(), r"C:\work\repo");
+        assert_eq!(
+            plain_current_dir(r"\\server\share\repo").unwrap(),
+            r"\\server\share\repo"
+        );
+    }
+
+    #[test]
+    fn plain_current_dir_rejects_other_verbatim_namespaces() {
+        for cwd in [
+            r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\repo",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\repo",
+            r"\\?\UNC\server",
+            r"\\?\UNC\\share\repo",
+            r"\\?\relative\repo",
+            r"\\.\C:\repo",
+            r"\??\C:\repo",
+        ] {
+            assert_eq!(
+                plain_current_dir(cwd).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "accepted {cwd}"
+            );
+        }
+    }
 }
 
 pub(super) fn open(
@@ -302,7 +387,7 @@ pub(super) fn open(
     let mut command = vec![b'"' as u16];
     command.extend_from_slice(&executable[..executable.len() - 1]);
     command.extend([b'"' as u16, 0]);
-    let cwd = wide(OsStr::new(cwd))?;
+    let cwd = wide(OsStr::new(&plain_current_dir(cwd)?))?;
     let mut environment = std::collections::BTreeMap::new();
     let env_key = |key: &OsStr| -> OsString {
         key.to_str()

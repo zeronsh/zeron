@@ -15,7 +15,8 @@
 //!   natively.
 //! - **MacApp** (running out of an app bundle): download the app tarball, swap the
 //!   bundle directory, relaunch. Driven by the UI.
-//! - **Unmanaged** (source builds, hand-copied binaries): report only.
+//! - **Unmanaged** (source builds, hand-copied binaries): report only — the
+//!   UI's advisory strip links to [`RELEASES_PAGE`].
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -45,6 +46,11 @@ const CHECK_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(
 /// While an auto-apply is deferred behind active sessions, re-probe idleness
 /// this often.
 const IDLE_RECHECK: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// Release metadata is tiny. Bound both its buffered size and total transfer
+/// time so a compromised or misconfigured public feed cannot hold a checker
+/// forever or make every local install buffer an unbounded response.
+const RELEASE_METADATA_MAX_BYTES: usize = 1024 * 1024;
+const RELEASE_METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
 // Release metadata
@@ -138,30 +144,31 @@ pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
     let base = release_base(edge_url)?;
     let client = http_client()?;
     let manifest_url = format!("{base}/manifest.json");
-    match client.get(&manifest_url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let manifest: Manifest = resp.json().await.context("parsing manifest.json")?;
+    match fetch_release_metadata(&client, &manifest_url).await {
+        Ok(response) if response.status.is_success() => {
+            let manifest: Manifest =
+                serde_json::from_slice(&response.body).context("parsing manifest.json")?;
             if manifest.version.trim().is_empty() {
                 bail!("manifest.json has an empty version");
             }
             return Ok(manifest);
         }
-        Ok(resp) => {
-            tracing::debug!(status = %resp.status(), "manifest.json unavailable; trying latest.txt")
+        Ok(response) => {
+            tracing::debug!(status = %response.status, "manifest.json unavailable; trying latest.txt")
         }
         Err(err) => tracing::debug!(error = %err, "manifest.json fetch failed; trying latest.txt"),
     }
     let latest_url = format!("{base}/latest.txt");
-    let version = client
-        .get(&latest_url)
-        .send()
+    let response = fetch_release_metadata(&client, &latest_url)
         .await
-        .context("fetching latest.txt")?
-        .error_for_status()
-        .context("fetching latest.txt")?
-        .text()
-        .await
-        .context("reading latest.txt")?
+        .context("fetching latest.txt")?;
+    anyhow::ensure!(
+        response.status.is_success(),
+        "fetching latest.txt: HTTP {}",
+        response.status
+    );
+    let version = std::str::from_utf8(&response.body)
+        .context("reading latest.txt as UTF-8")?
         .trim()
         .to_string();
     if version.is_empty() {
@@ -171,6 +178,67 @@ pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
         version,
         files: BTreeMap::new(),
     })
+}
+
+#[derive(Debug)]
+struct ReleaseMetadataResponse {
+    status: reqwest::StatusCode,
+    body: Vec<u8>,
+}
+
+async fn fetch_release_metadata(
+    client: &reqwest::Client,
+    url: &str,
+) -> anyhow::Result<ReleaseMetadataResponse> {
+    fetch_release_metadata_with_limits(
+        client,
+        url,
+        RELEASE_METADATA_TIMEOUT,
+        RELEASE_METADATA_MAX_BYTES,
+    )
+    .await
+}
+
+async fn fetch_release_metadata_with_limits(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: std::time::Duration,
+    max_bytes: usize,
+) -> anyhow::Result<ReleaseMetadataResponse> {
+    let request = async {
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("fetching {url}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Ok(ReleaseMetadataResponse {
+                status,
+                body: Vec::new(),
+            });
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            bail!("release metadata exceeds {max_bytes} bytes");
+        }
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("reading release metadata")?;
+            anyhow::ensure!(
+                body.len().saturating_add(chunk.len()) <= max_bytes,
+                "release metadata exceeds {max_bytes} bytes"
+            );
+            body.extend_from_slice(&chunk);
+        }
+        Ok(ReleaseMetadataResponse { status, body })
+    };
+    tokio::time::timeout(timeout, request)
+        .await
+        .with_context(|| format!("fetching {url} exceeded the metadata deadline"))?
 }
 
 fn http_client() -> anyhow::Result<reqwest::Client> {
@@ -220,6 +288,11 @@ fn validate_release_override(value: &str) -> anyhow::Result<String> {
     );
     Ok(url.as_str().trim_end_matches('/').to_owned())
 }
+
+/// The project's GitHub releases page — the advisory update strip opens this
+/// for unmanaged installs (source builds, hand-copied binaries), where no
+/// updater flow exists to drive.
+pub const RELEASES_PAGE: &str = "https://github.com/zeronsh/zeron/releases";
 
 fn release_base(edge_url: &str) -> anyhow::Result<String> {
     if let Ok(url) = std::env::var("ZERON_RELEASES_URL")
@@ -676,8 +749,12 @@ impl Updater {
             shutdown_tx: Arc::new(shutdown_tx),
             check_task: Arc::new(std::sync::Mutex::new(None)),
         };
+        // Subscribe before spawning so an immediate `check_now` cannot land
+        // before the background task first polls and be lost behind the 20s
+        // initial delay.
+        let checks = updater.check_tx.subscribe();
         let for_loop = updater.clone();
-        let task = tokio::spawn(async move { for_loop.check_loop().await });
+        let task = tokio::spawn(async move { for_loop.check_loop(checks).await });
         *updater.check_task.lock().unwrap() = Some(task);
         updater
     }
@@ -712,7 +789,7 @@ impl Updater {
         self.quiescent.as_ref().is_none_or(|check| check())
     }
 
-    async fn check_loop(&self) {
+    async fn check_loop(&self, mut checks: watch::Receiver<u64>) {
         let mut shutdown = self.shutdown_tx.subscribe();
         // Shutdown must cut the loop at ANY await point — including mid
         // `check_once()` / `auto_apply_when_idle()` HTTP — so the whole body
@@ -720,7 +797,6 @@ impl Updater {
         tokio::select! {
             _ = shutdown.wait_for(|stop| *stop) => {}
             _ = async {
-                let mut checks = self.check_tx.subscribe();
                 tokio::select! {
                     _ = tokio::time::sleep(CHECK_INITIAL_DELAY) => {}
                     _ = checks.changed() => {}
@@ -765,18 +841,35 @@ impl Updater {
             }
         }
         let mut deferred = false;
-        while !self.quiescent_now() {
-            if !deferred {
-                deferred = true;
-                tracing::info!("auto-update deferred: sessions or terminals active");
+        loop {
+            while !self.quiescent_now() {
+                if !deferred {
+                    deferred = true;
+                    tracing::info!("auto-update deferred: sessions or terminals active");
+                }
+                tokio::time::sleep(IDLE_RECHECK).await;
             }
-            tokio::time::sleep(IDLE_RECHECK).await;
-        }
-        match self.apply().await {
-            Ok(version) => {
-                tracing::info!(%version, "auto-update applied; service restarting")
+            // `apply_inner` fetches and stages again so a long defer lands on
+            // the newest release. Re-check quiescence immediately before the
+            // symlink swap: work can begin while that network/disk I/O runs.
+            match self.apply_inner(true).await {
+                Ok(Some(version)) => {
+                    tracing::info!(%version, "auto-update applied; service restarting");
+                    return;
+                }
+                Ok(None) => {
+                    if !deferred {
+                        deferred = true;
+                        tracing::info!(
+                            "auto-update deferred: activity began while staging the update"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "auto-update failed");
+                    return;
+                }
             }
-            Err(err) => tracing::warn!(error = %err, "auto-update failed"),
         }
     }
 
@@ -814,6 +907,15 @@ impl Updater {
     /// then restart the service after a short delay so the caller's RPC reply
     /// flushes before systemd/launchd kills this process.
     pub async fn apply(&self) -> anyhow::Result<String> {
+        self.apply_inner(false)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("update became busy before apply"))
+    }
+
+    /// `require_quiescent` is used by automatic updates. It deliberately checks
+    /// after all network and staging I/O and directly before the destructive
+    /// swap/restart boundary; `None` tells the caller to wait and try again.
+    async fn apply_inner(&self, require_quiescent: bool) -> anyhow::Result<Option<String>> {
         let InstallKind::Managed { app_root } = detect_install() else {
             bail!(
                 "this install is not update-managed — the desktop app updates from its UI; \
@@ -825,6 +927,9 @@ impl Updater {
             bail!("already up to date ({})", current_version());
         }
         stage_headless(&self.edge_url, &manifest, &app_root).await?;
+        if require_quiescent && !self.quiescent_now() {
+            return Ok(None);
+        }
         apply_headless(&app_root, &manifest.version)?;
         tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -832,7 +937,7 @@ impl Updater {
                 tracing::warn!(error = %err, "service restart failed — restart the engine to finish the update");
             }
         });
-        Ok(manifest.version)
+        Ok(Some(manifest.version))
     }
 }
 
@@ -914,6 +1019,90 @@ mod tests {
             10
         );
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn release_metadata_has_size_and_total_time_limits() {
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Reject an advertised oversized body before buffering it.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n01234567890")
+                .await
+                .unwrap();
+        });
+        let client =
+            http_client_with_timeouts(Duration::from_secs(1), Duration::from_secs(1)).unwrap();
+        let error = fetch_release_metadata_with_limits(
+            &client,
+            &format!("http://{address}"),
+            Duration::from_secs(1),
+            10,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeds 10 bytes"));
+        server.await.unwrap();
+
+        // Enforce the same cap when Content-Length is absent.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n01234567890")
+                .await
+                .unwrap();
+        });
+        let error = fetch_release_metadata_with_limits(
+            &client,
+            &format!("http://{address}"),
+            Duration::from_secs(1),
+            10,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeds 10 bytes"));
+        server.await.unwrap();
+
+        // Progressing bytes stay below the client's inactivity timeout but
+        // must still obey the metadata operation's total deadline.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n")
+                .await
+                .unwrap();
+            for _ in 0..10 {
+                if socket.write_all(b"x").await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        });
+        let error = fetch_release_metadata_with_limits(
+            &client,
+            &format!("http://{address}"),
+            Duration::from_millis(80),
+            100,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("metadata deadline"));
+        server.abort();
     }
 
     #[tokio::test]

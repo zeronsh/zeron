@@ -485,8 +485,42 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 })
                 .await;
                 core.workspace.set_chat_archived("first", true).unwrap();
-                wait_for(window, cx, "archived explorer cleanup", |shell, _| {
-                    !shell.files.contains_key("first") && !shell.files_subs.contains_key("first")
+                wait_for(window, cx, "archived session", |shell, cx| {
+                    shell
+                        .state
+                        .read(cx)
+                        .chats
+                        .iter()
+                        .any(|chat| chat.id == "first" && chat.archived)
+                })
+                .await;
+                window
+                    .update(cx, |shell, window, cx| {
+                        assert!(shell.files_panel_open(cx));
+                        assert_eq!(shell.files["first"].entity_id(), first_explorer.entity_id());
+                        assert!(shell.files_subs.contains_key("first"));
+                        shell.toggle_files_panel(window, cx);
+                        assert!(!shell.files_panel_open(cx));
+                        shell.toggle_files_panel(window, cx);
+                        assert!(shell.files_panel_open(cx));
+                    })
+                    .unwrap();
+                // An archived chat's explorer must survive subsequent state updates
+                // and keep receiving filesystem changes after being reopened.
+                state.update(cx, |_, cx| cx.notify());
+                std::fs::write(project.join("archived.txt"), "still accessible\n").unwrap();
+                wait_for(window, cx, "archived explorer update", |shell, cx| {
+                    shell.files_panel_open(cx)
+                        && shell.files.get("first").is_some_and(|files| {
+                            files.read(cx).tree().node("archived.txt").is_some()
+                        })
+                })
+                .await;
+                core.workspace.delete_chat("first").unwrap();
+                wait_for(window, cx, "deleted explorer cleanup", |shell, _| {
+                    !shell.files.contains_key("first")
+                        && !shell.files_subs.contains_key("first")
+                        && !shell.panels.get("first").files_open
                 })
                 .await;
                 drop(first_explorer);

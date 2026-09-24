@@ -719,7 +719,10 @@ async fn antigravity_run_without_sign_in_points_to_settings_instead_of_a_browser
     assert_eq!(dones.len(), 1, "{events:?}");
     assert_eq!(dones[0].0, DoneStatus::Errored);
     let error = dones[0].1.as_deref().unwrap_or_default();
-    assert!(error.contains("Settings → Agents → Sign in"), "{error}");
+    assert!(
+        error.contains("Settings → Providers → Antigravity and connect an account"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -1321,7 +1324,7 @@ async fn antigravity_load_and_prompt_auth_expiry_point_to_sign_in() {
                 .1
                 .as_deref()
                 .unwrap()
-                .contains("Settings → Agents → Sign in"),
+                .contains("Settings → Providers → Antigravity and connect an account"),
             "{events:?}"
         );
     }

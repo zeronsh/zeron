@@ -21,15 +21,19 @@ pub fn archived_chats(chats: &[Chat]) -> Vec<&Chat> {
         .collect()
 }
 
+const ARCHIVE_PAGE_SIZE: usize = 40;
+
+fn archive_page(total: usize, requested: usize) -> usize {
+    requested.min(total.saturating_sub(1) / ARCHIVE_PAGE_SIZE)
+}
+
 pub struct ArchivedPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
     error: Option<SharedString>,
     /// Chat with an in-flight unarchive (button shows working state).
     busy: Option<String>,
-    /// Row index under the pointer — drives the original's `group-hover`
-    /// Unarchive reveal (`opacity-0 group-hover:opacity-100`).
-    hovered: Option<usize>,
+    page: usize,
     task: Option<Task<()>>,
     _observe: Subscription,
 }
@@ -42,7 +46,7 @@ impl ArchivedPage {
             scroll: widgets::PageScroll::default(),
             error: None,
             busy: None,
-            hovered: None,
+            page: 0,
             task: None,
             _observe: observe,
         }
@@ -92,21 +96,36 @@ impl popover::ScrollRailHost for ArchivedPage {
 
 impl Render for ArchivedPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx).clone();
+        let theme = Theme::of(cx).for_settings_surface();
         let now = chrono::Utc::now();
-        let (rows, device_names): (Vec<Chat>, std::collections::HashMap<String, String>) = {
+        let (rows, device_names, count): (
+            Vec<Chat>,
+            std::collections::HashMap<String, String>,
+            usize,
+        ) = {
             let state = self.state.read(cx);
-            let rows = archived_chats(&state.chats).into_iter().cloned().collect();
+            let archived = archived_chats(&state.chats);
+            let count = archived.len();
+            let page = archive_page(count, self.page);
+            if self.page != page {
+                self.page = page;
+                self.scroll.reset();
+            }
+            let rows = archived
+                .into_iter()
+                .skip(self.page * 40)
+                .take(40)
+                .cloned()
+                .collect();
             let names = state
                 .devices
                 .iter()
                 .map(|d| (d.id.clone(), d.name.clone()))
                 .collect();
-            (rows, names)
+            (rows, names, count)
         };
         let busy = self.busy.clone();
-        let count = rows.len();
-
+        let page = self.page;
         let items: Vec<AnyElement> = rows
             .into_iter()
             .enumerate()
@@ -128,7 +147,6 @@ impl Render for ArchivedPage {
                 let location: Option<SharedString> =
                     crate::state::chat_location(&chat).map(Into::into);
                 let is_busy = busy.as_deref() == Some(chat.id.as_str());
-                let row_hovered = self.hovered == Some(ix);
                 let chat_id = chat.id.clone();
                 // zeron settings.archived.tsx row: archive tile, medium title
                 // + tabular time, quiet device · location meta, Unarchive.
@@ -142,14 +160,6 @@ impl Render for ArchivedPage {
                     .px(px(12.0))
                     .py(px(8.0))
                     .hover(|s| s.bg(crate::theme::ink(0.03)))
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered {
-                            this.hovered = Some(ix);
-                        } else if this.hovered == Some(ix) {
-                            this.hovered = None;
-                        }
-                        cx.notify();
-                    }))
                     .child(
                         div()
                             .flex_none()
@@ -191,7 +201,7 @@ impl Render for ArchivedPage {
                                         div()
                                             .flex_none()
                                             .text_size(crate::typography::ui_rems(11.0))
-                                            .text_color(theme.text_muted.opacity(0.5))
+                                            .text_color(theme.text_muted)
                                             .child(time_ago),
                                     ),
                             )
@@ -206,7 +216,7 @@ impl Render for ArchivedPage {
                                     .items_center()
                                     .gap(px(6.0))
                                     .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text_muted.opacity(0.55));
+                                    .text_color(theme.text_muted);
                                 let both = device.is_some() && location.is_some();
                                 if let Some(device) = device {
                                     meta = meta.child(device);
@@ -221,9 +231,7 @@ impl Render for ArchivedPage {
                             }),
                     )
                     .child(
-                        // Hidden until the row is hovered (zeron `opacity-0
-                        // group-hover:opacity-100`); hover fill is the solid
-                        // accent tone (`hover:bg-accent`).
+                        // Keep the action visible without list-wide hover invalidation.
                         div()
                             .id(("unarchive", ix))
                             .flex_none()
@@ -238,10 +246,13 @@ impl Render for ArchivedPage {
                             .border_color(theme.border)
                             .text_size(crate::typography::ui_rems(12.0))
                             .text_color(theme.text_muted)
-                            .opacity(if row_hovered || is_busy { 1.0 } else { 0.0 })
+                            .opacity(0.8)
                             .when(is_busy, |el| el.opacity(0.4))
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.surface_raised).text_color(theme.text))
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.unarchive(chat_id.clone(), cx);
                             }))
@@ -268,7 +279,7 @@ impl Render for ArchivedPage {
                 .flex_col()
                 .items_center()
                 .text_center()
-                .text_color(theme.text_muted.opacity(0.5))
+                .text_color(theme.text_muted)
                 .child(
                     // `opacity-40` on top of the inherited muted/50 — an
                     // effectively ~20% glyph (zeron settings.archived.tsx).
@@ -286,7 +297,7 @@ impl Render for ArchivedPage {
                     div()
                         .mt(px(4.0))
                         .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted.opacity(0.4))
+                        .text_color(theme.text_muted)
                         .child(SharedString::from(
                             "Right-click a session in the sidebar to archive it.",
                         )),
@@ -302,6 +313,53 @@ impl Render for ArchivedPage {
                 .into_any_element()
         };
 
+        let pagination = (count > ARCHIVE_PAGE_SIZE).then(|| {
+            div()
+                .mt(px(16.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    widgets::ghost_action(&theme)
+                        .id("archived-previous")
+                        .role(gpui::Role::Button)
+                        .aria_label("Previous archived sessions")
+                        .tab_index(0)
+                        .opacity(if page > 0 { 1.0 } else { 0.4 })
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.page = this.page.saturating_sub(1);
+                            this.scroll.reset();
+                            cx.notify();
+                        }))
+                        .child("Previous"),
+                )
+                .child(format!(
+                    "{}–{} of {}",
+                    page * ARCHIVE_PAGE_SIZE + 1,
+                    ((page + 1) * ARCHIVE_PAGE_SIZE).min(count),
+                    count
+                ))
+                .child(
+                    widgets::ghost_action(&theme)
+                        .id("archived-next")
+                        .role(gpui::Role::Button)
+                        .aria_label("Next archived sessions")
+                        .tab_index(0)
+                        .opacity(if (page + 1) * ARCHIVE_PAGE_SIZE < count {
+                            1.0
+                        } else {
+                            0.4
+                        })
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.page = archive_page(count, this.page + 1);
+                            this.scroll.reset();
+                            cx.notify();
+                        }))
+                        .child("Next"),
+                )
+        });
         let scrollbar = popover::rail(self, "archived-page-scrollbar", &theme, cx);
         div()
             .id("archived-page-host")
@@ -309,35 +367,47 @@ impl Render for ArchivedPage {
             .size_full()
             .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                div()
-                    .id("archived-page")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll.scroll)
-                    .child(
-                        widgets::page_column()
-                            .child(widgets::page_header(
-                                &theme,
-                                "Archived sessions",
-                                (count > 0).then_some(count),
-                            ))
-                            .child(widgets::page_subtitle(
-                                &theme,
-                                "Hidden from the sidebar, never deleted. Unarchiving puts a session back on its device.",
-                            ))
-                            .when_some(self.error.clone(), |el, message| {
-                                el.child(
-                                    widgets::error_strip(&theme, message)
-                                        .id("archived-error")
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.error = None;
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                            .child(body),
-                    ),
+                crate::edge_fade::edge_faded(
+                    16.0,
+                    true,
+                    true,
+                    div()
+                        .id("archived-page")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll.scroll)
+                        .child(
+                            widgets::page_column()
+                                .child(widgets::page_header(
+                                    &theme,
+                                    "Archived sessions",
+                                    (count > 0).then_some(count),
+                                ))
+                                .child(widgets::page_subtitle(
+                                    &theme,
+                                    "Hidden from the sidebar until restored.",
+                                ))
+                                .when_some(self.error.clone(), |el, message| {
+                                    el.child(
+                                        widgets::error_strip(&theme, message)
+                                            .id("archived-error")
+                                            .cursor_pointer()
+                                            .tab_index(0)
+                                            .role(gpui::Role::Button)
+                                            .focus_visible(|s| {
+                                                s.border_2().border_color(theme.accent).opacity(1.0)
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.error = None;
+                                                cx.notify();
+                                            })),
+                                    )
+                                })
+                                .child(body)
+                                .children(pagination),
+                        ),
+                )
+                .fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
     }
@@ -369,6 +439,15 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
         }
+    }
+
+    #[test]
+    fn archive_page_clamps_after_removal_and_handles_exact_boundaries() {
+        assert_eq!(archive_page(0, 9), 0);
+        assert_eq!(archive_page(40, 1), 0);
+        assert_eq!(archive_page(41, 1), 1);
+        assert_eq!(archive_page(80, 2), 1);
+        assert_eq!(archive_page(81, 2), 2);
     }
 
     #[test]

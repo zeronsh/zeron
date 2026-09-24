@@ -133,6 +133,16 @@
     border: 1px solid var(--line);
   }
   .btn.ghost:hover { color: var(--ink); border-color: var(--faint); background: transparent; }
+  .gh-stars {
+    padding-left: 9px;
+    border-left: 1px solid var(--line);
+    font-variant-numeric: tabular-nums;
+  }
+  .gh-icon .gh-stars {
+    padding-left: 7px;
+    border-left: 0;
+    font-size: 12.5px;
+  }
   .btn.small {
     height: var(--nav-control-height);
     padding: 0 13px;
@@ -177,6 +187,30 @@
   }
   .all-downloads { font-size: 13.5px; color: var(--dim); transition: color .15s; }
   .all-downloads:hover { color: var(--ink); }
+  .used-by { margin-top: 44px; }
+  .used-by p { font-size: 12.5px; color: var(--faint); }
+  .used-by-logos {
+    margin-top: 16px;
+    display: flex;
+    align-items: center;
+    gap: 30px;
+    flex-wrap: wrap;
+  }
+  /* at rest each logo is a --faint silhouette, like .agent-icon; hover
+     fades the real brand colors in */
+  .used-by-logos a { position: relative; display: inline-flex; }
+  .used-by-logos a::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-color: var(--faint);
+    -webkit-mask: var(--logo) no-repeat center / contain;
+    mask: var(--logo) no-repeat center / contain;
+    transition: opacity .2s;
+  }
+  .used-by-logos img { width: auto; opacity: 0; transition: opacity .2s; }
+  .used-by-logos a:hover::after { opacity: 0; }
+  .used-by-logos a:hover img { opacity: 1; }
   .hero-ascii {
     justify-self: end;
     font-family: var(--mono);
@@ -226,7 +260,7 @@
     display: flex;
     align-items: center;
     gap: 26px;
-    margin-top: 40px;
+    margin-bottom: 32px;
     flex-wrap: wrap;
   }
   .agent-icon {
@@ -747,7 +781,7 @@
     h1 { font-size: clamp(32px, 9vw, 38px); }
     .hero p.sub { font-size: 15px; }
     .hero .cta-row { margin-top: 28px; }
-    .agents { gap: 22px; margin-top: 30px; }
+    .agents { gap: 22px; margin-bottom: 26px; }
     .agent-icon { width: 20px; height: 20px; }
     .shot { padding: 28px 0 0; }
     .shot img { border-radius: 4px; }
@@ -785,7 +819,7 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 0 0-4.8851-1.5152.0741.0741 0 0 0-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 0 0-.0785-.037 19.7363 19.7363 0 0 0-4.8852 1.515.0699.0699 0 0 0-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 0 0 .0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 0 0 .0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 0 0-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 0 1-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 0 1 .0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 0 1 .0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 0 1-.0066.1276 12.2986 12.2986 0 0 1-1.873.8914.0766.0766 0 0 0-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 0 0 .0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 0 0 .0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 0 0-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189z"/></svg>
         </a>
         <a class="gh-icon" href="https://github.com/zeronsh/comet" aria-label="GitHub">
-          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg><span class="gh-stars" hidden></span>
         </a>
         <a class="btn small" id="nav-download" href="#downloads">Download</a>
       </div>
@@ -795,6 +829,16 @@
   <header class="hero">
     <div class="wrap hero-grid">
       <div>
+        <div class="agents" aria-label="Supported agents">
+          <span class="agent-icon" title="Claude Code" style="--icon: url('/assets/icons/claude-mark.svg')"></span>
+          <span class="agent-icon" title="Codex" style="--icon: url('/assets/icons/openai-mark.svg')"></span>
+          <span class="agent-icon" title="Cursor" style="--icon: url('/assets/icons/cursor-mark.svg')"></span>
+          <span class="agent-icon" title="Grok" style="--icon: url('/assets/icons/grok-mark.svg')"></span>
+          <span class="agent-icon" title="Hermes" style="--icon: url('/assets/icons/hermes-mark.svg')"></span>
+          <span class="agent-icon" title="Pi" style="--icon: url('/assets/icons/pi-mark.svg')"></span>
+          <span class="agent-icon" title="Devin" style="--icon: url('/assets/icons/devin-mark.svg')"></span>
+          <span class="agent-icon" title="OpenCode" style="--icon: url('/assets/icons/opencode-mark.svg')"></span>
+        </div>
         <h1>Access your agents from any device.</h1>
         <p class="sub">
           Zeron runs Claude Code, Codex, Grok, Hermes and Pi on your
@@ -805,15 +849,13 @@
           <a class="all-downloads" href="#downloads">All downloads ↓</a>
           <span class="cta-ver" id="ver">v0.2.66</span>
         </div>
-        <div class="agents" aria-label="Supported agents">
-          <span class="agent-icon" title="Claude Code" style="--icon: url('/assets/icons/claude-mark.svg')"></span>
-          <span class="agent-icon" title="Codex" style="--icon: url('/assets/icons/openai-mark.svg')"></span>
-          <span class="agent-icon" title="Cursor" style="--icon: url('/assets/icons/cursor-mark.svg')"></span>
-          <span class="agent-icon" title="Grok" style="--icon: url('/assets/icons/grok-mark.svg')"></span>
-          <span class="agent-icon" title="Hermes" style="--icon: url('/assets/icons/hermes-mark.svg')"></span>
-          <span class="agent-icon" title="Pi" style="--icon: url('/assets/icons/pi-mark.svg')"></span>
-          <span class="agent-icon" title="Devin" style="--icon: url('/assets/icons/devin-mark.svg')"></span>
-          <span class="agent-icon" title="OpenCode" style="--icon: url('/assets/icons/opencode-mark.svg')"></span>
+        <div class="used-by">
+          <p>Used by developers from</p>
+          <div class="used-by-logos">
+            <a href="https://cursor.com" target="_blank" rel="noopener" style="--logo: url('/assets/logos/cursor.svg')"><img src="/assets/logos/cursor.svg" alt="Cursor" height="20" /></a>
+            <a href="https://unsloth.ai" target="_blank" rel="noopener" style="--logo: url('/assets/logos/unsloth-mask.png')"><img src="/assets/logos/unsloth.png" alt="Unsloth" height="26" /></a>
+            <a href="https://www.thecontextcompany.com" target="_blank" rel="noopener" style="--logo: url('/assets/logos/thecontextcompany.png')"><img src="/assets/logos/thecontextcompany.png" alt="The Context Company" height="16" /></a>
+          </div>
         </div>
       </div>
       <pre class="hero-ascii" aria-hidden="true">++=========+=====+++++++++++******+++++++++++++++++++++*****#############%%######***#######*#%#######****#####
@@ -935,7 +977,7 @@
              Grok, Hermes and Pi — the same sessions and tools you use each day,
              in one fast native window on every device.</p>
           <div class="cta-row">
-            <a class="btn ghost" href="https://github.com/zeronsh/comet">Star on GitHub ↗</a>
+            <a class="btn ghost" href="https://github.com/zeronsh/comet">Star on GitHub ↗<span class="gh-stars" hidden></span></a>
           </div>
         </div>
       </div>
@@ -1021,6 +1063,15 @@
               </div>
               <p>Damn that UI is crisp!!</p>
             </a>
+            <a class="tweet" href="https://x.com/FrancoE114696/status/2102551301871501508" target="_blank" rel="noopener">
+              <div class="tweet-head">
+                <img src="/assets/tweets/francoe114696.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">Fran Escob</span><span class="tweet-handle">@FrancoE114696</span></div>
+                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
+              </div>
+              <p>Oh man, this is the best UI I've ever tried!
+For real. It feels really smooth. Typing, reading, everything. Really fast. Right now it's my main UI for coding.</p>
+            </a>
             <a class="tweet" href="https://x.com/jv_nguyen518/status/2082897177001464251" target="_blank" rel="noopener">
               <div class="tweet-head">
                 <img src="/assets/tweets/jv_nguyen518.jpg" alt="" loading="lazy" width="200" height="200" />
@@ -1028,6 +1079,14 @@
                 <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
               </div>
               <p>woah this is buttery af!!</p>
+            </a>
+            <a class="tweet" href="https://x.com/zebassembly/status/2082935161793245227" target="_blank" rel="noopener">
+              <div class="tweet-head">
+                <img src="/assets/tweets/zebassembly.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">zeb</span><span class="tweet-handle">@zebassembly</span></div>
+                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
+              </div>
+              <p>This looks absolutely fantastic, I can't think of a single example of <em class="hl">GPUI</em> looking this good.</p>
             </a>
             <a class="tweet" href="https://x.com/emanueledpt/status/2083105449608360297" target="_blank" rel="noopener">
               <div class="tweet-head">
@@ -1039,14 +1098,6 @@
 gg
 this space is so crowded</p>
             </a>
-            <a class="tweet" href="https://x.com/zebassembly/status/2082935161793245227" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/zebassembly.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">zeb</span><span class="tweet-handle">@zebassembly</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>This looks absolutely fantastic, I can't think of a single example of <em class="hl">GPUI</em> looking this good.</p>
-            </a>
             <a class="tweet" href="https://x.com/maxktz/status/2082956238153723904" target="_blank" rel="noopener">
               <div class="tweet-head">
                 <img src="/assets/tweets/maxktz.jpg" alt="" loading="lazy" width="200" height="200" />
@@ -1055,29 +1106,13 @@ this space is so crowded</p>
               </div>
               <p>amazing!</p>
             </a>
-            <a class="tweet" href="https://x.com/dipxsyy/status/2082889765603742123" target="_blank" rel="noopener">
+            <a class="tweet" href="https://x.com/sahilcodex/status/2102602368512860598" target="_blank" rel="noopener">
               <div class="tweet-head">
-                <img src="/assets/tweets/dipxsyy.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Deepanshu Mishra</span><span class="tweet-handle">@dipxsyy</span></div>
+                <img src="/assets/tweets/sahilcodex.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">丂ﾑんﾉﾚ</span><span class="tweet-handle">@sahilcodex</span></div>
                 <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
               </div>
-              <p>clean af</p>
-            </a>
-            <a class="tweet" href="https://x.com/0xwthw/status/2087320173522952320" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/0xwthw.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">wthw</span><span class="tweet-handle">@0xwthw</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>if i see another multi-agent terminal orchestrator app i'm gonna crash out</p>
-            </a>
-            <a class="tweet" href="https://x.com/localhost_5173/status/2088481357664313718" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/localhost_5173.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">EGOIST</span><span class="tweet-handle">@localhost_5173</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Zeron looks really good</p>
+              <p>one of the best app i have ever used</p>
             </a>
             <a class="tweet" href="https://x.com/theCTO/status/2088337024868889064" target="_blank" rel="noopener">
               <div class="tweet-head">
@@ -1095,6 +1130,14 @@ this space is so crowded</p>
               </div>
               <p>one of the best looking <em class="hl">gpui</em> interfaces i've seen yet, great work</p>
             </a>
+            <a class="tweet" href="https://x.com/0xwthw/status/2087320173522952320" target="_blank" rel="noopener">
+              <div class="tweet-head">
+                <img src="/assets/tweets/0xwthw.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">wthw</span><span class="tweet-handle">@0xwthw</span></div>
+                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
+              </div>
+              <p>if i see another multi-agent terminal orchestrator app i'm gonna crash out</p>
+            </a>
             <a class="tweet" href="https://x.com/leanderriefel/status/2088396806396809544" target="_blank" rel="noopener">
               <div class="tweet-head">
                 <img src="/assets/tweets/leanderriefel.jpg" alt="" loading="lazy" width="200" height="200" />
@@ -1103,13 +1146,13 @@ this space is so crowded</p>
               </div>
               <p>I'm getting emotional seeing a UI so buttery smooth in performance after using the Codex App on Windows all day.</p>
             </a>
-            <a class="tweet" href="https://x.com/swarajb/status/2088510531569405952" target="_blank" rel="noopener">
+            <a class="tweet" href="https://x.com/dev_shekhawat/status/2102533565590462728" target="_blank" rel="noopener">
               <div class="tweet-head">
-                <img src="/assets/tweets/swarajb.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">swaraj</span><span class="tweet-handle">@swarajb</span></div>
+                <img src="/assets/tweets/dev_shekhawat.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">Dev</span><span class="tweet-handle">@dev_shekhawat</span></div>
                 <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
               </div>
-              <p>btw you can still have similar performance with electron + get way more features</p>
+              <p>This feels refreshing! already loving it</p>
             </a>
           </div>
           <div class="tweet-group" aria-hidden="true">
@@ -1121,6 +1164,15 @@ this space is so crowded</p>
               </div>
               <p>Damn that UI is crisp!!</p>
             </a>
+            <a class="tweet" href="https://x.com/FrancoE114696/status/2102551301871501508" target="_blank" rel="noopener" tabindex="-1">
+              <div class="tweet-head">
+                <img src="/assets/tweets/francoe114696.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">Fran Escob</span><span class="tweet-handle">@FrancoE114696</span></div>
+                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
+              </div>
+              <p>Oh man, this is the best UI I've ever tried!
+For real. It feels really smooth. Typing, reading, everything. Really fast. Right now it's my main UI for coding.</p>
+            </a>
             <a class="tweet" href="https://x.com/jv_nguyen518/status/2082897177001464251" target="_blank" rel="noopener" tabindex="-1">
               <div class="tweet-head">
                 <img src="/assets/tweets/jv_nguyen518.jpg" alt="" loading="lazy" width="200" height="200" />
@@ -1128,6 +1180,14 @@ this space is so crowded</p>
                 <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
               </div>
               <p>woah this is buttery af!!</p>
+            </a>
+            <a class="tweet" href="https://x.com/zebassembly/status/2082935161793245227" target="_blank" rel="noopener" tabindex="-1">
+              <div class="tweet-head">
+                <img src="/assets/tweets/zebassembly.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">zeb</span><span class="tweet-handle">@zebassembly</span></div>
+                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
+              </div>
+              <p>This looks absolutely fantastic, I can't think of a single example of <em class="hl">GPUI</em> looking this good.</p>
             </a>
             <a class="tweet" href="https://x.com/emanueledpt/status/2083105449608360297" target="_blank" rel="noopener" tabindex="-1">
               <div class="tweet-head">
@@ -1139,14 +1199,6 @@ this space is so crowded</p>
 gg
 this space is so crowded</p>
             </a>
-            <a class="tweet" href="https://x.com/zebassembly/status/2082935161793245227" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/zebassembly.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">zeb</span><span class="tweet-handle">@zebassembly</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>This looks absolutely fantastic, I can't think of a single example of <em class="hl">GPUI</em> looking this good.</p>
-            </a>
             <a class="tweet" href="https://x.com/maxktz/status/2082956238153723904" target="_blank" rel="noopener" tabindex="-1">
               <div class="tweet-head">
                 <img src="/assets/tweets/maxktz.jpg" alt="" loading="lazy" width="200" height="200" />
@@ -1155,29 +1207,13 @@ this space is so crowded</p>
               </div>
               <p>amazing!</p>
             </a>
-            <a class="tweet" href="https://x.com/dipxsyy/status/2082889765603742123" target="_blank" rel="noopener" tabindex="-1">
+            <a class="tweet" href="https://x.com/sahilcodex/status/2102602368512860598" target="_blank" rel="noopener" tabindex="-1">
               <div class="tweet-head">
-                <img src="/assets/tweets/dipxsyy.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Deepanshu Mishra</span><span class="tweet-handle">@dipxsyy</span></div>
+                <img src="/assets/tweets/sahilcodex.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">丂ﾑんﾉﾚ</span><span class="tweet-handle">@sahilcodex</span></div>
                 <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
               </div>
-              <p>clean af</p>
-            </a>
-            <a class="tweet" href="https://x.com/0xwthw/status/2087320173522952320" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/0xwthw.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">wthw</span><span class="tweet-handle">@0xwthw</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>if i see another multi-agent terminal orchestrator app i'm gonna crash out</p>
-            </a>
-            <a class="tweet" href="https://x.com/localhost_5173/status/2088481357664313718" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/localhost_5173.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">EGOIST</span><span class="tweet-handle">@localhost_5173</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Zeron looks really good</p>
+              <p>one of the best app i have ever used</p>
             </a>
             <a class="tweet" href="https://x.com/theCTO/status/2088337024868889064" target="_blank" rel="noopener" tabindex="-1">
               <div class="tweet-head">
@@ -1195,6 +1231,14 @@ this space is so crowded</p>
               </div>
               <p>one of the best looking <em class="hl">gpui</em> interfaces i've seen yet, great work</p>
             </a>
+            <a class="tweet" href="https://x.com/0xwthw/status/2087320173522952320" target="_blank" rel="noopener" tabindex="-1">
+              <div class="tweet-head">
+                <img src="/assets/tweets/0xwthw.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">wthw</span><span class="tweet-handle">@0xwthw</span></div>
+                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
+              </div>
+              <p>if i see another multi-agent terminal orchestrator app i'm gonna crash out</p>
+            </a>
             <a class="tweet" href="https://x.com/leanderriefel/status/2088396806396809544" target="_blank" rel="noopener" tabindex="-1">
               <div class="tweet-head">
                 <img src="/assets/tweets/leanderriefel.jpg" alt="" loading="lazy" width="200" height="200" />
@@ -1203,13 +1247,13 @@ this space is so crowded</p>
               </div>
               <p>I'm getting emotional seeing a UI so buttery smooth in performance after using the Codex App on Windows all day.</p>
             </a>
-            <a class="tweet" href="https://x.com/swarajb/status/2088510531569405952" target="_blank" rel="noopener" tabindex="-1">
+            <a class="tweet" href="https://x.com/dev_shekhawat/status/2102533565590462728" target="_blank" rel="noopener" tabindex="-1">
               <div class="tweet-head">
-                <img src="/assets/tweets/swarajb.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">swaraj</span><span class="tweet-handle">@swarajb</span></div>
+                <img src="/assets/tweets/dev_shekhawat.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">Dev</span><span class="tweet-handle">@dev_shekhawat</span></div>
                 <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
               </div>
-              <p>btw you can still have similar performance with electron + get way more features</p>
+              <p>This feels refreshing! already loving it</p>
             </a>
           </div>
         </div>
@@ -1224,6 +1268,14 @@ this space is so crowded</p>
                 <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
               </div>
               <p>what a smooth animations on <em class="hl">gpui</em>, impressive!</p>
+            </a>
+            <a class="tweet" href="https://x.com/Purple_Orca7/status/2100314190732812553" target="_blank" rel="noopener">
+              <div class="tweet-head">
+                <img src="/assets/tweets/purple_orca7.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">purple orca</span><span class="tweet-handle">@Purple_Orca7</span></div>
+                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
+              </div>
+              <p>Have been trying zeron for the last two days after a very bad experience with <em class="hl">t3code</em>. I'm hooked.</p>
             </a>
             <a class="tweet" href="https://x.com/dwhitedesign/status/2082636175831953730" target="_blank" rel="noopener">
               <div class="tweet-head">
@@ -1241,6 +1293,22 @@ this space is so crowded</p>
               </div>
               <p>I need this, what is it? 😅</p>
             </a>
+            <a class="tweet" href="https://x.com/localhost_5173/status/2088481357664313718" target="_blank" rel="noopener">
+              <div class="tweet-head">
+                <img src="/assets/tweets/localhost_5173.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">EGOIST</span><span class="tweet-handle">@localhost_5173</span></div>
+                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
+              </div>
+              <p>Zeron looks really good</p>
+            </a>
+            <a class="tweet" href="https://x.com/afOrtunado124/status/2102727775991869480" target="_blank" rel="noopener">
+              <div class="tweet-head">
+                <img src="/assets/tweets/afortunado124.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">af0r</span><span class="tweet-handle">@afOrtunado124</span></div>
+                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
+              </div>
+              <p>bro i tested it all night, and it feels so good, congratulations i have a new daily driver, excelent taste</p>
+            </a>
             <a class="tweet" href="https://x.com/mrlemoos/status/2083380138243453356" target="_blank" rel="noopener">
               <div class="tweet-head">
                 <img src="/assets/tweets/mrlemoos.jpg" alt="" loading="lazy" width="200" height="200" />
@@ -1248,6 +1316,14 @@ this space is so crowded</p>
                 <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
               </div>
               <p>Looks beautiful btw.</p>
+            </a>
+            <a class="tweet" href="https://x.com/joelmoss/status/2088559794378481922" target="_blank" rel="noopener">
+              <div class="tweet-head">
+                <img src="/assets/tweets/joelmoss.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">Joel Moss</span><span class="tweet-handle">@joelmoss</span></div>
+                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
+              </div>
+              <p>Another one that looks exactly the same as the last 🤦</p>
             </a>
             <a class="tweet" href="https://x.com/RavTheMann/status/2083419265961754689" target="_blank" rel="noopener">
               <div class="tweet-head">
@@ -1258,21 +1334,13 @@ this space is so crowded</p>
               <p>sick
 love the ui</p>
             </a>
-            <a class="tweet" href="https://x.com/sebuzdugan/status/2083000351599239677" target="_blank" rel="noopener">
+            <a class="tweet" href="https://x.com/stlaurentgod/status/2102509074097258904" target="_blank" rel="noopener">
               <div class="tweet-head">
-                <img src="/assets/tweets/sebuzdugan.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Sebastian Buzdugan</span><span class="tweet-handle">@sebuzdugan</span></div>
+                <img src="/assets/tweets/stlaurentgod.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">seis dios ☽</span><span class="tweet-handle">@stlaurentgod</span></div>
                 <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
               </div>
-              <p>native is nice, but stale claude sessions will hurt more than electron overhead</p>
-            </a>
-            <a class="tweet" href="https://x.com/lucianmarin/status/2083290898834637281" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/lucianmarin.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Lucian Marin</span><span class="tweet-handle">@lucianmarin</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p><em class="hl">@superdoteng</em> is working on exactly the same thing.</p>
+              <p>best thing to happen to my agents this past week ✨</p>
             </a>
             <a class="tweet" href="https://x.com/hhamud_/status/2088814959014608939" target="_blank" rel="noopener">
               <div class="tweet-head">
@@ -1282,29 +1350,13 @@ love the ui</p>
               </div>
               <p>Played around with this. It's super light and the UI is amazing. Didn't know that Zed's rust UI library is this good.</p>
             </a>
-            <a class="tweet" href="https://x.com/joelmoss/status/2088559794378481922" target="_blank" rel="noopener">
+            <a class="tweet" href="https://x.com/dipxsyy/status/2082889765603742123" target="_blank" rel="noopener">
               <div class="tweet-head">
-                <img src="/assets/tweets/joelmoss.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Joel Moss</span><span class="tweet-handle">@joelmoss</span></div>
+                <img src="/assets/tweets/dipxsyy.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">Deepanshu Mishra</span><span class="tweet-handle">@dipxsyy</span></div>
                 <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
               </div>
-              <p>Another one that looks exactly the same as the last 🤦</p>
-            </a>
-            <a class="tweet" href="https://x.com/ivan_2j/status/2088628476857184291" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/ivan_2j.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">𝖎𝖛𝖆𝖓.・˚</span><span class="tweet-handle">@ivan_2j</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>all these agent control tools feel like making the perfect Notion setup when all you need is a notebook, but here with just using tmux and if you want remote add ssh</p>
-            </a>
-            <a class="tweet" href="https://x.com/crystlizedd/status/2088358572060975596" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/crystlizedd.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">crystl :3</span><span class="tweet-handle">@crystlizedd</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Isn't this a fork of <em class="hl">T3 Code</em>?? If so, why didn't you disclose it?</p>
+              <p>clean af</p>
             </a>
           </div>
           <div class="tweet-group" aria-hidden="true">
@@ -1315,6 +1367,14 @@ love the ui</p>
                 <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
               </div>
               <p>what a smooth animations on <em class="hl">gpui</em>, impressive!</p>
+            </a>
+            <a class="tweet" href="https://x.com/Purple_Orca7/status/2100314190732812553" target="_blank" rel="noopener" tabindex="-1">
+              <div class="tweet-head">
+                <img src="/assets/tweets/purple_orca7.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">purple orca</span><span class="tweet-handle">@Purple_Orca7</span></div>
+                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
+              </div>
+              <p>Have been trying zeron for the last two days after a very bad experience with <em class="hl">t3code</em>. I'm hooked.</p>
             </a>
             <a class="tweet" href="https://x.com/dwhitedesign/status/2082636175831953730" target="_blank" rel="noopener" tabindex="-1">
               <div class="tweet-head">
@@ -1332,6 +1392,22 @@ love the ui</p>
               </div>
               <p>I need this, what is it? 😅</p>
             </a>
+            <a class="tweet" href="https://x.com/localhost_5173/status/2088481357664313718" target="_blank" rel="noopener" tabindex="-1">
+              <div class="tweet-head">
+                <img src="/assets/tweets/localhost_5173.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">EGOIST</span><span class="tweet-handle">@localhost_5173</span></div>
+                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
+              </div>
+              <p>Zeron looks really good</p>
+            </a>
+            <a class="tweet" href="https://x.com/afOrtunado124/status/2102727775991869480" target="_blank" rel="noopener" tabindex="-1">
+              <div class="tweet-head">
+                <img src="/assets/tweets/afortunado124.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">af0r</span><span class="tweet-handle">@afOrtunado124</span></div>
+                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
+              </div>
+              <p>bro i tested it all night, and it feels so good, congratulations i have a new daily driver, excelent taste</p>
+            </a>
             <a class="tweet" href="https://x.com/mrlemoos/status/2083380138243453356" target="_blank" rel="noopener" tabindex="-1">
               <div class="tweet-head">
                 <img src="/assets/tweets/mrlemoos.jpg" alt="" loading="lazy" width="200" height="200" />
@@ -1339,6 +1415,14 @@ love the ui</p>
                 <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
               </div>
               <p>Looks beautiful btw.</p>
+            </a>
+            <a class="tweet" href="https://x.com/joelmoss/status/2088559794378481922" target="_blank" rel="noopener" tabindex="-1">
+              <div class="tweet-head">
+                <img src="/assets/tweets/joelmoss.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">Joel Moss</span><span class="tweet-handle">@joelmoss</span></div>
+                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
+              </div>
+              <p>Another one that looks exactly the same as the last 🤦</p>
             </a>
             <a class="tweet" href="https://x.com/RavTheMann/status/2083419265961754689" target="_blank" rel="noopener" tabindex="-1">
               <div class="tweet-head">
@@ -1349,21 +1433,13 @@ love the ui</p>
               <p>sick
 love the ui</p>
             </a>
-            <a class="tweet" href="https://x.com/sebuzdugan/status/2083000351599239677" target="_blank" rel="noopener" tabindex="-1">
+            <a class="tweet" href="https://x.com/stlaurentgod/status/2102509074097258904" target="_blank" rel="noopener" tabindex="-1">
               <div class="tweet-head">
-                <img src="/assets/tweets/sebuzdugan.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Sebastian Buzdugan</span><span class="tweet-handle">@sebuzdugan</span></div>
+                <img src="/assets/tweets/stlaurentgod.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">seis dios ☽</span><span class="tweet-handle">@stlaurentgod</span></div>
                 <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
               </div>
-              <p>native is nice, but stale claude sessions will hurt more than electron overhead</p>
-            </a>
-            <a class="tweet" href="https://x.com/lucianmarin/status/2083290898834637281" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/lucianmarin.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Lucian Marin</span><span class="tweet-handle">@lucianmarin</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p><em class="hl">@superdoteng</em> is working on exactly the same thing.</p>
+              <p>best thing to happen to my agents this past week ✨</p>
             </a>
             <a class="tweet" href="https://x.com/hhamud_/status/2088814959014608939" target="_blank" rel="noopener" tabindex="-1">
               <div class="tweet-head">
@@ -1373,32 +1449,17 @@ love the ui</p>
               </div>
               <p>Played around with this. It's super light and the UI is amazing. Didn't know that Zed's rust UI library is this good.</p>
             </a>
-            <a class="tweet" href="https://x.com/joelmoss/status/2088559794378481922" target="_blank" rel="noopener" tabindex="-1">
+            <a class="tweet" href="https://x.com/dipxsyy/status/2082889765603742123" target="_blank" rel="noopener" tabindex="-1">
               <div class="tweet-head">
-                <img src="/assets/tweets/joelmoss.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Joel Moss</span><span class="tweet-handle">@joelmoss</span></div>
+                <img src="/assets/tweets/dipxsyy.jpg" alt="" loading="lazy" width="200" height="200" />
+                <div class="tweet-who"><span class="tweet-name">Deepanshu Mishra</span><span class="tweet-handle">@dipxsyy</span></div>
                 <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
               </div>
-              <p>Another one that looks exactly the same as the last 🤦</p>
-            </a>
-            <a class="tweet" href="https://x.com/ivan_2j/status/2088628476857184291" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/ivan_2j.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">𝖎𝖛𝖆𝖓.・˚</span><span class="tweet-handle">@ivan_2j</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>all these agent control tools feel like making the perfect Notion setup when all you need is a notebook, but here with just using tmux and if you want remote add ssh</p>
-            </a>
-            <a class="tweet" href="https://x.com/crystlizedd/status/2088358572060975596" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/crystlizedd.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">crystl :3</span><span class="tweet-handle">@crystlizedd</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Isn't this a fork of <em class="hl">T3 Code</em>?? If so, why didn't you disclose it?</p>
+              <p>clean af</p>
             </a>
           </div>
         </div>
+      </div>
       </div>
   </section>
 
@@ -1445,7 +1506,7 @@ love the ui</p>
       <p>One window for every machine you own. Zeron is open source and MIT licensed.</p>
       <div class="cta-row">
         <a class="btn" id="closing-download" href="#downloads">Download</a>
-        <a class="btn ghost" href="https://github.com/zeronsh/comet">Star on GitHub ↗</a>
+        <a class="btn ghost" href="https://github.com/zeronsh/comet">Star on GitHub ↗<span class="gh-stars" hidden></span></a>
       </div>
     </div>
   </section>
@@ -1467,6 +1528,32 @@ love the ui</p>
   </footer>
 
 <script defer src="/downloads.js"></script>
+<script>
+  // GitHub star count on the "Star on GitHub" buttons. Cached for an hour so
+  // repeat visits stay under the unauthenticated API rate limit.
+  (() => {
+    const KEY = "zeron-gh-stars";
+    const show = (n) => {
+      const text = "★ " + new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(n).toLowerCase();
+      for (const el of document.querySelectorAll(".gh-stars")) {
+        el.textContent = text;
+        el.hidden = false;
+      }
+    };
+    let cached = null;
+    try { cached = JSON.parse(localStorage.getItem(KEY)); } catch {}
+    if (cached && Number.isFinite(cached.n)) show(cached.n);
+    if (cached && Date.now() - cached.at < 3600e3) return;
+    fetch("https://api.github.com/repos/zeronsh/zeron", { credentials: "omit" })
+      .then((r) => r.ok ? r.json() : Promise.reject())
+      .then(({ stargazers_count: n }) => {
+        if (!Number.isFinite(n)) return;
+        show(n);
+        try { localStorage.setItem(KEY, JSON.stringify({ n, at: Date.now() })); } catch {}
+      })
+      .catch(() => {});
+  })();
+</script>
 <script>
   // Edge ascii: a slow-warping noise field mapped through a glyph density
   // ramp — organic clusters of characters hugging each page edge, dense at

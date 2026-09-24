@@ -314,7 +314,7 @@ async fn clean_local_auth_construction_does_not_probe_edge_health() {
 }
 
 #[tokio::test]
-async fn local_runtime_does_not_start_the_edge_updater() {
+async fn local_runtime_checks_public_releases_without_starting_edge_links() {
     let dir = tempfile::tempdir().unwrap();
     let (edge_url, requests, edge_task) = rejecting_edge().await;
     let config = config(dir.path(), edge_url, Some("client_test"), None);
@@ -330,13 +330,27 @@ async fn local_runtime_does_not_start_the_edge_updater() {
 
     assert_eq!(scope, WorkspaceScope::Local);
     assert!(runtime.core().links().is_none());
-    assert!(
-        runtime.core().updater().is_none(),
-        "local runtime must not start an Edge updater"
-    );
+    let updater = runtime
+        .core()
+        .updater()
+        .expect("local runtime starts the public release checker");
     assert_eq!(requests.load(Ordering::SeqCst), 0);
 
+    updater.check_now();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while requests.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("release checker requested manifest.json and latest.txt");
+    assert!(runtime.core().links().is_none());
+
     runtime.shutdown().await;
+    let stopped_at = requests.load(Ordering::SeqCst);
+    updater.check_now();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(requests.load(Ordering::SeqCst), stopped_at);
     edge_task.abort();
 }
 

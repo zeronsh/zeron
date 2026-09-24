@@ -149,7 +149,7 @@ fn model(
 ///
 /// `pub`: besides the discovery-side enrichment here, the UI's display-side
 /// normalization borrows these labels so alias rows served by older engines
-/// still read with their version numbers ("Opus 5", not "Opus").
+/// still read with their version numbers ("Opus 5.5", not "Opus").
 pub(crate) fn configured_models() -> Vec<Model> {
     let root = std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|v| !v.is_empty())
@@ -331,9 +331,9 @@ pub fn static_models() -> Vec<Model> {
             vec![context_window()],
         ),
         model(
-            "claude-opus-5",
-            "Opus 5",
-            "Powerful model for complex work",
+            "claude-opus-5-5",
+            "Opus 5.5",
+            "Best for everyday, complex tasks",
             FULL_LADDER,
             vec![context_window(), toggle("fastMode", "Fast Mode")],
         ),
@@ -402,7 +402,8 @@ mod tests {
         assert!(supports_xhigh("claude-fable-5"));
         assert!(supports_xhigh("claude-fable-5-1"));
         assert!(supports_xhigh("claude-opus-5"));
-        assert!(supports_xhigh("claude-opus-5[1m]"));
+        assert!(supports_xhigh("claude-opus-5-5"));
+        assert!(supports_xhigh("claude-opus-5-5[1m]"));
         assert!(supports_xhigh("claude-opus-4-7-20260101"));
         assert!(!supports_xhigh("claude-opus-4-5"));
         assert!(!supports_xhigh("claude-sonnet-4-5"));

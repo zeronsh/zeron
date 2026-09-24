@@ -1975,3 +1975,89 @@ async fn shutdown_cancels_dial_and_joins_http_fallback() {
         "fallback must be dropped before final snapshot"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_construction_closes_the_actor_pipe() {
+    let (pipe, mut server) = pipe_pair();
+    let connecting = tokio::spawn(ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        Arc::new(RecordingSink::default()),
+        Arc::new(PendingFetcher),
+        "cancelled",
+        0,
+        ChatTuning::default(),
+    ));
+    expect_kind(&mut server, frame_type::HELLO).await;
+    connecting.abort();
+    let _ = connecting.await;
+    tokio::time::timeout(Duration::from_secs(1), server.tx.closed())
+        .await
+        .expect("cancelled constructor left a detached actor alive");
+}
+
+/// Keep HTTP from completing catch-up while the websocket deliberately stalls.
+struct PendingTransport;
+impl ChatTransport for PendingTransport {
+    fn fetch_rows(&self, _: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        Box::pin(std::future::pending())
+    }
+    fn push(&self, _: String, _: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+        Box::pin(std::future::pending())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_interrupts_hello_and_backfill_without_peer_disconnect() {
+    for backfill in [false, true] {
+        let (pipe, mut server) = pipe_pair();
+        let client = ChatClient::connect_with_transport(
+            connector(vec![pipe]),
+            Arc::new(RecordingSink::default()),
+            Arc::new(PendingFetcher),
+            "shutdown",
+            0,
+            ChatTuning::default(),
+            Some(Arc::new(PendingTransport)),
+        )
+        .await
+        .unwrap();
+        expect_kind(&mut server, frame_type::HELLO).await;
+        if backfill {
+            send(&server, frame_type::STATE, empty_state_json(), &[]).await;
+            expect_kind(&mut server, frame_type::ROWS_REQ).await;
+        }
+        tokio::time::timeout(Duration::from_millis(200), client.shutdown())
+            .await
+            .expect("shutdown waited for the peer or a protocol deadline");
+        assert!(server.tx.is_closed(), "actor still owns its receive pipe");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_shutdown_still_aborts_the_owned_actor() {
+    let (pipe, mut server) = pipe_pair();
+    let mut client = ChatClient::connect_with_transport(
+        connector(vec![pipe]),
+        Arc::new(RecordingSink::default()),
+        Arc::new(PendingFetcher),
+        "cancel-close",
+        0,
+        ChatTuning::default(),
+        Some(Arc::new(PendingTransport)),
+    )
+    .await
+    .unwrap();
+    expect_kind(&mut server, frame_type::HELLO).await;
+    // Model an actor whose graceful shutdown cannot finish. Dropping the
+    // shutdown future must retain the same abort ownership as dropping client.
+    let actor = client.task.take().unwrap();
+    actor.abort();
+    actor.await.unwrap_err();
+    client.task = Some(tokio::spawn(std::future::pending()));
+    let abort = client.task.as_ref().unwrap().abort_handle();
+    let mut closing = Box::pin(client.shutdown());
+    assert!(futures::poll!(&mut closing).is_pending());
+    drop(closing);
+    tokio::task::yield_now().await;
+    assert!(abort.is_finished(), "cancelled shutdown detached its actor");
+}

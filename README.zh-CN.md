@@ -49,6 +49,12 @@ zeron daemon start
 
 macOS 上用桌面版发行包，或者从源码构建 `zeron`，再运行 `zeron daemon install` 装上 launchd 服务。
 
+## 赞助
+
+感谢 [The Context Company](https://www.thecontextcompany.com/) 对 Zeron 的赞助。
+
+你也可以资助 Zeron 的开发。欢迎个人和公司[通过 GitHub 成为赞助者](https://github.com/sponsors/zeronsh)。
+
 ---
 
 想参与开发，或者好奇它怎么跑起来的？[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/zeronsh/zeron)，也可以看 [ARCHITECTURE.md](ARCHITECTURE.md)。

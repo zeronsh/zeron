@@ -932,45 +932,122 @@ impl Theme {
         self.element_hover
     }
 
-    /// Muted popup text is the theme foreground composited onto the glass.
-    /// Fixed opaque grays turn muddy over colorful or bright backgrounds.
+    /// Preserve the theme's text hierarchy on floating surfaces. Small labels
+    /// need readable contrast after both their alpha and the glass are painted;
+    /// replacing authored colors with fixed foreground opacities loses that.
     pub fn for_popup(&self) -> Self {
         let mut popup = self.clone();
         if self.is_frost() {
-            popup.text_muted = self.text.opacity(0.64);
-            popup.text_faint = self.text.opacity(0.48);
+            if matches!(self.appearance, Appearance::Dark) {
+                popup.text_muted = self.text.opacity(0.64);
+                popup.text_faint = self.text.opacity(0.48);
+                return popup;
+            }
+            // Use the least coverage primary text allows. Correcting muted
+            // text can reduce the coverage requested by glass_overlay, so its
+            // previous result is not a stable background for this calculation.
+            let mut primary_surface = self.clone();
+            primary_surface.text_muted = self.text;
+            let background = flatten(
+                primary_surface.glass_overlay(),
+                flatten(self.glass(), self.adverse_backdrop()),
+            );
+            // Keep light glass transparent; strengthen its foreground instead
+            // of increasing the fill when content underneath is dark.
+            if matches!(self.appearance, Appearance::Light)
+                && painted_contrast(popup.text, background) < 4.5
+            {
+                for step in 1..=100 {
+                    popup.text = mix(self.text, grey(0), step as f32 / 100.0);
+                    if painted_contrast(popup.text, background) >= 4.5 {
+                        break;
+                    }
+                }
+            }
+            for color in [
+                &mut popup.text_muted,
+                &mut popup.text_dim,
+                &mut popup.text_faint,
+            ] {
+                let original = *color;
+                if painted_contrast(original, background) >= 4.5 {
+                    continue;
+                }
+                for step in 1..=100 {
+                    *color = mix(original, popup.text, step as f32 / 100.0);
+                    if painted_contrast(*color, background) >= 4.5 {
+                        break;
+                    }
+                }
+            }
         }
         popup
     }
 
+    /// Settings pages used the authored dark theme before the shared frost
+    /// change. Keep that foreground palette while light pages use popup text.
+    pub fn for_settings_surface(&self) -> Self {
+        if matches!(self.appearance, Appearance::Dark) {
+            self.clone()
+        } else {
+            self.for_popup()
+        }
+    }
+
     /// The theme-owned tint floating cards paint over their backdrop blur (see
-    /// [`crate::frost::frosted`]). Light coverage stays heavier because dark
-    /// text is more vulnerable to unpredictable content behind a popover.
+    /// [`crate::frost::frosted`]). Light frost has fixed coverage so content
+    /// remains visible through it. Dark floating cards use composer_sidebar_tint.
     pub fn glass_overlay(&self) -> Hsla {
-        let base = match self.appearance {
-            Appearance::Dark => self.surface_overlay.opacity(0.50),
-            Appearance::Light => self.surface_overlay.opacity(0.85),
-        };
         if !self.is_frost() {
             return self.surface_overlay;
+        }
+        // Light glass must keep the blurred scene visible. A contrast guard
+        // against solid black raised this to 85–100%, effectively selecting
+        // opaque material even when the user explicitly chose frost.
+        if matches!(self.appearance, Appearance::Light) {
+            return self.surface_overlay.opacity(0.45);
         }
         self.surface_overlay
             .opacity(self.contrast_checked_tint_alpha(
                 self.surface_overlay,
-                base.a,
+                0.50,
                 self.adverse_backdrop(),
             ))
     }
 
-    /// Move toward the right pane tone while keeping the backdrop visible.
-    /// Solve the overlay in RGB: target = tint * alpha + canvas * (1 - alpha).
+    /// Compensated tint for the composer and dark floating surfaces. Preserve
+    /// the original dark glass recipe, including its 15% scene coverage.
+    /// The composer pill's fill: the dark frosted tint on dark glass, the
+    /// input glass otherwise. Shared by controls that should read as the
+    /// same material (the titlebar's project-action button).
+    pub fn composer_surface_bg(&self) -> Hsla {
+        if self.is_frost() && matches!(self.appearance, Appearance::Dark) {
+            self.composer_sidebar_tint()
+        } else {
+            self.input_glass_bg()
+        }
+    }
+
+    /// The composer pill's edge: a translucent cool silver/slate on frost
+    /// (sits more naturally there than the general-purpose separator), the
+    /// theme border otherwise.
+    pub fn composer_surface_border(&self) -> Hsla {
+        if self.is_frost() {
+            match self.appearance {
+                Appearance::Dark => hsla(210.0 / 360.0, 0.18, 0.78, 0.09),
+                Appearance::Light => hsla(210.0 / 360.0, 0.18, 0.32, 0.10),
+            }
+        } else {
+            self.border
+        }
+    }
+
     pub fn composer_sidebar_tint(&self) -> Hsla {
         let target = if self.is_glass() {
             flatten(self.bg.opacity(0.4), flatten(self.glass(), self.bg))
         } else {
             self.bg
         };
-        // The transcript has no fill of its own: its canvas is the shell glass.
         let canvas = flatten(self.glass(), self.bg);
         let canvas = hsl_to_rgb(canvas.h, canvas.s, canvas.l);
         let target = hsl_to_rgb(target.h, target.s, target.l);
@@ -987,26 +1064,30 @@ impl Theme {
             ((target[i] - canvas[i] * (1.0 - alpha)) / alpha).clamp(0.0, 1.0)
         });
         let (h, s, l) = rgb_to_hsl(rgb[0], rgb[1], rgb[2]);
-        // Use the compensated hue, but leave 85% of the blurred backdrop visible.
         hsla(h, s, l, 0.15)
     }
 
     /// Shared fill for the composer, queue tray, and input panels. Without
     /// frost, composite the theme's input tint onto the page to preserve its
     /// color while hiding the transcript and overlapping surfaces underneath.
-    /// Frosted surfaces retain their translucent, contrast-checked tint.
+    /// Light frost retains fixed translucent coverage; dark input panels keep
+    /// their original contrast-checked tint.
     pub fn input_glass_bg(&self) -> Hsla {
+        // input_bg may be a translucent white/black wash. Resolve the intended
+        // input tone before applying the material's coverage.
+        let tint = flatten(self.input_bg, self.bg);
         if !self.is_frost() {
-            return flatten(self.input_bg, self.bg);
+            return tint;
         }
-        let base = if matches!(self.appearance, Appearance::Light) {
-            0.30
-        } else {
-            self.input_bg.a
-        };
+        if matches!(self.appearance, Appearance::Light) {
+            return tint.opacity(0.35);
+        }
         let window = flatten(self.glass(), self.adverse_backdrop());
-        self.input_bg
-            .opacity(self.contrast_checked_tint_alpha(self.input_bg, base, window))
+        self.input_bg.opacity(self.contrast_checked_tint_alpha(
+            self.input_bg,
+            self.input_bg.a,
+            window,
+        ))
     }
 
     /// Section-card fill (settings cards and similar in-panel cards). The
@@ -2058,7 +2139,7 @@ mod tests {
             for (surface_name, surface) in [
                 (
                     "floating overlay",
-                    flatten(theme.glass_overlay(), adverse_backdrop),
+                    flatten(theme.glass_overlay(), composite),
                 ),
                 ("settings card", flatten(theme.card_glass_bg(), composite)),
                 ("input", flatten(theme.input_glass_bg(), composite)),
@@ -2606,11 +2687,8 @@ mod tests {
         set_current_appearance(Appearance::Dark);
     }
 
-    /// Both appearances are glass-forward on macOS and Windows. Light frost
-    /// runs heavier than dark's (a light tint controls the blur less), and floating cards
-    /// step their tint coverage up in light so menu text stays on a
-    /// known-enough background — assert both relationships so the frost and
-    /// the overlay can't drift apart.
+    /// Both appearances retain window and floating glass; the light floating
+    /// tint is thinner than the earlier contrast-checked treatment.
     #[test]
     fn both_appearances_stay_frosted_and_light_runs_heavier() {
         if Theme::GLASS_ALPHA < 1.0 {
@@ -2625,10 +2703,11 @@ mod tests {
             assert!(light.is_frost());
             assert!(dark.glass_overlay().a < 1.0);
             assert!(light.glass_overlay().a < 1.0);
-            assert!(
-                light.glass_overlay().a > dark.glass_overlay().a,
-                "light floating cards need more coverage over blur for legible rows"
-            );
+            assert_eq!(light.glass_overlay().a, 0.45);
+            assert_eq!(light.input_glass_bg().a, 0.35);
+            assert_eq!(crate::popover::surface_bg(&dark).a, 0.15);
+            assert_eq!(dark.for_popup().text_muted, dark.text.opacity(0.64));
+            assert_eq!(dark.for_popup().text_faint, dark.text.opacity(0.48));
         } else {
             assert_eq!(Theme::light().glass().a, 1.0);
             assert_eq!(Theme::dark().glass().a, 1.0);
@@ -2747,62 +2826,85 @@ mod tests {
     }
 
     #[test]
-    fn popup_foregrounds_keep_glass_and_solid_theme_surfaces_unchanged() {
-        for mut theme in [Theme::dark(), Theme::light()] {
-            theme.surface_treatment = SurfaceTreatment::Frosted;
-            let popup = theme.for_popup();
-            assert_eq!(popup.composer_sidebar_tint(), theme.composer_sidebar_tint());
-            assert_eq!(popup.surface_overlay, theme.surface_overlay);
-            assert_eq!(popup.text, theme.text);
-            for background in [
-                theme.bg,
-                hsla(0.60, 0.55, 0.35, 1.0),
-                hsla(0.57, 0.35, 0.82, 1.0),
-            ] {
-                let primary = painted_contrast(popup.text, background);
-                let secondary = painted_contrast(popup.text_muted, background);
-                let hint = painted_contrast(popup.text_faint, background);
-                assert!(
-                    primary > secondary && secondary > hint,
-                    "glass text hierarchy collapsed on {background:?}"
-                );
-                assert!(
-                    flatten(popup.text_muted, background) != popup.text_muted,
-                    "muted text must blend with the background"
-                );
+    fn light_frost_keeps_backdrop_visible_across_builtin_themes() {
+        let registry = ThemeRegistry::builtin();
+        for variant in registry.families.iter().flat_map(|family| &family.variants) {
+            let theme = Theme::from_variant(
+                variant,
+                AccentSelection::ThemeDefault,
+                SurfacePreference::Frosted,
+            );
+            if !theme.is_frost() {
+                continue;
             }
+            let popup = theme.for_popup();
+            if matches!(theme.appearance, Appearance::Light) {
+                assert_eq!(crate::popover::surface_bg(&theme).a, 0.45);
+                assert_eq!(crate::popover::surface_bg(&popup).a, 0.45);
+                assert_eq!(theme.input_glass_bg().a, 0.35);
+            } else {
+                assert_eq!(crate::popover::surface_bg(&theme).a, 0.15);
+                assert_eq!(crate::popover::surface_bg(&popup).a, 0.15);
+            }
+            // Text on transparent glass depends on the scene underneath. Test
+            // the application's painted canvas rather than a solid black image.
+            let canvas = flatten(theme.glass(), theme.bg);
+            let floating = flatten(crate::popover::surface_bg(&popup), canvas);
+            assert!(
+                painted_contrast(popup.text, floating) >= 4.5,
+                "{} primary popup text on app canvas",
+                variant.id
+            );
+            let input = flatten(theme.input_glass_bg(), canvas);
+            assert!(
+                painted_contrast(theme.text, input) >= 4.5,
+                "{} input text on app canvas",
+                variant.id
+            );
+        }
+    }
+
+    #[test]
+    fn opaque_floating_surfaces_keep_their_existing_fill_and_text() {
+        for mut theme in [Theme::dark(), Theme::light()] {
             theme.surface_treatment = SurfaceTreatment::Opaque;
+            assert_eq!(crate::popover::surface_bg(&theme), theme.input_glass_bg());
+            assert_eq!(crate::popover::surface_bg(&theme).a, 1.0);
             assert_eq!(theme.for_popup().text_muted, theme.text_muted);
             assert_eq!(theme.for_popup().text_faint, theme.text_faint);
         }
     }
 
     #[test]
-    fn composer_tint_moves_toward_sidebar_without_hiding_backdrop() {
-        for mut theme in [Theme::dark(), Theme::light()] {
-            for (canvas, shell) in [
-                (theme.bg, theme.surface),
-                (hsla(0.58, 0.3, 0.12, 1.0), hsla(0.62, 0.25, 0.22, 1.0)),
-                (hsla(0.12, 0.2, 0.93, 1.0), hsla(0.08, 0.15, 0.82, 1.0)),
-            ] {
-                theme.bg = canvas;
-                theme.surface = shell;
-                let tint = theme.composer_sidebar_tint();
-                let expected = if theme.is_glass() {
-                    flatten(theme.bg.opacity(0.4), flatten(theme.glass(), theme.bg))
-                } else {
-                    theme.bg
-                };
-                let actual = flatten(tint, flatten(theme.glass(), theme.bg));
-                let base = flatten(theme.glass(), theme.bg);
-                let base_rgb = hsl_to_rgb(base.h, base.s, base.l);
-                let target_rgb = hsl_to_rgb(expected.h, expected.s, expected.l);
-                let actual_rgb = hsl_to_rgb(actual.h, actual.s, actual.l);
-                for i in 0..3 {
-                    assert!(actual_rgb[i] >= base_rgb[i].min(target_rgb[i]) - 0.0001);
-                    assert!(actual_rgb[i] <= base_rgb[i].max(target_rgb[i]) + 0.0001);
-                }
-                assert_eq!(tint.a, 0.15);
+    fn custom_light_popup_text_is_readable_and_preparation_is_idempotent() {
+        let mut variant = ThemeRegistry::builtin()
+            .variant("zeron-light")
+            .unwrap()
+            .clone();
+        variant.id = "custom-light".to_owned();
+        variant.colors.text_muted = variant.colors.background;
+        variant.colors.text_faint = variant.colors.background;
+        let theme = Theme::from_variant(
+            &variant,
+            AccentSelection::ThemeDefault,
+            SurfacePreference::Frosted,
+        );
+        let popup = theme.for_popup();
+        let nested = popup.for_popup();
+        assert_eq!(popup.text_muted, nested.text_muted);
+        assert_eq!(popup.text_faint, nested.text_faint);
+        assert_eq!(
+            crate::popover::surface_bg(&popup),
+            crate::popover::surface_bg(&nested)
+        );
+        for level in [0, 32, 64, 128, 192, 255] {
+            let canvas = flatten(theme.glass(), grey(level));
+            let surface = flatten(crate::popover::surface_bg(&popup), canvas);
+            for color in [popup.text, popup.text_muted, popup.text_faint] {
+                assert!(
+                    painted_contrast(color, surface) >= 4.5,
+                    "custom light popup text"
+                );
             }
         }
     }

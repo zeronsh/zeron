@@ -546,21 +546,36 @@ impl Shell {
         let menu_mounted = self.project_actions.menu.get().is_some();
         let menu_closing = self.project_actions.menu.closing_since();
 
+        // A solid frosted pill in the composer's material and edge —
+        // with the frost on its own back layer so the dropdown menu (a
+        // deferred child) never lands inside the blur.
         let mut control = div()
             .relative()
             .flex_none()
             .flex()
             .flex_row()
             .items_center()
-            .h(px(24.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .occlude();
+            .h(px(ACTION_CONTROL_HEIGHT))
+            .rounded(px(ACTION_CONTROL_RADIUS))
+            .occlude()
+            .child(
+                div().absolute().inset_0().child(crate::frost::frosted(
+                    ACTION_CONTROL_RADIUS,
+                    crate::frost::MENU_BLUR,
+                    div()
+                        .size_full()
+                        .rounded(px(ACTION_CONTROL_RADIUS))
+                        .border_1()
+                        .border_color(theme.composer_surface_border())
+                        .bg(action_fill(&theme, false))
+                        .when(!theme.is_frost(), |el| el.shadow_sm()),
+                )),
+            );
 
         if let Some(action) = preferred.clone() {
             let run_action = action.clone();
             let main = action_segment(&theme, "project-action-main")
+                .rounded_l(px(ACTION_CONTROL_RADIUS))
                 .when(!can_run, |el| el.opacity(0.45))
                 .when(can_run, |el| {
                     el.cursor_pointer()
@@ -581,7 +596,7 @@ impl Shell {
                             .child(SharedString::from(action.name)),
                     )
                 });
-            control = control.child(main).child(
+            control = control.child(main).child(action_divider(&theme)).child(
                 action_chevron(
                     &theme,
                     cx.listener(|this, _, _, cx| this.toggle_project_actions_menu(cx)),
@@ -595,6 +610,7 @@ impl Shell {
             );
         } else if unavailable {
             let retry = action_segment(&theme, "project-actions-unavailable")
+                .rounded(px(ACTION_CONTROL_RADIUS))
                 .cursor_pointer()
                 .on_mouse_down(
                     MouseButton::Left,
@@ -614,6 +630,8 @@ impl Shell {
             control = control.child(retry);
         } else {
             let add = action_segment(&theme, "project-action-add")
+                .rounded_l(px(ACTION_CONTROL_RADIUS))
+                .when(!has_imports, |el| el.rounded_r(px(ACTION_CONTROL_RADIUS)))
                 .cursor_pointer()
                 .on_click(
                     cx.listener(|this, _, _, cx| this.open_project_action_editor(None, None, cx)),
@@ -626,7 +644,7 @@ impl Shell {
                 .child(SharedString::from("Add action"));
             control = control.child(add);
             if has_imports {
-                control = control.child(
+                control = control.child(action_divider(&theme)).child(
                     action_chevron(
                         &theme,
                         cx.listener(|this, _, _, cx| this.toggle_project_actions_menu(cx)),
@@ -1016,35 +1034,65 @@ fn project_action_params(
     params
 }
 
+const ACTION_CONTROL_HEIGHT: f32 = 24.0;
+const ACTION_CONTROL_RADIUS: f32 = 7.0;
+
+/// The pill's fill (or its hover): the composer's own material and edge, so
+/// the two read as one family. Hover is a faint wash over that dark fill —
+/// the titlebar's hover role reads far too bright on it.
+fn action_fill(theme: &Theme, hover: bool) -> gpui::Hsla {
+    if hover {
+        theme.wash(0.04)
+    } else {
+        theme.composer_surface_bg()
+    }
+}
+
 fn action_segment(theme: &Theme, id: &'static str) -> gpui::Stateful<gpui::Div> {
+    // Hover tints on top of the fill, so both halves stay one piece.
+    let hover = action_fill(theme, true);
     div()
         .id(id)
+        .relative()
         .h_full()
-        .px(px(7.0))
+        .px(px(8.0))
         .flex()
         .items_center()
         .gap(px(5.0))
         .text_size(px(11.5))
-        .text_color(theme.text.opacity(0.9))
-        .hover(|style| style.bg(crate::theme::ink(0.07)))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text)
+        .hover(move |style| style.bg(hover))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+}
+
+/// The split's seam: an inset hairline, not a full-height border, so the
+/// pill still reads as one solid piece.
+fn action_divider(theme: &Theme) -> gpui::Div {
+    div()
+        .relative()
+        .flex_none()
+        .w(px(1.0))
+        .h(px(ACTION_CONTROL_HEIGHT - 10.0))
+        .bg(theme.text.opacity(0.14))
 }
 
 fn action_chevron(
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
+    let hover = action_fill(theme, true);
     div()
         .id("project-actions-chevron")
         .h_full()
-        .w(px(23.0))
+        .relative()
+        .w(px(22.0))
+        .rounded_r(px(ACTION_CONTROL_RADIUS))
         .flex()
         .items_center()
         .justify_center()
-        .border_l_1()
-        .border_color(theme.border)
         .cursor_pointer()
-        .hover(|style| style.bg(crate::theme::ink(0.07)))
+        .hover(move |style| style.bg(hover))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |event, window, cx| {
             cx.stop_propagation();

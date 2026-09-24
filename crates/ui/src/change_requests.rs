@@ -80,7 +80,7 @@ impl Render for ChangeRequestTooltip {
             .border_1()
             .border_color(theme.border_strong)
             .bg(crate::popover::surface_bg(theme))
-            .shadow_md()
+            .when(!theme.is_frost(), |el| el.shadow_md())
             .child(
                 div()
                     .text_size(px(11.0))

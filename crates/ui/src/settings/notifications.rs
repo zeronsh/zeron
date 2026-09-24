@@ -5,9 +5,8 @@
 //! emits [`NotificationsEvent::Changed`], and the shell persists it. Nothing
 //! here talks RPC — all preferences are device-local UI settings.
 
-use gpui::{Context, EventEmitter, SharedString, Window, div, prelude::*, px};
+use gpui::{Context, EventEmitter, Window, div, prelude::*, px};
 
-use crate::icons;
 use crate::popover;
 use crate::settings::widgets;
 use crate::theme::Theme;
@@ -137,7 +136,7 @@ impl popover::ScrollRailHost for NotificationsPage {
 
 impl Render for NotificationsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx).clone();
+        let theme = Theme::of(cx).for_settings_surface();
         let accent = theme.accent;
         let sound = self.sound;
         let completion_sound = self.completion_sound;
@@ -146,13 +145,14 @@ impl Render for NotificationsPage {
         let desktop = self.desktop;
         let background_only = self.background_only;
         let toggle = |id: &'static str, label: &'static str, enabled: bool, interactive: bool| {
-            // Keep the familiar 32×18 visual inside a 40×40 activation target.
+            // Keep the visual inside its 56×40 activation target.
             // Disabled subordinate controls remain named switches in the
             // accessibility tree, but have no focus or input handlers.
             div()
                 .id(id)
                 .flex_none()
-                .size(px(40.0))
+                .w(px(widgets::SWITCH_WIDTH))
+                .h(px(40.0))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -166,58 +166,37 @@ impl Render for NotificationsPage {
                 .when(!interactive, |el| {
                     el.aria_description("Unavailable while its parent setting is off")
                 })
-                .child(widgets::toggle_switch(&theme, enabled))
+                .child(widgets::toggle_switch(&theme, enabled, id))
         };
         let card = widgets::section_card(&theme)
+            .mt_0()
             .child(
                 widgets::card_row(&theme, true)
-                    .child(widgets::row_tile(&theme, icons::VOLUME_LOUD))
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(160.0))
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Session sounds"))
-                            .child(widgets::meta_line(
-                                &theme,
-                                vec![
-                                    div()
-                                        .child(SharedString::from(
-                                            "Allow sounds for the selected session events below.",
-                                        ))
-                                        .into_any_element(),
-                                ],
-                            )),
+                            .child(widgets::row_title(&theme, "Session sounds")),
                     )
-                    .child(
-                        interactive_switch(
-                            toggle("notifications-sound-toggle", "Session sounds", sound, true),
-                            accent,
-                            NotificationPreference::Sound,
-                            cx,
-                        ),
-                    ),
+                    .child(interactive_switch(
+                        toggle("notifications-sound-toggle", "Session sounds", sound, true),
+                        accent,
+                        NotificationPreference::Sound,
+                        cx,
+                    )),
             )
             .child(
                 widgets::card_row(&theme, false)
                     .when(!sound, |el| el.opacity(0.55))
-                    .child(widgets::row_tile(&theme, icons::CHECK))
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(160.0))
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Task completed"))
-                            .child(widgets::meta_line(
-                                &theme,
-                                vec![div()
-                                    .child(SharedString::from(
-                                        "Play a sound when an agent finishes a run.",
-                                    ))
-                                    .into_any_element()],
-                            )),
+                            .child(widgets::row_title(&theme, "Task completed")),
                     )
                     .child(
                         toggle(
@@ -239,22 +218,13 @@ impl Render for NotificationsPage {
             .child(
                 widgets::card_row(&theme, false)
                     .when(!sound, |el| el.opacity(0.55))
-                    .child(widgets::row_tile(&theme, icons::CHAT_ROUND_LINE))
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(160.0))
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Input required"))
-                            .child(widgets::meta_line(
-                                &theme,
-                                vec![div()
-                                    .child(SharedString::from(
-                                        "Play a sound when an agent needs your response.",
-                                    ))
-                                    .into_any_element()],
-                            )),
+                            .child(widgets::row_title(&theme, "Input required")),
                     )
                     .child(
                         toggle(
@@ -264,34 +234,20 @@ impl Render for NotificationsPage {
                             sound,
                         )
                         .when(sound, |el| {
-                            interactive_switch(
-                                el,
-                                accent,
-                                NotificationPreference::InputSound,
-                                cx,
-                            )
+                            interactive_switch(el, accent, NotificationPreference::InputSound, cx)
                         }),
                     ),
             )
             .child(
                 widgets::card_row(&theme, false)
                     .when(!sound, |el| el.opacity(0.55))
-                    .child(widgets::row_tile(&theme, icons::DANGER_TRIANGLE))
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(160.0))
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Errors and disconnections"))
-                            .child(widgets::meta_line(
-                                &theme,
-                                vec![div()
-                                    .child(SharedString::from(
-                                        "Play a sound when a run fails or the connection remains unavailable.",
-                                    ))
-                                    .into_any_element()],
-                            )),
+                            .child(widgets::row_title(&theme, "Errors and disconnections")),
                     )
                     .child(
                         toggle(
@@ -309,66 +265,43 @@ impl Render for NotificationsPage {
                             )
                         }),
                     ),
-            )
+            );
+        let desktop_card = widgets::section_card(&theme)
+            .mt_0()
             .child(
-                widgets::card_row(&theme, false)
-                    .child(widgets::row_tile(&theme, icons::BELL))
+                widgets::card_row(&theme, true)
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(160.0))
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Desktop notifications"))
-                            .child(widgets::meta_line(
-                                &theme,
-                                vec![
-                                    div()
-                                        .child(SharedString::from(
-                                            "Show a system banner on the same events, so pings \
-                                             reach you while Zeron is in the background.",
-                                        ))
-                                        .into_any_element(),
-                                ],
-                            )),
+                            .child(widgets::row_title(&theme, "Desktop notifications")),
                     )
-                    .child(
-                        interactive_switch(
-                            toggle(
-                                "notifications-desktop-toggle",
-                                "Desktop notifications",
-                                desktop,
-                                true,
-                            ),
-                            accent,
-                            NotificationPreference::Desktop,
-                            cx,
+                    .child(interactive_switch(
+                        toggle(
+                            "notifications-desktop-toggle",
+                            "Desktop notifications",
+                            desktop,
+                            true,
                         ),
-                    ),
+                        accent,
+                        NotificationPreference::Desktop,
+                        cx,
+                    )),
             )
             .child(
                 // Sub-option of the banner row: dimmed + inert while banners
                 // are off (the harnesses not-installed treatment).
                 widgets::card_row(&theme, false)
                     .when(!desktop, |el| el.opacity(0.55))
-                    .child(widgets::row_tile(&theme, icons::MONITOR))
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(160.0))
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Only when in the background"))
-                            .child(widgets::meta_line(
-                                &theme,
-                                vec![
-                                    div()
-                                        .child(SharedString::from(
-                                            "Skip the banner while a Zeron window is focused.",
-                                        ))
-                                        .into_any_element(),
-                                ],
-                            )),
+                            .child(widgets::row_title(&theme, "Only when in the background")),
                     )
                     .child(
                         toggle(
@@ -395,25 +328,25 @@ impl Render for NotificationsPage {
             .size_full()
             .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                div()
-                    .id("notifications-page")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll.scroll)
-                    .child(
-                        widgets::page_column()
-                            .child(widgets::page_header(&theme, "Notifications", None))
-                            .child(
-                                widgets::page_subtitle(
-                                    &theme,
-                                    "Choose which session events can play a sound, and when desktop \
-                                     notifications appear.",
+                crate::edge_fade::edge_faded(
+                    16.0,
+                    true,
+                    true,
+                    div()
+                        .id("notifications-page")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll.scroll)
+                        .child(
+                            widgets::page_column()
+                                .child(widgets::page_header(&theme, "Notifications", None))
+                                .child(
+                                    widgets::section(&theme, "Desktop", desktop_card).mt(px(24.0)),
                                 )
-                                .max_w(px(512.0))
-                                .line_height(px(20.0)),
-                            )
-                            .child(card),
-                    ),
+                                .child(widgets::section(&theme, "Sounds", card)),
+                        ),
+                )
+                .fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
     }

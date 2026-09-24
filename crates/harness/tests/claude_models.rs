@@ -18,8 +18,8 @@ async fn initialize_is_shared_and_curated_metadata_survives_the_live_union() {
     let (dir, harness) = fixture(json!({"subtype":"success", "response":{
         "commands":[{"name":"review", "description":"Review"}],
         "models":[
-            {"value":"default", "resolvedModel":"claude-opus-5[1m]", "displayName":"Default (recommended)", "supportedEffortLevels":["low","medium","high","xhigh","max"]},
-            {"value":"opus[1m]", "resolvedModel":"claude-opus-5[1m]", "displayName":"Opus"},
+            {"value":"default", "resolvedModel":"claude-opus-5-5[1m]", "displayName":"Default (recommended)", "supportedEffortLevels":["low","medium","high","xhigh","max"]},
+            {"value":"opus[1m]", "resolvedModel":"claude-opus-5-5[1m]", "displayName":"Opus"},
             {"value":"fable[1m]", "resolvedModel":"claude-fable-5-1", "displayName":"Fable", "description":"CLI description", "supportedEffortLevels":["low"]},
             {"value":"gateway/new", "displayName":"Gateway model", "description":"Gateway description", "supportedEffortLevels":["low","xhigh","future","xhigh","max"]},
             {"value":"sonnet", "displayName":"Unresolved alias"}
@@ -29,8 +29,8 @@ async fn initialize_is_shared_and_curated_metadata_survives_the_live_union() {
     let catalog = catalog.unwrap();
     assert_eq!(catalog.source, "live");
     assert_eq!(commands.unwrap()[0].name, "review");
-    assert_eq!(catalog.models[0].id, "claude-opus-5[1m]");
-    assert_eq!(catalog.models[1].id, "claude-opus-5");
+    assert_eq!(catalog.models[0].id, "claude-opus-5-5[1m]");
+    assert_eq!(catalog.models[1].id, "claude-opus-5-5");
     for curated in zeron_harness::claude::catalog::static_models() {
         assert_eq!(
             catalog.models.iter().find(|m| m.id == curated.id),

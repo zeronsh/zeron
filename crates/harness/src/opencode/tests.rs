@@ -313,6 +313,25 @@ impl TurnWire {
         assert!(path.ends_with(suffix), "unexpected request: {path}");
     }
 
+    async fn posted(&self, suffix: &str) -> Value {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some((_, body)) = self
+                    .posts
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(path, _)| path.ends_with(suffix))
+                {
+                    return body.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("expected HTTP reply")
+    }
+
     fn status(&self, status: &str) {
         self.bus.send(json!({"type":"session.status", "properties":{"sessionID":"fixture", "status":{"type":status}}})).unwrap();
     }
@@ -674,6 +693,61 @@ async fn read_http_request_headers(socket: &mut tokio::net::TcpStream) {
         headers.push(socket.read_u8().await.unwrap());
         assert!(headers.len() <= 8192, "unexpectedly large request headers");
     }
+}
+
+/// The loopback `opencode serve` gets our Basic-auth password on every call,
+/// so a system/env proxy must never see that traffic.
+#[test]
+fn http_client_never_proxies_the_loopback_server() {
+    const NAME: &str = "opencode::tests::http_client_never_proxies_the_loopback_server";
+    const CHILD: &str = "ZERON_OPENCODE_PROXY_PROBE";
+    if std::env::var_os(CHILD).is_none() {
+        // reqwest reads the proxy from the environment, and mutating it here
+        // would race sibling tests, so run the body in a child process.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([NAME, "--exact", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("HTTP_PROXY", "http://127.0.0.1:1")
+            .env("http_proxy", "http://127.0.0.1:1")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .env_remove("REQUEST_METHOD")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "child probe failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/global/health", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_http_request_headers(&mut socket).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        // Control: a default client does route loopback through the dead
+        // proxy, so this test cannot pass vacuously.
+        assert!(reqwest::Client::new().get(&url).send().await.is_err());
+        let response = http_client()
+            .get(&url)
+            .send()
+            .await
+            .expect("opencode client must reach loopback directly");
+        assert!(response.status().is_success());
+    });
 }
 
 #[tokio::test]
@@ -1404,7 +1478,7 @@ fn prompt_body_v2_carries_text_and_files_only() {
 #[tokio::test]
 async fn permissions_stay_session_scoped_and_never_persist_grants() {
     for v2 in [false, true] {
-        let mut wire = TurnWire::start_proto(false, v2).await;
+        let mut wire = TurnWire::start_policy(false, v2, false, None).await;
         if v2 {
             wire.request("/api/model").await;
         }
@@ -1469,42 +1543,40 @@ async fn permissions_stay_session_scoped_and_never_persist_grants() {
 }
 
 #[tokio::test]
-async fn permissions_without_auto_approve_require_an_explicit_answer() {
+async fn permissions_always_approve_without_user_input() {
     for version in ["2.0.0", "2.0.3", "2.0.4", "2.0.11"] {
-        for accept in [false, true] {
+        for auto_approve in [false, true] {
+            // No input callback is available: any permission prompt fails the fixture.
             let mut wire =
-                TurnWire::start_config(false, true, false, Some(accept), version, json!({}), false)
+                TurnWire::start_config(false, true, auto_approve, None, version, json!({}), false)
                     .await;
             wire.request("/api/model").await;
             wire.request("/prompt").await;
-            wire.v2(
-                "permission.asked",
-                json!({"id":"approval", "sessionID":"fixture"}),
-            );
-            let body = tokio::time::timeout(Duration::from_secs(2), async {
-                loop {
-                    if let Some((_, body)) = wire
-                        .posts
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .find(|(p, _)| p.contains("permission"))
-                    {
-                        break body.clone();
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
             let key = if version == "2.0.0" || version == "2.0.3" {
                 "reply"
             } else {
                 "decision"
             };
-            assert_eq!(body, json!({key: if accept { "once" } else { "reject" }}));
+            for id in ["first", "second", "third"] {
+                wire.v2("permission.asked", json!({"id":id, "sessionID":"fixture"}));
+                let body = wire.posted(&format!("/permission/{id}/reply")).await;
+                assert_eq!(body, json!({key: "once"}));
+            }
         }
     }
+}
+
+#[tokio::test]
+async fn permissions_do_not_auto_answer_agent_questions() {
+    let mut wire = TurnWire::start_policy(false, false, false, Some(false)).await;
+    wire.request("/prompt_async").await;
+    wire.bus.send(json!({"type": "question.asked", "properties": {
+        "id": "question", "sessionID": "fixture", "questions": [{
+            "header": "Choice", "question": "Continue?", "options": [{"label": "No"}, {"label": "Yes"}]
+        }]
+    }})).unwrap();
+    let body = wire.posted("/question/question/reply").await;
+    assert_eq!(body, json!({"answers": [["No"]]}));
 }
 
 #[test]

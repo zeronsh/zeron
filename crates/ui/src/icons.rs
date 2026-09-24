@@ -145,6 +145,7 @@ icon_assets![
     (ARCHIVE_MINIMALISTIC, "archive-minimalistic"),
     (TRASH_BIN_MINIMALISTIC, "trash-bin-minimalistic"),
     // Shared settings glyph: user-supplied horizontal sliders.
+    (SETTINGS, "settings"),
     (SETTINGS_MINIMALISTIC, "settings-minimalistic"),
     (LOGOUT_2, "logout-2"),
     (MAGNIFER, "magnifer"),
