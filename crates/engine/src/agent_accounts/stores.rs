@@ -46,7 +46,11 @@
 //!
 //! Opaque tokens (Pi's Claude login, Copilot tokens) carry no identity: a
 //! live entry is matched to its slot by token, else identified ONCE per token
-//! with a read-only profile call (`/api/oauth/profile`, GitHub `/user`).
+//! with a read-only profile call (`/api/oauth/profile`, GitHub `/user`). A
+//! Copilot login on a self-hosted GitHub Enterprise Server (a host zeron
+//! never sends the token to) gets a local identity instead — its host and a
+//! SHA-256 fingerprint of the token — so it still switches; its usage is
+//! skipped.
 
 use std::collections::HashSet;
 
@@ -397,6 +401,43 @@ fn opaque_secret(entry: &serde_json::Value) -> Option<String> {
     str_field(entry, "refresh").or_else(|| str_field(entry, "access"))
 }
 
+/// A Copilot login on a GitHub Enterprise host zeron doesn't send tokens
+/// to (self-hosted GHES): identified without the network — labelled by its
+/// host, keyed by a SHA-256 fingerprint of its GitHub token (never the token
+/// itself) — so it snapshots into a slot, switches and restores like any
+/// other. Its usage stays skipped ([`copilot_api_base`] is `None`).
+pub(super) fn local_enterprise_identity(
+    store_key: &str,
+    github_token: &str,
+    entry: &serde_json::Value,
+) -> (String, SlotProfile) {
+    let host = str_field(entry, "enterpriseUrl").and_then(|raw| {
+        let raw = raw.trim();
+        let candidate = match raw.contains("://") {
+            true => raw.to_string(),
+            false => format!("https://{raw}"),
+        };
+        reqwest::Url::parse(&candidate)
+            .ok()?
+            .host_str()
+            .map(str::to_ascii_lowercase)
+    });
+    let email = match host {
+        Some(host) => format!("GitHub Enterprise account · {host}"),
+        None => "GitHub Enterprise account".to_string(),
+    };
+    (
+        format!("{store_key}:enterprise:{}", hashed_key(github_token)),
+        SlotProfile {
+            email,
+            display_name: None,
+            organization: None,
+            plan: Some("GitHub Copilot".to_string()),
+            auth_kind: AgentAuthKind::Oauth,
+        },
+    )
+}
+
 fn unresolved(store_key: &str, upstream: Upstream) -> Detected {
     let (email, plan) = match upstream {
         Upstream::Anthropic => ("Claude account", "Claude"),
@@ -610,15 +651,18 @@ pub(super) enum HostPolicy {
     /// GitHub Enterprise Cloud with data residency: a single-label subdomain
     /// of `ghe.com` (Copilot's `enterpriseUrl`). Self-hosted GHES hosts are
     /// deliberately NOT accepted — a credential field alone never decides
-    /// where a GitHub token is sent.
+    /// where a GitHub token is sent. Such a login is identified locally
+    /// instead (see [`local_enterprise_identity`]): it lists and switches,
+    /// without usage.
     GheCom,
 }
 
 /// Grok OIDC issuers (`oidc_issuer`, refresh only).
 pub(super) const GROK_ISSUERS: HostPolicy = HostPolicy::Domains(&["x.ai"]);
+/// Devin / Windsurf / Codeium domains: its API servers and sign-in pages.
+pub(super) const DEVIN_DOMAINS: &[&str] = &["codeium.com", "windsurf.com", "devin.ai"];
 /// Devin / Windsurf API servers (`api_server_url`).
-pub(super) const DEVIN_SERVERS: HostPolicy =
-    HostPolicy::Domains(&["codeium.com", "windsurf.com", "devin.ai"]);
+pub(super) const DEVIN_SERVERS: HostPolicy = HostPolicy::Domains(DEVIN_DOMAINS);
 /// The Nous portal (`portal_base_url` in Hermes' pool).
 pub(super) const NOUS_PORTALS: HostPolicy = HostPolicy::Domains(&["nousresearch.com"]);
 
@@ -660,9 +704,7 @@ pub(super) fn trusted_base(
     // `domain()` is `None` for IP literals: a secret never goes to a bare IP.
     let host = url.domain()?.to_ascii_lowercase();
     let allowed = match policy {
-        HostPolicy::Domains(domains) => domains
-            .iter()
-            .any(|d| host == *d || host.ends_with(&format!(".{d}"))),
+        HostPolicy::Domains(domains) => host_in(&host, domains),
         HostPolicy::GheCom => host
             .strip_suffix(".ghe.com")
             .is_some_and(|tenant| !tenant.is_empty() && !tenant.contains('.')),
@@ -670,11 +712,35 @@ pub(super) fn trusted_base(
     allowed.then_some(url)
 }
 
+/// `host` is one of `domains` or a subdomain of one — on a label boundary,
+/// so `evildevin.ai` and `devin.ai.evil.example` are not `devin.ai`.
+pub(super) fn host_in(host: &str, domains: &[&str]) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    domains
+        .iter()
+        .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+}
+
+/// `url` is an `https` page on one of `domains` (or a subdomain), with no
+/// userinfo and no explicit port: a sign-in page a CLI printed that is safe
+/// to open on the requesting device.
+pub(super) fn trusted_page(url: &str, domains: &[&str]) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|parsed| {
+        parsed.scheme() == "https"
+            && parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed.port().is_none()
+            // `domain()` is `None` for IP literals.
+            && parsed.domain().is_some_and(|host| host_in(host, domains))
+    })
+}
+
 /// The REST root for a Copilot login: GitHub's, or `https://api.<tenant>.ghe.com`
 /// for a GitHub Enterprise Cloud (`*.ghe.com`) `enterpriseUrl`. Any other
 /// enterprise host — self-hosted GHES included, whose REST root would be
 /// `https://<host>/api/v3` — is `None`: zeron skips identity/usage probes
-/// rather than send the token to a host the credential file alone names.
+/// rather than send the token to a host the credential file alone names
+/// (the login gets a local identity, [`local_enterprise_identity`]).
 pub(super) fn copilot_api_base(
     entry: &serde_json::Value,
     github_api: &str,
@@ -817,6 +883,19 @@ impl AgentAccounts {
             return Some(
                 Detected::known(slot.account_key, slot.profile, entry.clone()).keyed(store_key),
             );
+        }
+        // A GitHub Enterprise host zeron won't send the token to (self-hosted
+        // GHES): no profile call — a local identity keeps it switchable.
+        if upstream == Upstream::Copilot
+            && copilot_api_base(
+                entry,
+                &self.inner.endpoints.github_api,
+                self.inner.endpoints.allow_loopback_http,
+            )
+            .is_none()
+        {
+            let (account_key, profile) = local_enterprise_identity(store_key, &secret, entry);
+            return Some(Detected::known(account_key, profile, entry.clone()).keyed(store_key));
         }
         let fingerprint = format!("{store_key}:{}", hashed_key(&secret));
         let cached = lock(&self.inner.identities).get(&fingerprint).cloned();
@@ -1014,15 +1093,42 @@ impl AgentAccounts {
 
     // ── sign-ins through the CLI ────────────────────────────────────────────
 
-    /// A throwaway dir for one sign-in (`.login-<id>`, swept at startup).
-    fn login_home(&self, login_id: &str) -> Result<PathBuf, EngineError> {
+    /// A throwaway dir for one sign-in (`.login-<id>`, swept at startup),
+    /// owner-only inside an owner-only root before any CLI is spawned.
+    pub(super) fn login_home(&self, login_id: &str) -> Result<PathBuf, EngineError> {
         let home = self
             .inner
             .config
-            .root_dir()
+            .private_root()?
             .join(format!(".login-{login_id}"));
-        std::fs::create_dir_all(&home)?;
+        private_dir(&home)?;
         Ok(home)
+    }
+
+    /// Devin's throwaway sign-in: its XDG data / config / cache homes (all
+    /// owner-only) and the recording browser's `browser-url` file, created
+    /// empty and 0600 before Devin starts.
+    pub(super) fn devin_login_dirs(&self, login_id: &str) -> Result<DevinLoginDirs, EngineError> {
+        let home = self.login_home(login_id)?;
+        let dirs = DevinLoginDirs {
+            data: home.join("data"),
+            config: home.join("config"),
+            cache: home.join("cache"),
+            url_file: home.join("browser-url"),
+            home,
+        };
+        for dir in [&dirs.data, &dirs.config, &dirs.cache] {
+            private_dir(dir)?;
+        }
+        let mut url_file = std::fs::OpenOptions::new();
+        url_file.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            url_file.mode(0o600);
+        }
+        url_file.open(&dirs.url_file)?;
+        Ok(dirs)
     }
 
     async fn cli_command(
@@ -1139,12 +1245,13 @@ impl AgentAccounts {
             .acp_harness(HarnessId::Devin)
             .ok_or_else(|| EngineError::Other("Devin has no sign-in".into()))?;
         let login_id = new_id();
-        let home = self.login_home(&login_id)?;
-        let (data, config, cache) = (home.join("data"), home.join("config"), home.join("cache"));
-        for dir in [&data, &config, &cache] {
-            std::fs::create_dir_all(dir)?;
-        }
-        let url_file = home.join("browser-url");
+        let DevinLoginDirs {
+            home,
+            data,
+            config,
+            cache,
+            url_file,
+        } = self.devin_login_dirs(&login_id)?;
         #[cfg(unix)]
         let browser = ensure_recording_browser(&self.inner.config.root_dir());
         #[cfg(not(unix))]
@@ -1232,6 +1339,15 @@ impl AgentAccounts {
     }
 }
 
+/// See [`AgentAccounts::devin_login_dirs`].
+pub(super) struct DevinLoginDirs {
+    pub(super) home: PathBuf,
+    pub(super) data: PathBuf,
+    pub(super) config: PathBuf,
+    pub(super) cache: PathBuf,
+    pub(super) url_file: PathBuf,
+}
+
 fn hermes_profile(provider: &str, entry: &serde_json::Value, ix: usize) -> SlotProfile {
     let access = str_field(entry, "access_token")
         .and_then(|t| jwt_claims(&t))
@@ -1269,26 +1385,53 @@ fn hermes_profile(provider: &str, entry: &serde_json::Value, ix: usize) -> SlotP
     }
 }
 
-fn scan_grok_url(output: &str) -> Option<String> {
+pub(super) fn scan_grok_url(output: &str) -> Option<String> {
     scan_https_url(output, &["x.ai", "grok.com"])
 }
 
-fn scan_hermes_url(output: &str) -> Option<String> {
+pub(super) fn scan_hermes_url(output: &str) -> Option<String> {
     scan_https_url(output, &["nousresearch.com", "openai.com"])
 }
 
-/// Devin's sign-in page: its CLI-auth continue page (or the Windsurf
-/// editor sign-in), which names the loopback `redirect_uri`.
-pub(super) fn devin_login_url(url: &str) -> bool {
-    url.starts_with("https://")
-        && (url.contains("redirect_uri=")
-            || url.contains("/auth/cli/")
-            || url.contains("/editor/signin"))
+/// Devin's sign-in page — its CLI-auth page (`/auth/cli/…`) or the Windsurf
+/// editor sign-in (`/editor/signin`) — on a Devin / Windsurf / Codeium
+/// host over https, with no userinfo or explicit port. A `redirect_uri`, when
+/// present, must be a loopback `http` callback. This url is opened on the
+/// requesting device, so a CLI (or a log line) naming any other page is
+/// ignored.
+pub(super) fn devin_login_url(raw: &str) -> bool {
+    let raw = raw.trim();
+    if !trusted_page(raw, DEVIN_DOMAINS) {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    let path = url.path();
+    let sign_in_page = path.starts_with("/auth/cli/")
+        || path == "/editor/signin"
+        || path.starts_with("/editor/signin/");
+    sign_in_page
+        && url
+            .query_pairs()
+            .filter(|(key, _)| key == "redirect_uri")
+            .all(|(_, redirect)| loopback_redirect(&redirect))
+}
+
+/// An `http://localhost|127.0.0.1|[::1]:<port>/…` callback, no userinfo.
+fn loopback_redirect(raw: &str) -> bool {
+    reqwest::Url::parse(raw).is_ok_and(|url| {
+        url.scheme() == "http"
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.port().is_some()
+            && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+    })
 }
 
 /// The page a Devin sign-in opened: the recording browser's file, else the
 /// first sign-in url in the logs under its throwaway data dir.
-fn recorded_devin_url(url_file: &Path, logs: &Path) -> Option<String> {
+pub(super) fn recorded_devin_url(url_file: &Path, logs: &Path) -> Option<String> {
     if let Ok(text) = std::fs::read_to_string(url_file)
         && let Some(url) = text.lines().map(str::trim).find(|l| devin_login_url(l))
     {

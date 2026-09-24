@@ -261,8 +261,40 @@ impl AgentAccountsConfig {
         self.data_dir.join("agent-accounts")
     }
 
+    /// [`Self::root_dir`], created (or tightened) owner-only — it holds slot
+    /// files and every throwaway sign-in home.
+    fn private_root(&self) -> std::io::Result<PathBuf> {
+        let root = self.root_dir();
+        private_dir(&root)?;
+        Ok(root)
+    }
+
     fn usage_cache_file(&self) -> PathBuf {
         self.root_dir().join("usage-cache.json")
+    }
+}
+
+/// `dir` created (parents as needed) and itself made owner-only — 0700 on
+/// Unix, an existing looser dir included. Sign-in homes hold whatever a CLI
+/// writes there (fresh tokens, in modes the CLI picks), so the directory is
+/// the boundary that keeps other local users out.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+            Err(err) => return Err(err),
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
     }
 }
 
@@ -752,6 +784,12 @@ impl AgentAccounts {
         // `.login-<uuid>` throwaway CODEX_HOME dirs — each may hold live OAuth
         // tokens — with no owner to clean them. Reclaim them at boot.
         let root = config.root_dir();
+        // A root from an older build may be group/world-readable: tighten it.
+        if root.is_dir()
+            && let Err(err) = private_dir(&root)
+        {
+            tracing::warn!(error = %err, "could not make the agent-accounts dir private");
+        }
         if let Ok(entries) = std::fs::read_dir(&root) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
@@ -1358,7 +1396,7 @@ impl AgentAccounts {
                 &format!(
                     "<!doctype html><title>Sign-in failed</title><p>{}</p>\
                      <p>Return to Zeron to try again.</p>",
-                    html_escape(&error.to_string())
+                    html_escape(&zeron_harness::redact::redact_output(&error.to_string()))
                 ),
             ),
         };
@@ -1504,12 +1542,7 @@ impl AgentAccounts {
         let login_id = new_id();
         // A throwaway CODEX_HOME isolates the new login completely — the live
         // ~/.codex session is never touched until the user explicitly switches.
-        let home = self
-            .inner
-            .config
-            .root_dir()
-            .join(format!(".login-{login_id}"));
-        std::fs::create_dir_all(&home)?;
+        let home = self.login_home(&login_id)?;
         // Resolve through the harness itself (`CODEX_EXECUTABLE`, PATH, the
         // login-shell snapshot, install dirs — the Windows npm payload
         // included) and compose the same child PATH a chat run gets, so
@@ -1571,10 +1604,11 @@ impl AgentAccounts {
         }));
         #[cfg(unix)]
         let browser = {
-            let root = self.inner.config.root_dir();
-            std::fs::create_dir_all(&root)
+            self.inner
+                .config
+                .private_root()
                 .ok()
-                .and_then(|()| ensure_noop_browser(&root))
+                .and_then(|root| ensure_noop_browser(&root))
         };
         #[cfg(not(unix))]
         let browser = None;
@@ -1630,12 +1664,7 @@ impl AgentAccounts {
     async fn start_cursor_login(&self) -> Result<AgentLoginStart, EngineError> {
         self.reap_spawned_flows(HarnessId::Cursor);
         let login_id = new_id();
-        let home = self
-            .inner
-            .config
-            .root_dir()
-            .join(format!(".login-{login_id}"));
-        std::fs::create_dir_all(&home)?;
+        let home = self.login_home(&login_id)?;
         let cmd = zeron_harness::cursor::login_command(&home.join("auth.json"))
             .await
             .map_err(|e| {
@@ -1728,10 +1757,10 @@ impl AgentAccounts {
             .map_err(|e| EngineError::Other(format!("token exchange failed: {e}")))?;
         if !token.status().is_success() {
             let status = token.status();
-            let body = token.text().await.unwrap_or_default();
-            let excerpt: String = body.chars().take(200).collect();
+            // Never echo the body: it can carry token material on odd errors,
+            // and the loopback page shows this message to the browser.
             return Err(EngineError::Other(format!(
-                "Anthropic rejected the code ({status}): {excerpt}"
+                "Anthropic rejected the code ({status}) — try again."
             )));
         }
         let token: serde_json::Value = token
@@ -2266,8 +2295,12 @@ impl AgentAccounts {
     // ── slot files ──────────────────────────────────────────────────────────
 
     fn slots_dir(&self, harness: HarnessId) -> Result<PathBuf, EngineError> {
-        let dir = self.inner.config.root_dir().join(harness_slug(harness));
-        std::fs::create_dir_all(&dir)?;
+        let dir = self
+            .inner
+            .config
+            .private_root()?
+            .join(harness_slug(harness));
+        private_dir(&dir)?;
         Ok(dir)
     }
 
@@ -2403,7 +2436,7 @@ impl AgentAccounts {
         let persisted = serde_json::to_vec_pretty(&file)
             .map_err(|e| EngineError::Other(e.to_string()))
             .and_then(|json| {
-                std::fs::create_dir_all(self.inner.config.root_dir())?;
+                self.inner.config.private_root()?;
                 write_file_atomic(&self.inner.config.usage_cache_file(), &json, true)
             });
         if let Err(err) = persisted {
@@ -3425,10 +3458,7 @@ fn json_ms(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
 }
 
 fn scan_openai_url(output: &str) -> Option<String> {
-    let start = output.find("https://auth.openai.com/")?;
-    let rest = &output[start..];
-    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-    Some(rest[..end].to_string())
+    scan_https_url(output, &["auth.openai.com"])
 }
 
 /// Terminal escape sequences (colours, cursor moves) removed — the CLIs
@@ -3473,7 +3503,8 @@ fn strip_ansi(text: &str) -> String {
 }
 
 /// The first `https://` url in `output` (escapes stripped) whose host is
-/// `host` or one of its subdomains.
+/// one of `hosts` or a subdomain of one (on a label boundary), with no
+/// userinfo or explicit port — see [`stores::trusted_page`].
 fn scan_https_url(output: &str, hosts: &[&str]) -> Option<String> {
     let text = strip_ansi(output);
     let mut rest = text.as_str();
@@ -3483,12 +3514,7 @@ fn scan_https_url(output: &str, hosts: &[&str]) -> Option<String> {
             .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>'))
             .unwrap_or(candidate.len());
         let url = candidate[..end].trim_end_matches(['.', ',', ';', ')', ']']);
-        if let Ok(parsed) = reqwest::Url::parse(url)
-            && let Some(host) = parsed.host_str()
-            && hosts
-                .iter()
-                .any(|h| host == *h || host.ends_with(&format!(".{h}")))
-        {
+        if stores::trusted_page(url, hosts) {
             return Some(url.to_string());
         }
         rest = &candidate[end.max(1)..];
@@ -3556,7 +3582,9 @@ fn ensure_noop_browser(root: &Path) -> Option<PathBuf> {
 /// never prints its sign-in url. Unix only, like [`ensure_noop_browser`].
 #[cfg(unix)]
 fn ensure_recording_browser(root: &Path) -> Option<PathBuf> {
-    const SCRIPT: &str = "#!/bin/sh\n[ -n \"$ZERON_LOGIN_URL_FILE\" ] && \
+    // `umask 077`: should the file not exist yet, it's still owner-only
+    // (the sign-in pre-creates it 0600).
+    const SCRIPT: &str = "#!/bin/sh\numask 077\n[ -n \"$ZERON_LOGIN_URL_FILE\" ] && \
                           printf '%s\\n' \"$1\" >> \"$ZERON_LOGIN_URL_FILE\"\nexit 0\n";
     let path = root.join(".record-browser");
     if std::fs::read_to_string(&path).ok().as_deref() != Some(SCRIPT) {
@@ -3575,9 +3603,15 @@ fn scan_shim_event(output: &str, ev: &str) -> Option<serde_json::Value> {
     })
 }
 
+/// The Cursor SDK's sign-in page from the shim's `auth-url` frame — only a
+/// Cursor https page (it's opened on the requesting device).
 fn scan_cursor_url(output: &str) -> Option<String> {
     str_field(&scan_shim_event(output, "auth-url")?, "url")
+        .filter(|url| stores::trusted_page(url, CURSOR_DOMAINS))
 }
+
+/// Where the Cursor SDK's browser sign-in lives.
+const CURSOR_DOMAINS: &[&str] = &["cursor.com", "cursor.sh"];
 
 fn scan_shim_fatal(output: &str) -> Option<String> {
     str_field(&scan_shim_event(output, "fatal")?, "message")
@@ -3700,7 +3734,10 @@ fn pkce_pair() -> (String, String) {
 /// actually redirects to — a buggy or hostile peer can't make us bind (and
 /// receive local traffic on) an arbitrary loopback port.
 pub(crate) fn tunnel_port_allowed(port: u16, url: Option<&str>) -> bool {
-    port >= 1024 && url.and_then(loopback_port).is_some_and(|redirect| redirect == port)
+    port >= 1024
+        && url
+            .and_then(loopback_port)
+            .is_some_and(|redirect| redirect == port)
 }
 
 pub(crate) fn loopback_port(url: &str) -> Option<u16> {
@@ -4071,6 +4108,24 @@ mod tests {
             Some("https://cursor.com/loginDeepControl?challenge=x")
         );
         assert_eq!(scan_cursor_url("no frames here"), None);
+        // Only a Cursor https page is ever opened on the requesting device.
+        for url in [
+            "https://evil.example/loginDeepControl?challenge=x",
+            "https://cursor.com.evil.example/loginDeepControl",
+            "http://cursor.com/loginDeepControl",
+            "https://user@cursor.com/loginDeepControl",
+            "https://cursor.com:8443/loginDeepControl",
+            "javascript:alert(1)",
+        ] {
+            let frame = format!("{}\n", serde_json::json!({ "ev": "auth-url", "url": url }));
+            assert_eq!(scan_cursor_url(&frame), None, "{url}");
+        }
+        assert!(
+            scan_cursor_url(
+                "{\"ev\":\"auth-url\",\"url\":\"https://www.cursor.com/loginDeepControl?c=1\"}\n"
+            )
+            .is_some()
+        );
         assert_eq!(
             scan_shim_fatal("{\"ev\":\"fatal\",\"message\":\"cursor login failed: boom\"}\n")
                 .as_deref(),
@@ -4086,6 +4141,14 @@ mod tests {
             Some("https://auth.openai.com/authorize?x=1")
         );
         assert_eq!(scan_openai_url("nothing here"), None);
+        for output in [
+            "open https://auth.openai.com.evil.example/authorize?x=1",
+            "open https://auth.openai.com@evil.example/authorize?x=1",
+            "open https://auth.openai.com:8443/authorize?x=1",
+            "open http://auth.openai.com/authorize?x=1",
+        ] {
+            assert_eq!(scan_openai_url(output), None, "{output}");
+        }
     }
 
     #[cfg(unix)]
@@ -4230,7 +4293,9 @@ mod probe_tests {
         assert!(start.url.contains("state="));
         // The verifier never rides the authorize url.
         let verifier = match lock(&accounts.inner.flows).get(&start.login_id) {
-            Some(LoginFlow::Claude { verifier, state, .. }) => {
+            Some(LoginFlow::Claude {
+                verifier, state, ..
+            }) => {
                 assert_ne!(verifier, state);
                 verifier.clone()
             }
@@ -4553,6 +4618,7 @@ mod login_tests {
                 let mut request = vec![0u8; 16 * 1024];
                 let n = socket.read(&mut request).await.unwrap_or(0);
                 let request = String::from_utf8_lossy(&request[..n]).to_string();
+                let leaky = request.contains("\"code\":\"leaky-code\"");
                 let body = if request.contains("\"code\":\"good-code\"")
                     && request.contains("\"redirect_uri\":\"http://localhost:")
                 {
@@ -4563,10 +4629,13 @@ mod login_tests {
                         "account": { "email_address": "new@example.com", "uuid": "acct-new" },
                     })
                     .to_string()
+                } else if leaky {
+                    // An odd error that echoes token material.
+                    r#"{"error":"invalid_grant","access_token":"LEAKED-SECRET-123"}"#.into()
                 } else {
                     String::new()
                 };
-                let status = if body.is_empty() {
+                let status = if body.is_empty() || leaky {
                     "400 Bad Request"
                 } else {
                     "200 OK"
@@ -4659,6 +4728,45 @@ mod login_tests {
                 .any(|a| a.harness == HarnessId::ClaudeCode
                     && a.email.as_deref() == Some("new@example.com")
                     && !a.active)
+        );
+    }
+
+    /// A failed exchange reports its status only — never the provider's
+    /// body — on the browser page and in the poll.
+    #[tokio::test]
+    async fn a_failed_claude_exchange_never_echoes_the_response_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_url, _server) = token_server().await;
+        let endpoints = ProbeEndpoints {
+            claude_loopback_token: token_url,
+            claude_profile: "http://127.0.0.1:9/profile".into(),
+            ..Default::default()
+        };
+        let accounts =
+            AgentAccounts::with_endpoints(config(tmp.path()), endpoints, Default::default());
+        let start = accounts.start_login(HarnessId::ClaudeCode).await.unwrap();
+        let port = start.callback_port.unwrap();
+        let state = reqwest::Url::parse(&start.url)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        let page = browser_get(port, &format!("/callback?code=leaky-code&state={state}")).await;
+        assert!(page.starts_with("HTTP/1.1 400"), "{page}");
+        assert!(!page.contains("LEAKED"), "{page}");
+        assert!(!page.contains("invalid_grant"), "{page}");
+        assert!(
+            page.contains("Anthropic rejected the code (400 Bad Request) — try again."),
+            "{page}"
+        );
+        let poll = poll_until_settled(&accounts, &start.login_id).await;
+        assert_eq!(poll.status, AgentLoginStatus::Error);
+        let message = poll.message.unwrap();
+        assert_eq!(
+            message,
+            "Anthropic rejected the code (400 Bad Request) — try again."
         );
     }
 

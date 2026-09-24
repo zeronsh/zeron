@@ -11,114 +11,398 @@
 /// replaced:
 /// - url query strings and fragments (`?state=…`, `#code=…`) and userinfo;
 /// - device / user codes (`ABCD-1234`);
-/// - `key=value` / `"key":"value"` pairs whose key names a secret (token,
-///   secret, password, key, code, state, verifier, session, cookie, auth);
+/// - the value after a label naming a secret (`token: …`, `state=…`,
+///   `"password": "…"`, OpenCode / Pi's `"access"` / `"refresh"`), whatever
+///   it looks like — a quoted value through its closing quote;
+/// - an `Authorization` / `Proxy-Authorization` value through end-of-line
+///   (only its scheme word — `Bearer`, `Digest`, … — stays);
 /// - JWTs (`eyJ…`), vendor-prefixed keys (`sk-…`, `ghp_…`, `gho_…`, `xai-…`,
 ///   …), the value after `Bearer`, and long base64 / hex runs.
 pub fn redact_output(text: &str) -> String {
     let text = strip_ansi(text);
-    let mut out = String::with_capacity(text.len());
-    let mut previous = String::new();
+    let mut redactor = Redactor::default();
     let mut word = String::new();
-    // Set by a secret label whose value is the NEXT word: `token: abc`,
-    // `state = xyz`, pretty-printed `"access_token": "abc"`.
-    let mut value_next = false;
-    let mut flush = |word: &mut String, previous: &mut String, out: &mut String| {
-        if word.is_empty() {
-            return;
-        }
-        // `status code: 503` is a response code, not a secret: `code` after
-        // a status/exit word is not a secret label.
-        let label = secret_label(word).filter(|_| !is_status_code_label(word, previous));
-        let bare_separator = matches!(word.as_str(), "=" | ":" | "=>");
-        if value_next && is_auth_scheme(word) {
-            // `Authorization: Bearer <token>`, GitHub's `Authorization:
-            // token <token>`: the scheme word stays, and the pending
-            // redaction carries on to the credential after it.
-            out.push_str(word);
-        } else if value_next && !bare_separator {
-            out.push_str(&redact_labeled_value(word));
-            value_next = false;
-        } else {
-            out.push_str(&redact_word(word, previous));
-            value_next = match label {
-                // `token:` / `"access_token":` — the separator is attached.
-                Some(true) => true,
-                // `state` — wait for a bare `=` / `:` before the value.
-                Some(false) => false,
-                None => value_next || (bare_separator && secret_label(previous) == Some(false)),
-            };
-        }
-        *previous = word.to_ascii_lowercase();
-        word.clear();
-    };
     for c in text.chars() {
         if c.is_whitespace() {
-            flush(&mut word, &mut previous, &mut out);
-            out.push(c);
+            if !word.is_empty() {
+                redactor.word(&word);
+                word.clear();
+            }
+            redactor.space(c);
         } else {
             word.push(c);
         }
     }
-    flush(&mut word, &mut previous, &mut out);
-    out
+    if !word.is_empty() {
+        redactor.word(&word);
+    }
+    redactor.finish()
 }
 
-/// An HTTP authorization scheme word (`Bearer`, GitHub's `token`, …).
-fn is_auth_scheme(word: &str) -> bool {
-    let core = word.trim_matches(|c: char| matches!(c, '"' | '\'' | '`'));
-    matches!(
-        core.to_ascii_lowercase().as_str(),
-        "bearer" | "basic" | "digest" | "token" | "negotiate" | "ntlm" | "hawk" | "apikey"
-    )
+/// What follows a label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Label {
+    /// An ordinary secret (`token`, `password`, `access`, …): its value is
+    /// hidden whatever it looks like — `password: bearer` included.
+    Secret,
+    /// `Authorization` / `Proxy-Authorization`: the scheme word may stay;
+    /// every parameter and credential after it is hidden.
+    Authorization,
 }
 
-/// `code` labelling a status (`status code: 503`, `exit code: 1`) rather
-/// than an authorization or device code.
-fn is_status_code_label(word: &str, previous: &str) -> bool {
-    let core = word
-        .trim_matches(|c: char| !c.is_ascii_alphanumeric())
-        .to_ascii_lowercase();
+/// Where the redactor is within a line.
+#[derive(Debug, Clone, Copy, Default)]
+enum State {
+    #[default]
+    Text,
+    /// A bare label (`state`, `"password"`, `Authorization`) whose `=` / `:`
+    /// may come as the next word. Ends with the line.
+    Separator(Label),
+    /// The separator has been seen: the next word is the value.
+    Value(Label),
+    /// Inside a hidden value — through `quote`'s closing quote when it was
+    /// quoted, else through end-of-line. `masked` once its `[redacted]` is
+    /// written.
+    Hidden { quote: Option<char>, masked: bool },
+}
+
+#[derive(Default)]
+struct Redactor {
+    out: String,
+    /// Whitespace not yet written: dropped when it falls inside a hidden
+    /// value, so `"correct horse battery staple"` becomes `"[redacted]"`.
+    space: String,
+    /// The previous whole word, lowercased.
+    previous: String,
+    state: State,
+}
+
+impl Redactor {
+    fn space(&mut self, c: char) {
+        // Line-scoped states end with the line. A pending value (`token:` at
+        // the end of a line) still hides the next word.
+        if c == '\n' && matches!(self.state, State::Separator(_) | State::Hidden { .. }) {
+            self.state = State::Text;
+        }
+        self.space.push(c);
+    }
+
+    fn emit(&mut self, text: &str) {
+        self.out.push_str(&self.space);
+        self.space.clear();
+        self.out.push_str(text);
+    }
+
+    fn finish(mut self) -> String {
+        self.out.push_str(&self.space);
+        self.out
+    }
+
+    fn word(&mut self, word: &str) {
+        self.segment(word);
+        self.previous = word.to_ascii_lowercase();
+    }
+
+    /// `part` — a word, or what's left of one — in the current state.
+    fn segment(&mut self, part: &str) {
+        if part.is_empty() {
+            return;
+        }
+        match self.state {
+            State::Text => self.text(part),
+            State::Separator(label) => match strip_separator(part) {
+                Some(rest) => {
+                    self.emit(&part[..part.len() - rest.len()]);
+                    self.state = State::Value(label);
+                    self.segment(rest);
+                }
+                None => {
+                    self.state = State::Text;
+                    self.text(part);
+                }
+            },
+            State::Value(label) => {
+                if matches!(part, "=" | ":" | "=>") {
+                    self.emit(part);
+                    return;
+                }
+                self.state = State::Text;
+                match label {
+                    Label::Secret => self.secret_value(part),
+                    Label::Authorization => self.authorization_value(part),
+                }
+            }
+            State::Hidden { quote, masked } => self.hidden(part, quote, masked),
+        }
+    }
+
+    /// A word outside any value.
+    fn text(&mut self, part: &str) {
+        if let Some(parts) = parse_label(part) {
+            match (label_kind(parts.key, &self.previous), parts.rest) {
+                // `token`, `"password"`: the separator may follow.
+                (Some(label), None) => {
+                    let word = redact_word(part, &self.previous);
+                    self.emit(&word);
+                    self.state = State::Separator(label);
+                    return;
+                }
+                // `token:`, `password=hunter2`, `Authorization:Bearer`.
+                (Some(label), Some(rest)) => {
+                    self.emit(&part[..part.len() - rest.len()]);
+                    self.state = State::Value(label);
+                    self.segment(rest);
+                    return;
+                }
+                // `expires_in:3600`, `code:503` after `status`: keep the
+                // key, read what follows it on its own.
+                (None, Some(rest)) if !rest.is_empty() => {
+                    self.emit(&part[..part.len() - rest.len()]);
+                    self.segment(rest);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // A quoted item with more after it (`"x","token":"y"}`).
+        if let Some(end) = quoted_item_end(part)
+            && end < part.len()
+        {
+            let head = redact_word(&part[..end], &self.previous);
+            self.emit(&head);
+            self.segment(&part[end..]);
+            return;
+        }
+        // Compact lists (`a=1,token=2`); a url keeps its commas.
+        if !part.contains("://")
+            && let Some(comma) = part.find(',')
+            && comma + 1 < part.len()
+        {
+            self.segment(&part[..=comma]);
+            self.segment(&part[comma + 1..]);
+            return;
+        }
+        let word = redact_word(part, &self.previous);
+        self.emit(&word);
+    }
+
+    /// The value after an ordinary secret label: hidden, always.
+    fn secret_value(&mut self, part: &str) {
+        // A nested object: its own keys are labels.
+        if part == "{" {
+            self.emit(part);
+            return;
+        }
+        let Some(quote) = opening_quote(part) else {
+            self.emit(&redact_labeled_value(part));
+            return;
+        };
+        let inner = &part[1..];
+        self.emit(&part[..1]);
+        match find_closing(inner, quote) {
+            Some(close) => {
+                let content = &inner[..close];
+                if !content.is_empty() {
+                    self.emit(mask(content));
+                }
+                self.emit(&inner[close..=close]);
+                self.segment(&inner[close + 1..]);
+            }
+            None => {
+                if !inner.is_empty() {
+                    self.emit(REDACTED);
+                }
+                self.state = State::Hidden {
+                    quote: Some(quote),
+                    masked: !inner.is_empty(),
+                };
+            }
+        }
+    }
+
+    /// The first word of an `Authorization` value: a scheme word stays, and
+    /// everything after it is hidden through end-of-line (or the value's
+    /// closing quote).
+    fn authorization_value(&mut self, part: &str) {
+        let quote = opening_quote(part);
+        let body = match quote {
+            Some(_) => {
+                self.emit(&part[..1]);
+                &part[1..]
+            }
+            None => part,
+        };
+        if let Some(quote) = quote
+            && let Some(close) = find_closing(body, quote)
+        {
+            if close > 0 {
+                self.emit(REDACTED);
+            }
+            self.emit(&body[close..=close]);
+            self.segment(&body[close + 1..]);
+            return;
+        }
+        let masked = if is_auth_scheme(body) {
+            self.emit(body);
+            false
+        } else if body.is_empty() {
+            false
+        } else {
+            self.emit(REDACTED);
+            true
+        };
+        self.state = State::Hidden { quote, masked };
+    }
+
+    /// A word inside a hidden value: one `[redacted]` stands for all of it.
+    fn hidden(&mut self, part: &str, quote: Option<char>, mut masked: bool) {
+        let close = quote.and_then(|quote| find_closing(part, quote));
+        let content = &part[..close.unwrap_or(part.len())];
+        if masked {
+            self.space.clear();
+        } else if !content.is_empty() {
+            self.emit(REDACTED);
+            masked = true;
+        }
+        match close {
+            Some(close) => {
+                self.state = State::Text;
+                self.emit(&part[close..=close]);
+                self.segment(&part[close + 1..]);
+            }
+            None => self.state = State::Hidden { quote, masked },
+        }
+    }
+}
+
+/// A word that starts with a label: `key`, `key:`, `"key":`, `--key=value`.
+struct LabelParts<'a> {
+    key: &'a str,
+    /// `None` for a bare key (its separator may be the next word), else what
+    /// follows the separator (possibly nothing).
+    rest: Option<&'a str>,
+}
+
+fn parse_label(word: &str) -> Option<LabelParts<'_>> {
+    let body = word
+        .trim_start_matches(|c: char| matches!(c, '"' | '\'' | '`' | '{' | '[' | '(' | ',' | '-'));
+    let quote = word[..word.len() - body.len()]
+        .chars()
+        .last()
+        .filter(|c| is_quote(*c));
+    let key_len = body
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .unwrap_or(body.len());
+    let key = &body[..key_len];
+    // A token-shaped "key" is a secret, never a label to print.
+    if !key.starts_with(|c: char| c.is_ascii_alphabetic())
+        || key.len() > 64
+        || looks_like_secret(key)
+        || looks_like_device_code(key)
+    {
+        return None;
+    }
+    let mut after = &body[key_len..];
+    if let Some(quote) = quote
+        && let Some(unquoted) = after.strip_prefix(quote)
+    {
+        after = unquoted;
+    }
+    if after.is_empty() {
+        return Some(LabelParts { key, rest: None });
+    }
+    let rest = strip_separator(after)?;
+    // `https://…` is a url, not a label.
+    if rest.starts_with("//") {
+        return None;
+    }
+    Some(LabelParts {
+        key,
+        rest: Some(rest),
+    })
+}
+
+/// What `key` labels. `access` / `refresh` (OpenCode's and Pi's OAuth
+/// fields) match exactly — `accessible:` is not a secret — while the other
+/// names match anywhere in the key (`id_token`, `x-api-key`, `passwd`).
+fn label_kind(key: &str, previous: &str) -> Option<Label> {
+    let key = key.to_ascii_lowercase();
+    if matches!(key.as_str(), "authorization" | "proxy-authorization") {
+        return Some(Label::Authorization);
+    }
+    // `status code: 503` is a response code, not a secret.
     let previous = previous.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-    core == "code"
+    if key == "code"
         && matches!(
             previous,
             "status" | "http" | "exit" | "error" | "response" | "return"
         )
-}
-
-/// Whether `word` is a secret label on its own — `Some(true)` when it ends
-/// in its separator (`token:`, `"state":`, `password=`), `Some(false)` when
-/// the separator should follow as its own word (`token`, `"state"`), `None`
-/// when it isn't a label. A word carrying its value (`token=abc`) is not a
-/// label: [`redact_core`] handles it in place.
-fn secret_label(word: &str) -> Option<bool> {
-    let trimmed = word.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | ',' | '{' | '('));
-    let (key, separated) = match trimmed.strip_suffix([':', '=']) {
-        Some(key) => (
-            key.trim_matches(|c: char| matches!(c, '"' | '\'' | '`')),
-            true,
-        ),
-        None => (trimmed, false),
-    };
-    if key.is_empty()
-        || !key
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
         return None;
     }
-    let lower = key.to_ascii_lowercase();
-    SECRET_KEYS
-        .iter()
-        .any(|k| lower.contains(k))
-        .then_some(separated)
+    (EXACT_SECRET_KEYS.contains(&key.as_str()) || SECRET_KEYS.iter().any(|k| key.contains(k)))
+        .then_some(Label::Secret)
 }
 
-/// The value after a secret label, with its quotes and trailing punctuation
+/// `part` after a leading `=>`, `:` or `=`.
+fn strip_separator(part: &str) -> Option<&str> {
+    part.strip_prefix("=>")
+        .or_else(|| part.strip_prefix(':'))
+        .or_else(|| part.strip_prefix('='))
+}
+
+fn is_quote(c: char) -> bool {
+    matches!(c, '"' | '\'' | '`')
+}
+
+fn opening_quote(part: &str) -> Option<char> {
+    part.chars().next().filter(|c| is_quote(*c))
+}
+
+/// Byte index of the first unescaped `quote` in `text` (`\"` is JSON's
+/// escaped quote, not the end of the string).
+fn find_closing(text: &str, quote: char) -> Option<usize> {
+    let mut escaped = false;
+    for (ix, c) in text.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == quote {
+            return Some(ix);
+        }
+    }
+    None
+}
+
+/// The end (exclusive) of a leading `"quoted"` item.
+fn quoted_item_end(part: &str) -> Option<usize> {
+    let quote = opening_quote(part)?;
+    find_closing(&part[1..], quote).map(|close| close + 2)
+}
+
+/// An HTTP authorization scheme word (`Bearer`, GitHub's `token`, …).
+fn is_auth_scheme(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "bearer" | "basic" | "digest" | "token" | "negotiate" | "ntlm" | "hawk" | "apikey"
+    )
+}
+
+/// A hidden value's marker: a device code keeps its own, so a sign-in hint
+/// still reads right.
+fn mask(value: &str) -> &'static str {
+    if looks_like_device_code(value) {
+        "[code]"
+    } else {
+        REDACTED
+    }
+}
+
+/// An unquoted value after a secret label, with its trailing punctuation
 /// kept. Always redacted — a short PIN or OTP (`otp: 1234`) is still a
 /// secret; status codes stay readable because `status code` is not a label
-/// (see `is_status_code_label`).
+/// (see [`label_kind`]).
 fn redact_labeled_value(word: &str) -> String {
     const EDGE: &[char] = &['"', '\'', '`', ',', ';', ')', '}', ']'];
     let start = word.len() - word.trim_start_matches(EDGE).len();
@@ -127,18 +411,12 @@ fn redact_labeled_value(word: &str) -> String {
         return word.to_string();
     }
     let end = start + core.len();
-    // A device code keeps its own marker so a sign-in hint still reads right.
-    let mask = if looks_like_device_code(core) {
-        "[code]"
-    } else {
-        REDACTED
-    };
-    format!("{}{mask}{}", &word[..start], &word[end..])
+    format!("{}{}{}", &word[..start], mask(core), &word[end..])
 }
 
 const REDACTED: &str = "[redacted]";
 
-/// Key names whose values are secrets.
+/// Key names whose values are secrets, matched anywhere in a key.
 const SECRET_KEYS: &[&str] = &[
     "token",
     "secret",
@@ -154,6 +432,10 @@ const SECRET_KEYS: &[&str] = &[
     "credential",
     "otp",
 ];
+
+/// Generic words that are secrets only as a whole key: OpenCode / Pi keep
+/// OAuth tokens under `access` and `refresh`.
+const EXACT_SECRET_KEYS: &[&str] = &["access", "refresh"];
 
 /// Vendor key prefixes (the value follows the prefix).
 const SECRET_PREFIXES: &[&str] = &[
@@ -369,6 +651,114 @@ mod tests {
         );
     }
 
+    /// Every case of the consolidated security review (the seven leaks and
+    /// the spaced-status regression) plus the earlier rounds', in one table.
+    #[test]
+    fn adversarial_matrix() {
+        let cases = [
+            // Scheme words are passed through after `Authorization` only.
+            ("password: bearer", "password: [redacted]"),
+            (" token: token", " token: [redacted]"),
+            ("secret = Basic", "secret = [redacted]"),
+            // Compact `Authorization:Bearer` still hides the credential.
+            (
+                "Authorization:Bearer abc123def",
+                "Authorization:Bearer [redacted]",
+            ),
+            // Parameterised schemes: every parameter, through end-of-line.
+            (
+                "Authorization: Digest username=alice response=abc123 nonce=xyz",
+                "Authorization: Digest [redacted]",
+            ),
+            (
+                r#"Authorization: Hawk id="dh37", ts="1353832234", nonce="j4h3g2", mac="6R4rV5iE+NPoym+WwjeHzjAGXUtLNIxmo1vpMofpLAE=""#,
+                "Authorization: Hawk [redacted]",
+            ),
+            (
+                "Proxy-Authorization: Basic dXNlcjpwYXNz",
+                "Proxy-Authorization: Basic [redacted]",
+            ),
+            (
+                "authorization = Bearer abc, retry=1\nnext line stays",
+                "authorization = Bearer [redacted]\nnext line stays",
+            ),
+            (
+                r#"{"Authorization": "Bearer abc def", "x": 1}"#,
+                r#"{"Authorization": "Bearer [redacted]", "x": 1}"#,
+            ),
+            (
+                r#"-H "Authorization: token ghx""#,
+                r#"-H "Authorization: token [redacted]"#,
+            ),
+            // Quoted values through their closing quote, JSON escapes too.
+            (
+                r#""password": "correct horse battery staple""#,
+                r#""password": "[redacted]""#,
+            ),
+            (
+                r#""password": "a \"quoted\" pass phrase", "user": "wing""#,
+                r#""password": "[redacted]", "user": "wing""#,
+            ),
+            (
+                "password='two words' then text",
+                "password='[redacted]' then text",
+            ),
+            (
+                "password: \"unterminated secret\nvisible line",
+                "password: \"[redacted]\nvisible line",
+            ),
+            // OpenCode / Pi OAuth fields, exact keys only.
+            (
+                r#""access": "short-access-secret""#,
+                r#""access": "[redacted]""#,
+            ),
+            (
+                r#""refresh": "short-refresh-secret""#,
+                r#""refresh": "[redacted]""#,
+            ),
+            (
+                r#"{"type":"oauth","access":"a1","refresh":"r1","expires":3}"#,
+                r#"{"type":"oauth","access":"[redacted]","refresh":"[redacted]","expires":3}"#,
+            ),
+            ("id_token: abc", "id_token: [redacted]"),
+            ("access_token=abc", "access_token=[redacted]"),
+            ("refresh_token : abc", "refresh_token : [redacted]"),
+            ("accessible: yes", "accessible: yes"),
+            ("refreshing: true", "refreshing: true"),
+            ("access denied", "access denied"),
+            // Status codes stay readable, spaced separator included.
+            ("status code : 503", "status code : 503"),
+            ("status code: 503", "status code: 503"),
+            ("status code:503", "status code:503"),
+            ("HTTP code: 429", "HTTP code: 429"),
+            ("exit code: 1", "exit code: 1"),
+            // Earlier rounds.
+            ("otp: 1234", "otp: [redacted]"),
+            (
+                "Authorization: token abc123def",
+                "Authorization: token [redacted]",
+            ),
+            ("Code: WXYZ-9876", "Code: [code]"),
+            (r#""code": "ABCD-1234""#, r#""code": "[code]""#),
+            ("--token=abc tail", "--token=[redacted] tail"),
+            // An unquoted value keeps the rest of its word (a comma may be
+            // part of the secret).
+            ("a=1,token=2,b=3", "a=1,token=[redacted]"),
+            (
+                "https://auth.example/cb?code=abc&state=xyz",
+                "https://auth.example/cb?…",
+            ),
+            (
+                "redirect=https://auth.example/cb?code=abc",
+                "redirect=https://auth.example/cb?…",
+            ),
+            ("with ghp_abcOTPdefKEYghi0123456789", "with [redacted]"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(redact_output(input), want, "{input}");
+        }
+    }
+
     #[test]
     fn ordinary_labels_and_short_codes_stay_readable() {
         assert_eq!(redact_output("status code: 503"), "status code: 503");
@@ -442,7 +832,7 @@ mod tests {
         );
         assert_eq!(
             redact_output(r#"{"access_token":"abc","expires_in":3600}"#),
-            r#"{"access_token":[redacted]"#.to_string() + r#"}"#
+            r#"{"access_token":"[redacted]","expires_in":3600}"#
         );
         assert_eq!(
             redact_output("digest 3f786850e387550fdab836ed7e6dc881de23001b"),

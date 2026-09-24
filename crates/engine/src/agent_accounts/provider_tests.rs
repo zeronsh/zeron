@@ -1199,6 +1199,31 @@ fn device_codes_and_urls_are_found_in_coloured_cli_output() {
         scan_https_url("see https://evil.example/x.ai", &["x.ai"]),
         None
     );
+    // Grok and Hermes pages: vendor host on a label boundary, https, no
+    // userinfo and no explicit port; a later good url is still found.
+    for output in [
+        "see https://evilx.ai/device",
+        "see https://x.ai.evil.example/device",
+        "see https://auth.x.ai@evil.example/device",
+        "see https://user@auth.x.ai/device",
+        "see https://auth.x.ai:8443/device",
+        "see http://auth.x.ai/device",
+    ] {
+        assert_eq!(scan_grok_url(output), None, "{output}");
+    }
+    assert_eq!(
+        scan_grok_url("see https://evil.example/ then https://accounts.x.ai/device?c=1.")
+            .as_deref(),
+        Some("https://accounts.x.ai/device?c=1")
+    );
+    assert_eq!(
+        scan_hermes_url("go to https://nousresearch.com.evil.example/device"),
+        None
+    );
+    assert_eq!(
+        scan_hermes_url("go to https://portal.nousresearch.com/device").as_deref(),
+        Some("https://portal.nousresearch.com/device")
+    );
     assert_eq!(
         strip_ansi("\u{1b}]8;;https://a\u{7}link\u{1b}]8;;\u{7} \u{1b}[1mbold\u{1b}[0m"),
         "link bold"
@@ -1361,6 +1386,57 @@ fn credential_defined_endpoints_must_be_the_vendors_own_https_hosts() {
     );
 }
 
+/// Devin's sign-in page is opened on the requesting device: only a
+/// Devin / Windsurf / Codeium https page of the expected shape qualifies.
+#[test]
+fn devin_sign_in_urls_must_be_devins_own_pages() {
+    for url in [
+        "https://app.devin.ai/auth/cli/continue?redirect_uri=http%3A%2F%2F127.0.0.1%3A45678%2Fcallback&state=s",
+        "https://app.devin.ai/auth/cli/continue?state=s",
+        "https://windsurf.com/editor/signin?response_type=token&redirect_uri=http://localhost:1455/callback",
+        "https://www.codeium.com/editor/signin",
+        "https://devin.ai/auth/cli/?redirect_uri=http://[::1]:1455/cb",
+    ] {
+        assert!(devin_login_url(url), "{url}");
+    }
+    for url in [
+        // The review's case: any https host used to pass.
+        "https://evil.example/auth/cli/?redirect_uri=http://localhost:1455/callback",
+        "https://evildevin.ai/auth/cli/continue",
+        "https://app.devin.ai.evil.example/auth/cli/continue",
+        "https://app.devin.ai@evil.example/auth/cli/continue",
+        "https://user:pw@app.devin.ai/auth/cli/continue",
+        "https://app.devin.ai:8443/auth/cli/continue",
+        "http://app.devin.ai/auth/cli/continue",
+        "https://1.2.3.4/auth/cli/continue",
+        // Wrong page shapes.
+        "https://app.devin.ai/?redirect_uri=http://localhost:1455/callback",
+        "https://app.devin.ai/settings",
+        "https://app.devin.ai/editor/signinx",
+        "https://app.devin.ai/x/auth/cli/continue",
+        // A redirect that isn't a loopback http callback.
+        "https://app.devin.ai/auth/cli/continue?redirect_uri=https://evil.example/cb",
+        "https://app.devin.ai/auth/cli/continue?redirect_uri=http://evil.example:1455/cb",
+        "https://app.devin.ai/auth/cli/continue?redirect_uri=http://localhost/cb",
+        "https://app.devin.ai/auth/cli/continue?redirect_uri=http://localhost:1455/cb&redirect_uri=https://evil.example/",
+        "not a url",
+    ] {
+        assert!(!devin_login_url(url), "{url}");
+    }
+    // The log fallback applies the same rule.
+    let tmp = tempfile::tempdir().unwrap();
+    let logs = tmp.path().join("logs");
+    write(
+        &logs.join("devin.log"),
+        "open https://evil.example/auth/cli/?redirect_uri=http://localhost:1455/callback\n\
+         open https://app.devin.ai/auth/cli/continue?redirect_uri=http://127.0.0.1:1455/cb\n",
+    );
+    assert_eq!(
+        recorded_devin_url(&tmp.path().join("browser-url"), &logs).as_deref(),
+        Some("https://app.devin.ai/auth/cli/continue?redirect_uri=http://127.0.0.1:1455/cb")
+    );
+}
+
 #[tokio::test]
 async fn untrusted_endpoints_in_credentials_are_never_sent_a_secret() {
     let server = MockServer::start(|_, _, _| (200, "{}".into())).await;
@@ -1395,13 +1471,161 @@ async fn untrusted_endpoints_in_credentials_are_never_sent_a_secret() {
     );
     let hermes = rows(&snapshot, HarnessId::Hermes);
     assert_eq!(hermes[0].usage_error, devin[0].usage_error);
-    // The Copilot login can't even be identified without trusting the host.
+    // The Copilot login is identified locally (no request to the host its
+    // file names): switchable, labelled by that host, usage skipped.
     let copilot = rows(&snapshot, HarnessId::Opencode);
-    assert!(!copilot[0].switchable);
+    assert!(copilot[0].switchable && copilot[0].active);
+    assert_eq!(
+        copilot[0].email.as_deref(),
+        Some("GitHub Enterprise account · evil.example")
+    );
+    assert_eq!(copilot[0].usage_error, devin[0].usage_error);
     assert_eq!(
         lock(&server.hits).len(),
         0,
         "no request reached the planted server"
+    );
+}
+
+/// Throwaway sign-in homes hold whatever a CLI writes (fresh tokens, in
+/// modes the CLI picks): the accounts root and every login home are 0700
+/// before a CLI starts — an older, looser root included — and Devin's
+/// recording browser's url file is 0600.
+#[cfg(unix)]
+#[test]
+fn the_accounts_root_and_sign_in_homes_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let loosen = |path: &Path| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o775)).unwrap()
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let config = AgentAccountsConfig::isolated(tmp.path());
+    let root = config.root_dir();
+    std::fs::create_dir_all(&root).unwrap();
+    loosen(&root);
+    let (accounts, _) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    assert_eq!(
+        mode(&root),
+        0o700,
+        "an existing root is tightened at startup"
+    );
+
+    loosen(&root);
+    let home = accounts.login_home("0123456789abcdef").unwrap();
+    assert_eq!(mode(&root), 0o700, "tightened again before a sign-in");
+    assert_eq!(mode(&home), 0o700);
+
+    let devin = accounts.devin_login_dirs("fedcba9876543210").unwrap();
+    for dir in [&devin.home, &devin.data, &devin.config, &devin.cache] {
+        assert_eq!(mode(dir), 0o700, "{}", dir.display());
+    }
+    assert_eq!(mode(&devin.url_file), 0o600);
+    assert_eq!(std::fs::read_to_string(&devin.url_file).unwrap(), "");
+
+    // The recording browser appends to that file without loosening it, and
+    // creates a missing one owner-only too.
+    let browser = ensure_recording_browser(&root).unwrap();
+    let missing = devin.home.join("fresh-url");
+    for file in [&devin.url_file, &missing] {
+        let status = std::process::Command::new(&browser)
+            .arg("https://app.devin.ai/auth/cli/continue")
+            .env("ZERON_LOGIN_URL_FILE", file)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(mode(file), 0o600, "{}", file.display());
+        assert_eq!(
+            std::fs::read_to_string(file).unwrap(),
+            "https://app.devin.ai/auth/cli/continue\n"
+        );
+    }
+
+    // Slot dirs are owner-only too.
+    let slots = accounts.slots_dir(HarnessId::Grok).unwrap();
+    assert_eq!(mode(&slots), 0o700);
+}
+
+/// A self-hosted GHES Copilot login (a host zeron never sends the token to)
+/// still switches: keyed by a fingerprint of its token, snapshotted without
+/// any network call, and restored byte-for-byte after switching away.
+#[tokio::test]
+async fn a_self_hosted_ghes_login_switches_away_and_back_without_the_network() {
+    let server = MockServer::start(|_, path, _| match path {
+        "/user" => (
+            200,
+            r#"{"id":42,"login":"octo","email":"octo@example.com"}"#.into(),
+        ),
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    let file = &config.opencode_auth_file;
+    let ghes = serde_json::json!({
+        "type": "oauth", "access": "ghes-session", "refresh": "ghes-github-token",
+        "expires": 0, "enterpriseUrl": "github.company.com",
+    });
+    let dotcom = serde_json::json!({
+        "type": "oauth", "access": "dotcom-session", "refresh": "gho_dotcom", "expires": 0,
+    });
+    let store = |copilot: &serde_json::Value| {
+        serde_json::json!({ "github-copilot": copilot, "zen": { "type": "api", "key": "k" } })
+            .to_string()
+    };
+    // github.com login first (identified over the mocked API), then GHES.
+    write(file, &store(&dotcom));
+    let dotcom_id = rows(&accounts.list(false).await.unwrap(), HarnessId::Opencode)[0]
+        .id
+        .clone();
+    write(file, &store(&ghes));
+    let listed = rows(&accounts.list(true).await.unwrap(), HarnessId::Opencode);
+    let ghes_row = listed
+        .iter()
+        .find(|a| a.email.as_deref() == Some("GitHub Enterprise account · github.company.com"))
+        .expect("GHES login listed");
+    assert!(ghes_row.active && ghes_row.switchable);
+    assert_eq!(
+        ghes_row.usage_error.as_deref(),
+        Some("Usage skipped — this login names a server zeron doesn't recognize")
+    );
+    let ghes_id = ghes_row.id.clone();
+    // Keyed by a fingerprint — the token itself is never the account key.
+    let slot = accounts.read_slot(HarnessId::Opencode, &ghes_id).unwrap();
+    assert!(
+        slot.account_key.starts_with("github-copilot:enterprise:"),
+        "{}",
+        slot.account_key
+    );
+    assert!(!slot.account_key.contains("ghes-github-token"));
+
+    // Switch away to the github.com login…
+    accounts
+        .activate(HarnessId::Opencode, &dotcom_id)
+        .await
+        .unwrap();
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+    assert_eq!(written["github-copilot"]["refresh"], "gho_dotcom");
+    assert_eq!(written["zen"]["key"], "k");
+    // …and back: the GHES entry is restored exactly.
+    accounts
+        .activate(HarnessId::Opencode, &ghes_id)
+        .await
+        .unwrap();
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+    assert_eq!(written["github-copilot"], ghes);
+    let listed = rows(&accounts.list(false).await.unwrap(), HarnessId::Opencode);
+    assert_eq!(listed.len(), 2);
+    assert!(listed.iter().any(|a| a.id == ghes_id && a.active));
+    // Only the github.com login was ever looked up; no request carried the
+    // GHES token anywhere (its usage was skipped before any request).
+    assert_eq!(server.hits("GET /user"), 1);
+    let hits = lock(&server.hits).clone();
+    assert!(
+        hits.iter()
+            .all(|h| h == "GET /user" || h.starts_with("GET /copilot_internal")),
+        "{hits:?}"
     );
 }
 
