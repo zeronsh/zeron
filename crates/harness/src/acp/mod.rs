@@ -1080,7 +1080,12 @@ impl AcpHarness {
             tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "zeron_harness::acp", "sign-in stderr: {line}");
+                    // Sign-in output carries authorize urls and device codes.
+                    tracing::debug!(
+                        target: "zeron_harness::acp",
+                        "sign-in stderr: {}",
+                        crate::redact::redact_output(&line)
+                    );
                     if let Some(url) = sign_in_url(&line).filter(|url| accept_url(url))
                         && !announced.swap(true, std::sync::atomic::Ordering::AcqRel)
                     {

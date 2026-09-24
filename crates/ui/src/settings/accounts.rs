@@ -206,6 +206,20 @@ pub fn switches_accounts(harness: HarnessId) -> bool {
     !matches!(harness, HarnessId::Hermes | HarnessId::Antigravity)
 }
 
+/// A standing note under a provider's Accounts label, for an agent whose
+/// accounts work differently. Hermes owns its credential pool: zeron lists
+/// it and adds to it through Hermes' own CLI, but never switches or removes
+/// its entries. Pure.
+pub fn provider_note(harness: HarnessId) -> Option<&'static str> {
+    match harness {
+        HarnessId::Hermes => Some(
+            "Hermes manages its own credential pool and rotates through it. Accounts added \
+             here go through `hermes auth add`; remove one with `hermes auth remove`.",
+        ),
+        _ => None,
+    }
+}
+
 /// One way to add an account: agents that keep a login PER model provider
 /// (OpenCode, Pi, Hermes) sign in to a named provider; the rest have one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1830,6 +1844,15 @@ impl AccountsPage {
                     .collect::<Vec<_>>(),
                 _ => Vec::new(),
             })
+            .when_some(provider_note(harness), |el, note| {
+                el.child(
+                    div()
+                        .mt(px(4.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(note)),
+                )
+            })
             .child(content)
             .when_some(dialog, |el, dialog| el.child(dialog))
             .into_any_element()
@@ -2080,6 +2103,13 @@ impl Render for AccountsPage {
                                     .into_iter()
                                     .map(|warning| widgets::warning_strip(&theme, warning)),
                             )
+                            .children(provider_note(harness).map(|note| {
+                                div()
+                                    .mt(px(8.0))
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(note))
+                            }))
                             .child(card)
                             .into_any_element()
                     })
@@ -2296,8 +2326,10 @@ mod tests {
         // Antigravity has no quota to show and keeps a single login.
         assert!(!reports_usage(HarnessId::Antigravity) && reports_usage(HarnessId::Codex));
         assert!(keeps_one_login(HarnessId::Antigravity) && !keeps_one_login(HarnessId::Cursor));
-        // Hermes rotates its own pool; zeron never switches it.
+        // Hermes rotates its own pool; zeron never switches it, and says so.
         assert!(!switches_accounts(HarnessId::Hermes) && switches_accounts(HarnessId::Grok));
+        assert!(provider_note(HarnessId::Hermes).is_some_and(|n| n.contains("hermes auth add")));
+        assert!(provider_note(HarnessId::Grok).is_none());
     }
 
     #[test]

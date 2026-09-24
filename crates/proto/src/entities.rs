@@ -909,7 +909,11 @@ pub struct AgentAccount {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_kind: Option<AgentAuthKind>,
     /// False for a live login whose credentials we could not read (e.g. macOS
-    /// Keychain denied) — shown, but not re-activatable.
+    /// Keychain denied) or whose account couldn't be identified — shown, but
+    /// not re-activatable. Always false for Hermes: Hermes owns its
+    /// credential pool (it picks and rotates entries itself), so zeron lists
+    /// it read-only — no switch, no remove; accounts are added through
+    /// `hermes auth add`.
     #[serde(default)]
     pub switchable: bool,
     /// Epoch millis of the slot's last snapshot.

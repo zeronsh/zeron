@@ -263,22 +263,10 @@ pub(super) fn parse_grok_auth(auth: serde_json::Value) -> Option<Detected> {
         auth_kind: AgentAuthKind::Oauth,
     };
     let account_key = grok_identity(entry).unwrap_or_else(|| format!("oidc:{map_key}"));
-    Some(Detected::known(account_key, profile, auth.clone()))
-}
-
-/// The token set in a Grok slot's `auth.json` that belongs to `account_key`.
-pub(super) fn grok_entry<'a>(
-    credentials: &'a serde_json::Value,
-    account_key: &str,
-) -> Option<&'a serde_json::Value> {
-    let map = credentials.as_object()?;
-    map.iter()
-        .find(|(map_key, e)| {
-            format!("oidc:{map_key}") == account_key
-                || grok_identity(e).as_deref() == Some(account_key)
-        })
-        .map(|(_, e)| e)
-        .or_else(|| map.values().find(|e| str_field(e, "key").is_some()))
+    // The slot holds THIS issuer's token set only, keyed by its map key: a
+    // swap merges it back into the live file and leaves every other issuer's
+    // entry (and its freshly refreshed tokens) alone.
+    Some(Detected::known(account_key, profile, entry.clone()).keyed(map_key))
 }
 
 // ── Devin ───────────────────────────────────────────────────────────────────
@@ -435,48 +423,41 @@ fn unresolved(store_key: &str, upstream: Upstream) -> Detected {
 
 const LOCK_WAIT: Duration = Duration::from_secs(5);
 
-/// An exclusive advisory `flock` on a sidecar lock file (Grok's
-/// `auth.json.lock`), so a swap can't interleave with the CLI's own
-/// read-refresh-write. No-op off unix.
-pub(super) struct FileLock {
-    #[cfg(unix)]
-    _file: std::fs::File,
-}
+/// An exclusive lock on a sidecar lock file — `flock` on unix,
+/// `LockFileEx` on Windows (std's `File::try_lock`), the primitives the
+/// Rust CLIs' own lock crates use. Grok's `auth.json.lock` is the CLI's
+/// convention; OpenCode has none, so it gets a zeron-side one. Released
+/// when dropped (the handle closes).
+pub(super) struct FileLock(#[allow(dead_code)] std::fs::File);
 
 impl FileLock {
     pub(super) fn acquire(path: &Path) -> Result<Self, EngineError> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).write(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            use std::os::unix::io::AsRawFd;
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .mode(0o600)
-                .open(path)?;
-            let deadline = Instant::now() + LOCK_WAIT;
-            loop {
-                // SAFETY: flock on a descriptor this function owns.
-                if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                    return Ok(Self { _file: file });
+            options.mode(0o600);
+        }
+        let file = options.open(path)?;
+        let deadline = Instant::now() + LOCK_WAIT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self(file)),
+                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25));
                 }
-                if Instant::now() > deadline {
+                Err(std::fs::TryLockError::WouldBlock) => {
                     return Err(EngineError::Other(format!(
                         "{} is locked by the agent — try again in a moment.",
                         path.display()
                     )));
                 }
-                std::thread::sleep(Duration::from_millis(25));
+                Err(std::fs::TryLockError::Error(err)) => return Err(err.into()),
             }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = path;
-            Ok(Self {})
         }
     }
 }
@@ -531,6 +512,172 @@ fn lock_path(file: &Path) -> PathBuf {
     file.with_file_name(name)
 }
 
+/// How a JSON credential store is guarded while zeron rewrites one entry.
+pub(super) enum StoreLock {
+    /// A `flock`/`LockFileEx` on this sidecar file.
+    File(PathBuf),
+    /// proper-lockfile's lock directory.
+    Dir(PathBuf),
+}
+
+/// Rounds of compare-before-write before a store that keeps changing wins.
+const MERGE_ATTEMPTS: usize = 3;
+
+/// Replace ONE entry of a JSON-object credential store, keeping every other
+/// key as it is, under `lock` — then compare-before-write: the file is read
+/// again right before the rename, and a change since the first read (an
+/// agent that writes without taking the lock — OpenCode takes none — or a
+/// CLI mid-refresh) restarts the cycle from the new contents instead of
+/// clobbering it. RESIDUAL RISK: a writer that ignores the lock and lands
+/// between that second read and the rename is overwritten; the window is a
+/// single rename, and the entry it would have changed is re-detected (and
+/// re-snapshotted) on the next list.
+///
+/// An existing store that doesn't parse is never overwritten — writing only
+/// our entry would wipe the user's other logins.
+pub(super) fn merge_json_entry(
+    file: &Path,
+    key: &str,
+    entry: &serde_json::Value,
+    lock: StoreLock,
+) -> Result<(), EngineError> {
+    // Held for its Drop (the unlock) only.
+    #[allow(dead_code)]
+    enum Guard {
+        File(FileLock),
+        Dir(DirLock),
+    }
+    let _guard = match lock {
+        StoreLock::File(path) => Guard::File(FileLock::acquire(&path)?),
+        StoreLock::Dir(path) => Guard::Dir(DirLock::acquire(&path)?),
+    };
+    let read = || match std::fs::read(file) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(EngineError::from(err)),
+    };
+    for _ in 0..MERGE_ATTEMPTS {
+        let before = read()?;
+        let mut store = match &before {
+            Some(bytes) => serde_json::from_slice::<serde_json::Value>(bytes)
+                .ok()
+                .filter(serde_json::Value::is_object)
+                .ok_or_else(|| {
+                    EngineError::Other(format!(
+                        "{} exists but could not be parsed — not switching to avoid wiping it.",
+                        file.display()
+                    ))
+                })?,
+            None => serde_json::json!({}),
+        };
+        if let Some(map) = store.as_object_mut() {
+            map.insert(key.to_string(), entry.clone());
+        }
+        let json = serde_json::to_string_pretty(&store)
+            .map_err(|e| EngineError::Other(format!("serialize {}: {e}", file.display())))?;
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        if read()? != before {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        return write_file_atomic(file, json.as_bytes(), true);
+    }
+    Err(EngineError::Other(format!(
+        "{} kept changing while zeron was switching — try again in a moment.",
+        file.display()
+    )))
+}
+
+// ── credential-defined endpoints ────────────────────────────────────────────
+
+/// Which hosts a credential-supplied endpoint may name before zeron sends
+/// that credential's secret there. A tampered or misconfigured store must
+/// never route a refresh token or API key to an arbitrary server.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum HostPolicy {
+    /// The vendor's own domains (and their subdomains).
+    Domains(&'static [&'static str]),
+    /// Any plain DNS host — ONLY for a value that names an enterprise
+    /// deployment the user configured in the CLI itself (Copilot's
+    /// `enterpriseUrl`, i.e. GitHub Enterprise).
+    EnterpriseHost,
+}
+
+/// Grok OIDC issuers (`oidc_issuer`, refresh only).
+pub(super) const GROK_ISSUERS: HostPolicy = HostPolicy::Domains(&["x.ai"]);
+/// Devin / Windsurf API servers (`api_server_url`).
+pub(super) const DEVIN_SERVERS: HostPolicy =
+    HostPolicy::Domains(&["codeium.com", "windsurf.com", "devin.ai"]);
+/// The Nous portal (`portal_base_url` in Hermes' pool).
+pub(super) const NOUS_PORTALS: HostPolicy = HostPolicy::Domains(&["nousresearch.com"]);
+
+/// `raw` as a base url safe to send a secret to: `https`, a DNS host the
+/// policy allows, no userinfo, port, query or fragment, and no path beyond
+/// `/`. A bare host (how OpenCode and Pi store `enterpriseUrl`) reads as
+/// `https://host` under [`HostPolicy::EnterpriseHost`]. `allow_loopback`
+/// additionally admits `http://127.0.0.1|localhost:<port>` — tests' mock
+/// servers only, never production. `None` = don't send anything.
+pub(super) fn trusted_base(
+    raw: &str,
+    policy: HostPolicy,
+    allow_loopback: bool,
+) -> Option<reqwest::Url> {
+    let raw = raw.trim();
+    let candidate = match (raw.contains("://"), policy) {
+        (true, _) => raw.to_string(),
+        (false, HostPolicy::EnterpriseHost) => format!("https://{}", raw.trim_end_matches('/')),
+        (false, _) => return None,
+    };
+    let url = reqwest::Url::parse(&candidate).ok()?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
+        return None;
+    }
+    if allow_loopback
+        && url.scheme() == "http"
+        && matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
+    {
+        return Some(url);
+    }
+    if url.scheme() != "https" || url.port().is_some() {
+        return None;
+    }
+    // `domain()` is `None` for IP literals: a secret never goes to a bare IP.
+    let host = url.domain()?.to_ascii_lowercase();
+    let allowed = match policy {
+        HostPolicy::Domains(domains) => domains
+            .iter()
+            .any(|d| host == *d || host.ends_with(&format!(".{d}"))),
+        HostPolicy::EnterpriseHost => host.contains('.') && !host.ends_with('.'),
+    };
+    allowed.then_some(url)
+}
+
+/// The REST root for a Copilot login: GitHub's, or `https://api.<host>` for
+/// a (validated) GitHub Enterprise `enterpriseUrl`. `None` = untrusted.
+pub(super) fn copilot_api_base(
+    entry: &serde_json::Value,
+    github_api: &str,
+    allow_loopback: bool,
+) -> Option<String> {
+    match str_field(entry, "enterpriseUrl") {
+        None => Some(github_api.trim_end_matches('/').to_string()),
+        Some(raw) => {
+            let url = trusted_base(&raw, HostPolicy::EnterpriseHost, allow_loopback)?;
+            Some(match url.scheme() {
+                "https" => format!("https://api.{}", url.host_str()?),
+                _ => url.as_str().trim_end_matches('/').to_string(),
+            })
+        }
+    }
+}
+
 // ── service ─────────────────────────────────────────────────────────────────
 
 impl AgentAccounts {
@@ -547,17 +694,18 @@ impl AgentAccounts {
         parse_devin_toml(&text).and_then(parse_devin_credentials)
     }
 
-    /// Rewrite Grok's `auth.json` with a slot's token sets, under the
-    /// CLI's own lock.
-    pub(super) fn write_grok_auth(
+    /// Put one issuer's token set (a Grok slot) into the live `auth.json`
+    /// under the CLI's own `auth.json.lock`, leaving other issuers' entries
+    /// untouched.
+    pub(super) fn write_grok_entry(
         &self,
-        credentials: &serde_json::Value,
+        map_key: Option<&str>,
+        entry: &serde_json::Value,
     ) -> Result<(), EngineError> {
+        let map_key = map_key
+            .ok_or_else(|| EngineError::Other("That saved Grok login names no issuer.".into()))?;
         let file = self.grok_auth_file();
-        let _lock = FileLock::acquire(&lock_path(&file))?;
-        let json = serde_json::to_string_pretty(credentials)
-            .map_err(|e| EngineError::Other(format!("serialize grok auth: {e}")))?;
-        write_file_atomic(&file, json.as_bytes(), true)
+        merge_json_entry(&file, map_key, entry, StoreLock::File(lock_path(&file)))
     }
 
     pub(super) fn write_devin_credentials(
@@ -591,8 +739,10 @@ impl AgentAccounts {
     }
 
     /// Replace ONE provider's entry in OpenCode's / Pi's store, keeping every
-    /// other key as it is. An existing store that doesn't parse is left
-    /// alone — writing only our entry would wipe the user's other logins.
+    /// other key as it is (see [`merge_json_entry`]). Pi: under its own
+    /// proper-lockfile lock. OpenCode takes no lock of its own, so zeron
+    /// serialises its writers on a sidecar lock and relies on
+    /// compare-before-write against OpenCode itself.
     pub(super) fn write_keyed_entry(
         &self,
         harness: HarnessId,
@@ -600,33 +750,11 @@ impl AgentAccounts {
         entry: &serde_json::Value,
     ) -> Result<(), EngineError> {
         let file = self.keyed_file(harness);
-        let _lock = match harness {
-            HarnessId::Pi => Some(DirLock::acquire(&lock_path(&file))?),
-            _ => None,
+        let lock = match harness {
+            HarnessId::Pi => StoreLock::Dir(lock_path(&file)),
+            _ => StoreLock::File(file.with_file_name("auth.json.zeron-lock")),
         };
-        let mut store = if file.exists() {
-            read_json(&file).ok_or_else(|| {
-                EngineError::Other(format!(
-                    "{} exists but could not be parsed — not switching to avoid wiping it.",
-                    file.display()
-                ))
-            })?
-        } else {
-            serde_json::json!({})
-        };
-        let Some(map) = store.as_object_mut() else {
-            return Err(EngineError::Other(format!(
-                "{} is not a JSON object — not switching.",
-                file.display()
-            )));
-        };
-        map.insert(store_key.to_string(), entry.clone());
-        if let Some(dir) = file.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let json = serde_json::to_string_pretty(&store)
-            .map_err(|e| EngineError::Other(format!("serialize {}: {e}", cli_name(harness))))?;
-        write_file_atomic(&file, json.as_bytes(), true)
+        merge_json_entry(&file, store_key, entry, lock)
     }
 
     /// The live per-provider logins of OpenCode / Pi: `(identified,
@@ -749,10 +877,12 @@ impl AgentAccounts {
         github_token: &str,
         entry: &serde_json::Value,
     ) -> Option<(String, SlotProfile)> {
-        let base = match str_field(entry, "enterpriseUrl") {
-            Some(host) => format!("https://api.{}", host.trim_end_matches('/')),
-            None => self.inner.endpoints.github_api.clone(),
-        };
+        // A GitHub Enterprise host is validated before the token goes there.
+        let base = copilot_api_base(
+            entry,
+            &self.inner.endpoints.github_api,
+            self.inner.endpoints.allow_loopback_http,
+        )?;
         let user: serde_json::Value = self
             .inner
             .http
@@ -798,7 +928,9 @@ impl AgentAccounts {
             return Ok(());
         };
         match harness {
-            HarnessId::Grok if self.detect_grok().is_none() => self.write_grok_auth(credentials),
+            HarnessId::Grok if self.detect_grok().is_none() => {
+                self.write_grok_entry(detected.store_key.as_deref(), credentials)
+            }
             HarnessId::Devin if self.detect_devin().is_none() => {
                 self.write_devin_credentials(credentials)
             }

@@ -139,6 +139,7 @@ fn mocked(base: &str) -> ProbeEndpoints {
         openai_port: 0,
         nous_portal: base.to_string(),
         allow_slot_refresh: true,
+        allow_loopback_http: true,
     }
 }
 
@@ -235,6 +236,14 @@ fn grok_auth_prefers_auth_x_ai_and_keys_by_identity() {
     );
     let detected = parse_grok_auth(auth).unwrap();
     assert_eq!(detected.account_key, "user-1");
+    // The slot holds only the selected issuer's token set.
+    assert_eq!(
+        detected.store_key.as_deref(),
+        Some("https://auth.x.ai::client-1")
+    );
+    let entry = detected.credentials.as_ref().unwrap();
+    assert_eq!(entry["key"], "k1");
+    assert!(entry.get("https://accounts.x.ai/sign-in::legacy").is_none());
     assert_eq!(detected.profile.email, "ada@x.ai");
     assert_eq!(detected.profile.display_name.as_deref(), Some("Ada L"));
     assert_eq!(detected.profile.plan.as_deref(), Some("SuperGrok Heavy"));
@@ -363,16 +372,17 @@ async fn a_rejected_saved_grok_token_refreshes_once_against_its_issuer() {
     let (accounts, _) = accounts_with(tmp.path(), endpoints);
     let mut auth = grok_auth("user-a", "a@x.ai", "stale");
     auth["https://auth.x.ai::client-1"]["oidc_issuer"] = server.base.clone().into();
+    let detected = parse_grok_auth(auth).unwrap();
     let slot = Slot {
         id: slot_id_for(HarnessId::Grok, "user-a"),
         harness: HarnessId::Grok,
         account_key: "user-a".into(),
-        profile: parse_grok_auth(auth.clone()).unwrap().profile,
-        credentials: auth,
+        profile: detected.profile,
+        credentials: detected.credentials.unwrap(),
         claude_config: None,
         saved_at: 1,
         created_at: None,
-        store_key: None,
+        store_key: detected.store_key,
     };
     accounts.write_slot(&slot).unwrap();
     // The LIVE login is never refreshed by zeron.
@@ -387,14 +397,16 @@ async fn a_rejected_saved_grok_token_refreshes_once_against_its_issuer() {
         "billing mock rejects all"
     );
     let stored = accounts.read_slot(HarnessId::Grok, &slot.id).unwrap();
-    assert_eq!(
-        stored.credentials["https://auth.x.ai::client-1"]["key"],
-        "fresh"
-    );
-    assert_eq!(
-        stored.credentials["https://auth.x.ai::client-1"]["refresh_token"],
-        "rotated"
-    );
+    assert_eq!(stored.credentials["key"], "fresh");
+    assert_eq!(stored.credentials["refresh_token"], "rotated");
+
+    // An issuer outside xAI never receives the refresh token.
+    let mut evil = slot.clone();
+    evil.credentials["oidc_issuer"] = "https://auth.x.ai.evil.example".into();
+    let before = issuer_hits.load(Ordering::SeqCst);
+    let refused = accounts.grok_usage(&evil, false).await;
+    assert_eq!(refused, Err(ProbeError::UntrustedEndpoint));
+    assert_eq!(issuer_hits.load(Ordering::SeqCst), before);
 }
 
 #[cfg(unix)]
@@ -1226,5 +1238,257 @@ fn usage_reasons_name_each_providers_vendor_and_cli() {
     assert_eq!(
         reason(HarnessId::Grok, None, false, rejected),
         "Signed out — sign in again"
+    );
+}
+
+// ── review hardening: grok entries, endpoints, the secret writer ────────────
+
+/// A multi-issuer `auth.json`: a switch merges only the slot's issuer entry
+/// back, leaving every other issuer's entry — including tokens refreshed
+/// after the snapshot — exactly as the CLI left them.
+#[tokio::test]
+async fn a_grok_switch_leaves_other_issuers_entries_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let live = config.grok_home.join("auth.json");
+    let with_sso = |auth: serde_json::Value, sso_key: &str| {
+        let mut auth = auth;
+        auth.as_object_mut().unwrap().insert(
+            "https://sso.corp.example::cli".into(),
+            serde_json::json!({ "key": sso_key, "oidc_issuer": "https://sso.corp.example" }),
+        );
+        auth.to_string()
+    };
+    write(
+        &live,
+        &with_sso(grok_auth("user-a", "a@x.ai", "key-a"), "sso-1"),
+    );
+    let a_id = rows(&accounts.list(false).await.unwrap(), HarnessId::Grok)[0]
+        .id
+        .clone();
+    write(
+        &live,
+        &with_sso(grok_auth("user-b", "b@x.ai", "key-b"), "sso-1"),
+    );
+    accounts.list(false).await.unwrap();
+    // The CLI refreshes the other issuer after the snapshots were taken.
+    write(
+        &live,
+        &with_sso(grok_auth("user-b", "b@x.ai", "key-b"), "sso-2-refreshed"),
+    );
+    accounts.activate(HarnessId::Grok, &a_id).await.unwrap();
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&live).unwrap()).unwrap();
+    assert_eq!(written["https://auth.x.ai::client-1"]["key"], "key-a");
+    assert_eq!(
+        written["https://sso.corp.example::cli"]["key"],
+        "sso-2-refreshed"
+    );
+    assert_eq!(written.as_object().unwrap().len(), 2);
+    // Rows don't form per-issuer groups: one Grok login is live at a time.
+    let grok = rows(&accounts.list(false).await.unwrap(), HarnessId::Grok);
+    assert!(grok.iter().all(|a| a.provider.is_none()));
+}
+
+#[test]
+fn credential_defined_endpoints_must_be_the_vendors_own_https_hosts() {
+    let ok = |raw: &str, policy| trusted_base(raw, policy, false).map(|u| u.to_string());
+    assert_eq!(
+        ok("https://auth.x.ai", GROK_ISSUERS).as_deref(),
+        Some("https://auth.x.ai/")
+    );
+    assert!(ok("https://auth.x.ai/", GROK_ISSUERS).is_some());
+    assert!(ok("https://server.codeium.com", DEVIN_SERVERS).is_some());
+    assert!(ok("https://inference.codeium.com", DEVIN_SERVERS).is_some());
+    assert!(ok("https://portal.nousresearch.com", NOUS_PORTALS).is_some());
+    for raw in [
+        "http://auth.x.ai",               // not https
+        "https://auth.x.ai.evil.example", // look-alike suffix
+        "https://evilx.ai",               // not a subdomain
+        "https://user:pw@auth.x.ai",      // userinfo
+        "https://auth.x.ai?next=evil",    // query
+        "https://auth.x.ai#frag",         // fragment
+        "https://auth.x.ai/oauth2/token", // a path, not a base
+        "https://auth.x.ai:8443",         // explicit port
+        "https://1.2.3.4",                // IP literal
+        "auth.x.ai",                      // no scheme for a vendor url
+        "file:///etc/passwd",
+        "http://127.0.0.1:9", // loopback only in tests
+    ] {
+        assert_eq!(ok(raw, GROK_ISSUERS), None, "{raw}");
+    }
+    assert!(trusted_base("http://127.0.0.1:9", GROK_ISSUERS, true).is_some());
+    // GitHub Enterprise: a plain host the user configured, https only.
+    let ghe = |raw: &str| {
+        copilot_api_base(
+            &serde_json::json!({ "enterpriseUrl": raw }),
+            "https://api.github.com",
+            false,
+        )
+    };
+    assert_eq!(
+        ghe("company.ghe.com").as_deref(),
+        Some("https://api.company.ghe.com")
+    );
+    assert_eq!(
+        ghe("https://company.ghe.com/").as_deref(),
+        Some("https://api.company.ghe.com")
+    );
+    for raw in [
+        "company.ghe.com/x",
+        "http://company.ghe.com",
+        "evil@company.ghe.com",
+        "localhost",
+        "company.ghe.com?x=1",
+        "10.0.0.1",
+    ] {
+        assert_eq!(ghe(raw), None, "{raw}");
+    }
+    assert_eq!(
+        copilot_api_base(&serde_json::json!({}), "https://api.github.com", false).as_deref(),
+        Some("https://api.github.com")
+    );
+}
+
+#[tokio::test]
+async fn untrusted_endpoints_in_credentials_are_never_sent_a_secret() {
+    let server = MockServer::start(|_, _, _| (200, "{}".into())).await;
+    let tmp = tempfile::tempdir().unwrap();
+    // Production endpoints: a loopback url in a credential is NOT trusted.
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    write(
+        &config.devin_credentials_file,
+        &format!(
+            "windsurf_api_key = \"k\"\napi_server_url = \"{}\"\n",
+            server.base
+        ),
+    );
+    write(
+        &config.opencode_auth_file,
+        &serde_json::json!({ "github-copilot": {
+            "type": "oauth", "access": "gho_x", "refresh": "gho_x", "expires": 0,
+            "enterpriseUrl": "evil.example/steal?x=1",
+        }})
+        .to_string(),
+    );
+    let hermes = serde_json::json!({ "active_provider": "nous", "credential_pool": { "nous": [
+        { "id": "n1", "label": "n@example.com", "auth_type": "oauth", "priority": 0,
+          "access_token": "t", "portal_base_url": "https://portal.nousresearch.com.evil.example" },
+    ]}});
+    write(&config.hermes_home.join("auth.json"), &hermes.to_string());
+    let snapshot = accounts.list(true).await.unwrap();
+    let devin = rows(&snapshot, HarnessId::Devin);
+    assert_eq!(
+        devin[0].usage_error.as_deref(),
+        Some("Usage skipped — this login names a server zeron doesn't recognize")
+    );
+    let hermes = rows(&snapshot, HarnessId::Hermes);
+    assert_eq!(hermes[0].usage_error, devin[0].usage_error);
+    // The Copilot login can't even be identified without trusting the host.
+    let copilot = rows(&snapshot, HarnessId::Opencode);
+    assert!(!copilot[0].switchable);
+    assert_eq!(
+        lock(&server.hits).len(),
+        0,
+        "no request reached the planted server"
+    );
+}
+
+/// The secret writer: random exclusive temp file, 0600 before any byte,
+/// renamed over the target (replacing a symlink rather than writing through
+/// it), and nothing left behind.
+#[cfg(unix)]
+#[test]
+fn secret_writes_are_exclusive_owner_only_and_never_follow_symlinks() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let target = dir.join("auth.json");
+    std::fs::write(&target, "old").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+    // The old predictable temp name, pre-planted by someone else.
+    let planted = dir.join(format!("auth.tmp-{}", std::process::id()));
+    std::fs::write(&planted, "planted").unwrap();
+    std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o666)).unwrap();
+    write_file_atomic(&target, b"secret", true).unwrap();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "secret");
+    assert_eq!(
+        mode(&target),
+        0o600,
+        "narrowed even though the target was 0644"
+    );
+    assert_eq!(std::fs::read_to_string(&planted).unwrap(), "planted");
+    // A symlink at the target is replaced, never written through.
+    let victim = dir.join("victim");
+    std::fs::write(&victim, "keep").unwrap();
+    let link = dir.join("link.json");
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+    write_file_atomic(&link, b"secret", true).unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    assert!(
+        !std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(mode(&link), 0o600);
+    // No temp files survive a write.
+    let names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+    // Non-secret writes keep the target's mode.
+    let config = dir.join("config.json");
+    std::fs::write(&config, "{}").unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o640)).unwrap();
+    write_file_atomic(&config, b"{\"a\":1}", false).unwrap();
+    assert_eq!(mode(&config), 0o640);
+}
+
+/// OpenCode takes no lock of its own: zeron serialises its writers on a
+/// sidecar lock (released after the write) and never leaves it held.
+#[test]
+fn opencode_writes_hold_a_zeron_side_lock_only_while_writing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("auth.json");
+    let lock = tmp.path().join("auth.json.zeron-lock");
+    std::fs::write(&file, r#"{"other":{"type":"api","key":"k"}}"#).unwrap();
+    merge_json_entry(
+        &file,
+        "openai",
+        &serde_json::json!({ "type": "oauth", "access": "a" }),
+        StoreLock::File(lock.clone()),
+    )
+    .unwrap();
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(written["other"]["key"], "k");
+    assert_eq!(written["openai"]["access"], "a");
+    // Released: another writer can take it at once.
+    let held = FileLock::acquire(&lock).unwrap();
+    drop(held);
+}
+
+/// A failing CLI's last words reach the dialog without the authorize url's
+/// parameters, the device code or anything token-shaped.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_sign_ins_output_is_redacted_before_the_ui_sees_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, _) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let cli = script(
+        tmp.path(),
+        "grok",
+        "#!/bin/sh\necho 'failed at https://auth.x.ai/device?user_code=WXYZ-9876&state=s3cr3t with code WXYZ-9876 token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig' >&2\nexit 2\n",
+    );
+    accounts.override_cli(HarnessId::Grok, cli);
+    let start = accounts.start_login(HarnessId::Grok).await.unwrap();
+    let polls = settle(&accounts, &start.login_id).await;
+    let message = polls.last().unwrap().message.clone().unwrap();
+    assert_eq!(
+        message,
+        "failed at https://auth.x.ai/device?… with code [code] token=[redacted]"
     );
 }

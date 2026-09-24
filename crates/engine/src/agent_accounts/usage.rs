@@ -21,7 +21,10 @@
 //! the agent (or Hermes' pool) owns them — a rejected token reads "switch to
 //! it to refresh" / "refreshes next time" instead.
 
-use super::stores::{Upstream, devin_api_key, grok_entry, upstream_of};
+use super::stores::{
+    DEVIN_SERVERS, GROK_ISSUERS, NOUS_PORTALS, Upstream, copilot_api_base, devin_api_key,
+    trusted_base, upstream_of,
+};
 use super::*;
 
 pub(super) const GROK_USAGE_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
@@ -40,8 +43,8 @@ impl AgentAccounts {
         let missing = ProbeError::NoCredentials {
             why: NoCredentials::Missing,
         };
-        let entry = grok_entry(&slot.credentials, &slot.account_key).ok_or(missing.clone())?;
-        let access_token = str_field(entry, "key").ok_or(missing)?;
+        // A Grok slot is one issuer's token set.
+        let access_token = str_field(&slot.credentials, "key").ok_or(missing)?;
         match self.grok_usage_request(&access_token).await {
             // Same rule as Claude: rotate slot-owned tokens only after the
             // endpoint REJECTED them; the live pair is the CLI's.
@@ -84,17 +87,26 @@ impl AgentAccounts {
         let missing = ProbeError::NoCredentials {
             why: NoCredentials::Missing,
         };
-        let entry = grok_entry(&slot.credentials, &slot.account_key).ok_or(missing.clone())?;
+        let entry = &slot.credentials;
         let refresh_token = str_field(entry, "refresh_token").ok_or(missing.clone())?;
         let client_id = str_field(entry, "oidc_client_id").ok_or(missing)?;
-        let issuer =
-            str_field(entry, "oidc_issuer").unwrap_or_else(|| "https://auth.x.ai".to_string());
+        // The issuer comes from the credential file: the refresh token only
+        // goes to an xAI host.
+        let issuer = trusted_base(
+            &str_field(entry, "oidc_issuer").unwrap_or_else(|| "https://auth.x.ai".to_string()),
+            GROK_ISSUERS,
+            self.inner.endpoints.allow_loopback_http,
+        )
+        .ok_or(ProbeError::UntrustedEndpoint)?;
         let body = probe_json(
             "grok",
             "refresh",
             self.inner
                 .http
-                .post(format!("{}/oauth2/token", issuer.trim_end_matches('/')))
+                .post(format!(
+                    "{}/oauth2/token",
+                    issuer.as_str().trim_end_matches('/')
+                ))
                 .form(&[
                     ("grant_type", "refresh_token"),
                     ("refresh_token", refresh_token.as_str()),
@@ -114,11 +126,7 @@ impl AgentAccounts {
             .and_then(|v| v.as_i64())
             .unwrap_or(3600);
         let mut credentials = slot.credentials.clone();
-        if let Some(entry) = credentials.as_object_mut().and_then(|map| {
-            map.values_mut()
-                .find(|e| str_field(e, "refresh_token").as_deref() == Some(refresh_token.as_str()))
-        }) && let Some(entry) = entry.as_object_mut()
-        {
+        if let Some(entry) = credentials.as_object_mut() {
             entry.insert("key".into(), serde_json::json!(access_token));
             if let Some(rotated) = str_field(&body, "refresh_token") {
                 entry.insert("refresh_token".into(), serde_json::json!(rotated));
@@ -144,8 +152,16 @@ impl AgentAccounts {
         let api_key = devin_api_key(&slot.credentials).ok_or(ProbeError::NoCredentials {
             why: NoCredentials::Missing,
         })?;
-        let server = str_field(&slot.credentials, "api_server_url")
-            .unwrap_or_else(|| DEVIN_DEFAULT_API_SERVER.to_string());
+        // The server comes from the credential file: the key only goes to a
+        // Devin / Windsurf host.
+        let server = trusted_base(
+            &str_field(&slot.credentials, "api_server_url")
+                .unwrap_or_else(|| DEVIN_DEFAULT_API_SERVER.to_string()),
+            DEVIN_SERVERS,
+            self.inner.endpoints.allow_loopback_http,
+        )
+        .ok_or(ProbeError::UntrustedEndpoint)?;
+        let server = server.as_str();
         let body = probe_json(
             "devin",
             "usage",
@@ -226,8 +242,18 @@ impl AgentAccounts {
                     self.openai_usage("hermes", &access, &account).await
                 }
                 "nous" => {
-                    let portal = str_field(creds, "portal_base_url")
-                        .unwrap_or_else(|| self.inner.endpoints.nous_portal.clone());
+                    // A pool entry's own portal is honoured only on a Nous host.
+                    let portal = match str_field(creds, "portal_base_url") {
+                        Some(raw) => trusted_base(
+                            &raw,
+                            NOUS_PORTALS,
+                            self.inner.endpoints.allow_loopback_http,
+                        )
+                        .ok_or(ProbeError::UntrustedEndpoint)?
+                        .as_str()
+                        .to_string(),
+                        None => self.inner.endpoints.nous_portal.clone(),
+                    };
                     self.nous_usage(&portal, &access).await
                 }
                 _ => Err(ProbeError::NoCredentials {
@@ -248,10 +274,13 @@ impl AgentAccounts {
             }
             Some(Upstream::Copilot) => {
                 let token = str_field(creds, "refresh").ok_or(missing)?;
-                let api = match str_field(creds, "enterpriseUrl") {
-                    Some(host) => format!("https://api.{}", host.trim_end_matches('/')),
-                    None => self.inner.endpoints.github_api.clone(),
-                };
+                // GitHub Enterprise: a validated plain host, or nothing is sent.
+                let api = copilot_api_base(
+                    creds,
+                    &self.inner.endpoints.github_api,
+                    self.inner.endpoints.allow_loopback_http,
+                )
+                .ok_or(ProbeError::UntrustedEndpoint)?;
                 self.copilot_usage(&api, &token).await
             }
             None => Err(ProbeError::NoCredentials {

@@ -475,6 +475,9 @@ enum ProbeError {
     /// The slot holds nothing probeable.
     #[serde(rename_all = "camelCase")]
     NoCredentials { why: NoCredentials },
+    /// The credentials name a server (issuer, API or portal url) outside the
+    /// provider's known hosts: nothing was sent.
+    UntrustedEndpoint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -503,6 +506,7 @@ impl ProbeError {
             ProbeError::Network { .. } => "network",
             ProbeError::Schema => "schema",
             ProbeError::NoCredentials { .. } => "no-credentials",
+            ProbeError::UntrustedEndpoint => "untrusted-endpoint",
         }
     }
 
@@ -534,9 +538,9 @@ impl ProbeError {
             ProbeError::Network { .. } => Duration::from_secs(MIN),
             // Lifted early when the slot's credentials change (re-login, the
             // CLI refreshing its token) — see `UsageEntry::probe_due`.
-            ProbeError::Unauthorized { .. } | ProbeError::NoCredentials { .. } => {
-                Duration::from_secs(10 * 60)
-            }
+            ProbeError::Unauthorized { .. }
+            | ProbeError::NoCredentials { .. }
+            | ProbeError::UntrustedEndpoint => Duration::from_secs(10 * 60),
         }
     }
 }
@@ -580,7 +584,9 @@ impl UsageEntry {
                 // rate limit or outage is not, so it holds regardless.
                 matches!(
                     error,
-                    ProbeError::Unauthorized { .. } | ProbeError::NoCredentials { .. }
+                    ProbeError::Unauthorized { .. }
+                        | ProbeError::NoCredentials { .. }
+                        | ProbeError::UntrustedEndpoint
                 ) && self.credentials.as_deref() != Some(credentials)
             }
             _ => true,
@@ -637,6 +643,10 @@ struct ProbeEndpoints {
     /// The Nous portal (`/api/oauth/account`).
     nous_portal: String,
     allow_slot_refresh: bool,
+    /// Test seam: admit `http://127.0.0.1` for credential-DEFINED endpoints
+    /// (Grok issuer, Devin server, …) so mock servers can stand in. Always
+    /// `false` in production — see [`stores::trusted_base`].
+    allow_loopback_http: bool,
 }
 
 impl Default for ProbeEndpoints {
@@ -654,6 +664,7 @@ impl Default for ProbeEndpoints {
             openai_port: oauth::OPENAI_LOOPBACK_PORT,
             nous_portal: usage::NOUS_PORTAL.into(),
             allow_slot_refresh: true,
+            allow_loopback_http: false,
         }
     }
 }
@@ -961,7 +972,7 @@ impl AgentAccounts {
                     // Hermes' pool is Hermes' to order (see module docs).
                     switchable: harness != HarnessId::Hermes,
                     saved_at: (harness != HarnessId::Hermes).then_some(slot.saved_at),
-                    provider: slot.store_key.clone(),
+                    provider: provider_group(harness, slot.store_key.as_deref()),
                 });
             }
             // A live login whose credentials we couldn't read has no slot — still
@@ -984,7 +995,7 @@ impl AgentAccounts {
                     auth_kind: Some(u.profile.auth_kind),
                     switchable: false,
                     saved_at: None,
-                    provider: u.store_key.clone(),
+                    provider: provider_group(harness, u.store_key.as_deref()),
                 });
             }
         }
@@ -1001,11 +1012,23 @@ impl AgentAccounts {
     /// Swap the CLI's live login to a saved slot. Detection runs first, so the
     /// CURRENT login is snapshotted into its slot before being overwritten (the
     /// claude-swap trick — a swap never strands the session it replaces).
+    ///
+    /// Refused for Hermes (and by [`Self::forget`]): Hermes owns its
+    /// credential pool and rotates through it itself — a running Hermes
+    /// would write its own order back over any change — so zeron keeps it
+    /// read-only (see [`stores`]).
     pub async fn activate(
         &self,
         harness: HarnessId,
         account_id: &str,
     ) -> Result<AgentAccountsSnapshot, EngineError> {
+        if harness == HarnessId::Hermes {
+            return Err(EngineError::Other(
+                "Hermes picks from its own credential pool — zeron doesn't reorder it. Use \
+                 `hermes auth` to manage it."
+                    .into(),
+            ));
+        }
         // The pre-swap snapshot must hold the CURRENT tokens (the CLI may have
         // rotated its refresh token seconds ago) — never a cached read.
         *lock(&self.inner.claude_credentials) = None;
@@ -1023,7 +1046,9 @@ impl AgentAccounts {
             HarnessId::ClaudeCode => self.activate_claude(&slot).await?,
             HarnessId::Codex => self.activate_codex(&slot)?,
             HarnessId::Cursor => self.write_cursor_auth(&slot.credentials)?,
-            HarnessId::Grok => self.write_grok_auth(&slot.credentials)?,
+            HarnessId::Grok => {
+                self.write_grok_entry(slot.store_key.as_deref(), &slot.credentials)?
+            }
             HarnessId::Devin => self.write_devin_credentials(&slot.credentials)?,
             HarnessId::Opencode | HarnessId::Pi => {
                 let key = slot.store_key.as_deref().ok_or_else(|| {
@@ -1885,7 +1910,7 @@ impl AgentAccounts {
                         self.write_cursor_auth(credentials)?;
                     }
                     HarnessId::Grok if self.detect_grok().is_none() => {
-                        self.write_grok_auth(credentials)?;
+                        self.write_grok_entry(detected.store_key.as_deref(), credentials)?;
                     }
                     _ => {}
                 }
@@ -1924,9 +1949,11 @@ impl AgentAccounts {
                         .to_string()
                 })
             };
+            // A CLI's last words can carry an authorize url, a device code or
+            // worse — never hand them to the UI (or a log) raw.
             return Ok(AgentLoginPoll {
                 status: AgentLoginStatus::Error,
-                message: Some(message),
+                message: Some(zeron_harness::redact::redact_output(&message)),
                 url: None,
                 callback_port: None,
             });
@@ -1994,7 +2021,7 @@ impl AgentAccounts {
                 },
                 Some(Err(message)) => AgentLoginPoll {
                     status: AgentLoginStatus::Error,
-                    message: Some(message.clone()),
+                    message: Some(zeron_harness::redact::redact_output(message)),
                     url: None,
                     callback_port: None,
                 },
@@ -2818,6 +2845,19 @@ async fn antigravity_keychain_item(_account: &str) -> bool {
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
+/// The upstream group a row belongs to (`AgentAccount::provider`): only
+/// agents that keep one login PER model provider have one. (Grok slots also
+/// carry a store key — the issuer entry they swap — but one Grok login is
+/// live at a time, so its rows form a single group.)
+fn provider_group(harness: HarnessId, store_key: Option<&str>) -> Option<String> {
+    matches!(
+        harness,
+        HarnessId::Opencode | HarnessId::Pi | HarnessId::Hermes
+    )
+    .then(|| store_key.map(str::to_string))
+    .flatten()
+}
+
 fn harness_slug(harness: HarnessId) -> &'static str {
     match harness {
         HarnessId::ClaudeCode => "claude-code",
@@ -3279,6 +3319,9 @@ fn usage_error_message(
         ProbeError::NoCredentials {
             why: NoCredentials::Unsupported,
         } => "No usage view for this login".to_string(),
+        ProbeError::UntrustedEndpoint => {
+            "Usage skipped — this login names a server zeron doesn't recognize".to_string()
+        }
     })
 }
 
@@ -3804,23 +3847,47 @@ fn urlencode(input: &str) -> String {
 }
 
 /// Atomic write via a same-dir temp file + rename; `secret` = 0600 from birth.
+///
+/// The temp file has a random name and is created exclusively (`O_CREAT |
+/// O_EXCL`, which never follows or reuses a pre-planted path or symlink),
+/// gets its permissions set on the open handle before any byte is written,
+/// is fsynced, then renamed over `file` — replacing a symlink there rather
+/// than writing through it. A crash leaves at worst an owner-only temp file
+/// and never a torn target.
 fn write_file_atomic(file: &Path, bytes: &[u8], secret: bool) -> Result<(), EngineError> {
-    let tmp = file.with_extension(format!("tmp-{}", std::process::id()));
+    use std::io::Write;
+    let dir = file
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut tmp = tempfile::Builder::new()
+        .prefix(&format!(".{name}."))
+        .suffix(".tmp")
+        .tempfile_in(dir)?;
+    #[cfg(unix)]
     {
-        use std::io::Write;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        if secret {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        #[cfg(not(unix))]
-        let _ = secret;
-        let mut handle = options.open(&tmp)?;
-        handle.write_all(bytes)?;
+        use std::os::unix::fs::PermissionsExt;
+        // Secrets: owner-only. Anything else keeps the target's mode (a
+        // config file the user made group-readable stays so).
+        let mode = if secret {
+            0o600
+        } else {
+            std::fs::metadata(file)
+                .map(|m| m.permissions().mode() & 0o777)
+                .unwrap_or(0o644)
+        };
+        tmp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(mode))?;
     }
-    std::fs::rename(&tmp, file)?;
+    #[cfg(not(unix))]
+    let _ = secret;
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(file).map_err(|e| EngineError::from(e.error))?;
     Ok(())
 }
 
