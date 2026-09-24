@@ -88,7 +88,12 @@ impl DevicesPage {
         }
     }
 
-    fn open_rename(&mut self, device_id: String, current: String, cx: &mut Context<Self>) {
+    pub(crate) fn open_rename(
+        &mut self,
+        device_id: String,
+        current: String,
+        cx: &mut Context<Self>,
+    ) {
         let input = cx.new(|cx| ComposerInput::new("Device name", cx));
         input.update(cx, |input, cx| input.set_text(current, cx));
         let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
@@ -102,6 +107,16 @@ impl DevicesPage {
             _events: events,
         });
         cx.notify();
+    }
+
+    /// Escape that reached Settings unclaimed closes the rename dialog first,
+    /// so it never closes Settings under the dialog. Returns whether it did.
+    pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.rename.take().is_none() {
+            return false;
+        }
+        cx.notify();
+        true
     }
 
     fn submit_rename(&mut self, cx: &mut Context<Self>) {

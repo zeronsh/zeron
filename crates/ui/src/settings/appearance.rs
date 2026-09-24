@@ -764,6 +764,17 @@ impl AppearancePage {
         true
     }
 
+    /// Escape that reached Settings unclaimed closes the topmost dialog
+    /// (import, else the mapping review) first, so it never closes Settings
+    /// under it. Returns whether it did.
+    pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.import_dialog.take().is_none() && self.review_entry.take().is_none() {
+            return false;
+        }
+        cx.notify();
+        true
+    }
+
     fn open_import(&mut self, cx: &mut Context<Self>) {
         let input = cx.new(|cx| {
             ComposerInput::with_context(

@@ -193,7 +193,7 @@ impl Shell {
         match entry {
             Entry::NewChat => self.open_new_session(cx),
             Entry::NewProject => self.open_add_space(cx),
-            Entry::Settings => self.open_settings(SettingsSection::General, cx),
+            Entry::Settings => self.open_last_settings(cx),
             Entry::Theme(_) => unreachable!(),
             Entry::Chat(id) => self.open_chat(id, cx),
         }
