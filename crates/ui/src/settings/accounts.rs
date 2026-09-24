@@ -2468,6 +2468,71 @@ mod tests {
             .unwrap();
     }
 
+    /// A per-provider agent's section renders its rows (a live login, a
+    /// saved one, an unidentified one) and one add button per provider,
+    /// and a device-code sign-in's dialog shows the code line.
+    #[gpui::test]
+    fn per_provider_accounts_render_with_one_add_button_per_provider(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window = page(cx);
+        let row = |id: &str, email: &str, active, switchable| AgentAccount {
+            id: id.into(),
+            harness: HarnessId::Opencode,
+            email: Some(email.into()),
+            plan_label: Some("ChatGPT Plus".into()),
+            active,
+            usage_windows: vec![zeron_proto::AgentUsageWindow {
+                label: "Session".into(),
+                used_fraction: 0.4,
+                resets_at: None,
+            }],
+            usage_fetched_at: None,
+            usage_error: None,
+            display_name: None,
+            organization: None,
+            auth_kind: None,
+            switchable,
+            saved_at: None,
+            provider: Some("openai".into()),
+        };
+        window
+            .update(cx, |page, _, cx| {
+                page.set_embedded_harness(HarnessId::Opencode, cx);
+                page.snapshot = Loadable::Ready(AgentAccountsSnapshot {
+                    accounts: vec![
+                        row("a", "a@example.com", true, true),
+                        row("b", "b@example.com", false, true),
+                        AgentAccount {
+                            usage_windows: vec![],
+                            provider: Some("github-copilot".into()),
+                            ..row("c", "GitHub account", true, false)
+                        },
+                    ],
+                    warnings: vec![],
+                });
+                page.login = Some(LoginFlow {
+                    provider: Some("github-copilot"),
+                    url: Some("https://github.com/login/device".into()),
+                    step: LoginStep::Browser {
+                        message: Some("Enter the code ABCD-1234 on GitHub.".into()),
+                    },
+                    ..waiting(HarnessId::Opencode, 1)
+                });
+                assert_eq!(
+                    page.login.as_ref().unwrap().status().as_ref(),
+                    "Enter the code ABCD-1234 on GitHub."
+                );
+                assert_eq!(
+                    page.login.as_ref().unwrap().title(),
+                    "Sign in to GitHub Copilot for OpenCode"
+                );
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+    }
+
     #[gpui::test]
     fn claudes_paste_fallback_joins_the_same_dialog(cx: &mut gpui::TestAppContext) {
         let window = page(cx);
