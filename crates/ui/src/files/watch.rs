@@ -4,6 +4,7 @@ use gpui::Context;
 use zeron_proto::{WorkspaceFileChangeKind, WorkspaceFileChanges};
 
 use super::{FilesEvent, FilesSurface, client::WorkspaceFilesClient, model::parent_path};
+use crate::i18n::{self, MessageId};
 
 impl FilesSurface {
     pub(super) fn ensure_watch(&mut self, cx: &mut Context<Self>) {
@@ -32,8 +33,13 @@ impl FilesSurface {
                                     Ok(frame) => surface.apply_workspace_changes(frame, cx),
                                     Err(error) => {
                                         surface.watch_error = Some(
-                                            format!("File updates could not be decoded: {error}")
-                                                .into(),
+                                            i18n::fill(
+                                                MessageId::FilesWatchDecodeFailed,
+                                                "{error}",
+                                                &error.to_string(),
+                                                i18n::locale(cx),
+                                            )
+                                            .into(),
                                         );
                                         cx.notify();
                                     }
@@ -45,8 +51,13 @@ impl FilesSurface {
                         }
                         if this
                             .update(cx, |surface, cx| {
-                                surface.watch_error =
-                                    Some("File updates interrupted — retrying".into());
+                                surface.watch_error = Some(
+                                    i18n::translate(
+                                        MessageId::FilesWatchInterrupted,
+                                        i18n::locale(cx),
+                                    )
+                                    .into(),
+                                );
                                 cx.notify();
                             })
                             .is_err()
@@ -57,7 +68,7 @@ impl FilesSurface {
                     Err(error) => {
                         if this
                             .update(cx, |surface, cx| {
-                                surface.watch_error = Some(error.to_string().into());
+                                surface.watch_error = Some(error.text(i18n::locale(cx)));
                                 cx.notify();
                             })
                             .is_err()

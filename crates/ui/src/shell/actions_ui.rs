@@ -41,7 +41,15 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if let Some(error) = setup_error {
-            self.sidebar_notice = Some(format!("Setup action failed: {error}").into());
+            self.sidebar_notice = Some(
+                i18n::fill(
+                    MessageId::ProjectActionSetupFailed,
+                    "{error}",
+                    &error,
+                    i18n::locale(cx),
+                )
+                .into(),
+            );
         }
         let Some(run) = setup_action else {
             cx.notify();
@@ -49,7 +57,12 @@ impl Shell {
         };
 
         let panel = self.terminal_panel(cx);
-        let title = format!("{} (setup)", run.action_name);
+        let title = i18n::fill(
+            MessageId::ProjectActionSetupTabTitle,
+            "{name}",
+            &run.action_name,
+            i18n::locale(cx),
+        );
         let tab = panel.update(cx, |panel, cx| {
             panel.reserve_tab_for_chat(chat_id.clone(), title, cx)
         });
@@ -57,8 +70,13 @@ impl Shell {
             panel.attach_reserved_session(&chat_id, tab, run.terminal, target_device_id, cx)
         });
         if !attached {
-            self.sidebar_notice =
-                Some("Setup action started, but its terminal could not be attached".into());
+            self.sidebar_notice = Some(
+                i18n::translate(
+                    MessageId::ProjectActionSetupTerminalUnavailable,
+                    i18n::locale(cx),
+                )
+                .into(),
+            );
         }
 
         let selected = self.active_chat == chat_id;
@@ -113,8 +131,10 @@ impl Shell {
 
     fn refresh_project_actions(&mut self, context: ProjectActionContext, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.project_actions
-                .mark_unavailable(&context.key, "Engine not connected".into());
+            self.project_actions.mark_unavailable(
+                &context.key,
+                i18n::translate(MessageId::ErrorEngineNotConnected, i18n::locale(cx)).into(),
+            );
             cx.notify();
             return;
         };
@@ -184,9 +204,17 @@ impl Shell {
                     icon: ProjectActionIcon::Play,
                     run_on_worktree_create: false,
                 });
-        let name = cx.new(|cx| ComposerInput::new("Action name", cx));
+        let locale = i18n::locale(cx);
+        let name = cx.new(|cx| {
+            ComposerInput::new(
+                i18n::translate(MessageId::ProjectActionNamePlaceholder, locale),
+                cx,
+            )
+        });
         name.update(cx, |input, cx| input.set_text(draft.name, cx));
-        let command = cx.new(|cx| ComposerInput::new("Command", cx));
+        let command = cx.new(|cx| {
+            ComposerInput::new(i18n::translate(MessageId::ProjectActionCommand, locale), cx)
+        });
         command.update(cx, |input, cx| input.set_text(draft.command, cx));
         let name_events = cx.subscribe(&name, |_: &mut Shell, _, _, cx| cx.notify());
         let command_events = cx.subscribe(&command, |_: &mut Shell, _, _, cx| cx.notify());
@@ -210,7 +238,9 @@ impl Shell {
     fn save_project_action(&mut self, cx: &mut Context<Self>) {
         let Some(context) = self.project_action_context(cx) else {
             if let Some(editor) = self.project_actions.editor.as_mut() {
-                editor.error = Some("Project action is no longer available".into());
+                editor.error = Some(
+                    i18n::translate(MessageId::ProjectActionUnavailable, i18n::locale(cx)).into(),
+                );
                 cx.notify();
             }
             return;
@@ -223,14 +253,15 @@ impl Shell {
         }
         let name = editor.name.read(cx).text().trim().to_string();
         let command = editor.command.read(cx).text().trim().to_string();
+        let locale = i18n::locale(cx);
         let error = if name.is_empty() {
-            Some("Action name is required".to_string())
+            Some(i18n::translate(MessageId::ProjectActionNameRequired, locale).to_string())
         } else if name.chars().count() > 80 {
-            Some("Action name must not exceed 80 characters".to_string())
+            Some(i18n::translate(MessageId::ProjectActionNameTooLong, locale).to_string())
         } else if command.is_empty() {
-            Some("Action command is required".to_string())
+            Some(i18n::translate(MessageId::ProjectActionCommandRequired, locale).to_string())
         } else if command.len() > 16 * 1024 {
-            Some("Action command must not exceed 16384 bytes".to_string())
+            Some(i18n::translate(MessageId::ProjectActionCommandTooLong, locale).to_string())
         } else {
             None
         };
@@ -240,12 +271,13 @@ impl Shell {
             return;
         }
         if context.key != editor.key {
-            editor.error = Some("The selected project changed".into());
+            editor.error =
+                Some(i18n::translate(MessageId::ProjectActionProjectChanged, locale).into());
             cx.notify();
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            editor.error = Some("Engine not connected".into());
+            editor.error = Some(i18n::translate(MessageId::ErrorEngineNotConnected, locale).into());
             cx.notify();
             return;
         };
@@ -532,6 +564,7 @@ impl Shell {
         let can_run = status.can_run();
         let unavailable = matches!(status, ProjectActionsStatus::Unavailable { .. });
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let preferred = preferred_action(
             &snapshot.actions,
             self.settings
@@ -609,7 +642,10 @@ impl Shell {
                         .text_color(theme.danger),
                 )
                 .when(show_label, |el| {
-                    el.child(SharedString::from("Actions unavailable"))
+                    el.child(SharedString::from(i18n::translate(
+                        MessageId::ProjectActionsUnavailable,
+                        locale,
+                    )))
                 });
             control = control.child(retry);
         } else {
@@ -626,7 +662,10 @@ impl Shell {
                         .size(px(13.0))
                         .text_color(theme.text_muted),
                 )
-                .child(SharedString::from("Add action"));
+                .child(SharedString::from(i18n::translate(
+                    MessageId::ProjectActionAdd,
+                    locale,
+                )));
             control = control.child(add);
             if has_imports {
                 control = control.child(
@@ -663,13 +702,17 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let mut card = project_actions_menu_surface(
             &theme,
             viewport_height,
             &self.project_actions.menu_scroll,
         )
         .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_project_actions_menu(cx)))
-        .child(popover::menu_heading(&theme, "Project actions"));
+        .child(popover::menu_heading(
+            &theme,
+            i18n::translate(MessageId::ProjectActionsTitle, locale),
+        ));
         if let ProjectActionsStatus::Unavailable { message, .. } = status {
             let retry = self.project_action_context(cx);
             card = card
@@ -689,7 +732,10 @@ impl Shell {
                                 this.refresh_project_actions(context.clone(), cx)
                             }))
                             .child(icon(icons::REFRESH).size(px(15.0)))
-                            .child(SharedString::from("Retry")),
+                            .child(SharedString::from(i18n::translate(
+                                MessageId::CommonRetry,
+                                locale,
+                            ))),
                     )
                 });
         }
@@ -716,7 +762,12 @@ impl Shell {
                             .min_w_0()
                             .truncate()
                             .child(SharedString::from(if action.run_on_worktree_create {
-                                format!("{} (setup)", action.name)
+                                i18n::fill(
+                                    MessageId::ProjectActionSetupTabTitle,
+                                    "{name}",
+                                    &action.name,
+                                    locale,
+                                )
                             } else {
                                 action.name
                             })),
@@ -748,7 +799,10 @@ impl Shell {
         if !snapshot.importable_actions.is_empty() {
             card = card
                 .child(popover::menu_separator())
-                .child(popover::menu_heading(&theme, "Import from zeron.json"));
+                .child(popover::menu_heading(
+                    &theme,
+                    i18n::translate(MessageId::ProjectActionImport, locale),
+                ));
             for draft in snapshot.importable_actions.clone() {
                 let import = draft.clone();
                 let row_id = SharedString::from(format!("import-project-action-{}", draft.name));
@@ -791,7 +845,10 @@ impl Shell {
                             .size(px(15.0))
                             .text_color(theme.text_muted),
                     )
-                    .child(SharedString::from("Add action")),
+                    .child(SharedString::from(i18n::translate(
+                        MessageId::ProjectActionAdd,
+                        locale,
+                    ))),
             )
             .into_any_element()
     }
@@ -807,13 +864,17 @@ impl Shell {
             window.focus(&editor.name.focus_handle(cx), cx);
         }
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         if editor.confirm_delete {
             let name = editor.name.read(cx).text().trim().to_string();
             let card = popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Delete action?"))
+                .child(popover::dialog_title(
+                    &theme,
+                    i18n::translate(MessageId::ProjectActionDeleteTitle, locale),
+                ))
                 .child(div().mt(px(6.0)).child(popover::dialog_body(
                     &theme,
-                    format!("“{name}” will be permanently deleted."),
+                    i18n::fill(MessageId::ProjectActionDeleteBody, "{name}", &name, locale),
                 )))
                 .child(
                     div()
@@ -822,21 +883,26 @@ impl Shell {
                         .justify_end()
                         .gap(px(8.0))
                         .child(
-                            popover::btn_ghost(&theme, "Cancel", "action-delete-cancel")
-                                .id("action-delete-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(editor) = this.project_actions.editor.as_mut() {
-                                        editor.confirm_delete = false;
-                                    }
-                                    cx.notify();
-                                })),
+                            popover::btn_ghost(
+                                &theme,
+                                i18n::translate(MessageId::CommonCancel, locale),
+                                "action-delete-cancel",
+                            )
+                            .id("action-delete-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(editor) = this.project_actions.editor.as_mut() {
+                                    editor.confirm_delete = false;
+                                }
+                                cx.notify();
+                            })),
                         )
                         .child(
-                            popover::btn_danger(&theme, "Delete")
-                                .id("action-delete-confirm")
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.delete_project_action(cx)),
-                                ),
+                            popover::btn_danger(
+                                &theme,
+                                i18n::translate(MessageId::CommonDelete, locale),
+                            )
+                            .id("action-delete-confirm")
+                            .on_click(cx.listener(|this, _, _, cx| this.delete_project_action(cx))),
                         ),
                 )
                 .into_any_element();
@@ -850,7 +916,14 @@ impl Shell {
         let editing = editor.action_id.is_some();
         let saving = editor.saving;
         let error = editor.error.clone();
-        let title = if editing { "Edit action" } else { "Add action" };
+        let title = i18n::translate(
+            if editing {
+                MessageId::ProjectActionEdit
+            } else {
+                MessageId::ProjectActionAdd
+            },
+            locale,
+        );
         let mut card = popover::dialog_card(&theme)
             .w(px(440.0))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
@@ -860,9 +933,15 @@ impl Shell {
                 }
             }))
             .child(popover::dialog_title(&theme, title))
-            .child(action_field_label(&theme, "Name"))
+            .child(action_field_label(
+                &theme,
+                i18n::translate(MessageId::ProjectActionName, locale),
+            ))
             .child(popover::dialog_field(name.into_any_element()))
-            .child(action_field_label(&theme, "Command"))
+            .child(action_field_label(
+                &theme,
+                i18n::translate(MessageId::ProjectActionCommand, locale),
+            ))
             .child(
                 popover::dialog_field(
                     div()
@@ -873,7 +952,10 @@ impl Shell {
                 )
                 .font_family(theme.font_mono.clone()),
             )
-            .child(action_field_label(&theme, "Icon"));
+            .child(action_field_label(
+                &theme,
+                i18n::translate(MessageId::ProjectActionIcon, locale),
+            ));
         let mut icon_row = div().flex().flex_row().gap(px(6.0));
         for (kind, label) in ACTION_ICONS {
             icon_row = icon_row.child(
@@ -942,7 +1024,10 @@ impl Shell {
                                 )
                             }),
                     )
-                    .child(SharedString::from("Run automatically on worktree creation")),
+                    .child(SharedString::from(i18n::translate(
+                        MessageId::ProjectActionRunOnWorktree,
+                        locale,
+                    ))),
             )
             .when_some(error, |card, error| {
                 card.child(
@@ -961,15 +1046,19 @@ impl Shell {
                     .justify_between()
                     .child(div().when(editing, |el| {
                         el.child(
-                            popover::btn_ghost(&theme, "Delete action", "action-delete")
-                                .id("action-delete")
-                                .text_color(theme.danger)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(editor) = this.project_actions.editor.as_mut() {
-                                        editor.confirm_delete = true;
-                                    }
-                                    cx.notify();
-                                })),
+                            popover::btn_ghost(
+                                &theme,
+                                i18n::translate(MessageId::ProjectActionDelete, locale),
+                                "action-delete",
+                            )
+                            .id("action-delete")
+                            .text_color(theme.danger)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(editor) = this.project_actions.editor.as_mut() {
+                                    editor.confirm_delete = true;
+                                }
+                                cx.notify();
+                            })),
                         )
                     }))
                     .child(
@@ -977,17 +1066,30 @@ impl Shell {
                             .flex()
                             .gap(px(8.0))
                             .child(
-                                popover::btn_ghost(&theme, "Cancel", "action-cancel")
-                                    .id("action-cancel")
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                popover::btn_ghost(
+                                    &theme,
+                                    i18n::translate(MessageId::CommonCancel, locale),
+                                    "action-cancel",
+                                )
+                                .id("action-cancel")
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.project_actions.editor = None;
                                         cx.notify();
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
                                 popover::btn_primary(
                                     &theme,
-                                    if saving { "Saving…" } else { "Save action" },
+                                    i18n::translate(
+                                        if saving {
+                                            MessageId::ProjectActionSaving
+                                        } else {
+                                            MessageId::ProjectActionSave
+                                        },
+                                        locale,
+                                    ),
                                 )
                                 .id("action-save")
                                 .when(!saving, |button| {

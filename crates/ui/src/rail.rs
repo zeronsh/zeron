@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 
+use crate::i18n::{self, MessageId};
 use crate::motion;
 use crate::popover;
 use crate::theme::Theme;
@@ -457,6 +458,7 @@ impl Transcript {
         let active = active_tick(&tick_rows, top_row);
         let hover = self.rail_hover();
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
 
         // Fixed footprint (shadcn Transcript Outline): a compact stack of at
         // most MAX_RAIL_TICKS marks — past that, ticks become even buckets
@@ -531,7 +533,12 @@ impl Transcript {
                                 div()
                                     .text_size(crate::typography::ui_rems(10.0))
                                     .text_color(theme.text_muted)
-                                    .child(SharedString::from(format!("{bucket_len} prompts"))),
+                                    .child(SharedString::from(i18n::counted(
+                                        MessageId::CountPromptOne,
+                                        MessageId::CountPromptMany,
+                                        bucket_len,
+                                        locale,
+                                    ))),
                             )
                         });
                     // Mounted straight through deferred/anchored (not a popover

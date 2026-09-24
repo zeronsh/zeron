@@ -11,7 +11,7 @@ use super::{
     client::{FilesRequestContext, request_params},
     model::parent_path,
 };
-use crate::{state::EngineHandle, theme::Theme};
+use crate::{i18n::MessageId, state::EngineHandle, theme::Theme};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum DecorationKind {
@@ -117,7 +117,7 @@ pub(super) struct GitStatusSource {
     device_id: String,
     decorations: Decorations,
     revision: Option<String>,
-    notice: Option<&'static str>,
+    notice: Option<MessageId>,
     _task: Task<()>,
 }
 
@@ -145,10 +145,10 @@ impl GitStatusSource {
         }
         let revision = snapshot.as_ref().map(|s| s.revision.clone());
         let notice = match &snapshot {
-            Some(snapshot) if !snapshot.complete => Some("Git status unavailable or incomplete"),
+            Some(snapshot) if !snapshot.complete => Some(MessageId::FilesGitStatusIncomplete),
             Some(_) => None,
             None if self.revision.is_some() || self.notice.is_some() => {
-                Some("Git status unavailable")
+                Some(MessageId::FilesGitStatusUnavailable)
             }
             None => None,
         };
@@ -237,7 +237,7 @@ impl GitStatusSource {
                         .update(cx, |source, cx| {
                             source.apply(None, Decorations::default(), cx);
                             if source.notice.is_none() {
-                                source.notice = Some("Git status unavailable");
+                                source.notice = Some(MessageId::FilesGitStatusUnavailable);
                                 cx.notify();
                             }
                         })
@@ -268,7 +268,7 @@ impl FilesSurface {
     pub(crate) fn test_git_source(&self) -> Option<gpui::EntityId> {
         self.git_status.as_ref().map(Entity::entity_id)
     }
-    pub(super) fn git_status_notice(&self, cx: &App) -> Option<&'static str> {
+    pub(super) fn git_status_notice(&self, cx: &App) -> Option<MessageId> {
         self.git_status.as_ref()?.read(cx).notice
     }
 

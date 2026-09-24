@@ -5,6 +5,7 @@
 //! selected. `UiSettings.open_tabs` is legacy — no longer read or written.
 
 use super::*;
+use crate::i18n::{self, MessageId};
 
 /// The chat one step from `selected` in the sidebar `order`, wrapping at both
 /// ends. Pure.
@@ -171,6 +172,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         // The canvas titles as NOTHING (user request — a "New session"
         // header over the empty canvas was noise); the bar keeps its height,
         // drag region, and buttons. A session appends its target as a muted
@@ -193,10 +195,12 @@ impl Shell {
                         .unwrap_or_else(|| "~".to_string());
                     let device = state
                         .device_name(&chat.device_id)
-                        .unwrap_or("Unknown device");
+                        .unwrap_or(i18n::translate(MessageId::DeviceUnknown, locale));
                     (
                         SharedString::from(transcript::single_line(
-                            &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                            &chat.title.clone().unwrap_or_else(|| {
+                                i18n::translate(MessageId::SessionUntitled, locale).into()
+                            }),
                         )),
                         Some(SharedString::from(format!("{folder} @ {device}"))),
                         chat.config.as_ref().map(|c| c.harness),
@@ -364,11 +368,14 @@ impl Shell {
                                     }),
                                 )
                                 .role(gpui::Role::Button)
-                                .aria_label(if self.files_panel_open(cx) {
-                                    "Hide files panel"
-                                } else {
-                                    "Show files panel"
-                                })
+                                .aria_label(i18n::translate(
+                                    if self.files_panel_open(cx) {
+                                        MessageId::FilesHidePanel
+                                    } else {
+                                        MessageId::FilesShowPanel
+                                    },
+                                    locale,
+                                ))
                                 .when(self.files_panel_open(cx), |button| {
                                     button.bg(crate::theme::wash(0.09))
                                 }),

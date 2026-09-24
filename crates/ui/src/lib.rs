@@ -31,6 +31,7 @@ pub mod file_icons;
 pub mod files;
 pub mod frost;
 pub mod history;
+pub mod i18n;
 pub mod icons;
 pub(crate) mod image_media;
 pub(crate) mod image_viewer;
@@ -161,6 +162,9 @@ pub fn run_app(config: UiConfig) {
         let data_dir = config.boot().data_dir.clone();
         let ui_settings = settings::UiSettings::load(&data_dir);
         settings::init(ui_settings.clone(), data_dir.clone(), cx);
+        // Resolve the interface language before any window opens, so the first
+        // frame already renders the right copy.
+        i18n::init(ui_settings.language, cx);
         let font_availability = typography::register_fonts(cx);
         // Typography first: theme installation reads the effective family, so
         // the first frame has the final font and palette without a flash.
@@ -249,7 +253,7 @@ pub fn run_app(config: UiConfig) {
         // `open_main_window` because `Shell::new` ran `apply_keymap`
         // synchronously, so `set_menus` reads the final bindings for the ⌘-key
         // equivalents (gpui snapshots the keymap at set time).
-        cx.set_menus(app_menus::app_menus());
+        cx.set_menus(app_menus::app_menus(i18n::locale(cx)));
         cx.activate(true);
     });
 }
@@ -562,7 +566,7 @@ fn deliver_appshot(
             shell.receive_appshot(appshot, window, cx);
         }
         if let Some(error) = error {
-            shell.show_appshot_error(error.to_string(), window, cx);
+            shell.show_appshot_error(error.text(crate::i18n::locale(cx)), window, cx);
         }
     });
     if captured {

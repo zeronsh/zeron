@@ -21,6 +21,7 @@ use gpui::{
 };
 use zeron_syntax::{HighlightKind, HighlightSpan, HighlightedDocument};
 
+use crate::i18n::{self, MessageId};
 use crate::theme::Theme;
 
 use super::parser::{Block, BlockTree, InlineRun, TableAlign};
@@ -314,6 +315,18 @@ struct CodeScrollbarDragGhost;
 impl Render for CodeScrollbarDragGhost {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         gpui::Empty
+    }
+}
+
+/// One translated string, resolved while gpui builds the element. The markdown
+/// tree renders from a `Window` alone, so inline copy has no `App` at the call
+/// site; a tooltip resolves from its own builder and this covers the rest.
+#[derive(IntoElement)]
+struct LocalizedText(MessageId);
+
+impl RenderOnce for LocalizedText {
+    fn render(self, _window: &mut Window, cx: &mut gpui::App) -> impl IntoElement {
+        SharedString::from(i18n::translate(self.0, i18n::locale(cx)))
     }
 }
 
@@ -1850,9 +1863,9 @@ fn render_code_block(
             let toggle_action = code_icon_action(
                 format!("{frame_id}-source-toggle").into(),
                 if diagram.show_source {
-                    "Show diagram"
+                    MessageId::MarkdownShowDiagram
                 } else {
-                    "Show source"
+                    MessageId::MarkdownShowSource
                 },
                 if diagram.show_source {
                     crate::icons::EYE
@@ -1885,7 +1898,7 @@ fn render_code_block(
 
 fn code_icon_action(
     id: SharedString,
-    label: &'static str,
+    label: MessageId,
     icon_path: &'static str,
     handler: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
     theme: &Theme,
@@ -1909,7 +1922,10 @@ fn code_icon_action(
             cx.stop_propagation();
             handler(window, cx);
         })
-        .tooltip(move |_, cx| cx.new(move |_| CodeBlockTooltip(label)).into())
+        .tooltip(move |_, cx| {
+            let copy = i18n::translate(label, i18n::locale(cx));
+            cx.new(move |_| CodeBlockTooltip(copy)).into()
+        })
         .child(
             crate::icons::icon(icon_path)
                 .size(px(13.0))
@@ -1960,7 +1976,9 @@ fn code_copy_button(
                 .size(px(12.0))
                 .text_color(theme.text_muted),
             )
-            .when(copied, |el| el.child(SharedString::from("Copied")))
+            .when(copied, |el| {
+                el.child(LocalizedText(MessageId::CommonCopied))
+            })
             .into_any_element()
     })
 }
@@ -2137,14 +2155,15 @@ fn render_code_block_source_with_actions(
                 toggle(window, cx);
             })
             .tooltip(move |_, cx| {
-                cx.new(move |_| {
-                    CodeBlockTooltip(if fit_content {
-                        "Use horizontal scrolling"
+                let copy = i18n::translate(
+                    if fit_content {
+                        MessageId::MarkdownUseHorizontalScrolling
                     } else {
-                        "Fit content"
-                    })
-                })
-                .into()
+                        MessageId::MarkdownFitContent
+                    },
+                    i18n::locale(cx),
+                );
+                cx.new(move |_| CodeBlockTooltip(copy)).into()
             })
             .child(
                 crate::icons::icon(crate::icons::WRAP_TEXT)

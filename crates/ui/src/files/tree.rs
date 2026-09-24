@@ -10,6 +10,7 @@ use super::{
 };
 use crate::{
     file_icons::{self, FileIconIdentity},
+    i18n::{self, MessageId},
     icons::{self, icon},
     popover,
     theme::Theme,
@@ -179,7 +180,7 @@ impl FilesSurface {
         div()
             .id("files-tree")
             .role(gpui::Role::Tree)
-            .aria_label("Workspace file tree")
+            .aria_label(i18n::translate(MessageId::FilesTreeLabel, i18n::locale(cx)))
             .relative()
             .flex_1()
             .min_h_0()
@@ -316,14 +317,14 @@ impl FilesSurface {
             VisibleRowKind::Loading { .. } => status_row(
                 index,
                 padding + TREE_INDENT,
-                "Loading…",
+                i18n::translate(MessageId::CommonLoading, i18n::locale(cx)),
                 theme.text_faint,
                 &theme,
             ),
             VisibleRowKind::Empty { .. } => status_row(
                 index,
                 padding + TREE_INDENT,
-                "Empty folder",
+                i18n::translate(MessageId::FilesTreeEmptyFolder, i18n::locale(cx)),
                 theme.text_faint.opacity(0.7),
                 &theme,
             ),
@@ -355,7 +356,12 @@ impl FilesSurface {
                         .truncate()
                         .text_size(px(10.5))
                         .text_color(theme.danger.opacity(0.82))
-                        .child(format!("{message} — Retry")),
+                        .child(i18n::fill(
+                            MessageId::FilesTreeErrorRetry,
+                            "{message}",
+                            &message,
+                            i18n::locale(cx),
+                        )),
                 )
                 .into_any_element(),
             VisibleRowKind::LoadMore { directory, cursor } => div()
@@ -376,7 +382,10 @@ impl FilesSurface {
                     div()
                         .text_size(px(10.5))
                         .text_color(theme.text_muted)
-                        .child("Load more…"),
+                        .child(i18n::translate(
+                            MessageId::FilesTreeLoadMore,
+                            i18n::locale(cx),
+                        )),
                 )
                 .into_any_element(),
         };

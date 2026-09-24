@@ -287,19 +287,46 @@ pub struct ChatGroup<'a> {
     pub chats: Vec<&'a Chat>,
 }
 
-/// Project label for a chat: the basename of its cwd, or "No project".
-pub fn project_label(cwd: Option<&str>) -> String {
+/// A chat's project label, split where it carries copy: a checkout's basename is
+/// data every viewport shows verbatim, and "no project" is copy a localized
+/// viewport names itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectName {
+    /// The basename of the chat's cwd.
+    Named(String),
+    /// The cwd names no project: empty, the home directory, or a bare root.
+    Unset,
+}
+
+impl ProjectName {
+    /// The English label, for every client that has no locale.
+    pub fn english(self) -> String {
+        match self {
+            Self::Named(name) => name,
+            Self::Unset => "No project".to_string(),
+        }
+    }
+}
+
+/// See [`ProjectName`]: the classification without its copy.
+pub fn project_name(cwd: Option<&str>) -> ProjectName {
     let Some(cwd) = cwd.map(str::trim).filter(|c| !c.is_empty()) else {
-        return "No project".to_string();
+        return ProjectName::Unset;
     };
     if matches!(cwd, "~" | "~/") {
-        return "No project".to_string();
+        return ProjectName::Unset;
     }
-    std::path::Path::new(cwd.trim_end_matches(['/', '\\']))
+    let name = std::path::Path::new(cwd.trim_end_matches(['/', '\\']))
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| cwd.to_string())
+        .unwrap_or_else(|| cwd.to_string());
+    ProjectName::Named(name)
+}
+
+/// Project label for a chat: the basename of its cwd, or "No project".
+pub fn project_label(cwd: Option<&str>) -> String {
+    project_name(cwd).english()
 }
 
 /// Group chats by project label, preserving the incoming (recency) order both
@@ -320,54 +347,107 @@ pub fn group_chats<'a>(chats: impl IntoIterator<Item = &'a Chat>) -> Vec<ChatGro
 }
 
 /// Compact relative time ("now", "5m", "3h", "2d", "1w", …) — no "ago" suffix;
-/// port of zeron's `formatTimeAgo`.
+/// port of zeron's `formatTimeAgo`. The English rendering of [`compact_age`].
 pub fn format_time_ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    compact_age(then, now).english()
+}
+
+/// The bucket a compact relative time falls into, without its copy: the gpui
+/// viewport renders these in the active locale, and `format_time_ago` renders
+/// them in English for every other client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactAge {
+    Now,
+    Minutes(u64),
+    Hours(u64),
+    Days(u64),
+    Weeks(u64),
+    Months(u64),
+    Years(u64),
+}
+
+impl CompactAge {
+    pub fn english(self) -> String {
+        match self {
+            Self::Now => "now".to_string(),
+            Self::Minutes(n) => format!("{n}m"),
+            Self::Hours(n) => format!("{n}h"),
+            Self::Days(n) => format!("{n}d"),
+            Self::Weeks(n) => format!("{n}w"),
+            Self::Months(n) => format!("{n}mo"),
+            Self::Years(n) => format!("{n}y"),
+        }
+    }
+}
+
+pub fn compact_age(then: DateTime<Utc>, now: DateTime<Utc>) -> CompactAge {
     let s = now.signed_duration_since(then).num_seconds().max(0);
     // Under a minute reads as "now" — otherwise 45–59s floors to a bare "0m".
     if s < 60 {
-        return "now".to_string();
+        return CompactAge::Now;
     }
     let m = s / 60;
     if m < 60 {
-        return format!("{m}m");
+        return CompactAge::Minutes(m as u64);
     }
     let h = m / 60;
     if h < 24 {
-        return format!("{h}h");
+        return CompactAge::Hours(h as u64);
     }
     let d = h / 24;
     if d < 7 {
-        return format!("{d}d");
+        return CompactAge::Days(d as u64);
     }
     let w = d / 7;
     if w < 5 {
-        return format!("{w}w");
+        return CompactAge::Weeks(w as u64);
     }
     let mo = d / 30;
     if mo < 12 {
-        return format!("{mo}mo");
+        return CompactAge::Months(mo as u64);
     }
-    format!("{}y", d / 365)
+    CompactAge::Years((d / 365) as u64)
 }
 
 /// Session-row sub-line, "project · branch" (zeron `chatLocation`): the repo
 /// checkout identity. Either part may be missing; empty when both are.
 pub fn chat_location(chat: &Chat) -> Option<String> {
+    let parts = chat_location_parts(chat);
+    location_line(parts.project.map(ProjectName::english), parts.reference)
+}
+
+/// The two halves of a session row's location, without their copy: the checkout
+/// identity is data, and a chat whose cwd names no project reaches a viewport as
+/// [`ProjectName::Unset`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatLocation {
+    pub project: Option<ProjectName>,
+    pub reference: Option<String>,
+}
+
+pub fn chat_location_parts(chat: &Chat) -> ChatLocation {
     let project = chat
         .cwd
         .as_deref()
         .map(str::trim)
         .filter(|c| !c.is_empty())
-        .map(|c| project_label(Some(c)));
+        .map(|c| project_name(Some(c)));
     let reference = chat
         .branch
         .as_deref()
         .map(str::trim)
-        .filter(|b| !b.is_empty());
+        .filter(|b| !b.is_empty())
+        .map(str::to_string);
+    ChatLocation { project, reference }
+}
+
+/// Joins an already-rendered location into the one sub-line: whichever half is
+/// present, `" · "` between the two. One place decides for both viewports.
+pub fn location_line(project: Option<String>, reference: Option<String>) -> Option<String> {
     match (project, reference) {
         (Some(p), Some(r)) => Some(format!("{p} · {r}")),
         (Some(p), None) => Some(p),
-        (None, Some(r)) => Some(r.to_string()),
+        (None, Some(r)) => Some(r),
         (None, None) => None,
     }
 }
@@ -395,55 +475,191 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     }
 }
 
+/// A tool call's chip label, without its copy: the gpui viewport names each
+/// kind in the active locale, and `tool_chip_content` names it in English for
+/// every other client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolChip {
+    Run,
+    Read,
+    Write,
+    Edit,
+    Patch,
+    Search,
+    Glob,
+    Fetch,
+    Web,
+    Todo,
+    Mcp,
+    Agent,
+    Tool,
+}
+
+impl ToolChip {
+    /// Labels match zeron's `describeTool` (tool-chip.tsx) exactly, so the two
+    /// viewports name a tool identically.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Run => "Run",
+            Self::Read => "Read",
+            Self::Write => "Write",
+            Self::Edit => "Edit",
+            Self::Patch => "Patch",
+            Self::Search => "Search",
+            Self::Glob => "Glob",
+            Self::Fetch => "Fetch",
+            Self::Web => "Web",
+            Self::Todo => "Todo",
+            Self::Mcp => "MCP",
+            Self::Agent => "Agent",
+            Self::Tool => "Tool",
+        }
+    }
+}
+
+/// The chip's one-line detail, split where it carries copy: everything else is
+/// tool or model data a localized viewport must pass through untouched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolChipDetail {
+    /// A command, path, pattern, URL, query, or `server · tool` pair.
+    Data(String),
+    /// A patch that names no path: the scope it applies to.
+    Workspace,
+    /// `{pattern} in {path}`.
+    In { pattern: String, path: String },
+    /// `{done}/{total} done`.
+    TodoProgress { done: usize, total: usize },
+}
+
+impl ToolChipDetail {
+    pub fn english(&self) -> String {
+        match self {
+            Self::Data(text) => text.clone(),
+            Self::Workspace => "workspace".to_string(),
+            Self::In { pattern, path } => format!("{pattern} in {path}"),
+            Self::TodoProgress { done, total } => format!("{done}/{total} done"),
+        }
+    }
+}
+
+pub struct ToolChipParts {
+    pub kind: ToolChip,
+    pub detail: ToolChipDetail,
+}
+
 /// Per-kind chip label + one-line detail. Labels match zeron's `describeTool`
 /// (tool-chip.tsx) exactly, so the two viewports name a tool identically.
 pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
-    let (label, detail) = tool_chip_content_raw(call);
-    (label, single_line(&detail))
+    let parts = tool_chip_parts(call);
+    (parts.kind.label(), single_line(&parts.detail.english()))
 }
 
-fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
+pub fn tool_chip_parts(call: &crate::ToolCall) -> ToolChipParts {
     use crate::ToolCall;
-    match call {
-        ToolCall::Exec { command } => ("Run", command.clone()),
-        ToolCall::ReadFile { path } => ("Read", path.clone()),
-        ToolCall::WriteFile { path, .. } => ("Write", path.clone()),
-        ToolCall::EditFile { path, .. } => ("Edit", path.clone()),
-        ToolCall::ApplyPatch { path } => {
-            ("Patch", path.clone().unwrap_or_else(|| "workspace".into()))
-        }
-        ToolCall::Search { pattern, path } => (
-            "Search",
+    let (kind, detail) = match call {
+        ToolCall::Exec { command } => (ToolChip::Run, ToolChipDetail::Data(command.clone())),
+        ToolCall::ReadFile { path } => (ToolChip::Read, ToolChipDetail::Data(path.clone())),
+        ToolCall::WriteFile { path, .. } => (ToolChip::Write, ToolChipDetail::Data(path.clone())),
+        ToolCall::EditFile { path, .. } => (ToolChip::Edit, ToolChipDetail::Data(path.clone())),
+        ToolCall::ApplyPatch { path } => (
+            ToolChip::Patch,
             match path {
-                Some(path) => format!("{pattern} in {path}"),
-                None => pattern.clone(),
+                Some(path) => ToolChipDetail::Data(path.clone()),
+                None => ToolChipDetail::Workspace,
             },
         ),
-        ToolCall::Glob { pattern } => ("Glob", pattern.clone()),
-        ToolCall::WebFetch { url, .. } => ("Fetch", url.clone()),
-        ToolCall::WebSearch { query } => ("Web", query.clone()),
-        ToolCall::Todo { items } => {
-            let done = items.iter().filter(|i| i.done).count();
-            ("Todo", format!("{done}/{} done", items.len()))
-        }
-        ToolCall::Mcp { server, tool, .. } => ("MCP", format!("{server} · {tool}")),
+        ToolCall::Search { pattern, path } => (
+            ToolChip::Search,
+            match path {
+                Some(path) => ToolChipDetail::In {
+                    pattern: pattern.clone(),
+                    path: path.clone(),
+                },
+                None => ToolChipDetail::Data(pattern.clone()),
+            },
+        ),
+        ToolCall::Glob { pattern } => (ToolChip::Glob, ToolChipDetail::Data(pattern.clone())),
+        ToolCall::WebFetch { url, .. } => (ToolChip::Fetch, ToolChipDetail::Data(url.clone())),
+        ToolCall::WebSearch { query } => (ToolChip::Web, ToolChipDetail::Data(query.clone())),
+        ToolCall::Todo { items } => (
+            ToolChip::Todo,
+            ToolChipDetail::TodoProgress {
+                done: items.iter().filter(|i| i.done).count(),
+                total: items.len(),
+            },
+        ),
+        ToolCall::Mcp { server, tool, .. } => (
+            ToolChip::Mcp,
+            ToolChipDetail::Data(format!("{server} · {tool}")),
+        ),
         // Subagent spawns decode as Unknown named "Agent[: <description>]"
         // (every native driver's convention): label them "Agent" with the
         // description as the detail — "Tool · Agent: scan repo" read as two
         // labels fighting.
         ToolCall::Unknown { name, .. } => match name.strip_prefix("Agent: ") {
-            Some(description) => ("Agent", description.to_owned()),
-            None if name == "Agent" => ("Agent", String::new()),
-            None => ("Tool", name.clone()),
+            Some(description) => (
+                ToolChip::Agent,
+                ToolChipDetail::Data(description.to_owned()),
+            ),
+            None if name == "Agent" => (ToolChip::Agent, ToolChipDetail::Data(String::new())),
+            None => (ToolChip::Tool, ToolChipDetail::Data(name.clone())),
         },
+    };
+    ToolChipParts { kind, detail }
+}
+
+/// One segment of a ToolGroup summary, without its copy: the gpui viewport
+/// names each segment in the active locale, and `tool_group_summary` names them
+/// in English for every other client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolSummarySegment {
+    RanCommands(usize),
+    EditedFiles(usize),
+    ReadFiles(usize),
+    Searched(usize),
+    FetchedPages(usize),
+    UpdatedTodos,
+    CalledTools(usize),
+    Failed(usize),
+    /// The fallback when no counted kind applies: a bare tool count.
+    Tools(usize),
+}
+
+impl ToolSummarySegment {
+    pub fn english(self) -> String {
+        match self {
+            Self::RanCommands(n) => format!("ran {}", plural(n, "command", "commands")),
+            Self::EditedFiles(n) => format!("edited {}", plural(n, "file", "files")),
+            Self::ReadFiles(n) => format!("read {}", plural(n, "file", "files")),
+            Self::Searched(n) => format!("searched {}", plural(n, "time", "times")),
+            Self::FetchedPages(n) => format!("fetched {}", plural(n, "page", "pages")),
+            Self::UpdatedTodos => "updated todos".to_string(),
+            Self::CalledTools(n) => format!("called {}", plural(n, "tool", "tools")),
+            Self::Failed(n) => format!("{n} failed"),
+            Self::Tools(n) => plural(n, "tool", "tools"),
+        }
     }
 }
 
-/// The ToolGroup summary line — "Ran 3 commands · edited 2 files".
+/// Joins rendered summary segments into the one collapsed line: `" · "` between
+/// them, first letter capitalized (zeron's style). A locale without letter case
+/// is unaffected.
+pub fn summary_line(segments: impl IntoIterator<Item = String>) -> String {
+    let mut summary = segments.into_iter().collect::<Vec<_>>().join(" · ");
+    // Capitalize the first segment only (zeron's style).
+    if let Some(first) = summary.get(0..1) {
+        let upper = first.to_uppercase();
+        summary.replace_range(0..1, &upper);
+    }
+    summary
+}
+
+/// The summary's segments in display order: counted kinds in zeron's order,
+/// failures last, and a bare tool count when no counted kind applies.
 ///
 /// Takes `(call, is_error)` pairs so each viewport can keep its own row model;
-/// the summary itself is one implementation for both.
-pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
+/// the classification itself is one implementation for both.
+pub fn tool_group_segments(tools: &[(crate::ToolCall, bool)]) -> Vec<ToolSummarySegment> {
     use crate::ToolCall;
     let mut commands = 0usize;
     let mut edited: Vec<&str> = Vec::new();
@@ -479,41 +695,44 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
             ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => other += 1,
         }
     }
-    let mut segments: Vec<String> = Vec::new();
+    let mut segments: Vec<ToolSummarySegment> = Vec::new();
     if commands > 0 {
-        segments.push(format!("ran {}", plural(commands, "command", "commands")));
+        segments.push(ToolSummarySegment::RanCommands(commands));
     }
     if !edited.is_empty() {
-        segments.push(format!("edited {}", plural(edited.len(), "file", "files")));
+        segments.push(ToolSummarySegment::EditedFiles(edited.len()));
     }
     if reads > 0 {
-        segments.push(format!("read {}", plural(reads, "file", "files")));
+        segments.push(ToolSummarySegment::ReadFiles(reads));
     }
     if searches > 0 {
-        segments.push(format!("searched {}", plural(searches, "time", "times")));
+        segments.push(ToolSummarySegment::Searched(searches));
     }
     if fetches > 0 {
-        segments.push(format!("fetched {}", plural(fetches, "page", "pages")));
+        segments.push(ToolSummarySegment::FetchedPages(fetches));
     }
     if todos > 0 {
-        segments.push("updated todos".to_string());
+        segments.push(ToolSummarySegment::UpdatedTodos);
     }
     if other > 0 {
-        segments.push(format!("called {}", plural(other, "tool", "tools")));
+        segments.push(ToolSummarySegment::CalledTools(other));
     }
     if segments.is_empty() {
-        segments.push(plural(tools.len(), "tool", "tools"));
+        segments.push(ToolSummarySegment::Tools(tools.len()));
     }
     if failed > 0 {
-        segments.push(format!("{failed} failed"));
+        segments.push(ToolSummarySegment::Failed(failed));
     }
-    let mut summary = segments.join(" · ");
-    // Capitalize the first segment only (zeron's style).
-    if let Some(first) = summary.get(0..1) {
-        let upper = first.to_uppercase();
-        summary.replace_range(0..1, &upper);
-    }
-    summary
+    segments
+}
+
+/// The ToolGroup summary line — "Ran 3 commands · edited 2 files".
+pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
+    summary_line(
+        tool_group_segments(tools)
+            .into_iter()
+            .map(ToolSummarySegment::english),
+    )
 }
 
 /// The status-dot palette, as oklch triples (L, C, H°).

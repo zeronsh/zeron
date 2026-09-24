@@ -42,6 +42,7 @@ use gpui::{
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 use zeron_proto::ToolCall;
 
+use crate::i18n::{self, Locale, MessageId};
 use crate::markdown::parser::{
     Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
 };
@@ -353,7 +354,7 @@ pub struct ToolItem {
     /// command / pattern / URL / input JSON) that the chip header collapses
     /// to one truncated line. Rendered above `detail` in the open card.
     /// Precomputed for the same reason as `detail`.
-    pub invocation: Option<Arc<ToolDetail>>,
+    pub invocation: Option<Arc<CallBlock>>,
     /// Sidecar key of the full output (chat2-sync A3) — the doc carries only
     /// a one-line summary; expanding offers a lazy "Show full output" fetch.
     pub output_ref: Option<SharedString>,
@@ -863,11 +864,37 @@ fn wrap_cols(line: &str, cols: usize) -> Vec<SharedString> {
         .collect()
 }
 
-/// Build a chip's full-invocation block — the complete tool call the header
-/// truncates to one line: the whole command, pattern, or URL, todo items one
-/// per line, MCP/unknown input as pretty-printed JSON. Reuses the output
-/// code-block payload so rendering and height stay one implementation.
-pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
+/// A chip's full-invocation block: the complete call the header truncates to
+/// one line — the whole command, pattern, or URL, todo items one per line,
+/// MCP/unknown input as pretty-printed JSON. Reuses the output code-block
+/// payload so rendering and height stay one implementation.
+///
+/// The block is drawn from the row's cached fingerprint, so it is built once —
+/// except for the calls whose text reads in the UI's language (a patch with no
+/// path, a search scoped to one), which stay structured until the row is drawn.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallBlock {
+    /// Language-neutral text, wrapped and truncated once.
+    Lines(Arc<ToolDetail>),
+    /// One line phrased per locale from structured data.
+    Detail(ToolChipDetail),
+}
+
+impl CallBlock {
+    /// The block as drawn. The body and the row's analytic height both read it,
+    /// so the wrap lives here rather than in each caller.
+    fn resolved(&self, locale: Locale) -> Arc<ToolDetail> {
+        match self {
+            CallBlock::Lines(detail) => detail.clone(),
+            CallBlock::Detail(detail) => Arc::new(ToolDetail::Output {
+                lines: wrap_cols(&chip_detail_text(detail, locale), CALL_WRAP_COLS),
+                truncated_by: 0,
+            }),
+        }
+    }
+}
+
+pub fn call_block(call: &ToolCall) -> Option<CallBlock> {
     let text: String = match call {
         ToolCall::Exec { command } => command.clone(),
         ToolCall::ReadFile { path } => path.clone(),
@@ -876,9 +903,17 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
             None => path.clone(),
         },
         ToolCall::EditFile { path, .. } => path.clone(),
-        ToolCall::ApplyPatch { path } => path.clone().unwrap_or_else(|| "workspace".into()),
+        ToolCall::ApplyPatch { path } => match path {
+            Some(path) => path.clone(),
+            None => return Some(CallBlock::Detail(ToolChipDetail::Workspace)),
+        },
         ToolCall::Search { pattern, path } => match path {
-            Some(path) => format!("{pattern} in {path}"),
+            Some(path) => {
+                return Some(CallBlock::Detail(ToolChipDetail::In {
+                    pattern: pattern.clone(),
+                    path: path.clone(),
+                }));
+            }
             None => pattern.clone(),
         },
         ToolCall::Glob { pattern } => pattern.clone(),
@@ -923,10 +958,10 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
     }
     let truncated_by = lines.len().saturating_sub(OUTPUT_DETAIL_MAX_LINES);
     lines.truncate(OUTPUT_DETAIL_MAX_LINES);
-    Some(ToolDetail::Output {
+    Some(CallBlock::Lines(Arc::new(ToolDetail::Output {
         lines,
         truncated_by,
-    })
+    })))
 }
 
 /// Reduce an inline [`zeron_proto::ToolDiff`] to the changes pane's
@@ -1122,9 +1157,12 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
     for t in tools {
         acc.extend_from_slice(t.part_id.as_bytes());
         acc.push(0);
-        let (label, detail) = tool_chip_content(&t.call);
-        acc.extend_from_slice(label.as_bytes());
-        acc.extend_from_slice(&(detail.len() as u32).to_le_bytes());
+        // Locale-neutral by construction: the kind plus `zeron_proto`'s own
+        // English detail (never the active locale's copy, which would re-splice
+        // every tool row on a language switch).
+        let parts = tool_chip_parts(&t.call);
+        acc.push(parts.kind as u8);
+        acc.extend_from_slice(&(parts.detail.english().len() as u32).to_le_bytes());
         acc.push(t.is_error as u8 | (t.resolved as u8) << 1);
         // Thought/note chips share `ToolCall::Unknown` — the kind is the
         // label/icon discriminator, so a flip must re-splice.
@@ -1185,16 +1223,27 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
         }
         // The invocation block is pure over `call`, which the one-line hash
         // above only covers by length — hash its bytes so an in-place call
-        // update (a streaming MCP input, a growing todo list) re-splices.
-        if let Some(ToolDetail::Output {
-            lines,
-            truncated_by,
-        }) = t.invocation.as_deref()
-        {
-            for line in lines {
-                acc.extend_from_slice(line.as_bytes());
+        // update (a streaming MCP input, a growing todo list) re-splices. The
+        // locale-dependent blocks hash their ENGLISH text: the fingerprint keys
+        // the cached row and must not move with the language.
+        match t.invocation.as_deref() {
+            Some(CallBlock::Lines(detail)) => {
+                if let ToolDetail::Output {
+                    lines,
+                    truncated_by,
+                } = detail.as_ref()
+                {
+                    for line in lines {
+                        acc.extend_from_slice(line.as_bytes());
+                    }
+                    acc.extend_from_slice(&(*truncated_by as u32).to_le_bytes());
+                }
             }
-            acc.extend_from_slice(&(*truncated_by as u32).to_le_bytes());
+            Some(CallBlock::Detail(detail)) => {
+                acc.push(4);
+                acc.extend_from_slice(detail.english().as_bytes());
+            }
+            None => {}
         }
         // Sidecar refs arriving after the resolve tick must re-splice too —
         // they add the fetch affordance without changing the detail payload.
@@ -1381,7 +1430,7 @@ pub fn rows_for_entry(
                 version: tool_fingerprint(&tools, auto_open),
                 turn_start: false,
                 kind: RowKind::ToolGroup {
-                    summary: tool_group_summary(&tools).into(),
+                    summary: tool_group_summary(&tools, Locale::En).into(),
                     tools: Arc::new(tools),
                     auto_open,
                     worked_secs: None,
@@ -1578,12 +1627,14 @@ pub fn rows_for_entry(
                         resolved,
                         ..
                     } => {
-                        // Model-generated header onto the one-line chip.
+                        // Model-generated header onto the one-line chip. A doc
+                        // without one leaves the chip's own label to render
+                        // (rows stay locale-independent).
                         let header: SharedString = single_line(
                             &questions
                                 .first()
                                 .map(|q| q.header.clone())
-                                .unwrap_or_else(|| "Question".to_string()),
+                                .unwrap_or_default(),
                         )
                         .into();
                         rows.push(Row {
@@ -1660,7 +1711,7 @@ pub fn rows_for_entry(
                 version: tool_fingerprint(&tools, false),
                 turn_start: false,
                 kind: RowKind::ToolGroup {
-                    summary: tool_group_summary(&tools).into(),
+                    summary: tool_group_summary(&tools, Locale::En).into(),
                     tools: Arc::new(tools),
                     auto_open: false,
                     worked_secs: (!streaming)
@@ -1914,8 +1965,9 @@ pub fn diff_rows(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
 /// The ToolGroup summary line — "Ran 3 commands · edited 2 files".
 ///
 /// The rule lives in `zeron_proto::view` so the terminal viewport reports the
-/// same summary; this only adapts the row model's [`ToolItem`] to it.
-pub fn tool_group_summary(tools: &[ToolItem]) -> String {
+/// same summary; this adapts the row model's [`ToolItem`] to it and names each
+/// segment in `locale`.
+pub fn tool_group_summary(tools: &[ToolItem], locale: Locale) -> String {
     #[cfg(test)]
     FORBID_ROW_PREPARATION
         .with(|forbidden| assert!(!forbidden.get(), "tool summary formatting ran on UI thread"));
@@ -1937,20 +1989,36 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     let base = if pairs.is_empty() {
         String::new()
     } else {
-        zeron_proto::view::tool_group_summary(&pairs)
+        zeron_proto::view::summary_line(
+            zeron_proto::view::tool_group_segments(&pairs)
+                .into_iter()
+                .map(|segment| summary_segment(segment, locale)),
+        )
     };
     // Thought and note chips ride the group (they are UI-synthesized, so the
     // shared view summary never sees them): name them on the collapsed line.
     let mut segments: Vec<String> = Vec::new();
     match thoughts {
         0 => {}
-        1 => segments.push("thought process".into()),
-        n => segments.push(format!("thought {n} times")),
+        1 => {
+            segments.push(i18n::translate(MessageId::TranscriptThoughtProcess, locale).to_string())
+        }
+        n => segments.push(i18n::fill(
+            MessageId::TranscriptThoughtTimes,
+            "{n}",
+            &n.to_string(),
+            locale,
+        )),
     }
     match notes {
         0 => {}
-        1 => segments.push("wrote a note".into()),
-        n => segments.push(format!("wrote {n} notes")),
+        1 => segments.push(i18n::translate(MessageId::TranscriptNoteWritten, locale).to_string()),
+        n => segments.push(i18n::fill(
+            MessageId::TranscriptNoteWrittenTimes,
+            "{n}",
+            &n.to_string(),
+            locale,
+        )),
     }
     if !base.is_empty() {
         segments.push(base);
@@ -1962,6 +2030,58 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
         first.make_ascii_uppercase();
     }
     summary
+}
+
+/// One summary segment in `locale`. A counted segment names its own count (the
+/// English row carries the verb, so the noun's number cannot be translated on
+/// its own); the other two read the same number-independent template in both
+/// locales.
+fn summary_segment(segment: ToolSummarySegment, locale: Locale) -> String {
+    let (one, many, n) = match segment {
+        ToolSummarySegment::RanCommands(n) => (
+            MessageId::TranscriptSummaryRanCommandsOne,
+            MessageId::TranscriptSummaryRanCommandsMany,
+            n,
+        ),
+        ToolSummarySegment::EditedFiles(n) => (
+            MessageId::TranscriptSummaryEditedFilesOne,
+            MessageId::TranscriptSummaryEditedFilesMany,
+            n,
+        ),
+        ToolSummarySegment::ReadFiles(n) => (
+            MessageId::TranscriptSummaryReadFilesOne,
+            MessageId::TranscriptSummaryReadFilesMany,
+            n,
+        ),
+        ToolSummarySegment::Searched(n) => (
+            MessageId::TranscriptSummarySearchedOne,
+            MessageId::TranscriptSummarySearchedMany,
+            n,
+        ),
+        ToolSummarySegment::FetchedPages(n) => (
+            MessageId::TranscriptSummaryFetchedPagesOne,
+            MessageId::TranscriptSummaryFetchedPagesMany,
+            n,
+        ),
+        ToolSummarySegment::CalledTools(n) => (
+            MessageId::TranscriptSummaryCalledToolsOne,
+            MessageId::TranscriptSummaryCalledToolsMany,
+            n,
+        ),
+        ToolSummarySegment::Tools(n) => (MessageId::CountToolOne, MessageId::CountToolMany, n),
+        ToolSummarySegment::UpdatedTodos => {
+            return i18n::translate(MessageId::TranscriptSummaryUpdatedTodos, locale).to_string();
+        }
+        ToolSummarySegment::Failed(n) => {
+            return i18n::fill(
+                MessageId::TranscriptSummaryFailed,
+                "{n}",
+                &n.to_string(),
+                locale,
+            );
+        }
+    };
+    i18n::counted(one, many, n, locale)
 }
 
 fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Theme) -> AnyElement {
@@ -2057,12 +2177,69 @@ fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Them
         .into_any_element()
 }
 
-// `single_line` and the per-kind chip label/detail are shared with the terminal
-// viewport (`zeron_proto::view`): a tool must be named identically on every
-// surface, and the one-line collapse is needed for the same reason in both (a
-// literal newline breaks gpui's ellipsis logic and would be a cursor move in a
-// cell grid).
-pub use zeron_proto::view::{single_line, tool_chip_content};
+// `single_line`, the per-kind chip classification and the summary segments are
+// shared with the terminal viewport (`zeron_proto::view`): a tool must be named
+// identically on every surface, and the one-line collapse is needed for the same
+// reason in both (a literal newline breaks gpui's ellipsis logic and would be a
+// cursor move in a cell grid). `zeron_proto` renders its own English copy
+// (`tool_chip_content`, `tool_group_summary`); this viewport names the same
+// classification in the active locale.
+pub use zeron_proto::view::{
+    ToolChip, ToolChipDetail, ToolSummarySegment, single_line, tool_chip_content, tool_chip_parts,
+};
+
+/// The chip's label and one-line detail in `locale`. The classification (kind
+/// and detail shape) is `zeron_proto`'s, so both viewports name a tool
+/// identically; only the copy is this crate's.
+fn tool_chip_text(call: &ToolCall, locale: Locale) -> (&'static str, String) {
+    let parts = tool_chip_parts(call);
+    (
+        i18n::translate(
+            match parts.kind {
+                ToolChip::Run => MessageId::ToolChipRun,
+                ToolChip::Read => MessageId::ToolChipRead,
+                ToolChip::Write => MessageId::ToolChipWrite,
+                ToolChip::Edit => MessageId::ToolChipEdit,
+                ToolChip::Patch => MessageId::ToolChipPatch,
+                ToolChip::Search => MessageId::ToolChipSearch,
+                ToolChip::Glob => MessageId::ToolChipGlob,
+                ToolChip::Fetch => MessageId::ToolChipFetch,
+                ToolChip::Web => MessageId::ToolChipWeb,
+                ToolChip::Todo => MessageId::ToolChipTodo,
+                ToolChip::Mcp => MessageId::ToolChipMcp,
+                ToolChip::Agent => MessageId::ToolChipAgent,
+                ToolChip::Tool => MessageId::ToolChipTool,
+            },
+            locale,
+        ),
+        chip_detail_text(&parts.detail, locale),
+    )
+}
+
+/// The chip's detail line in `locale`.
+fn chip_detail_text(detail: &ToolChipDetail, locale: Locale) -> String {
+    match detail {
+        // Command, path, pattern, URL or `server · tool`: tool and model
+        // data, inserted verbatim.
+        ToolChipDetail::Data(text) => single_line(text),
+        ToolChipDetail::Workspace => {
+            i18n::translate(MessageId::ToolChipWorkspace, locale).to_string()
+        }
+        ToolChipDetail::In { pattern, path } => i18n::fill_many(
+            MessageId::ToolChipInPath,
+            &[("{pattern}", pattern), ("{path}", path)],
+            locale,
+        ),
+        ToolChipDetail::TodoProgress { done, total } => i18n::fill_many(
+            MessageId::ToolChipTodoProgress,
+            &[
+                ("{done}", &done.to_string()),
+                ("{total}", &total.to_string()),
+            ],
+            locale,
+        ),
+    }
+}
 
 /// Analytic expanded-chips height — no measurement needed for the fold tween.
 pub fn chips_height(count: usize) -> f32 {
@@ -2154,36 +2331,39 @@ fn format_kb(bytes: u64) -> String {
 // Working indicator flavour (pure; rendered by the shell strip)
 // ---------------------------------------------------------------------------
 
-/// Rotating flavour vocabulary (21 words / 7s, seeded per chat).
-pub const FLAVOUR_WORDS: [&str; 21] = [
-    "Zeroning",
-    "Thinking",
-    "Pondering",
-    "Scheming",
-    "Brewing",
-    "Weaving",
-    "Tinkering",
-    "Musing",
-    "Composing",
-    "Sifting",
-    "Untangling",
-    "Distilling",
-    "Sketching",
-    "Plotting",
-    "Riffing",
-    "Combobulating",
-    "Percolating",
-    "Marinating",
-    "Noodling",
-    "Puzzling",
-    "Conjuring",
+/// Rotating flavour vocabulary (21 words / 7s, seeded per chat). The words are
+/// message keys, not copy: the trailer reads them through [`i18n::translate`],
+/// so a locale switch cannot leave one behind.
+const FLAVOUR_WORDS: [MessageId; 21] = [
+    MessageId::TranscriptFlavourZeroning,
+    MessageId::TranscriptFlavourThinking,
+    MessageId::TranscriptFlavourPondering,
+    MessageId::TranscriptFlavourScheming,
+    MessageId::TranscriptFlavourBrewing,
+    MessageId::TranscriptFlavourWeaving,
+    MessageId::TranscriptFlavourTinkering,
+    MessageId::TranscriptFlavourMusing,
+    MessageId::TranscriptFlavourComposing,
+    MessageId::TranscriptFlavourSifting,
+    MessageId::TranscriptFlavourUntangling,
+    MessageId::TranscriptFlavourDistilling,
+    MessageId::TranscriptFlavourSketching,
+    MessageId::TranscriptFlavourPlotting,
+    MessageId::TranscriptFlavourRiffing,
+    MessageId::TranscriptFlavourCombobulating,
+    MessageId::TranscriptFlavourPercolating,
+    MessageId::TranscriptFlavourMarinating,
+    MessageId::TranscriptFlavourNoodling,
+    MessageId::TranscriptFlavourPuzzling,
+    MessageId::TranscriptFlavourConjuring,
 ];
 pub const FLAVOUR_ROTATE_SECS: i64 = 7;
 
 /// The flavour word for a seed at an elapsed time.
-pub fn flavour_word(seed: u64, elapsed_secs: i64) -> &'static str {
+pub fn flavour_word(seed: u64, elapsed_secs: i64, locale: Locale) -> &'static str {
     let step = (elapsed_secs.max(0) / FLAVOUR_ROTATE_SECS) as u64;
-    FLAVOUR_WORDS[((seed.wrapping_add(step)) % FLAVOUR_WORDS.len() as u64) as usize]
+    let ix = ((seed.wrapping_add(step)) % FLAVOUR_WORDS.len() as u64) as usize;
+    i18n::translate(FLAVOUR_WORDS[ix], locale)
 }
 
 /// A stable per-chat seed.
@@ -2207,21 +2387,52 @@ pub fn sending_bridge(
 }
 
 /// Compact elapsed formatting, using at most two units up to days.
-pub fn format_elapsed(secs: i64) -> String {
+pub fn format_elapsed(secs: i64, locale: Locale) -> String {
     let secs = secs.max(0);
     if secs < 60 {
-        format!("{secs}s")
+        i18n::fill(
+            MessageId::TranscriptElapsedSeconds,
+            "{n}",
+            &secs.to_string(),
+            locale,
+        )
     } else if secs < 3_600 {
-        format!("{}m {}s", secs / 60, secs % 60)
+        i18n::fill_many(
+            MessageId::TranscriptElapsedMinutes,
+            &[
+                ("{n}", &(secs / 60).to_string()),
+                ("{s}", &(secs % 60).to_string()),
+            ],
+            locale,
+        )
     } else if secs < 86_400 {
-        format!("{}h {}m", secs / 3_600, (secs % 3_600) / 60)
+        i18n::fill_many(
+            MessageId::TranscriptElapsedHours,
+            &[
+                ("{n}", &(secs / 3_600).to_string()),
+                ("{m}", &((secs % 3_600) / 60).to_string()),
+            ],
+            locale,
+        )
     } else {
-        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3_600)
+        i18n::fill_many(
+            MessageId::TranscriptElapsedDays,
+            &[
+                ("{n}", &(secs / 86_400).to_string()),
+                ("{h}", &((secs % 86_400) / 3_600).to_string()),
+            ],
+            locale,
+        )
     }
 }
 
-fn worked_for_label(secs: i64) -> String {
-    format!("Worked for {}", format_elapsed(secs))
+fn worked_for_label(secs: i64, locale: Locale) -> String {
+    i18n::fill(
+        MessageId::TranscriptWorkedFor,
+        "{elapsed}",
+        &format_elapsed(secs, locale),
+        locale,
+    )
 }
 
 /// Compact-mode header: the live tool summary crossfades into "Worked for".
@@ -5665,15 +5876,20 @@ impl Transcript {
         } else {
             crate::icons::ALT_ARROW_DOWN
         };
-        let label = if expanded { "Show less" } else { "Show more" };
+        let locale = i18n::locale(cx);
+        let label = if expanded {
+            i18n::translate(MessageId::TranscriptShowLess, locale)
+        } else {
+            i18n::translate(MessageId::TranscriptShowMore, locale)
+        };
         let button = div()
             .id(SharedString::from(format!("{row_id}-expander")))
             .group("user-message-toggle")
             .role(gpui::Role::Button)
             .aria_label(if expanded {
-                "Collapse message"
+                i18n::translate(MessageId::TranscriptCollapseMessage, locale)
             } else {
-                "Expand message"
+                i18n::translate(MessageId::TranscriptExpandMessage, locale)
             })
             .aria_expanded(expanded)
             .flex()
@@ -5747,7 +5963,10 @@ impl Transcript {
                     .w(px(dimensions.0 as f32 * scale))
                     .h(px(dimensions.1 as f32 * scale))
                     .role(gpui::Role::Button)
-                    .aria_label("Preview generated image")
+                    .aria_label(i18n::translate(
+                        MessageId::TranscriptPreviewGeneratedImage,
+                        i18n::locale(cx),
+                    ))
                     .tab_index(0)
                     .cursor_pointer()
                     .focus_visible(move |style| style.border_2().border_color(theme.accent))
@@ -5769,11 +5988,17 @@ impl Transcript {
             }
             AttachmentSnapshot::Loading => frame
                 .text_color(theme.text_muted)
-                .child("Loading generated image…")
+                .child(i18n::translate(
+                    MessageId::TranscriptLoadingGeneratedImage,
+                    i18n::locale(cx),
+                ))
                 .into_any_element(),
             AttachmentSnapshot::Error { .. } => frame
                 .text_color(theme.text_muted)
-                .child("Generated image unavailable")
+                .child(i18n::translate(
+                    MessageId::TranscriptGeneratedImageUnavailable,
+                    i18n::locale(cx),
+                ))
                 .into_any_element(),
         }
     }
@@ -5788,6 +6013,7 @@ impl Transcript {
     ) -> AnyElement {
         use crate::attachments::AttachmentSnapshot;
         let glyph = Theme::of(cx).glyph;
+        let locale = i18n::locale(cx);
         let device_ids = self.attachment_device_ids(cx);
         let mut strip = div()
             .w_full()
@@ -5862,10 +6088,13 @@ impl Transcript {
                         let preview =
                             crate::attachments::PreviewImage::new(image.name, image.image.clone());
                         card.role(gpui::Role::Button)
-                            .aria_label(format!(
-                                "Preview {} Appshot: {}",
-                                appshot.app_name,
-                                appshot.title()
+                            .aria_label(i18n::fill_many(
+                                MessageId::TranscriptPreviewAppshot,
+                                &[
+                                    ("{source}", &appshot.app_name),
+                                    ("{title}", &appshot.title()),
+                                ],
+                                i18n::locale(cx),
                             ))
                             .tab_index(0)
                             .cursor_pointer()
@@ -5896,9 +6125,9 @@ impl Transcript {
                                 .text_size(px(11.0))
                                 .text_color(theme.text_muted)
                                 .child(if sending {
-                                    "Uploading Appshot…"
+                                    i18n::translate(MessageId::TranscriptAppshotUploading, locale)
                                 } else {
-                                    "Loading Appshot…"
+                                    i18n::translate(MessageId::TranscriptAppshotLoading, locale)
                                 }),
                         ),
                     ),
@@ -5908,9 +6137,9 @@ impl Transcript {
                                 .text_size(px(11.0))
                                 .text_color(theme.text_muted)
                                 .child(if sending {
-                                    "Uploading Appshot…"
+                                    i18n::translate(MessageId::TranscriptAppshotUploading, locale)
                                 } else {
-                                    "Appshot unavailable"
+                                    i18n::translate(MessageId::TranscriptAppshotUnavailable, locale)
                                 }),
                         ),
                     ),
@@ -5946,9 +6175,11 @@ impl Transcript {
                                     .truncate()
                                     .text_size(px(11.0))
                                     .text_color(theme.text_muted)
-                                    .child(SharedString::from(format!(
-                                        "{} · Appshot",
-                                        appshot.app_name
+                                    .child(SharedString::from(i18n::fill(
+                                        MessageId::TranscriptAppshotName,
+                                        "{name}",
+                                        &appshot.app_name,
+                                        locale,
                                     ))),
                             ),
                     )
@@ -5968,8 +6199,18 @@ impl Transcript {
                             .text_color(theme.text_muted)
                             .child(SharedString::from(
                                 uploading
-                                    .map(|pct| format!("Uploading {pct}%"))
-                                    .unwrap_or_else(|| "Uploading…".into()),
+                                    .map(|pct| {
+                                        i18n::fill(
+                                            MessageId::TranscriptUploadingPercent,
+                                            "{percent}",
+                                            &pct.to_string(),
+                                            locale,
+                                        )
+                                    })
+                                    .unwrap_or_else(|| {
+                                        i18n::translate(MessageId::TranscriptUploading, locale)
+                                            .to_string()
+                                    }),
                             )),
                     );
                 }
@@ -6154,7 +6395,10 @@ impl Transcript {
                         .text_color(theme.danger)
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
-                        .child(SharedString::from("Not delivered — click to retry"))
+                        .child(i18n::translate(
+                            MessageId::TranscriptNotDeliveredRetry,
+                            i18n::locale(cx),
+                        ))
                         .into_any_element(),
                 );
             }
@@ -6204,12 +6448,18 @@ impl Transcript {
                 self.compact_last_elapsed.insert(entry_id, elapsed_secs);
             }
         }
-        let word = if queued {
-            "Queued — will send automatically"
+        let locale = i18n::locale(cx);
+        // The queued and sending lines carry their own trailing punctuation;
+        // the flavour words take the ellipsis the renderer appends.
+        let (word, trailing_ellipsis) = if queued {
+            (
+                i18n::translate(MessageId::TranscriptQueuedWillSend, locale),
+                false,
+            )
         } else if sending {
-            "Sending"
+            (i18n::translate(MessageId::ComposerSending, locale), false)
         } else {
-            flavour_word(seed, elapsed_secs)
+            (flavour_word(seed, elapsed_secs, locale), true)
         };
         let theme = Theme::of(cx).clone();
         Some(
@@ -6235,10 +6485,10 @@ impl Transcript {
                         } else {
                             theme.text_muted
                         })
-                        .child(SharedString::from(if queued {
-                            word.to_string()
-                        } else {
+                        .child(SharedString::from(if trailing_ellipsis {
                             format!("{word}…")
+                        } else {
+                            word.to_string()
                         })),
                 )
                 .when(!sending, |el| {
@@ -6247,7 +6497,7 @@ impl Transcript {
                             .relative()
                             .top(px(1.0))
                             .text_color(theme.text_faint)
-                            .child(SharedString::from(format_elapsed(elapsed_secs))),
+                            .child(SharedString::from(format_elapsed(elapsed_secs, locale))),
                     )
                 })
                 .into_any_element(),
@@ -6260,6 +6510,7 @@ impl Transcript {
         };
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let workspace_root = {
             let state = self.state.read(cx);
             self.chat_id
@@ -6340,6 +6591,7 @@ impl Transcript {
                                     SharedString::from(format!("{}#badge{bix}", row.id)),
                                     badge,
                                     &theme,
+                                    locale,
                                 )
                             })),
                     );
@@ -6505,7 +6757,7 @@ impl Transcript {
                 cx,
             ),
             RowKind::InputChip { header, resolved } => {
-                input_chip(header.clone(), *resolved, &theme)
+                input_chip(header.clone(), *resolved, &theme, i18n::locale(cx))
             }
             RowKind::GeneratedImage {
                 owner,
@@ -6513,7 +6765,7 @@ impl Transcript {
                 name,
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
-            RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
+            RowKind::ErrorChip { message } => error_chip(message.clone(), &theme, i18n::locale(cx)),
         };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
@@ -6877,6 +7129,7 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let locale = i18n::locale(cx);
         let mut fold = self.folds.get(row_id).copied().unwrap_or_default();
         // Agent/spawn chips never fold: they are their own row, always open,
         // no "Called N tools" header — a running subagent stays visible.
@@ -6984,7 +7237,7 @@ impl Transcript {
             .collect();
         // Full-invocation blocks — with them, EVERY chip expands: the click
         // always answers "what exactly was this call?", output or not.
-        let invocations: Vec<Option<Arc<ToolDetail>>> = tools
+        let invocations: Vec<Option<Arc<CallBlock>>> = tools
             .iter()
             .map(|tool| tool.invocation.clone().filter(|_| !is_spawn_link(tool)))
             .collect();
@@ -7012,8 +7265,16 @@ impl Transcript {
                     best.map(|(_, r)| r)
                 };
                 let candidates = [
-                    (tool.diff_ref.as_ref(), "diff", None),
-                    (tool.output_ref.as_ref(), "output", tool.output_bytes),
+                    (
+                        tool.diff_ref.as_ref(),
+                        i18n::translate(MessageId::TranscriptDetailDiff, locale),
+                        None,
+                    ),
+                    (
+                        tool.output_ref.as_ref(),
+                        i18n::translate(MessageId::TranscriptDetailOutput, locale),
+                        tool.output_bytes,
+                    ),
                 ];
                 for (blob_ref, what, bytes) in candidates {
                     let Some(blob_ref) = blob_ref else { continue };
@@ -7022,15 +7283,23 @@ impl Transcript {
                             if shown == Some(blob_ref) {
                                 continue;
                             }
-                            format!("Show full {what}")
+                            i18n::fill(MessageId::TranscriptShowFull, "{what}", what, locale)
                         }
-                        Some(BlobFetch::Loading(_)) => format!("Loading full {what}…"),
+                        Some(BlobFetch::Loading(_)) => {
+                            i18n::fill(MessageId::TranscriptLoadingFull, "{what}", what, locale)
+                        }
                         Some(BlobFetch::Failed) => {
-                            format!("Couldn't load full {what} — tap to retry")
+                            i18n::fill(MessageId::TranscriptLoadFullFailed, "{what}", what, locale)
                         }
                         None => match bytes {
-                            Some(b) => format!("Show full {what} ({})", format_kb(b)),
-                            None => format!("Show full {what}"),
+                            Some(b) => i18n::fill_many(
+                                MessageId::TranscriptShowFullSized,
+                                &[("{what}", what), ("{size}", &format_kb(b))],
+                                locale,
+                            ),
+                            None => {
+                                i18n::fill(MessageId::TranscriptShowFull, "{what}", what, locale)
+                            }
                         },
                     };
                     return Some(ChipAffordance {
@@ -7097,7 +7366,9 @@ impl Transcript {
             .map(|((((detail, invocation), affordance), open), fold)| {
                 let target = if *open {
                     base_row_height
-                        + invocation.as_deref().map_or(0.0, detail_height)
+                        + invocation
+                            .as_deref()
+                            .map_or(0.0, |block| detail_height(&block.resolved(locale)))
                         + detail.as_deref().map_or(0.0, detail_height)
                         + if affordance.is_some() {
                             BLOB_AFFORDANCE_HEIGHT
@@ -7170,6 +7441,11 @@ impl Transcript {
                 .sum::<f32>();
         let viewport_height = revealed_height;
         let target = if open { viewport_height } else { 0.0 };
+        let summary: SharedString = if locale == Locale::En {
+            summary.clone()
+        } else {
+            tool_group_summary(tools, locale).into()
+        };
         let shimmer_phase = if active && !reduce_motion {
             motion::pulse_lease(cx.entity_id(), cx);
             self.tool_group_reveals
@@ -7241,7 +7517,7 @@ impl Transcript {
                     .child(match worked_secs {
                         Some(secs) => compact_work_title(
                             summary.clone(),
-                            SharedString::from(worked_for_label(secs)),
+                            SharedString::from(worked_for_label(secs, locale)),
                             worked_fade_t,
                             shimmer_phase,
                             theme,
@@ -7299,7 +7575,7 @@ impl Transcript {
                 // the surface — the chip only announces which doc it indexes).
                 if let Some(doc_id) = tool.subagent_ref.clone().filter(|_| is_spawn_link(tool)) {
                     let chat_id = self.chat_id.clone().unwrap_or_default();
-                    let title = subagent_tab_title(&tool.call);
+                    let title = subagent_tab_title(&tool.call, locale);
                     let frozen = matches!(
                         tool.subagent_status,
                         Some(SubagentStatus::Done) | Some(SubagentStatus::Failed)
@@ -7410,7 +7686,12 @@ impl Transcript {
                                     .flex_none()
                                     .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
                             )
-                            .child(detail_body(invocation, None, theme));
+                            .child(detail_body(
+                                &invocation.resolved(locale),
+                                None,
+                                theme,
+                                locale,
+                            ));
                     }
                     if let Some(detail) = detail.as_deref() {
                         panel = panel
@@ -7420,7 +7701,12 @@ impl Transcript {
                                     .flex_none()
                                     .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
                             )
-                            .child(detail_body(detail, detail_highlights[ix].clone(), theme));
+                            .child(detail_body(
+                                detail,
+                                detail_highlights[ix].clone(),
+                                theme,
+                                locale,
+                            ));
                     }
                     if let Some(ChipAffordance { blob_ref, label }) = affordance {
                         let loading = matches!(
@@ -7655,14 +7941,20 @@ fn user_bubble_text(
 /// WRAPS instead of truncating: startup-crash errors carry the agent's exit
 /// status and stderr, and a one-line ellipsis was exactly what made
 /// zeronsh/comet#95 undiagnosable from the screenshot.
-fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
+fn error_chip(message: SharedString, theme: &Theme, locale: Locale) -> AnyElement {
     div()
         .py(px(4.0))
         .w_full()
         .child(
-            notice_chip(theme, false, "Error", message, Tile)
-                .overflow_hidden()
-                .w_full(),
+            notice_chip(
+                theme,
+                false,
+                i18n::translate(MessageId::ComposerNoticeError, locale),
+                message,
+                Tile,
+            )
+            .overflow_hidden()
+            .w_full(),
         )
         .into_any_element()
 }
@@ -7672,13 +7964,16 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
 /// 34px row, `rounded-[10px] border-white/[0.08] bg-white/[0.045] px-2
 /// text-[12px]`, a 20px `bg-white/[0.09]` icon tile with a 12px
 /// ChatRoundLine, the medium "Question" label, then the truncating value —
-/// the first question's header once resolved, "Awaiting your answer…" while
-/// pending. Neutral tones throughout; resolution never recolors the chip.
-fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement {
-    let value: SharedString = if resolved {
-        header
+/// the first question's header once resolved (the chip's own label when the
+/// doc carried none), "Awaiting your answer…" while pending. Neutral tones
+/// throughout; resolution never recolors the chip.
+fn input_chip(header: SharedString, resolved: bool, theme: &Theme, locale: Locale) -> AnyElement {
+    let value: SharedString = if !resolved {
+        i18n::translate(MessageId::TranscriptAwaitingAnswer, locale).into()
+    } else if header.is_empty() {
+        i18n::translate(MessageId::TranscriptQuestion, locale).into()
     } else {
-        "Awaiting your answer…".into()
+        header
     };
     div()
         .py(px(4.0))
@@ -7717,7 +8012,7 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
                         .flex_none()
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme.text_muted)
-                        .child(SharedString::from("Question")),
+                        .child(i18n::translate(MessageId::TranscriptQuestion, locale)),
                 )
                 .child(
                     div()
@@ -7770,16 +8065,18 @@ fn detail_body(
     detail: &ToolDetail,
     diff_highlights: Option<Arc<crate::changes::DiffHighlights>>,
     theme: &Theme,
+    locale: Locale,
 ) -> AnyElement {
     let body = div().w_full().min_w_0().flex().flex_col().overflow_hidden();
     match detail {
         // No comment layer: an inline tool diff is a record of what the
         // agent already did, not a review surface.
         ToolDetail::Diff { file, .. } => body
-            .child(crate::changes::render_file_body_with_syntax(
+            .child(crate::changes::render_file_body_with_syntax_in(
                 file,
                 diff_highlights,
                 theme,
+                locale,
             ))
             .into_any_element(),
         ToolDetail::Stats { stats } => body
@@ -7842,7 +8139,7 @@ fn detail_body(
                     .child(div().w_full().min_w_0().truncate().child(line.clone()))
             }))
             .when(*truncated_by > 0, |block| {
-                block.child(more_lines_row(*truncated_by, theme))
+                block.child(more_lines_row(*truncated_by, theme, locale))
             })
             .into_any_element(),
         ToolDetail::Thought {
@@ -7870,21 +8167,26 @@ fn detail_body(
                 )
             }))
             .when(*truncated_by > 0, |block| {
-                block.child(more_lines_row(*truncated_by, theme))
+                block.child(more_lines_row(*truncated_by, theme, locale))
             })
             .into_any_element(),
     }
 }
 
 /// The counted-tail row under a truncated Output/Thought detail.
-fn more_lines_row(truncated_by: usize, theme: &Theme) -> gpui::Div {
+fn more_lines_row(truncated_by: usize, theme: &Theme, locale: Locale) -> gpui::Div {
     div()
         .h(px(OUTPUT_LINE_HEIGHT))
         .flex()
         .items_center()
         .text_size(px(TOOL_TEXT_SIZE))
         .text_color(theme.text_faint)
-        .child(SharedString::from(format!("… {truncated_by} more lines")))
+        .child(SharedString::from(i18n::fill(
+            MessageId::TranscriptMoreLines,
+            "{n}",
+            &truncated_by.to_string(),
+            locale,
+        )))
 }
 
 /// Shape one flattened thought line into gpui text runs — the detail-body
@@ -7974,9 +8276,15 @@ fn chip_header_row(
     cx: &mut gpui::App,
 ) -> gpui::Div {
     let (label, detail) = match tool.kind {
-        ToolItemKind::Thought => ("Thought process", String::new()),
-        ToolItemKind::Note => ("Wrote", note_chip_detail(tool)),
-        ToolItemKind::Call => tool_chip_content(&tool.call),
+        ToolItemKind::Thought => (
+            i18n::translate(MessageId::TranscriptThoughtProcess, i18n::locale(cx)),
+            String::new(),
+        ),
+        ToolItemKind::Note => (
+            i18n::translate(MessageId::TranscriptNoteWrote, i18n::locale(cx)),
+            note_chip_detail(tool),
+        ),
+        ToolItemKind::Call => tool_chip_text(&tool.call, i18n::locale(cx)),
     };
     let activity = !is_agent_tool(tool);
     let file_path = match &tool.call {
@@ -8282,12 +8590,13 @@ fn strip_spawn_prefix(text: &str) -> &str {
 /// ("verify the marker pipeline"). The chip keeps the tool's fuller name —
 /// a fixed-width tab spent on "Agent: " never shows the task, so the genus
 /// is stripped here and the call input's description/prompt fields back up
-/// a bare name (older docs); "Subagent" only as the last resort.
-fn subagent_tab_title(call: &ToolCall) -> SharedString {
+/// a bare name (older docs); the generic label only as the last resort.
+fn subagent_tab_title(call: &ToolCall, locale: Locale) -> SharedString {
+    let fallback = || i18n::translate(MessageId::TranscriptSubagent, locale).into();
     let (name, input) = match call {
         ToolCall::Unknown { name, input } => (name.as_str(), input.as_ref()),
         ToolCall::Mcp { tool, input, .. } => (tool.as_str(), input.as_ref()),
-        _ => return "Subagent".into(),
+        _ => return fallback(),
     };
     let candidates = [
         Some(name),
@@ -8299,7 +8608,7 @@ fn subagent_tab_title(call: &ToolCall) -> SharedString {
             return title.into();
         }
     }
-    "Subagent".into()
+    fallback()
 }
 
 /// Clip one newly appended task row to its committed height. Fade and lift are
@@ -10536,9 +10845,13 @@ mod tests {
             tools[0].detail.as_deref(),
             Some(ToolDetail::Thought { lines, .. }) if !lines.is_empty()
         ));
-        let summary = tool_group_summary(&tools);
+        let summary = tool_group_summary(&tools, Locale::En);
         assert!(summary.starts_with("Thought 2 times"), "{summary}");
         assert!(summary.contains("2 commands"), "{summary}");
+        // Both halves are named in the active locale.
+        let chinese = tool_group_summary(&tools, Locale::ZhCn);
+        assert!(chinese.starts_with("思考 2 次"), "{chinese}");
+        assert!(chinese.contains("已运行 2 个命令"), "{chinese}");
 
         // A lone thought is still an accordion (with the group tween), named
         // plainly.
@@ -10552,7 +10865,8 @@ mod tests {
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
-        assert_eq!(tool_group_summary(&tools), "Thought process");
+        assert_eq!(tool_group_summary(&tools, Locale::En), "Thought process");
+        assert_eq!(tool_group_summary(&tools, Locale::ZhCn), "思考过程");
 
         // Empty reasoning renders nothing.
         let entry = assistant(
@@ -10639,7 +10953,7 @@ mod tests {
         assert_eq!(tools[2].kind, ToolItemKind::Note);
         assert_eq!(tools[3].kind, ToolItemKind::Call);
         assert!(matches!(visible[1].kind, RowKind::Markdown { .. }));
-        let summary = tool_group_summary(tools);
+        let summary = tool_group_summary(tools, Locale::En);
         assert!(summary.contains("wrote a note"), "{summary}");
         assert!(summary.contains("Ran 2 commands"), "{summary}");
         assert!(summary.contains("Thought process"), "{summary}");
@@ -10676,8 +10990,8 @@ mod tests {
             panic!("expected a tool group");
         };
         assert_eq!(*worked_secs, Some(310));
-        assert_eq!(worked_for_label(310), "Worked for 5m 10s");
-        assert_eq!(worked_for_label(95), "Worked for 1m 35s");
+        assert_eq!(worked_for_label(310, Locale::En), "Worked for 5m 10s");
+        assert_eq!(worked_for_label(95, Locale::En), "Worked for 1m 35s");
 
         let streaming = assistant("a1", MessageStatus::Streaming, vec![tool_part("t0", "ls")]);
         let mut streaming = streaming;
@@ -13393,16 +13707,19 @@ mod tests {
             edit("b.rs"),
         ];
         assert_eq!(
-            tool_group_summary(&tools),
+            tool_group_summary(&tools, Locale::En),
             "Ran 3 commands · edited 2 files"
         );
         // Distinct-path dedupe: editing one file twice counts once.
         let tools = vec![edit("a.rs"), edit("a.rs")];
-        assert_eq!(tool_group_summary(&tools), "Edited 1 file");
+        assert_eq!(tool_group_summary(&tools, Locale::En), "Edited 1 file");
         // Failures append.
         let mut failing = exec("boom");
         failing.is_error = true;
-        assert_eq!(tool_group_summary(&[failing]), "Ran 1 command · 1 failed");
+        assert_eq!(
+            tool_group_summary(&[failing], Locale::En),
+            "Ran 1 command · 1 failed"
+        );
         // Reads / searches / misc.
         let tools = vec![
             ToolItem {
@@ -13453,7 +13770,252 @@ mod tests {
                 kind: ToolItemKind::Call,
             },
         ];
-        assert_eq!(tool_group_summary(&tools), "Read 1 file · searched 2 times");
+        assert_eq!(
+            tool_group_summary(&tools, Locale::En),
+            "Read 1 file · searched 2 times"
+        );
+    }
+
+    #[test]
+    fn tool_group_summary_names_every_segment_in_both_locales() {
+        let tool = |call: ToolCall, is_error: bool| ToolItem {
+            part_id: "fixture".into(),
+            call,
+            is_error,
+            resolved: true,
+            detail: None,
+            invocation: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+            kind: ToolItemKind::Call,
+        };
+        let tools = vec![
+            tool(
+                ToolCall::Exec {
+                    command: "ls".into(),
+                },
+                false,
+            ),
+            tool(
+                ToolCall::EditFile {
+                    path: "a.rs".into(),
+                    old_string: None,
+                    new_string: None,
+                },
+                false,
+            ),
+            tool(
+                ToolCall::ReadFile {
+                    path: "a.rs".into(),
+                },
+                false,
+            ),
+            tool(
+                ToolCall::Search {
+                    pattern: "foo".into(),
+                    path: None,
+                },
+                true,
+            ),
+            tool(
+                ToolCall::WebFetch {
+                    url: "https://x.dev".into(),
+                    prompt: None,
+                },
+                false,
+            ),
+            tool(
+                ToolCall::Todo {
+                    items: vec![zeron_proto::TodoItem {
+                        text: "a".into(),
+                        done: true,
+                    }],
+                },
+                false,
+            ),
+            tool(
+                ToolCall::Mcp {
+                    server: "gh".into(),
+                    tool: "issues".into(),
+                    input: None,
+                },
+                false,
+            ),
+        ];
+        // The classification (counts, dedupe, order) is `zeron_proto`'s, so its
+        // own English renderer — what the terminal viewport shows — must come out
+        // byte-identical. Asserting against it rather than a second literal list
+        // keeps the shared wording honest.
+        let pairs: Vec<(ToolCall, bool)> =
+            tools.iter().map(|t| (t.call.clone(), t.is_error)).collect();
+        assert_eq!(
+            zeron_proto::view::tool_group_summary(&pairs),
+            tool_group_summary(&tools, Locale::En)
+        );
+        assert_eq!(
+            tool_group_summary(&tools, Locale::En),
+            "Ran 1 command · edited 1 file · read 1 file · searched 1 time · fetched 1 page · updated todos · called 1 tool · 1 failed"
+        );
+        // Every segment has its own Chinese row; nothing borrows an English noun.
+        assert_eq!(
+            tool_group_summary(&tools, Locale::ZhCn),
+            "已运行 1 个命令 · 已编辑 1 个文件 · 已读取 1 个文件 · 已搜索 1 次 · 已抓取 1 个页面 · 已更新待办 · 已调用 1 个工具 · 1 个失败"
+        );
+        // The bare tool count is proto's fallback for an empty set, and the UI
+        // wrapper short-circuits that case (a thought-only group draws nothing).
+        assert_eq!(zeron_proto::view::tool_group_summary(&[]), "0 tools");
+        assert_eq!(tool_group_summary(&[], Locale::ZhCn), "");
+        // Its row is asserted on the segment, which is where a viewport would
+        // name it.
+        assert_eq!(
+            summary_segment(ToolSummarySegment::Tools(3), Locale::En),
+            "3 tools"
+        );
+        assert_eq!(
+            summary_segment(ToolSummarySegment::Tools(3), Locale::ZhCn),
+            "3 个工具"
+        );
+    }
+
+    #[test]
+    fn tool_chip_english_matches_zeron_proto_and_chinese_names_each_part() {
+        // Shared classification, crate-local copy: English must equal proto's
+        // renderer for every kind and detail shape.
+        let calls = [
+            ToolCall::Exec {
+                command: "cargo test".into(),
+            },
+            ToolCall::ReadFile {
+                path: "src/main.rs".into(),
+            },
+            ToolCall::WriteFile {
+                path: "a.rs".into(),
+                content: None,
+            },
+            ToolCall::EditFile {
+                path: "a.rs".into(),
+                old_string: None,
+                new_string: None,
+            },
+            ToolCall::ApplyPatch { path: None },
+            ToolCall::ApplyPatch {
+                path: Some("a.rs".into()),
+            },
+            ToolCall::Search {
+                pattern: "foo".into(),
+                path: None,
+            },
+            ToolCall::Search {
+                pattern: "foo".into(),
+                path: Some("src".into()),
+            },
+            ToolCall::Glob {
+                pattern: "*.rs".into(),
+            },
+            ToolCall::WebFetch {
+                url: "https://x.dev".into(),
+                prompt: None,
+            },
+            ToolCall::WebSearch {
+                query: "gpui".into(),
+            },
+            ToolCall::Todo {
+                items: vec![
+                    zeron_proto::TodoItem {
+                        text: "a".into(),
+                        done: true,
+                    },
+                    zeron_proto::TodoItem {
+                        text: "b".into(),
+                        done: false,
+                    },
+                ],
+            },
+            ToolCall::Mcp {
+                server: "gh".into(),
+                tool: "issues".into(),
+                input: None,
+            },
+            ToolCall::Unknown {
+                name: "Agent: scan repo".into(),
+                input: None,
+            },
+            ToolCall::Unknown {
+                name: "Agent".into(),
+                input: None,
+            },
+            ToolCall::Unknown {
+                name: "mystery".into(),
+                input: None,
+            },
+        ];
+        for call in &calls {
+            let (en_label, en_detail) = tool_chip_content(call);
+            let (label, detail) = tool_chip_text(call, Locale::En);
+            assert_eq!(
+                (label, detail.as_str()),
+                (en_label, en_detail.as_str()),
+                "{call:?}"
+            );
+        }
+        // One case per detail shape, Chinese.
+        assert_eq!(
+            tool_chip_text(
+                &ToolCall::Exec {
+                    command: "cargo test".into()
+                },
+                Locale::ZhCn
+            ),
+            ("运行", "cargo test".to_string())
+        );
+        assert_eq!(
+            tool_chip_text(&ToolCall::ApplyPatch { path: None }, Locale::ZhCn),
+            ("补丁", "工作区".to_string())
+        );
+        assert_eq!(
+            tool_chip_text(
+                &ToolCall::Search {
+                    pattern: "foo".into(),
+                    path: Some("src".into())
+                },
+                Locale::ZhCn
+            ),
+            ("搜索", "在 src 中搜索 foo".to_string())
+        );
+        assert_eq!(
+            tool_chip_text(
+                &ToolCall::Todo {
+                    items: vec![
+                        zeron_proto::TodoItem {
+                            text: "a".into(),
+                            done: true
+                        },
+                        zeron_proto::TodoItem {
+                            text: "b".into(),
+                            done: false
+                        },
+                    ]
+                },
+                Locale::ZhCn
+            ),
+            ("待办", "已完成 1/2".to_string())
+        );
+        // `server · tool` is data, not copy: it survives both locales verbatim.
+        assert_eq!(
+            tool_chip_text(
+                &ToolCall::Mcp {
+                    server: "gh".into(),
+                    tool: "issues".into(),
+                    input: None
+                },
+                Locale::ZhCn
+            ),
+            ("MCP", "gh · issues".to_string())
+        );
     }
 
     #[test]
@@ -13463,7 +14025,7 @@ mod tests {
             name: "Agent: scan repo".into(),
             input: None,
         };
-        assert_eq!(subagent_tab_title(&named).as_ref(), "scan repo");
+        assert_eq!(subagent_tab_title(&named, Locale::En).as_ref(), "scan repo");
         // A bare "Task"/"Agent" digs the description out of the call input
         // (which sheds any genus of its own).
         let bare = ToolCall::Unknown {
@@ -13473,34 +14035,47 @@ mod tests {
                 "prompt": "very long instructions…",
             })),
         };
-        assert_eq!(subagent_tab_title(&bare).as_ref(), "audit the auth flow");
+        assert_eq!(
+            subagent_tab_title(&bare, Locale::En).as_ref(),
+            "audit the auth flow"
+        );
         // Word boundaries only — a name that merely STARTS with the genus
         // keeps itself.
         let compound = ToolCall::Unknown {
             name: "Taskmaster".into(),
             input: None,
         };
-        assert_eq!(subagent_tab_title(&compound).as_ref(), "Taskmaster");
-        // Nothing to derive → the generic label.
+        assert_eq!(
+            subagent_tab_title(&compound, Locale::En).as_ref(),
+            "Taskmaster"
+        );
+        // Nothing to derive → the generic label, in the active locale.
         let blank = ToolCall::Unknown {
             name: "agent".into(),
             input: None,
         };
-        assert_eq!(subagent_tab_title(&blank).as_ref(), "Subagent");
+        assert_eq!(subagent_tab_title(&blank, Locale::En).as_ref(), "Subagent");
+        assert_eq!(
+            subagent_tab_title(&blank, Locale::ZhCn).as_ref(),
+            "子智能体"
+        );
         // Absurd lengths cap with an ellipsis; multiline prompts keep only
         // their first line.
         let long = ToolCall::Unknown {
             name: "x".repeat(120),
             input: None,
         };
-        let title = subagent_tab_title(&long);
+        let title = subagent_tab_title(&long, Locale::En);
         assert_eq!(title.chars().count(), SUBAGENT_TITLE_MAX + 1);
         assert!(title.ends_with('…'));
         // Non-spawn-shaped calls stay generic.
         assert_eq!(
-            subagent_tab_title(&ToolCall::Exec {
-                command: "ls".into()
-            })
+            subagent_tab_title(
+                &ToolCall::Exec {
+                    command: "ls".into()
+                },
+                Locale::En,
+            )
             .as_ref(),
             "Subagent"
         );
@@ -13581,18 +14156,28 @@ mod tests {
         assert_eq!(q, "line one line two");
     }
 
-    #[test]
-    fn call_block_carries_the_full_invocation() {
-        // Multi-line command: verbatim lines, not the flattened chip line.
-        let Some(ToolDetail::Output {
+    /// A chip's invocation block as drawn in English, for tests that care about
+    /// content rather than phrasing.
+    fn block_output(call: &ToolCall) -> (Vec<SharedString>, usize) {
+        let Some(block) = call_block(call) else {
+            panic!("expected an invocation block")
+        };
+        let ToolDetail::Output {
             lines,
             truncated_by,
-        }) = call_block(&ToolCall::Exec {
-            command: "set -e\ncargo test".into(),
-        })
+        } = block.resolved(Locale::En).as_ref().clone()
         else {
             panic!("expected an output block")
         };
+        (lines, truncated_by)
+    }
+
+    #[test]
+    fn call_block_carries_the_full_invocation() {
+        // Multi-line command: verbatim lines, not the flattened chip line.
+        let (lines, truncated_by) = block_output(&ToolCall::Exec {
+            command: "set -e\ncargo test".into(),
+        });
         assert_eq!(truncated_by, 0);
         assert_eq!(
             lines.iter().map(|l| l.as_ref()).collect::<Vec<_>>(),
@@ -13600,27 +14185,23 @@ mod tests {
         );
 
         // A long single-line command soft-wraps instead of ellipsizing.
-        let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Exec {
+        let (lines, _) = block_output(&ToolCall::Exec {
             command: "x".repeat(CALL_WRAP_COLS * 2 + 10),
-        }) else {
-            panic!("expected an output block")
-        };
+        });
         assert_eq!(lines.len(), 3);
         assert!(lines.iter().all(|l| l.chars().count() <= CALL_WRAP_COLS));
 
         // MCP input pretty-prints under the `server · tool` line.
-        let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Mcp {
+        let (lines, _) = block_output(&ToolCall::Mcp {
             server: "gh".into(),
             tool: "issues".into(),
             input: Some(serde_json::json!({"repo": "zeron"})),
-        }) else {
-            panic!("expected an output block")
-        };
+        });
         assert_eq!(lines[0].as_ref(), "gh · issues");
         assert!(lines.iter().any(|l| l.contains("\"repo\": \"zeron\"")));
 
         // Todos list one item per line with checkbox state.
-        let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Todo {
+        let (lines, _) = block_output(&ToolCall::Todo {
             items: vec![
                 zeron_proto::TodoItem {
                     text: "a".into(),
@@ -13631,9 +14212,7 @@ mod tests {
                     done: false,
                 },
             ],
-        }) else {
-            panic!("expected an output block")
-        };
+        });
         assert_eq!(
             lines.iter().map(|l| l.as_ref()).collect::<Vec<_>>(),
             vec!["[x] a", "[ ] b"]
@@ -13646,6 +14225,41 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn a_localized_call_block_phrases_when_drawn() {
+        // The two calls whose block carries copy stay structured, so the
+        // language is picked at draw time and the model's data rides through.
+        let patch = ToolCall::ApplyPatch { path: None };
+        assert_eq!(
+            call_block(&patch),
+            Some(CallBlock::Detail(ToolChipDetail::Workspace))
+        );
+        assert_eq!(block_output(&patch).0[0].as_ref(), "workspace");
+        let drawn = call_block(&patch).unwrap().resolved(Locale::ZhCn);
+        let ToolDetail::Output { lines, .. } = drawn.as_ref() else {
+            panic!("expected an output block")
+        };
+        assert_eq!(lines[0].as_ref(), "工作区");
+
+        let scoped = ToolCall::Search {
+            pattern: "needle".into(),
+            path: Some("src".into()),
+        };
+        assert_eq!(
+            call_block(&scoped),
+            Some(CallBlock::Detail(ToolChipDetail::In {
+                pattern: "needle".into(),
+                path: "src".into(),
+            }))
+        );
+        assert_eq!(block_output(&scoped).0[0].as_ref(), "needle in src");
+        let drawn = call_block(&scoped).unwrap().resolved(Locale::ZhCn);
+        let ToolDetail::Output { lines, .. } = drawn.as_ref() else {
+            panic!("expected an output block")
+        };
+        assert_eq!(lines[0].as_ref(), "在 src 中搜索 needle");
     }
 
     #[test]
@@ -13843,14 +14457,20 @@ mod tests {
     #[test]
     fn flavour_words_rotate_every_seven_seconds() {
         let seed = flavour_seed("chat-1");
-        assert_eq!(flavour_word(seed, 0), flavour_word(seed, 6));
-        assert_ne!(flavour_word(seed, 0), flavour_word(seed, 7));
+        let en = |elapsed| flavour_word(seed, elapsed, Locale::En);
+        assert_eq!(en(0), en(6));
+        assert_ne!(en(0), en(7));
         // Deterministic per chat; different chats usually differ in phase.
-        assert_eq!(flavour_word(seed, 3), flavour_word(seed, 3));
-    }
+        assert_eq!(en(3), en(3));
+        // The same slot is a different word per locale, never a leaked English
+        // one.
+        assert_ne!(flavour_word(seed, 3, Locale::ZhCn), en(3));
+        assert_eq!(format_elapsed(59, Locale::En), "59s");
+        assert_eq!(format_elapsed(92, Locale::En), "1m 32s");
+        assert_eq!(format_elapsed(-5, Locale::En), "0s");
+        assert_eq!(format_elapsed(92, Locale::ZhCn), "1分32秒");
+        assert_eq!(flavour_word(seed, 3, Locale::En), en(3));
 
-    #[test]
-    fn elapsed_format_scales_from_seconds_to_days() {
         for (secs, expected) in [
             (-5, "0s"),
             (0, "0s"),
@@ -13866,7 +14486,11 @@ mod tests {
             (86_400, "1d 0h"),
             (183_845, "2d 3h"),
         ] {
-            assert_eq!(format_elapsed(secs), expected, "elapsed seconds: {secs}");
+            assert_eq!(
+                format_elapsed(secs, Locale::En),
+                expected,
+                "elapsed seconds: {secs}"
+            );
         }
     }
 

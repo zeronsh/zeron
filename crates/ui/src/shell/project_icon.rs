@@ -287,15 +287,16 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let state = self.state.read(cx);
+        let locale = i18n::locale(cx);
         let chat = state.chats.iter().find(|chat| chat.id == chat_id);
         let space = chat.and_then(|chat| state.space_for_chat(chat));
         let name = space
             .map(|space| space.display_name().to_string())
-            .unwrap_or_else(|| "Home".into());
+            .unwrap_or_else(|| i18n::translate(MessageId::ProjectIconHome, locale).to_string());
         // Same fallback as the row's "@ device" fragment.
         let device = chat
             .and_then(|chat| state.device_name(&chat.device_id))
-            .unwrap_or("Unknown device")
+            .unwrap_or(i18n::translate(MessageId::DeviceUnknown, locale))
             .to_string();
         let seed = space
             .map(|space| space.path.clone())

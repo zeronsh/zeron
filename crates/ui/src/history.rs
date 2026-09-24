@@ -24,6 +24,7 @@ use zeron_proto::{
 use zeron_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::i18n::{self, Locale, MessageId};
 use crate::motion::AnimationExt;
 use crate::popover::{self, Popup};
 use crate::settings::{
@@ -461,11 +462,13 @@ pub fn configured_author_display(cx: &App) -> GitHistoryAuthorDisplay {
     cx.global::<HistoryColumnPreferences>().author_display
 }
 
-fn history_column_label(column: GitHistoryColumn) -> &'static str {
+/// The column's header label, as a key: the render paths resolve it against the
+/// active locale.
+fn history_column_label(column: GitHistoryColumn) -> MessageId {
     match column {
-        GitHistoryColumn::Author => "Author",
-        GitHistoryColumn::Date => "Date",
-        GitHistoryColumn::Sha => "SHA",
+        GitHistoryColumn::Author => MessageId::HistoryColumnAuthor,
+        GitHistoryColumn::Date => MessageId::HistoryColumnDate,
+        GitHistoryColumn::Sha => MessageId::HistoryColumnSha,
     }
 }
 
@@ -1188,13 +1191,23 @@ fn ref_icon(kind: GitHistoryRefKind) -> &'static str {
     }
 }
 
-fn ref_description(reference: &GitHistoryRef) -> SharedString {
-    let kind = match reference.kind {
-        GitHistoryRefKind::Branch => "Branch",
-        GitHistoryRefKind::Remote => "Remote branch",
-        GitHistoryRefKind::Tag => "Tag",
-    };
-    format!("{kind}: {}", reference.label).into()
+/// `{kind}` is the ref kind's label and `{name}` the ref itself; the ref name is
+/// data and stays verbatim.
+fn ref_description(reference: &GitHistoryRef, locale: Locale) -> SharedString {
+    let kind = i18n::translate(
+        match reference.kind {
+            GitHistoryRefKind::Branch => MessageId::HistoryRefBranch,
+            GitHistoryRefKind::Remote => MessageId::HistoryRefRemoteBranch,
+            GitHistoryRefKind::Tag => MessageId::HistoryRefTag,
+        },
+        locale,
+    );
+    i18n::fill_many(
+        MessageId::HistoryRefDescription,
+        &[("{kind}", kind), ("{name}", reference.label.as_str())],
+        locale,
+    )
+    .into()
 }
 
 fn graph_color(mut color: gpui::Hsla) -> gpui::Hsla {
@@ -1266,9 +1279,9 @@ impl Render for HistoryAuthorTooltip {
     }
 }
 
-fn history_author_name(name: &str) -> SharedString {
+fn history_author_name(name: &str, locale: Locale) -> SharedString {
     if name.trim().is_empty() {
-        "Unknown".into()
+        i18n::translate(MessageId::HistoryAuthorUnknown, locale).into()
     } else {
         name.to_string().into()
     }
@@ -1399,7 +1412,12 @@ pub struct GitHistorySearchControl {
 impl GitHistorySearchControl {
     pub fn new(history: Entity<GitHistory>, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| {
-            ComposerInput::with_context("Search", "PaletteSearch", cx).with_text_metrics(11.0, 14.0)
+            ComposerInput::with_context(
+                i18n::translate(MessageId::HistorySearch, i18n::locale(cx)),
+                "PaletteSearch",
+                cx,
+            )
+            .with_text_metrics(11.0, 14.0)
         });
         let observe = cx.observe(&history, |this, history, cx| {
             let query = history.read(cx).search_query.clone();
@@ -1607,7 +1625,14 @@ impl Render for GitHistoryFetchButton {
                     } else {
                         theme.text_muted
                     })
-                    .child(if fetching { "Fetching…" } else { "Fetch all" }),
+                    .child(i18n::translate(
+                        if fetching {
+                            MessageId::HistoryFetching
+                        } else {
+                            MessageId::HistoryFetchAll
+                        },
+                        i18n::locale(cx),
+                    )),
             )
     }
 }
@@ -1618,9 +1643,9 @@ impl Render for GitHistoryViewButton {
         let showing_tips = self.history.read(cx).view_mode == GitHistoryViewMode::BranchTips;
         let history = self.history.clone();
         let tooltip = if showing_tips {
-            "Show all commits"
+            MessageId::HistoryShowAllCommits
         } else {
-            "Show branch tips"
+            MessageId::HistoryShowBranchTips
         };
 
         div()
@@ -1667,8 +1692,8 @@ impl Render for GitHistoryViewButton {
                     }),
             )
             .tooltip(move |_, cx| {
-                cx.new(|_| HistoryRefTooltip {
-                    descriptions: vec![tooltip.into()],
+                cx.new(|tooltip_cx| HistoryRefTooltip {
+                    descriptions: vec![i18n::translate(tooltip, i18n::locale(tooltip_cx)).into()],
                 })
                 .into()
             })
@@ -1711,8 +1736,14 @@ impl Render for GitHistorySearchControl {
                         .text_color(theme.text_muted),
                 )
                 .tooltip(|_, cx| {
-                    cx.new(|_| HistoryRefTooltip {
-                        descriptions: vec!["Search commits".into()],
+                    cx.new(|tooltip_cx| HistoryRefTooltip {
+                        descriptions: vec![
+                            i18n::translate(
+                                MessageId::HistorySearchCommits,
+                                i18n::locale(tooltip_cx),
+                            )
+                            .into(),
+                        ],
                     })
                     .into()
                 })
@@ -1838,6 +1869,9 @@ impl Render for GitHistoryCount {
             .comparison
             .clone()
             .filter(|comparison| comparison.ahead > 0 || comparison.behind > 0);
+        // `container_query`'s closure is `'static`, so the locale is resolved
+        // once here instead of borrowing `cx` inside it.
+        let locale = i18n::locale(cx);
         div()
             .h_full()
             .min_w_0()
@@ -1862,10 +1896,7 @@ impl Render for GitHistoryCount {
                                     .text_size(px(11.0))
                                     .line_height(px(14.0))
                                     .text_color(theme.text_muted)
-                                    .child(SharedString::from(format!(
-                                        "{count} commit{}",
-                                        if count == 1 { "" } else { "s" }
-                                    ))),
+                                    .child(SharedString::from(i18n::count_commits(count, locale))),
                             )
                         })
                         .when_some(
@@ -1890,8 +1921,11 @@ impl Render for GitHistoryCount {
                                                     .text_size(px(10.5))
                                                     .line_height(px(13.0))
                                                     .text_color(theme.accent.opacity(0.88))
-                                                    .child(SharedString::from(format!(
-                                                        "{ahead} ahead"
+                                                    .child(SharedString::from(i18n::fill(
+                                                        MessageId::HistoryAhead,
+                                                        "{n}",
+                                                        &ahead.to_string(),
+                                                        locale,
                                                     ))),
                                             )
                                         })
@@ -1910,19 +1944,26 @@ impl Render for GitHistoryCount {
                                                     .text_size(px(10.5))
                                                     .line_height(px(13.0))
                                                     .text_color(theme.warning.opacity(0.82))
-                                                    .child(SharedString::from(format!(
-                                                        "{behind} behind"
+                                                    .child(SharedString::from(i18n::fill(
+                                                        MessageId::HistoryBehind,
+                                                        "{n}",
+                                                        &behind.to_string(),
+                                                        locale,
                                                     ))),
                                             )
                                         })
                                         .tooltip(move |_, cx| {
-                                            cx.new(|_| HistoryRefTooltip {
-                                                descriptions: vec![
-                                                    format!(
-                                                        "Compared with {base}: {ahead} ahead, {behind} behind"
-                                                    )
-                                                    .into(),
+                                            let copy = i18n::fill_many(
+                                                MessageId::HistoryComparedWith,
+                                                &[
+                                                    ("{base}", base.as_str()),
+                                                    ("{ahead}", &ahead.to_string()),
+                                                    ("{behind}", &behind.to_string()),
                                                 ],
+                                                i18n::locale(cx),
+                                            );
+                                            cx.new(|_| HistoryRefTooltip {
+                                                descriptions: vec![copy.into()],
                                             })
                                             .into()
                                         }),
@@ -3034,7 +3075,7 @@ impl GitHistory {
         let data_column = history_data_column(column);
         let width = history_optional_width(column, widths);
         let (min_width, _) = history_column_limits(data_column);
-        let label = history_column_label(column);
+        let label = i18n::translate(history_column_label(column), i18n::locale(cx));
         let id = match column {
             GitHistoryColumn::Author => "history-author-header",
             GitHistoryColumn::Date => "history-date-header",
@@ -3209,7 +3250,10 @@ impl GitHistory {
                         this.toggle_author_display(cx);
                         this.close_author_menu(cx);
                     }))
-                    .child(div().flex_1().child("Name"))
+                    .child(div().flex_1().child(i18n::translate(
+                        MessageId::HistoryAuthorDisplayName,
+                        i18n::locale(cx),
+                    )))
                     .child(div().w(px(12.0)).flex_none().flex().justify_end().when(
                         show_name,
                         |element| {
@@ -3230,7 +3274,7 @@ impl GitHistory {
         let widths = configured_column_widths(cx);
         let order = configured_column_order(cx);
         let option =
-            |label: &'static str,
+            |label: MessageId,
              checked: bool,
              column: GitHistoryColumn,
              index: usize,
@@ -3250,7 +3294,11 @@ impl GitHistory {
                     cx.stop_propagation();
                     this.toggle_column(column, cx);
                 }))
-                .child(div().flex_1().child(label))
+                .child(
+                    div()
+                        .flex_1()
+                        .child(i18n::translate(label, i18n::locale(cx))),
+                )
                 .child(div().w(px(12.0)).flex_none().flex().justify_end().when(
                     checked,
                     |element| {
@@ -3278,14 +3326,26 @@ impl GitHistory {
                     .flex_col()
                     .gap(px(popover::MENU_GAP))
                     .child(option(
-                        "Author",
+                        MessageId::HistoryColumnAuthor,
                         columns.author,
                         GitHistoryColumn::Author,
                         0,
                         cx,
                     ))
-                    .child(option("Date", columns.date, GitHistoryColumn::Date, 1, cx))
-                    .child(option("SHA", columns.sha, GitHistoryColumn::Sha, 2, cx))
+                    .child(option(
+                        MessageId::HistoryColumnDate,
+                        columns.date,
+                        GitHistoryColumn::Date,
+                        1,
+                        cx,
+                    ))
+                    .child(option(
+                        MessageId::HistoryColumnSha,
+                        columns.sha,
+                        GitHistoryColumn::Sha,
+                        2,
+                        cx,
+                    ))
                     .when(can_reset, |menu| {
                         menu.child(
                             div()
@@ -3307,7 +3367,7 @@ impl GitHistory {
                                     this.reset_columns(cx);
                                     this.close_column_menu(cx);
                                 }))
-                                .child("Reset"),
+                                .child(i18n::translate(MessageId::CommonReset, i18n::locale(cx))),
                         )
                     }),
             )
@@ -3584,17 +3644,26 @@ impl GitHistory {
             let collapsed = self.collapsed_branches.contains(&key);
             let hidden_count = self.collapsed_counts.get(&key).copied().unwrap_or_default();
             let tooltip = if collapsed {
-                format!(
-                    "Expand {}{}",
-                    reference.label,
-                    if hidden_count == 0 {
-                        String::new()
-                    } else {
-                        format!(" ({hidden_count} hidden)")
-                    }
+                let id = if hidden_count == 0 {
+                    MessageId::HistoryExpandRef
+                } else {
+                    MessageId::HistoryExpandRefHidden
+                };
+                i18n::fill_many(
+                    id,
+                    &[
+                        ("{name}", reference.label.as_str()),
+                        ("{n}", &hidden_count.to_string()),
+                    ],
+                    i18n::locale(cx),
                 )
             } else {
-                format!("Collapse {}", reference.label)
+                i18n::fill(
+                    MessageId::HistoryCollapseRef,
+                    "{name}",
+                    &reference.label,
+                    i18n::locale(cx),
+                )
             };
             let history = cx.entity();
             div()
@@ -3689,10 +3758,11 @@ impl GitHistory {
         row_index: usize,
         ref_index: usize,
         theme: &Theme,
+        locale: Locale,
     ) -> AnyElement {
         let color = ref_color(&reference, theme);
         let icon = ref_icon(reference.kind);
-        let description = ref_description(&reference);
+        let description = ref_description(&reference, locale);
         div()
             .id(SharedString::from(format!(
                 "history-ref-{row_index}-{ref_index}"
@@ -3735,11 +3805,15 @@ impl GitHistory {
         row_index: usize,
         available_width: f32,
         theme: &Theme,
+        locale: Locale,
     ) -> AnyElement {
         let visible_count = visible_ref_count(&refs, available_width);
         let hidden_refs: Vec<_> = refs.iter().skip(visible_count).cloned().collect();
         let hidden_count = hidden_refs.len();
-        let hidden_descriptions: Vec<_> = hidden_refs.iter().map(ref_description).collect();
+        let hidden_descriptions: Vec<_> = hidden_refs
+            .iter()
+            .map(|reference| ref_description(reference, locale))
+            .collect();
 
         div()
             .max_w(px(available_width))
@@ -3749,7 +3823,9 @@ impl GitHistory {
             .items_center()
             .gap(px(HISTORY_REF_GAP))
             .children(refs.into_iter().take(visible_count).enumerate().map(
-                |(ref_index, reference)| Self::render_ref(reference, row_index, ref_index, theme),
+                |(ref_index, reference)| {
+                    Self::render_ref(reference, row_index, ref_index, theme, locale)
+                },
             ))
             .when(hidden_count > 0, |element| {
                 element.child(
@@ -3874,7 +3950,7 @@ impl GitHistory {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let label = if copied {
-            "Copied".to_string()
+            i18n::translate(MessageId::CommonCopied, i18n::locale(cx)).to_string()
         } else {
             sha.chars().take(7).collect()
         };
@@ -3933,11 +4009,11 @@ impl GitHistory {
                 self.error.is_some()
             };
             let label = if pending {
-                "Loading…"
+                i18n::translate(MessageId::CommonLoading, i18n::locale(cx))
             } else if has_error {
-                "Retry"
+                i18n::translate(MessageId::CommonRetry, i18n::locale(cx))
             } else {
-                "Load more"
+                i18n::translate(MessageId::HistoryLoadMore, i18n::locale(cx))
             };
             let button = div()
                 .id("history-load-older")
@@ -4002,7 +4078,7 @@ impl GitHistory {
         let open_commit = commit.clone();
         let copied = self.copied_sha.as_deref() == Some(sha.as_str());
         let commit_subject = if commit.subject.is_empty() {
-            "(no subject)".to_string()
+            i18n::translate(MessageId::HistoryCommitNoSubject, i18n::locale(cx)).to_string()
         } else {
             commit.subject
         };
@@ -4012,7 +4088,7 @@ impl GitHistory {
         let column_widths = configured_column_widths(cx);
         let column_order = configured_column_order(cx);
         let author_display = configured_author_display(cx);
-        let author_name = history_author_name(&commit.author_name);
+        let author_name = history_author_name(&commit.author_name, i18n::locale(cx));
         let author_initial = history_author_initial(&author_name);
         let avatar_image = self
             .avatar_images
@@ -4082,7 +4158,7 @@ impl GitHistory {
             }))
             .child(self.graph_cell(index, graph_row, graph_focus, &theme, cx))
             .child(
-                container_query(move |size, _, _| {
+                container_query(move |size, _, cx| {
                     let refs_width = ref_area_width(f32::from(size.width));
                     div()
                         .size_full()
@@ -4106,6 +4182,7 @@ impl GitHistory {
                                 index,
                                 refs_width,
                                 &commit_theme,
+                                i18n::locale(cx),
                             ))
                         })
                 })
@@ -4256,7 +4333,10 @@ impl Render for GitHistory {
                 .justify_center()
                 .text_size(px(12.0))
                 .text_color(theme.text_faint)
-                .child("No repository selected")
+                .child(i18n::translate(
+                    MessageId::HistoryNoRepository,
+                    i18n::locale(cx),
+                ))
                 .into_any_element()
         } else if self.loading && self.commits.is_empty() {
             div()
@@ -4277,7 +4357,10 @@ impl Render for GitHistory {
                     div()
                         .text_size(px(12.0))
                         .text_color(theme.text_faint)
-                        .child("Loading history…"),
+                        .child(i18n::translate(
+                            MessageId::HistoryLoadingHistory,
+                            i18n::locale(cx),
+                        )),
                 )
                 .into_any_element()
         } else if self.visible_commits.is_empty() {
@@ -4287,13 +4370,16 @@ impl Render for GitHistory {
                 self.error.clone()
             };
             let message = active_error.clone().unwrap_or_else(|| {
-                SharedString::from(if self.search_active() {
-                    "No matching commits"
-                } else if self.view_mode == GitHistoryViewMode::BranchTips {
-                    "No branch tips found"
-                } else {
-                    "No commits found"
-                })
+                SharedString::from(i18n::translate(
+                    if self.search_active() {
+                        MessageId::HistoryNoMatchingCommits
+                    } else if self.view_mode == GitHistoryViewMode::BranchTips {
+                        MessageId::HistoryNoBranchTips
+                    } else {
+                        MessageId::DiffNoCommitsFound
+                    },
+                    i18n::locale(cx),
+                ))
             });
             div()
                 .flex_1()
@@ -4342,7 +4428,12 @@ impl Render for GitHistory {
                         .truncate()
                         .text_size(px(11.0))
                         .text_color(theme.danger_muted)
-                        .child(SharedString::from(format!("Fetch failed: {error}"))),
+                        .child(SharedString::from(i18n::fill(
+                            MessageId::HistoryFetchFailed,
+                            "{error}",
+                            &error,
+                            i18n::locale(cx),
+                        ))),
                 )
             })
             .when_some(
@@ -4471,7 +4562,10 @@ impl Render for GitHistory {
                                     .text_size(px(9.5))
                                     .text_color(header_theme.text_faint)
                                     .child(graph_spacer)
-                                    .child(div().flex_1().min_w(px(80.0)).child("Commit"))
+                                    .child(div().flex_1().min_w(px(80.0)).child(i18n::translate(
+                                        MessageId::CommonCommit,
+                                        i18n::locale(cx),
+                                    )))
                                     .child(optional_headers)
                                     .child(column_button),
                             )
@@ -4848,7 +4942,18 @@ mod tests {
 
     #[test]
     fn author_avatar_fallback_uses_the_first_visible_initial() {
-        assert_eq!(history_author_name(""), SharedString::from("Unknown"));
+        assert_eq!(
+            history_author_name("", Locale::En),
+            SharedString::from("Unknown")
+        );
+        assert_eq!(
+            history_author_name("", Locale::ZhCn),
+            SharedString::from("未知")
+        );
+        assert_eq!(
+            history_author_name("Ada", Locale::ZhCn),
+            SharedString::from("Ada")
+        );
         assert_eq!(history_author_initial("  josé"), SharedString::from("J"));
         assert_eq!(history_author_initial("   "), SharedString::from("?"));
     }
@@ -5248,16 +5353,35 @@ mod tests {
             label: label.into(),
         };
         assert_eq!(
-            ref_description(&reference(GitHistoryRefKind::Branch, "main")),
+            ref_description(&reference(GitHistoryRefKind::Branch, "main"), Locale::En),
             "Branch: main"
         );
         assert_eq!(
-            ref_description(&reference(GitHistoryRefKind::Remote, "origin/main")),
+            ref_description(
+                &reference(GitHistoryRefKind::Remote, "origin/main"),
+                Locale::En
+            ),
             "Remote branch: origin/main"
         );
         assert_eq!(
-            ref_description(&reference(GitHistoryRefKind::Tag, "v0.1.52")),
+            ref_description(&reference(GitHistoryRefKind::Tag, "v0.1.52"), Locale::En),
             "Tag: v0.1.52"
+        );
+        // The ref name is data and survives verbatim.
+        assert_eq!(
+            ref_description(&reference(GitHistoryRefKind::Branch, "main"), Locale::ZhCn),
+            "分支：main"
+        );
+        assert_eq!(
+            ref_description(
+                &reference(GitHistoryRefKind::Remote, "origin/main"),
+                Locale::ZhCn
+            ),
+            "远程分支：origin/main"
+        );
+        assert_eq!(
+            ref_description(&reference(GitHistoryRefKind::Tag, "v0.1.52"), Locale::ZhCn),
+            "标签：v0.1.52"
         );
     }
 }

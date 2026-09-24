@@ -1,6 +1,7 @@
 //! Global action and conversation search, using the sidebar's conversation rows.
 use super::*;
 use crate::appearance::AppearanceMode;
+use crate::i18n::{self, Locale, MessageId};
 
 const HISTORY_RESULT_LIMIT: usize = 30;
 const RESULTS_FADE_BAND: f32 = 18.0;
@@ -46,16 +47,18 @@ enum Entry {
 }
 
 impl Entry {
-    fn action(&self) -> Option<(&'static str, &'static str)> {
+    /// The display label as a message id — the palette both renders it and
+    /// searches it, so both read the translation table.
+    fn action(&self) -> Option<(MessageId, &'static str)> {
         match self {
-            Self::NewChat => Some(("New chat", icons::PEN_NEW_SQUARE)),
-            Self::NewProject => Some(("New project", icons::FOLDER)),
-            Self::Settings => Some(("Open settings", icons::SETTINGS_MINIMALISTIC)),
+            Self::NewChat => Some((MessageId::CommandNewChat, icons::PEN_NEW_SQUARE)),
+            Self::NewProject => Some((MessageId::CommonNewProject, icons::FOLDER)),
+            Self::Settings => Some((MessageId::CommandOpenSettings, icons::SETTINGS_MINIMALISTIC)),
             Self::Theme(mode) => Some((
                 match mode {
-                    AppearanceMode::System => "Switch to system theme",
-                    AppearanceMode::Light => "Switch to light theme",
-                    AppearanceMode::Dark => "Switch to dark theme",
+                    AppearanceMode::System => MessageId::CommandThemeSystem,
+                    AppearanceMode::Light => MessageId::CommandThemeLight,
+                    AppearanceMode::Dark => MessageId::CommandThemeDark,
                 },
                 mode.icon(),
             )),
@@ -69,7 +72,7 @@ fn matches_query(query: &str, text: &str) -> bool {
     query.split_whitespace().all(|word| text.contains(word))
 }
 
-fn actions_for(query: &str, is_dark: bool) -> Vec<Entry> {
+fn actions_for(query: &str, is_dark: bool, locale: Locale) -> Vec<Entry> {
     [
         Entry::NewChat,
         Entry::NewProject,
@@ -81,7 +84,13 @@ fn actions_for(query: &str, is_dark: bool) -> Vec<Entry> {
         }),
     ]
     .into_iter()
-    .filter(|entry| matches_query(query, entry.action().unwrap().0))
+    .filter(|entry| {
+        let (label, _) = entry.action().unwrap();
+        // Both the rendered copy and the English original match: a Chinese UI
+        // still answers to the English term the user may reach for first.
+        matches_query(query, i18n::translate(label, locale))
+            || matches_query(query, label.english())
+    })
     .collect()
 }
 
@@ -99,7 +108,11 @@ impl Shell {
         }
         self.add_space = None;
         let search = cx.new(|cx| {
-            ComposerInput::with_context("Search commands and chats…", "PaletteSearch", cx)
+            ComposerInput::with_context(
+                i18n::translate(MessageId::CommandPalettePlaceholder, i18n::locale(cx)),
+                "PaletteSearch",
+                cx,
+            )
         });
         let events = cx.subscribe(&search, |this, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
@@ -138,7 +151,8 @@ impl Shell {
             return Vec::new();
         };
         let query = palette.search.read(cx).text().trim().to_lowercase();
-        let mut entries = actions_for(&query, Theme::of(cx).appearance.is_dark());
+        let locale = i18n::locale(cx);
+        let mut entries = actions_for(&query, Theme::of(cx).appearance.is_dark(), locale);
         let state = self.state.read(cx);
         // Global history deliberately ignores the sidebar's project filter and
         // collapsed groups. Archived conversations remain searchable too.
@@ -166,7 +180,9 @@ impl Shell {
                     &query,
                     &format!(
                         "{} {project} {device} {branch} {pr}",
-                        chat.title.as_deref().unwrap_or("New session")
+                        chat.title
+                            .as_deref()
+                            .unwrap_or(i18n::translate(MessageId::SessionUntitled, locale))
                     ),
                 )
             })
@@ -217,6 +233,7 @@ impl Shell {
         let focus = palette.focus.clone();
         let scroll = palette.scroll.clone();
         let theme = Theme::of(cx).for_popup();
+        let locale = i18n::locale(cx);
         let action_count = entries.iter().take_while(|e| e.action().is_some()).count();
         let mut rows = Vec::new();
         for (ix, entry) in entries.iter().enumerate() {
@@ -230,7 +247,8 @@ impl Shell {
             if ix == action_count && action_count > 0 {
                 row = row.child(spaces::sidebar_separator(&theme).w_full().my(px(8.0)));
             }
-            let content = if let Some((label, glyph)) = entry.action() {
+            let content = if let Some((label_id, glyph)) = entry.action() {
+                let label = i18n::translate(label_id, locale);
                 let shortcut = match entry {
                     Entry::NewChat | Entry::NewProject => {
                         let id = if *entry == Entry::NewChat {
@@ -307,9 +325,18 @@ impl Shell {
                     .flatten();
                 self.render_chat_row(
                     id.clone(),
-                    transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into(),
-                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), Utc::now())
-                        .into(),
+                    transcript::single_line(
+                        chat.title
+                            .as_deref()
+                            .unwrap_or(i18n::translate(MessageId::SessionUntitled, locale)),
+                    )
+                    .into(),
+                    time_ago_compact(
+                        chat.last_message_at.unwrap_or(chat.created_at),
+                        Utc::now(),
+                        locale,
+                    )
+                    .into(),
                     folder.into(),
                     branch,
                     pr,
@@ -351,11 +378,11 @@ impl Shell {
                         .items_center()
                         .gap(px(6.0))
                         .text_size(crate::typography::ui_rems(13.0))
-                        .child("No results")
+                        .child(i18n::translate(MessageId::CommandNoResults, locale))
                         .child(
                             div()
                                 .text_color(theme.text_muted)
-                                .child("Try a command, chat title, project, or device."),
+                                .child(i18n::translate(MessageId::CommandNoResultsHint, locale)),
                         ),
                 )
             });
@@ -462,9 +489,21 @@ impl Shell {
                     .flex_wrap()
                     .items_center()
                     .gap(px(12.0))
-                    .child(command_key_hint(&theme, "↑ ↓", "Navigate"))
-                    .child(command_key_hint(&theme, "↵", "Select"))
-                    .child(command_key_hint(&theme, "Esc", "Close")),
+                    .child(command_key_hint(
+                        &theme,
+                        "↑ ↓",
+                        i18n::translate(MessageId::PaletteHintNavigate, locale),
+                    ))
+                    .child(command_key_hint(
+                        &theme,
+                        "↵",
+                        i18n::translate(MessageId::PaletteHintSelect, locale),
+                    ))
+                    .child(command_key_hint(
+                        &theme,
+                        "Esc",
+                        i18n::translate(MessageId::PaletteHintClose, locale),
+                    )),
             );
         // Match the composer's 16px backdrop blur, including its opaque fallback.
         let card = crate::frost::frosted(16.0, crate::frost::MENU_BLUR, card);
@@ -537,7 +576,7 @@ mod tests {
     #[test]
     fn action_search_hides_empty_section_and_preserves_order() {
         assert_eq!(
-            actions_for("", true),
+            actions_for("", true, Locale::En),
             vec![
                 Entry::NewChat,
                 Entry::NewProject,
@@ -546,33 +585,55 @@ mod tests {
             ]
         );
         assert_eq!(
-            actions_for("new", true),
+            actions_for("new", true, Locale::En),
             vec![Entry::NewChat, Entry::NewProject]
         );
-        assert_eq!(actions_for("settings", true), vec![Entry::Settings]);
         assert_eq!(
-            actions_for("theme", true),
+            actions_for("settings", true, Locale::En),
+            vec![Entry::Settings]
+        );
+        assert_eq!(
+            actions_for("theme", true, Locale::En),
             vec![Entry::Theme(AppearanceMode::Light)]
         );
-        assert!(actions_for("deployment", true).is_empty());
+        assert!(actions_for("deployment", true, Locale::En).is_empty());
+    }
+
+    /// The action labels are searched through the translation table, so the
+    /// palette filters on the copy it is actually showing. The English label
+    /// keeps matching as well, so typing `settings` in a Chinese UI still works.
+    #[test]
+    fn action_search_follows_the_rendered_locale() {
+        assert_eq!(
+            actions_for("设置", true, Locale::ZhCn),
+            vec![Entry::Settings]
+        );
+        assert_eq!(
+            actions_for("新建会话", true, Locale::ZhCn),
+            vec![Entry::NewChat]
+        );
+        assert_eq!(
+            actions_for("settings", true, Locale::ZhCn),
+            vec![Entry::Settings]
+        );
     }
 
     #[test]
     fn theme_action_targets_the_opposite_resolved_appearance() {
         assert_eq!(
-            actions_for("theme", true),
+            actions_for("theme", true, Locale::En),
             vec![Entry::Theme(AppearanceMode::Light)]
         );
         assert_eq!(
-            actions_for("theme", false),
+            actions_for("theme", false, Locale::En),
             vec![Entry::Theme(AppearanceMode::Dark)]
         );
         assert_eq!(
-            actions_for("light", true),
+            actions_for("light", true, Locale::En),
             vec![Entry::Theme(AppearanceMode::Light)]
         );
         assert_eq!(
-            actions_for("dark", false),
+            actions_for("dark", false, Locale::En),
             vec![Entry::Theme(AppearanceMode::Dark)]
         );
     }

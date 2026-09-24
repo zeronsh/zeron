@@ -88,7 +88,10 @@ impl Shell {
             true
         } else {
             if !self.state.read(cx).sidebar_preferences.can_edit() {
-                self.sidebar_notice = Some("Sidebar is still syncing. Try again shortly.".into());
+                self.sidebar_notice = Some(
+                    i18n::translate(MessageId::SidebarSectionsStillSyncing, i18n::locale(cx))
+                        .into(),
+                );
                 cx.notify();
                 return false;
             }
@@ -147,7 +150,13 @@ impl Shell {
             .find(|section| Some(&section.id) == id.as_ref())
             .map(|s| s.name)
             .unwrap_or_default();
-        let input = cx.new(|cx| ComposerInput::new("Section name", cx));
+        let locale = i18n::locale(cx);
+        let input = cx.new(|cx| {
+            ComposerInput::new(
+                i18n::translate(MessageId::SidebarSectionNamePlaceholder, locale),
+                cx,
+            )
+        });
         input.update(cx, |input, cx| input.set_text(name, cx));
         let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
@@ -221,7 +230,8 @@ impl Shell {
             return;
         }
         let Some(engine) = state.engine().cloned() else {
-            self.sidebar_notice = Some("Engine not connected".into());
+            self.sidebar_notice =
+                Some(i18n::translate(MessageId::ErrorEngineNotConnected, i18n::locale(cx)).into());
             cx.notify();
             return;
         };
@@ -235,7 +245,15 @@ impl Shell {
             if failed > 0 {
                 let _ = this.update(cx, |this, cx| {
                     if this.state.read(cx).engine().is_some_and(|current| current.same_connection(&engine)) {
-                        this.sidebar_notice = Some(format!("Could not archive {failed} sessions. Try again.").into());
+                        this.sidebar_notice = Some(
+                            i18n::fill(
+                                MessageId::SidebarSectionsArchiveFailed,
+                                "{failed}",
+                                &failed.to_string(),
+                                i18n::locale(cx),
+                            )
+                            .into(),
+                        );
                         cx.notify();
                     }
                 });
@@ -252,6 +270,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> SidebarKeyedRow {
+        let locale = i18n::locale(cx);
         let id = section.id.clone();
         let open = !section.collapsed;
         let empty = rows.is_empty();
@@ -350,7 +369,7 @@ impl Shell {
                         .items_center()
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted.opacity(0.5))
-                        .child("Drop sessions here"),
+                        .child(i18n::translate(MessageId::SidebarSectionEmpty, locale)),
                 )
             })
             .children(rows.into_iter().map(|(_, _, row)| row))
@@ -422,6 +441,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).for_popup();
+        let locale = i18n::locale(cx);
         let mut overlays = Vec::new();
         if let Some((id, position)) = self.section_menu.clone() {
             if !self.active_sidebar_sections(cx).iter().any(|s| s.id == id) {
@@ -459,9 +479,13 @@ impl Shell {
                     this.section_menu = None;
                     cx.notify();
                 }));
-            for (action, label) in ["Edit section", "Archive all", "Delete"]
-                .into_iter()
-                .enumerate()
+            for (action, label) in [
+                MessageId::SidebarSectionEdit,
+                MessageId::SidebarSectionArchiveAll,
+                MessageId::CommonDelete,
+            ]
+            .into_iter()
+            .enumerate()
             {
                 let target = id.clone();
                 card = card.child(
@@ -476,7 +500,7 @@ impl Shell {
                         this.activate_section_menu(action, &target, cx);
                         cx.stop_propagation();
                     }))
-                    .child(label),
+                    .child(i18n::translate(label, locale)),
                 );
             }
             overlays.push(popover::menu_at(
@@ -509,7 +533,14 @@ impl Shell {
                         .justify_between()
                         .child(popover::dialog_title(
                             &theme,
-                            if edit { "Edit section" } else { "New section" },
+                            i18n::translate(
+                                if edit {
+                                    MessageId::SidebarSectionEdit
+                                } else {
+                                    MessageId::SidebarSectionNew
+                                },
+                                locale,
+                            ),
                         ))
                         .child(
                             div()
@@ -534,7 +565,7 @@ impl Shell {
                     div()
                         .mt(px(8.0))
                         .text_color(theme.text_muted)
-                        .child("Group sessions however you like"),
+                        .child(i18n::translate(MessageId::SidebarSectionDialogHint, locale)),
                 )
                 .child(
                     div()
@@ -548,17 +579,28 @@ impl Shell {
                         .justify_end()
                         .gap(px(8.0))
                         .child(
-                            popover::btn_ghost(&theme, "Cancel", "section-cancel")
-                                .id("section-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.section_dialog = None;
-                                    cx.notify();
-                                })),
+                            popover::btn_ghost(
+                                &theme,
+                                i18n::translate(MessageId::CommonCancel, locale),
+                                "section-cancel",
+                            )
+                            .id("section-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.section_dialog = None;
+                                cx.notify();
+                            })),
                         )
                         .child(
                             popover::btn_primary(
                                 &theme,
-                                if edit { "Save" } else { "Create section" },
+                                i18n::translate(
+                                    if edit {
+                                        MessageId::CommonSave
+                                    } else {
+                                        MessageId::SidebarSectionCreate
+                                    },
+                                    locale,
+                                ),
                             )
                             .id("section-save")
                             .opacity(if valid { 1.0 } else { 0.5 })
@@ -910,7 +952,13 @@ mod tests {
                 });
                 assert!(shell.active_sidebar_sections(cx)[0].session_ids.is_empty());
                 assert_eq!(shell.active_sidebar_pins(cx), vec!["regular".to_string()]);
-                shell.finish_sidebar_pin_write(1, Err("rejected".into()), cx);
+                shell.finish_sidebar_pin_write(
+                    1,
+                    Err(super::super::sidebar_pins::PinWriteFailure::Detail(
+                        "rejected".into(),
+                    )),
+                    cx,
+                );
                 assert_eq!(
                     shell.active_sidebar_sections(cx)[0].session_ids,
                     vec!["regular".to_string()]
@@ -1029,7 +1077,13 @@ mod tests {
                 let id = shell.sidebar_pin_write.as_ref().unwrap().id;
                 shell.migrate_sidebar_sections(cx);
                 assert_eq!(shell.sidebar_pin_write.as_ref().unwrap().queue.len(), 1);
-                shell.finish_sidebar_pin_write(id, Err("disk full".into()), cx);
+                shell.finish_sidebar_pin_write(
+                    id,
+                    Err(super::super::sidebar_pins::PinWriteFailure::Detail(
+                        "disk full".into(),
+                    )),
+                    cx,
+                );
                 assert_eq!(shell.settings.sidebar_sections_by_profile[&key], sections);
                 // A reconnect/restart permits another idempotent attempt.
                 shell.sidebar_section_migration = None;

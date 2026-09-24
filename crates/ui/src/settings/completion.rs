@@ -1,7 +1,13 @@
 //! Composer completion preferences in Settings → Shortcuts.
 
 use super::ShortcutsPage;
-use crate::{popover::Loadable, settings, settings::widgets, theme::Theme};
+use crate::{
+    i18n::{self, MessageId},
+    popover::Loadable,
+    settings,
+    settings::widgets,
+    theme::Theme,
+};
 use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
 use zeron_engine::registry::HarnessDescriptor;
 use zeron_proto::HarnessId;
@@ -18,8 +24,9 @@ fn active_agents(list: &[HarnessDescriptor]) -> Vec<(HarnessId, &'static str)> {
 impl ShortcutsPage {
     pub(crate) fn load_completion_harnesses(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.completion_harnesses =
-                Loadable::Error("Connect this device to load its active agents.".into());
+            self.completion_harnesses = Loadable::Error(
+                i18n::translate(MessageId::CompletionConnectDevice, i18n::locale(cx)).to_string(),
+            );
             return;
         };
         self.completion_harnesses = Loadable::Loading;
@@ -67,6 +74,7 @@ impl ShortcutsPage {
     }
 
     pub(super) fn render_completion(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let locale = i18n::locale(cx);
         let current = settings::current(cx);
         let customized =
             !current.skill_completion_by_harness.is_empty() || current.skills_in_slash_menu;
@@ -76,13 +84,16 @@ impl ShortcutsPage {
             .justify_between()
             .flex_wrap()
             .gap(px(12.0))
-            .child(widgets::field_label(theme, "Composer completion"))
+            .child(widgets::field_label(
+                theme,
+                i18n::translate(MessageId::CompletionTitle, locale),
+            ))
             .when(customized, |header| {
                 header.child(
                     widgets::ghost_action(theme)
                         .id("reset-completion")
                         .role(gpui::Role::Button)
-                        .aria_label("Restore composer completion defaults")
+                        .aria_label(i18n::translate(MessageId::CompletionResetAria, locale))
                         .tab_index(0)
                         .border_1()
                         .border_color(gpui::transparent_black())
@@ -96,62 +107,75 @@ impl ShortcutsPage {
                                 page.reset_completion(cx);
                             }
                         }))
-                        .child("Restore defaults"),
+                        .child(i18n::translate(MessageId::ShortcutsRestoreDefaults, locale)),
                 )
             });
-        let mut section = div().mt(px(28.0)).flex().flex_col().gap(px(12.0))
-            .child(div().flex().flex_col().gap(px(4.0)).child(header)
-                .child(widgets::page_subtitle(theme, "For active agents on this device. Completion preferences apply across your devices.")
-                    .mt(px(0.0)).line_height(px(20.0))));
+        let mut section = div().mt(px(28.0)).flex().flex_col().gap(px(12.0)).child(
+            div().flex().flex_col().gap(px(4.0)).child(header).child(
+                widgets::page_subtitle(
+                    theme,
+                    i18n::translate(MessageId::CompletionSubtitle, locale),
+                )
+                .mt(px(0.0))
+                .line_height(px(20.0)),
+            ),
+        );
         match &self.completion_harnesses {
             Loadable::Idle | Loadable::Loading => {
-                section = section.child(widgets::page_subtitle(theme, "Loading active agents…"));
+                section = section.child(widgets::page_subtitle(
+                    theme,
+                    i18n::translate(MessageId::CompletionLoading, locale),
+                ));
             }
             Loadable::Error(_) => {
-                section =
-                    section.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .flex_wrap()
-                            .gap(px(12.0))
-                            .child(widgets::page_subtitle(
-                                theme,
-                                "Unable to load active agents.",
-                            ))
-                            .child(
-                                widgets::ghost_action(theme)
-                                    .id("retry-completion-agents")
-                                    .role(gpui::Role::Button)
-                                    .aria_label("Retry loading active agents")
-                                    .tab_index(0)
-                                    .border_1()
-                                    .border_color(gpui::transparent_black())
-                                    .focus_visible(|s| s.border_color(theme.accent))
-                                    .on_click(cx.listener(|page, _, _, cx| {
+                section = section.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .flex_wrap()
+                        .gap(px(12.0))
+                        .child(widgets::page_subtitle(
+                            theme,
+                            i18n::translate(MessageId::CompletionLoadFailed, locale),
+                        ))
+                        .child(
+                            widgets::ghost_action(theme)
+                                .id("retry-completion-agents")
+                                .role(gpui::Role::Button)
+                                .aria_label(i18n::translate(MessageId::CompletionRetryAria, locale))
+                                .tab_index(0)
+                                .border_1()
+                                .border_color(gpui::transparent_black())
+                                .focus_visible(|s| s.border_color(theme.accent))
+                                .on_click(
+                                    cx.listener(|page, _, _, cx| {
                                         page.load_completion_harnesses(cx)
-                                    }))
-                                    .on_key_down(cx.listener(
-                                        |page, event: &gpui::KeyDownEvent, _, cx| {
-                                            if !event.is_held
-                                                && matches!(
-                                                    event.keystroke.key.as_str(),
-                                                    "enter" | "space"
-                                                )
-                                            {
-                                                cx.stop_propagation();
-                                                page.load_completion_harnesses(cx);
-                                            }
-                                        },
-                                    ))
-                                    .child("Retry"),
-                            ),
-                    );
+                                    }),
+                                )
+                                .on_key_down(cx.listener(
+                                    |page, event: &gpui::KeyDownEvent, _, cx| {
+                                        if !event.is_held
+                                            && matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            )
+                                        {
+                                            cx.stop_propagation();
+                                            page.load_completion_harnesses(cx);
+                                        }
+                                    },
+                                ))
+                                .child(i18n::translate(MessageId::CommonRetry, locale)),
+                        ),
+                );
             }
             Loadable::Ready(list) => {
                 let agents = active_agents(list);
                 if agents.is_empty() {
-                    section = section.child(widgets::page_subtitle(theme, "No active agents on this device. Enable an installed agent in Settings → Agents."));
+                    section = section.child(widgets::page_subtitle(
+                        theme,
+                        i18n::translate(MessageId::CompletionNoAgents, locale),
+                    ));
                 }
                 for (harness, name) in agents {
                     let preferences = current.skill_completion(harness);
@@ -175,28 +199,39 @@ impl ShortcutsPage {
                     for (dollar, label, description, enabled) in [
                         (
                             true,
-                            "Use $ for skills",
-                            "Type $ to find and insert a skill.",
+                            MessageId::CompletionUseDollar,
+                            MessageId::CompletionUseDollarHint,
                             preferences.dollar,
                         ),
                         (
                             false,
-                            "Separate / commands",
-                            "Keep skills out of the / command menu.",
+                            MessageId::CompletionSeparateCommands,
+                            MessageId::CompletionSeparateCommandsHint,
                             preferences.separate_from_slash,
                         ),
                     ]
                     .into_iter()
                     {
+                        let label = i18n::translate(label, locale);
+                        let description = i18n::translate(description, locale);
+                        let state = i18n::translate(
+                            if enabled {
+                                MessageId::CommonOn
+                            } else {
+                                MessageId::CommonOff
+                            },
+                            locale,
+                        );
                         card = card.child(
                             widgets::card_row(theme, true)
                                 .id(SharedString::from(format!(
                                     "completion-{harness:?}-{dollar}"
                                 )))
                                 .role(gpui::Role::Switch)
-                                .aria_label(format!(
-                                    "{name}: {label}, {}",
-                                    if enabled { "on" } else { "off" }
+                                .aria_label(i18n::fill_many(
+                                    MessageId::CompletionToggleAria,
+                                    &[("{name}", name), ("{label}", label), ("{state}", state)],
+                                    locale,
                                 ))
                                 .tab_index(0)
                                 .cursor_pointer()

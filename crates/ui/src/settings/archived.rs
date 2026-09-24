@@ -8,6 +8,7 @@ use gpui::{
 use zeron_proto::Chat;
 use zeron_rpc::methods;
 
+use crate::i18n::{self, MessageId};
 use crate::popover;
 use crate::settings::widgets;
 use crate::state::AppState;
@@ -61,7 +62,15 @@ impl ArchivedPage {
             this.update(cx, |page, cx| {
                 page.busy = None;
                 if let Err(err) = result {
-                    page.error = Some(format!("Unarchive failed: {err}").into());
+                    page.error = Some(
+                        i18n::fill(
+                            MessageId::ArchivedUnarchiveFailed,
+                            "{message}",
+                            &err.to_string(),
+                            i18n::locale(cx),
+                        )
+                        .into(),
+                    );
                 }
                 cx.notify();
             })
@@ -90,6 +99,7 @@ impl popover::ScrollRailHost for ArchivedPage {
 impl Render for ArchivedPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let now = chrono::Utc::now();
         let (rows, device_names): (Vec<Chat>, std::collections::HashMap<String, String>) = {
             let state = self.state.read(cx);
@@ -111,19 +121,22 @@ impl Render for ArchivedPage {
                 let title: SharedString = chat
                     .title
                     .clone()
-                    .unwrap_or_else(|| "Untitled session".into())
+                    .unwrap_or_else(|| {
+                        i18n::translate(MessageId::SessionUntitledArchived, locale).into()
+                    })
                     .into();
                 // Unknown device → no fragment at all (zeron renders the
                 // device span only when the name resolves).
                 let device: Option<SharedString> =
                     device_names.get(&chat.device_id).cloned().map(Into::into);
-                let time_ago: SharedString = crate::state::format_time_ago(
+                let time_ago: SharedString = crate::state::time_ago_compact(
                     chat.last_message_at.unwrap_or(chat.created_at),
                     now,
+                    locale,
                 )
                 .into();
                 let location: Option<SharedString> =
-                    crate::state::chat_location(&chat).map(Into::into);
+                    crate::state::chat_location_in(&chat, locale).map(Into::into);
                 let is_busy = busy.as_deref() == Some(chat.id.as_str());
                 let row_hovered = self.hovered == Some(ix);
                 let chat_id = chat.id.clone();
@@ -247,11 +260,14 @@ impl Render for ArchivedPage {
                                     .size(px(14.0))
                                     .text_color(theme.text_muted),
                             )
-                            .child(SharedString::from(if is_busy {
-                                "Unarchiving…"
-                            } else {
-                                "Unarchive"
-                            })),
+                            .child(SharedString::from(i18n::translate(
+                                if is_busy {
+                                    MessageId::ArchivedUnarchiving
+                                } else {
+                                    MessageId::CommonUnarchive
+                                },
+                                locale,
+                            ))),
                     )
                     .into_any_element()
             })
@@ -277,16 +293,20 @@ impl Render for ArchivedPage {
                     div()
                         .mt(px(12.0))
                         .text_size(crate::typography::ui_rems(14.0))
-                        .child(SharedString::from("Nothing archived")),
+                        .child(SharedString::from(i18n::translate(
+                            MessageId::ArchivedEmpty,
+                            locale,
+                        ))),
                 )
                 .child(
                     div()
                         .mt(px(4.0))
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted.opacity(0.4))
-                        .child(SharedString::from(
-                            "Right-click a session in the sidebar to archive it.",
-                        )),
+                        .child(SharedString::from(i18n::translate(
+                            MessageId::ArchivedEmptyHint,
+                            locale,
+                        ))),
                 )
                 .into_any_element()
         } else {
@@ -315,12 +335,12 @@ impl Render for ArchivedPage {
                         widgets::page_column()
                             .child(widgets::page_header(
                                 &theme,
-                                "Archived sessions",
+                                i18n::translate(MessageId::ArchivedTitle, locale),
                                 (count > 0).then_some(count),
                             ))
                             .child(widgets::page_subtitle(
                                 &theme,
-                                "Hidden from the sidebar, never deleted. Unarchiving puts a session back on its device.",
+                                i18n::translate(MessageId::ArchivedSubtitle, locale),
                             ))
                             .when_some(self.error.clone(), |el, message| {
                                 el.child(

@@ -14,6 +14,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::attachments::StagedAttachment;
+use crate::i18n::{self, Locale, MessageId};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -81,14 +82,15 @@ pub enum CapabilityState {
 }
 
 impl CapabilityState {
-    pub fn badge(self) -> &'static str {
+    /// The badge's display copy; the caller renders it with its locale.
+    pub fn badge_message(self) -> MessageId {
         match self {
-            Self::Checking => "Checking",
-            Self::Ready => "Ready",
-            Self::PermissionRequired => "Required",
-            Self::SetupRequired => "Set up",
-            Self::UserSelection => "Select window",
-            Self::Unavailable => "Unavailable",
+            Self::Checking => MessageId::AppshotsBadgeChecking,
+            Self::Ready => MessageId::AppshotsBadgeReady,
+            Self::PermissionRequired => MessageId::AppshotsBadgeRequired,
+            Self::SetupRequired => MessageId::AppshotsBadgeSetUp,
+            Self::UserSelection => MessageId::AppshotsBadgeSelectWindow,
+            Self::Unavailable => MessageId::AppshotsBadgeUnavailable,
         }
     }
 
@@ -113,77 +115,55 @@ pub struct AppshotCapabilities {
 }
 
 impl AppshotCapabilities {
-    pub fn setup_description(self) -> &'static str {
+    /// Page subtitle: how this platform gets Appshots set up.
+    pub fn setup_message(self) -> MessageId {
         match self.platform {
-            AppshotPlatform::MacOs => {
-                "Set up once, one permission at a time. Screen Recording captures the window; Accessibility optionally adds off-screen application text."
-            }
-            AppshotPlatform::LinuxWayland => {
-                "Your desktop owns capture and shortcut consent. Zeron checks each portal capability separately and explains any required fallback."
-            }
-            AppshotPlatform::LinuxX11 => {
-                "X11 normally needs no capture permission. Zeron prefers an active-window screenshot portal when available and otherwise uses native X11 capture."
-            }
-            AppshotPlatform::Unsupported => {
-                "This platform does not currently provide an Appshot capture backend."
-            }
+            AppshotPlatform::MacOs => MessageId::AppshotsSetupMacOs,
+            AppshotPlatform::LinuxWayland => MessageId::AppshotsSetupWayland,
+            AppshotPlatform::LinuxX11 => MessageId::AppshotsSetupX11,
+            AppshotPlatform::Unsupported => MessageId::AppshotsSetupUnsupported,
         }
     }
 
-    pub fn shortcut_description(self) -> &'static str {
+    /// Row description for the global-shortcut capability.
+    pub fn shortcut_message(self) -> MessageId {
         match self.platform {
             AppshotPlatform::MacOs | AppshotPlatform::LinuxX11
                 if self.global_shortcut != CapabilityState::Ready =>
             {
-                "This shortcut is unavailable. Choose a different key combination."
+                MessageId::AppshotsShortcutUnavailable
             }
-            AppshotPlatform::MacOs | AppshotPlatform::LinuxX11 => {
-                "The shortcut works while another application has focus."
-            }
+            AppshotPlatform::MacOs | AppshotPlatform::LinuxX11 => MessageId::AppshotsShortcutGlobal,
             AppshotPlatform::LinuxWayland if self.global_shortcut == CapabilityState::Ready => {
-                "Your desktop portal controls the binding. Confirm changes in its shortcut settings."
+                MessageId::AppshotsShortcutWaylandPortal
             }
-            AppshotPlatform::LinuxWayland => {
-                "Bind `zeron appshot` in your desktop's Keyboard Shortcuts settings."
-            }
-            AppshotPlatform::Unsupported => "This platform has no Appshot shortcut backend.",
+            AppshotPlatform::LinuxWayland => MessageId::AppshotsShortcutWaylandManual,
+            AppshotPlatform::Unsupported => MessageId::AppshotsShortcutUnsupported,
         }
     }
 
-    pub fn capture_description(self) -> &'static str {
+    /// Row description for the window-capture capability.
+    pub fn capture_message(self) -> MessageId {
         match (self.platform, self.target) {
-            (AppshotPlatform::MacOs, _) => {
-                "Screen Recording lets Zeron capture the frontmost window. macOS may request one restart."
-            }
-            (AppshotPlatform::LinuxX11, _) => {
-                "Zeron uses native X11 capture when active-window portal capture is unavailable. Obscured or protected windows may be incomplete."
-            }
+            (AppshotPlatform::MacOs, _) => MessageId::AppshotsCaptureMacOs,
+            (AppshotPlatform::LinuxX11, _) => MessageId::AppshotsCaptureX11,
             (AppshotPlatform::LinuxWayland, CaptureTarget::ActiveWindow) => {
-                "Your screenshot portal supports the active-window target. A system consent surface may appear."
+                MessageId::AppshotsCaptureWaylandActiveWindow
             }
             (AppshotPlatform::LinuxWayland, CaptureTarget::PortalWindowPicker) => {
-                "Your portal requires choosing a window for each capture."
+                MessageId::AppshotsCaptureWaylandPicker
             }
-            (AppshotPlatform::Unsupported, _) => {
-                "Active-window capture is unavailable on this platform."
-            }
+            (AppshotPlatform::Unsupported, _) => MessageId::AppshotsCaptureUnsupported,
         }
     }
 
-    pub fn semantic_description(self) -> &'static str {
+    /// Row description for the application-text capability.
+    pub fn semantic_message(self) -> MessageId {
         match self.platform {
-            AppshotPlatform::MacOs => {
-                "Accessibility adds visible and off-screen application text. Screenshots work without it."
-            }
-            AppshotPlatform::LinuxWayland => {
-                "This portal does not identify the captured window, so Appshots include the screenshot only."
-            }
-            AppshotPlatform::LinuxX11 => {
-                "Native X11 captures can include AT-SPI text when the process and window can be matched uniquely. Portal captures include the screenshot only."
-            }
-            AppshotPlatform::Unsupported => {
-                "Semantic application text is unavailable on this platform."
-            }
+            AppshotPlatform::MacOs => MessageId::AppshotsSemanticMacOs,
+            AppshotPlatform::LinuxWayland => MessageId::AppshotsSemanticWayland,
+            AppshotPlatform::LinuxX11 => MessageId::AppshotsSemanticX11,
+            AppshotPlatform::Unsupported => MessageId::AppshotsSemanticUnsupported,
         }
     }
 }
@@ -235,9 +215,9 @@ impl AppshotBackend for UnsupportedBackend {
     }
 
     async fn capture_active_window(&self) -> Result<CapturedAppshot, CaptureError> {
-        Err(CaptureError::CaptureFailed(
-            "Appshots are not available on this platform.".into(),
-        ))
+        Err(CaptureError::CaptureFailed(CaptureFailure::new(
+            MessageId::AppshotErrorUnavailable,
+        )))
     }
 }
 
@@ -260,11 +240,12 @@ pub enum AppshotDestination {
 impl AppshotDestination {
     pub const ALL: [Self; 3] = [Self::Automatic, Self::LastSession, Self::NewSession];
 
-    pub fn label(self) -> &'static str {
+    /// The destination chip's display copy; the caller renders it with its locale.
+    pub fn label_message(self) -> MessageId {
         match self {
-            Self::Automatic => "Automatic",
-            Self::LastSession => "Last session",
-            Self::NewSession => "New session",
+            Self::Automatic => MessageId::AppshotsDestinationAutomatic,
+            Self::LastSession => MessageId::AppshotsDestinationLastSession,
+            Self::NewSession => MessageId::AppshotsDestinationNewSession,
         }
     }
 }
@@ -320,23 +301,30 @@ pub fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 pub fn validate_capture_dimensions(width: u32, height: u32) -> Result<usize, CaptureError> {
     if width == 0 || height == 0 || width > MAX_CAPTURE_DIMENSION || height > MAX_CAPTURE_DIMENSION
     {
-        return Err(CaptureError::CaptureFailed(format!(
-            "The captured window dimensions ({width}×{height}) are not supported."
-        )));
+        return Err(CaptureError::CaptureFailed(
+            CaptureFailure::new(MessageId::AppshotErrorDimensionsUnsupported)
+                .with("{width}", width.to_string())
+                .with("{height}", height.to_string()),
+        ));
     }
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
-        .ok_or_else(|| CaptureError::CaptureFailed("The captured window is too large.".into()))?;
-    let rgba_bytes = pixels
-        .checked_mul(4)
-        .ok_or_else(|| CaptureError::CaptureFailed("The captured window is too large.".into()))?;
+        .ok_or_else(|| {
+            CaptureError::CaptureFailed(CaptureFailure::new(MessageId::AppshotErrorTooLarge))
+        })?;
+    let rgba_bytes = pixels.checked_mul(4).ok_or_else(|| {
+        CaptureError::CaptureFailed(CaptureFailure::new(MessageId::AppshotErrorTooLarge))
+    })?;
     if pixels > MAX_CAPTURE_PIXELS || rgba_bytes > MAX_CAPTURE_RGBA_BYTES {
-        return Err(CaptureError::CaptureFailed(format!(
-            "The captured window ({width}×{height}) exceeds Zeron's capture budget."
-        )));
+        return Err(CaptureError::CaptureFailed(
+            CaptureFailure::new(MessageId::AppshotErrorBudgetExceeded)
+                .with("{width}", width.to_string())
+                .with("{height}", height.to_string()),
+        ));
     }
-    usize::try_from(rgba_bytes)
-        .map_err(|_| CaptureError::CaptureFailed("The captured window is too large.".into()))
+    usize::try_from(rgba_bytes).map_err(|_| {
+        CaptureError::CaptureFailed(CaptureFailure::new(MessageId::AppshotErrorTooLarge))
+    })
 }
 
 /// Turn OS-provided application names into one safe filename component.
@@ -368,15 +356,18 @@ pub fn safe_app_name(value: &str) -> String {
 /// Opaque margins, rounded corners and even alpha=1 pixels remain untouched.
 fn trim_appshot_padding(bytes: &[u8]) -> Result<Option<Vec<u8>>, CaptureError> {
     let invalid = |error: png::DecodingError| {
-        CaptureError::CaptureFailed(format!("Could not decode the captured window: {error}"))
+        CaptureError::CaptureFailed(
+            CaptureFailure::new(MessageId::AppshotErrorDecodeFailed)
+                .with("{err}", error.to_string()),
+        )
     };
     if bytes.len() as u64 > crate::attachments::MAX_ATTACHMENT_BYTES {
-        return Err(CaptureError::CaptureFailed(
-            "The captured window is larger than Zeron's 24 MB image limit.".into(),
-        ));
+        return Err(CaptureError::CaptureFailed(CaptureFailure::new(
+            MessageId::AppshotErrorImageLimit,
+        )));
     }
     let (width, height) = png_dimensions(bytes).ok_or_else(|| {
-        CaptureError::CaptureFailed("The captured window is not a valid PNG image.".into())
+        CaptureError::CaptureFailed(CaptureFailure::new(MessageId::AppshotErrorInvalidPng))
     })?;
     validate_capture_dimensions(width, height)?;
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
@@ -395,7 +386,9 @@ fn trim_appshot_padding(bytes: &[u8]) -> Result<Option<Vec<u8>>, CaptureError> {
     let buffer_size = reader
         .output_buffer_size()
         .filter(|size| *size <= MAX_CAPTURE_RGBA_BYTES as usize)
-        .ok_or_else(|| CaptureError::CaptureFailed("The captured window is too large.".into()))?;
+        .ok_or_else(|| {
+            CaptureError::CaptureFailed(CaptureFailure::new(MessageId::AppshotErrorTooLarge))
+        })?;
     let mut pixels = vec![0; buffer_size];
     let frame = reader.next_frame(&mut pixels).map_err(invalid)?;
     let sample_bytes = frame.bit_depth as usize / 8;
@@ -452,7 +445,10 @@ fn trim_appshot_padding(bytes: &[u8]) -> Result<Option<Vec<u8>>, CaptureError> {
         .and_then(|encoder| encoder.write_header())
         .and_then(|mut writer| writer.write_image_data(&pixels))
         .map_err(|error| {
-            CaptureError::CaptureFailed(format!("Could not encode the captured window: {error}"))
+            CaptureError::CaptureFailed(
+                CaptureFailure::new(MessageId::AppshotErrorEncodeFailed)
+                    .with("{err}", error.to_string()),
+            )
         })?;
     Ok(Some(output.bytes))
 }
@@ -462,13 +458,13 @@ pub fn stage_appshot_png(
     bytes: Vec<u8>,
 ) -> Result<(StagedAttachment, (u32, u32)), CaptureError> {
     if bytes.len() as u64 > crate::attachments::MAX_ATTACHMENT_BYTES {
-        return Err(CaptureError::CaptureFailed(
-            "The captured window is larger than Zeron's 24 MB image limit.".into(),
-        ));
+        return Err(CaptureError::CaptureFailed(CaptureFailure::new(
+            MessageId::AppshotErrorImageLimit,
+        )));
     }
     let bytes = trim_appshot_padding(&bytes)?.unwrap_or(bytes);
     let dimensions = png_dimensions(&bytes).ok_or_else(|| {
-        CaptureError::CaptureFailed("The captured window is not a valid PNG image.".into())
+        CaptureError::CaptureFailed(CaptureFailure::new(MessageId::AppshotErrorInvalidPng))
     })?;
     validate_capture_dimensions(dimensions.0, dimensions.1)?;
     Ok((
@@ -512,9 +508,10 @@ pub fn encode_rgba_png(
 ) -> Result<Vec<u8>, CaptureError> {
     let expected = validate_capture_dimensions(width, height)?;
     if rgba.len() != expected {
-        return Err(CaptureError::CaptureFailed(format!(
-            "{platform} returned an invalid pixel buffer."
-        )));
+        return Err(CaptureError::CaptureFailed(
+            CaptureFailure::new(MessageId::AppshotErrorPlatformPixelBuffer)
+                .with("{platform}", platform),
+        ));
     }
     let mut output = AttachmentBudgetWriter { bytes: Vec::new() };
     {
@@ -525,10 +522,37 @@ pub fn encode_rgba_png(
             .write_header()
             .and_then(|mut writer| writer.write_image_data(rgba))
             .map_err(|error| {
-                CaptureError::CaptureFailed(format!("{platform} Appshot encoding failed: {error}"))
+                CaptureError::CaptureFailed(
+                    CaptureFailure::new(MessageId::AppshotErrorPlatformEncodeFailed)
+                        .with("{platform}", platform)
+                        .with("{err}", error.to_string()),
+                )
             })?;
     }
     Ok(output.bytes)
+}
+
+/// Repo-authored capture failure: the row to render plus the values its
+/// placeholders take. Values are inserted verbatim, never translated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureFailure {
+    message: MessageId,
+    values: Vec<(&'static str, String)>,
+}
+
+impl CaptureFailure {
+    pub fn new(message: MessageId) -> Self {
+        Self {
+            message,
+            values: Vec::new(),
+        }
+    }
+
+    /// Add a placeholder value, e.g. `("{width}", width.to_string())`.
+    pub fn with(mut self, placeholder: &'static str, value: impl Into<String>) -> Self {
+        self.values.push((placeholder, value.into()));
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -538,23 +562,40 @@ pub enum CaptureError {
     SelfCapture,
     NoEligibleWindow,
     ShortcutUnavailable,
-    CaptureFailed(String),
+    CaptureFailed(CaptureFailure),
+}
+
+impl CaptureError {
+    /// The user-facing text for `locale`. `Display` renders the same copy in
+    /// English, so logs and the UI never diverge.
+    pub fn text(&self, locale: Locale) -> gpui::SharedString {
+        match self {
+            Self::PermissionRequired => {
+                i18n::translate(MessageId::AppshotErrorPermissionRequired, locale).into()
+            }
+            Self::Cancelled => i18n::translate(MessageId::AppshotErrorCancelled, locale).into(),
+            Self::SelfCapture => i18n::translate(MessageId::AppshotErrorSelfCapture, locale).into(),
+            Self::NoEligibleWindow => {
+                i18n::translate(MessageId::AppshotErrorNoEligibleWindow, locale).into()
+            }
+            Self::ShortcutUnavailable => {
+                i18n::translate(MessageId::AppshotErrorShortcutUnavailable, locale).into()
+            }
+            Self::CaptureFailed(failure) => {
+                let values: Vec<(&str, &str)> = failure
+                    .values
+                    .iter()
+                    .map(|(placeholder, value)| (*placeholder, value.as_str()))
+                    .collect();
+                i18n::fill_many(failure.message, &values, locale).into()
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for CaptureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::PermissionRequired => f.write_str(
-                "Window capture permission is required. Open Zeron Settings → Appshots for the platform-specific recovery step.",
-            ),
-            Self::Cancelled => f.write_str("Appshot capture cancelled."),
-            Self::SelfCapture => f.write_str("Switch to another app to capture an Appshot."),
-            Self::NoEligibleWindow => f.write_str("No application window is available to capture."),
-            Self::ShortcutUnavailable => f.write_str(
-                "The Appshot shortcut could not be registered because another app may be using it.",
-            ),
-            Self::CaptureFailed(message) => f.write_str(message),
-        }
+        write!(f, "{}", self.text(Locale::En))
     }
 }
 
@@ -1220,12 +1261,14 @@ pub(crate) mod tests {
             application_text: CapabilityState::Ready,
             target: CaptureTarget::PortalWindowPicker,
         };
-        assert!(
-            capabilities
-                .shortcut_description()
-                .contains("zeron appshot")
+        assert_eq!(
+            capabilities.shortcut_message(),
+            MessageId::AppshotsShortcutWaylandManual
         );
-        assert!(capabilities.capture_description().contains("each capture"));
+        assert_eq!(
+            capabilities.capture_message(),
+            MessageId::AppshotsCaptureWaylandPicker
+        );
         assert!(capabilities.window_capture.is_ready());
     }
 }

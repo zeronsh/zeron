@@ -1,5 +1,8 @@
 //! Context occupancy is read from the replicated chat snapshot, never local CLI state.
-use crate::theme::Theme;
+use crate::{
+    i18n::{self, Locale, MessageId},
+    theme::Theme,
+};
 use gpui::{
     Context, IntoElement, PathBuilder, Render, SharedString, Window, canvas, div, point,
     prelude::*, px,
@@ -103,34 +106,45 @@ pub fn has_window(usage: Option<ContextUsage>) -> bool {
         .is_some_and(|window| window > 0)
 }
 
-fn details(usage: Option<ContextUsage>) -> String {
+fn details(usage: Option<ContextUsage>, locale: Locale) -> gpui::SharedString {
     match usage.unwrap_or_default() {
         ContextUsage {
             tokens: Some(tokens),
             window: Some(window),
-        } if window > 0 => {
-            format!(
-                "{} / {} tokens\n{} tokens remaining",
-                with_separators(tokens),
-                with_separators(window),
-                with_separators(window.saturating_sub(tokens))
-            )
-        }
+        } if window > 0 => i18n::fill_many(
+            MessageId::ContextUsageRemaining,
+            &[
+                ("{used}", &with_separators(tokens)),
+                ("{total}", &with_separators(window)),
+                (
+                    "{remaining}",
+                    &with_separators(window.saturating_sub(tokens)),
+                ),
+            ],
+            locale,
+        )
+        .into(),
         ContextUsage {
             tokens: Some(tokens),
             ..
-        } => format!(
-            "{} tokens used\nContext limit not reported",
-            with_separators(tokens)
-        ),
+        } => i18n::fill(
+            MessageId::ContextUsageUsed,
+            "{used}",
+            &with_separators(tokens),
+            locale,
+        )
+        .into(),
         ContextUsage {
             window: Some(window),
             ..
-        } if window > 0 => format!(
-            "{} token capacity\nWaiting for context usage",
-            with_separators(window)
-        ),
-        _ => "Context usage not reported by this harness yet".into(),
+        } if window > 0 => i18n::fill(
+            MessageId::ContextUsageWaiting,
+            "{capacity}",
+            &with_separators(window),
+            locale,
+        )
+        .into(),
+        _ => i18n::translate(MessageId::ContextUsageNotReported, locale).into(),
     }
 }
 
@@ -147,7 +161,10 @@ impl Render for UsageCard {
                     .text_size(px(12.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child("Context window"),
+                    .child(i18n::translate(
+                        MessageId::ContextUsageTitle,
+                        i18n::locale(cx),
+                    )),
             )
             .child(
                 // the lines break only at their own newlines: a tooltip sizes
@@ -159,6 +176,7 @@ impl Render for UsageCard {
                     .text_color(theme.text_muted)
                     .child(SharedString::from(details(
                         self.state.read(cx).context_usage,
+                        i18n::locale(cx),
                     ))),
             );
         crate::frost::frosted(crate::popover::CARD_RADIUS, crate::frost::MENU_BLUR, card)
@@ -187,28 +205,89 @@ mod tests {
 
     #[test]
     fn missing_usage_is_distinct_from_zero_and_overflow() {
-        assert!(details(None).contains("not reported"));
+        assert!(details(None, Locale::En).contains("not reported"));
         assert!(
-            details(Some(ContextUsage {
-                tokens: Some(0),
-                window: Some(200)
-            }))
+            details(
+                Some(ContextUsage {
+                    tokens: Some(0),
+                    window: Some(200)
+                }),
+                Locale::En
+            )
             .contains("200 tokens remaining")
         );
         assert!(
-            details(Some(ContextUsage {
-                tokens: Some(250),
-                window: Some(200)
-            }))
+            details(
+                Some(ContextUsage {
+                    tokens: Some(250),
+                    window: Some(200)
+                }),
+                Locale::En
+            )
             .contains("0 tokens remaining")
         );
         assert!(
-            details(Some(ContextUsage {
-                tokens: Some(10),
-                window: Some(0)
-            }))
+            details(
+                Some(ContextUsage {
+                    tokens: Some(10),
+                    window: Some(0)
+                }),
+                Locale::En
+            )
             .contains("limit not reported")
         );
+    }
+
+    #[test]
+    fn every_detail_branch_reads_its_template_in_both_locales() {
+        let remaining = ContextUsage {
+            tokens: Some(5417),
+            window: Some(1_048_576),
+        };
+        assert_eq!(
+            details(Some(remaining), Locale::En),
+            "5,417 / 1,048,576 tokens\n1,043,159 tokens remaining"
+        );
+        assert_eq!(
+            details(Some(remaining), Locale::ZhCn),
+            "5,417 / 1,048,576 tokens\n剩余 1,043,159 tokens"
+        );
+        assert_ne!(
+            details(Some(remaining), Locale::ZhCn),
+            details(Some(remaining), Locale::En)
+        );
+
+        let used = ContextUsage {
+            tokens: Some(1200),
+            window: None,
+        };
+        assert_eq!(
+            details(Some(used), Locale::En),
+            "1,200 tokens used\nContext limit not reported"
+        );
+        assert_eq!(
+            details(Some(used), Locale::ZhCn),
+            "已使用 1,200 tokens\n未上报上下文上限"
+        );
+
+        let waiting = ContextUsage {
+            tokens: None,
+            window: Some(200_000),
+        };
+        assert_eq!(
+            details(Some(waiting), Locale::En),
+            "200,000 token capacity\nWaiting for context usage"
+        );
+        assert_eq!(
+            details(Some(waiting), Locale::ZhCn),
+            "200,000 tokens 容量\n正在等待上下文用量"
+        );
+
+        assert_eq!(
+            details(None, Locale::En),
+            "Context usage not reported by this harness yet"
+        );
+        assert_eq!(details(None, Locale::ZhCn), "此 Harness 尚未上报上下文用量");
     }
 
     #[test]
@@ -218,11 +297,9 @@ mod tests {
         assert_eq!(with_separators(5417), "5,417");
         assert_eq!(with_separators(1_048_576), "1,048,576");
         assert_eq!(
-            details(Some(ContextUsage {
-                tokens: Some(5417),
-                window: Some(1_048_576)
-            })),
-            "5,417 / 1,048,576 tokens\n1,043,159 tokens remaining"
+            with_separators(1_043_159),
+            "1,043,159",
+            "the remaining count is formatted, not translated"
         );
     }
 }

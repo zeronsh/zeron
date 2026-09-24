@@ -49,7 +49,29 @@ impl Palette {
     }
 }
 
-pub fn render(source: &str, palette: &Palette) -> Result<String, String> {
+/// Why a diagram could not be rendered.
+///
+/// Structured rather than a message string: a rendered SVG is cached per style
+/// generation, so the copy has to resolve where it is drawn, not where the
+/// diagram is rendered. [`Self::message_id`] is the only source of that text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagramError {
+    TooComplex,
+    TooLarge,
+    RenderFailed,
+}
+
+impl DiagramError {
+    pub const fn message_id(self) -> crate::i18n::MessageId {
+        match self {
+            Self::TooComplex => crate::i18n::MessageId::MarkdownDiagramTooComplex,
+            Self::TooLarge => crate::i18n::MessageId::MarkdownDiagramTooLarge,
+            Self::RenderFailed => crate::i18n::MessageId::MarkdownDiagramRenderFailed,
+        }
+    }
+}
+
+pub fn render(source: &str, palette: &Palette) -> Result<String, DiagramError> {
     if source.len() > MAX_SOURCE_BYTES
         || source.lines().count() > 256
         || source
@@ -57,7 +79,7 @@ pub fn render(source: &str, palette: &Palette) -> Result<String, String> {
             .count()
             > 2048
     {
-        return Err("Diagram exceeds preview complexity limit".into());
+        return Err(DiagramError::TooComplex);
     }
     let _guard = RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::panic::catch_unwind(|| {
@@ -88,14 +110,16 @@ pub fn render(source: &str, palette: &Palette) -> Result<String, String> {
         theme.sequence_note_border = palette.border.clone();
         theme.sequence_activation_fill = palette.accent.clone();
         theme.sequence_activation_border = palette.border.clone();
-        let svg =
-            mermaid_rs_renderer::render_with_options(source, options).map_err(|e| e.to_string())?;
+        let svg = mermaid_rs_renderer::render_with_options(source, options).map_err(|error| {
+            tracing::debug!(%error, "mermaid render failed");
+            DiagramError::RenderFailed
+        })?;
         if svg.len() > 2 * 1024 * 1024 {
-            return Err("Diagram output exceeds preview size limit".into());
+            return Err(DiagramError::TooLarge);
         }
         Ok(svg)
     })
-    .unwrap_or_else(|_| Err("Diagram could not be rendered".into()))
+    .unwrap_or(Err(DiagramError::RenderFailed))
 }
 
 #[cfg(test)]
@@ -142,7 +166,8 @@ mod tests {
         ] {
             let palette = Palette::from_theme(&theme);
             for (name, source) in CORPUS {
-                let svg = render(source, &palette).unwrap_or_else(|e| panic!("{mode}/{name}: {e}"));
+                let svg =
+                    render(source, &palette).unwrap_or_else(|e| panic!("{mode}/{name}: {e:?}"));
                 assert!(!svg.contains("<foreignObject"));
                 let raster = renderer.render_single_frame(svg.as_bytes(), 1.0).unwrap();
                 assert!(raster.size(0).width.0 > 0);
@@ -188,5 +213,20 @@ mod tests {
         assert!(render("this is not a diagram", &palette).is_err());
         assert!(render(&"x".repeat(MAX_SOURCE_BYTES + 1), &palette).is_err());
         assert!(render("flowchart TD\nA[Hola<br/>mundo] --> B[Fin]", &palette).is_ok());
+    }
+
+    /// The failure copy lives in the message table, so every variant must have
+    /// both locales available.
+    #[test]
+    fn diagram_errors_map_to_translated_message_keys() {
+        for error in [
+            DiagramError::TooComplex,
+            DiagramError::TooLarge,
+            DiagramError::RenderFailed,
+        ] {
+            let id = error.message_id();
+            assert!(!id.english().trim().is_empty(), "{id:?}");
+            assert!(id.chinese().is_some(), "{id:?} needs Chinese copy");
+        }
     }
 }

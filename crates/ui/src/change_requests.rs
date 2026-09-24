@@ -7,8 +7,11 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::{AnyElement, Context, Render, SharedString, Window, div, prelude::*, px};
-use zeron_proto::{ChangeRequestSummary, Chat, CheckoutChangeRequestStatus, Space};
+use zeron_proto::{
+    ChangeRequestState, ChangeRequestSummary, Chat, CheckoutChangeRequestStatus, Space,
+};
 
+use crate::i18n::{self, Locale, MessageId};
 use crate::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,27 +34,39 @@ impl ChangeRequestBadgeTone {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChangeRequestBadgeModel {
     pub number: SharedString,
-    pub state_label: &'static str,
+    /// The state itself, not its label: the badge draws only the number, and the
+    /// tooltip names the state in the active locale.
+    pub state: ChangeRequestState,
     pub title: SharedString,
     pub tone: ChangeRequestBadgeTone,
 }
 
 impl ChangeRequestBadgeModel {
     pub fn from_summary(summary: &ChangeRequestSummary) -> Self {
-        use zeron_proto::ChangeRequestState;
-
-        let (state_label, tone) = match summary.state {
-            ChangeRequestState::Open => ("Open", ChangeRequestBadgeTone::Open),
-            ChangeRequestState::Merged => ("Merged", ChangeRequestBadgeTone::Merged),
-            ChangeRequestState::Closed => ("Closed", ChangeRequestBadgeTone::Closed),
+        let tone = match summary.state {
+            ChangeRequestState::Open => ChangeRequestBadgeTone::Open,
+            ChangeRequestState::Merged => ChangeRequestBadgeTone::Merged,
+            ChangeRequestState::Closed => ChangeRequestBadgeTone::Closed,
         };
         Self {
             number: format!("#{}", summary.number).into(),
-            state_label,
+            state: summary.state,
             title: summary.title.replace(['\r', '\n'], " ").into(),
             tone,
         }
     }
+}
+
+/// The state's label in `locale` — "Open" / "Merged" / "Closed".
+fn state_label(state: ChangeRequestState, locale: Locale) -> &'static str {
+    i18n::translate(
+        match state {
+            ChangeRequestState::Open => MessageId::ChangeRequestStateOpen,
+            ChangeRequestState::Merged => MessageId::ChangeRequestStateMerged,
+            ChangeRequestState::Closed => MessageId::ChangeRequestStateClosed,
+        },
+        locale,
+    )
 }
 
 pub(crate) struct ChangeRequestTooltip {
@@ -69,6 +84,7 @@ impl ChangeRequestTooltip {
 impl Render for ChangeRequestTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
+        let locale = i18n::locale(cx);
         let card = div()
             .max_w(px(320.0))
             .px(px(9.0))
@@ -86,9 +102,13 @@ impl Render for ChangeRequestTooltip {
                     .text_size(px(11.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(self.model.tone.color(theme))
-                    .child(SharedString::from(format!(
-                        "PR {} · {}",
-                        self.model.number, self.model.state_label
+                    .child(SharedString::from(i18n::fill_many(
+                        MessageId::ChangeRequestTooltipTitle,
+                        &[
+                            ("{number}", &self.model.number),
+                            ("{state}", state_label(self.model.state, locale)),
+                        ],
+                        locale,
                     ))),
             )
             .child(
@@ -625,23 +645,11 @@ mod tests {
     #[test]
     fn badge_models_cover_open_merged_and_closed() {
         let cases = [
-            (
-                ChangeRequestState::Open,
-                "Open",
-                ChangeRequestBadgeTone::Open,
-            ),
-            (
-                ChangeRequestState::Merged,
-                "Merged",
-                ChangeRequestBadgeTone::Merged,
-            ),
-            (
-                ChangeRequestState::Closed,
-                "Closed",
-                ChangeRequestBadgeTone::Closed,
-            ),
+            (ChangeRequestState::Open, ChangeRequestBadgeTone::Open),
+            (ChangeRequestState::Merged, ChangeRequestBadgeTone::Merged),
+            (ChangeRequestState::Closed, ChangeRequestBadgeTone::Closed),
         ];
-        for (state, label, tone) in cases {
+        for (state, tone) in cases {
             let mut summary = snapshot("local", "/repo", "checkout")
                 .change_request
                 .unwrap();
@@ -649,9 +657,26 @@ mod tests {
             summary.title = "First line\nSecond line".into();
             let model = ChangeRequestBadgeModel::from_summary(&summary);
             assert_eq!(model.number, "#90");
-            assert_eq!(model.state_label, label);
+            assert_eq!(model.state, state);
             assert_eq!(model.tone, tone);
             assert_eq!(model.title, "First line Second line");
+            // The state's label is copy, named at render time.
+            assert_eq!(
+                state_label(model.state, Locale::En),
+                match state {
+                    ChangeRequestState::Open => "Open",
+                    ChangeRequestState::Merged => "Merged",
+                    ChangeRequestState::Closed => "Closed",
+                }
+            );
+            assert_eq!(
+                state_label(model.state, Locale::ZhCn),
+                match state {
+                    ChangeRequestState::Open => "开放",
+                    ChangeRequestState::Merged => "已合并",
+                    ChangeRequestState::Closed => "已关闭",
+                }
+            );
         }
     }
 }

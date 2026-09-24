@@ -13,6 +13,7 @@ use zeron_proto::WorkspaceScope;
 use zeron_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::i18n::{self, Locale, MessageId, RelativeUnit};
 use crate::popover;
 use crate::settings::widgets;
 use crate::state::AppState;
@@ -28,30 +29,65 @@ pub fn device_online(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bo
         .is_some_and(|at| now.signed_duration_since(at).num_seconds() <= DEVICE_ONLINE_WINDOW_SECS)
 }
 
-/// Compact last-seen line. Pure.
-pub fn format_last_seen(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+/// A language-neutral freshness bucket for a last-seen timestamp.
+///
+/// The sidebar keeps one of these as a change-detection key, so switching the
+/// interface language can never leave a stale translated label in cached state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastSeen {
+    Never,
+    JustNow,
+    Minutes(u64),
+    Hours(u64),
+    Days(u64),
+}
+
+impl LastSeen {
+    /// Compact label, e.g. `5m ago` / `5 分钟前`.
+    pub fn label(self, locale: Locale) -> String {
+        match self {
+            Self::Never => i18n::translate(MessageId::RelativeNeverSeen, locale).to_string(),
+            Self::JustNow => i18n::translate(MessageId::RelativeJustNow, locale).to_string(),
+            Self::Minutes(count) => i18n::relative_ago(count, RelativeUnit::Minutes, locale),
+            Self::Hours(count) => i18n::relative_ago(count, RelativeUnit::Hours, locale),
+            Self::Days(count) => i18n::relative_ago(count, RelativeUnit::Days, locale),
+        }
+    }
+}
+
+/// Bucket a last-seen timestamp. Pure.
+pub fn last_seen_bucket(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> LastSeen {
     let Some(at) = last_seen else {
-        return "never seen".to_string();
+        return LastSeen::Never;
     };
     let secs = now.signed_duration_since(at).num_seconds();
     if secs < 60 {
-        "just now".to_string()
+        LastSeen::JustNow
     } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
+        LastSeen::Minutes((secs / 60) as u64)
     } else if secs < 86_400 {
-        format!("{}h ago", secs / 3600)
+        LastSeen::Hours((secs / 3600) as u64)
     } else {
-        format!("{}d ago", secs / 86_400)
+        LastSeen::Days((secs / 86_400) as u64)
     }
+}
+
+/// Compact last-seen line. Pure.
+pub fn format_last_seen(
+    last_seen: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    locale: Locale,
+) -> String {
+    last_seen_bucket(last_seen, now).label(locale)
 }
 
 /// Scope-aware copy: a local registry describes only the active local
 /// workspace and must not imply that account device metadata is already live.
-pub fn devices_subtitle(scope: Option<WorkspaceScope>) -> &'static str {
+pub fn devices_subtitle_message(scope: Option<WorkspaceScope>) -> MessageId {
     match scope {
-        Some(WorkspaceScope::Local) => "Manage device details stored in this local workspace.",
-        Some(WorkspaceScope::Synced) => "Manage device names and inspect synced device metadata.",
-        Some(WorkspaceScope::Development) | None => "Manage device names for this workspace.",
+        Some(WorkspaceScope::Local) => MessageId::DevicesSubtitleLocal,
+        Some(WorkspaceScope::Synced) => MessageId::DevicesSubtitleSynced,
+        Some(WorkspaceScope::Development) | None => MessageId::DevicesSubtitleDefault,
     }
 }
 
@@ -89,7 +125,13 @@ impl DevicesPage {
     }
 
     fn open_rename(&mut self, device_id: String, current: String, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| ComposerInput::new("Device name", cx));
+        let locale = i18n::locale(cx);
+        let input = cx.new(|cx| {
+            ComposerInput::new(
+                i18n::translate(MessageId::DevicesRenamePlaceholder, locale),
+                cx,
+            )
+        });
         input.update(cx, |input, cx| input.set_text(current, cx));
         let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
@@ -125,7 +167,15 @@ impl DevicesPage {
             let result = engine.client().call(methods::MUTATE, params).await;
             this.update(cx, |page, cx| {
                 if let Err(err) = result {
-                    page.error = Some(format!("Rename failed: {err}").into());
+                    page.error = Some(
+                        i18n::fill(
+                            MessageId::DevicesRenameFailed,
+                            "{err}",
+                            &err.to_string(),
+                            i18n::locale(cx),
+                        )
+                        .into(),
+                    );
                 }
                 cx.notify();
             })
@@ -156,10 +206,14 @@ impl DevicesPage {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).for_popup();
+        let locale = i18n::locale(cx);
         let dialog = self.rename.as_ref()?;
         let input = dialog.input.clone();
         let card = popover::dialog_card(&theme)
-            .child(popover::dialog_title(&theme, "Rename device"))
+            .child(popover::dialog_title(
+                &theme,
+                i18n::translate(MessageId::DevicesRenameTitle, locale),
+            ))
             .child(
                 div()
                     .mt(px(12.0))
@@ -173,17 +227,24 @@ impl DevicesPage {
                     .justify_end()
                     .gap(px(8.0))
                     .child(
-                        popover::btn_ghost(&theme, "Cancel", "rename-cancel")
-                            .id("rename-cancel")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.rename = None;
-                                cx.notify();
-                            })),
+                        popover::btn_ghost(
+                            &theme,
+                            i18n::translate(MessageId::CommonCancel, locale),
+                            "rename-cancel",
+                        )
+                        .id("rename-cancel")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.rename = None;
+                            cx.notify();
+                        })),
                     )
                     .child(
-                        popover::btn_primary(&theme, "Rename")
-                            .id("rename-save")
-                            .on_click(cx.listener(|this, _, _, cx| this.submit_rename(cx))),
+                        popover::btn_primary(
+                            &theme,
+                            i18n::translate(MessageId::CommonRename, locale),
+                        )
+                        .id("rename-save")
+                        .on_click(cx.listener(|this, _, _, cx| this.submit_rename(cx))),
                     ),
             )
             .into_any_element();
@@ -233,6 +294,7 @@ impl Render for DevicesPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let now = Utc::now();
+        let locale = i18n::locale(cx);
         let (devices, local_id, workspace_scope) = {
             let state = self.state.read(cx);
             (
@@ -306,9 +368,11 @@ impl Render for DevicesPage {
                 if !online {
                     meta.push(
                         div()
-                            .child(SharedString::from(format!(
-                                "Last seen {}",
-                                format_last_seen(device.last_seen_at, now)
+                            .child(SharedString::from(i18n::fill(
+                                MessageId::DevicesLastSeen,
+                                "{time}",
+                                &format_last_seen(device.last_seen_at, now, locale),
+                                locale,
                             )))
                             .into_any_element(),
                     );
@@ -317,9 +381,11 @@ impl Render for DevicesPage {
                 if let Some(created) = device.created_at {
                     meta.push(
                         div()
-                            .child(SharedString::from(format!(
-                                "Added {}",
-                                format_last_seen(Some(created), now)
+                            .child(SharedString::from(i18n::fill(
+                                MessageId::DevicesAdded,
+                                "{time}",
+                                &format_last_seen(Some(created), now, locale),
+                                locale,
                             )))
                             .into_any_element(),
                     );
@@ -340,7 +406,7 @@ impl Render for DevicesPage {
                             this.copy_id(copy_id.clone(), cx);
                         }))
                         .child(SharedString::from(if id_copied {
-                            "Copied".to_string()
+                            i18n::translate(MessageId::CommonCopied, i18n::locale(cx)).to_string()
                         } else {
                             short_id(&device.id)
                         }))
@@ -365,9 +431,9 @@ impl Render for DevicesPage {
                                 .text_size(px(10.5))
                                 .text_color(theme.text_muted)
                                 .child(if workspace_scope == Some(WorkspaceScope::Local) {
-                                    "Local only"
+                                    i18n::translate(MessageId::SidebarLocalOnly, locale)
                                 } else {
-                                    "This device"
+                                    i18n::translate(MessageId::PickerThisDevice, locale)
                                 }),
                         )
                     })
@@ -391,7 +457,10 @@ impl Render for DevicesPage {
                                     .size(px(14.0))
                                     .text_color(theme.text_muted),
                             )
-                            .child(SharedString::from("Rename")),
+                            .child(SharedString::from(i18n::translate(
+                                MessageId::CommonRename,
+                                locale,
+                            ))),
                     )
                     .into_any_element()
             })
@@ -406,7 +475,10 @@ impl Render for DevicesPage {
                     .text_center()
                     .text_size(crate::typography::ui_rems(14.0))
                     .text_color(theme.text_muted.opacity(0.6))
-                    .child(SharedString::from("No devices registered")),
+                    .child(SharedString::from(i18n::translate(
+                        MessageId::DevicesEmpty,
+                        locale,
+                    ))),
             )
         } else {
             card.children(rows)
@@ -428,12 +500,12 @@ impl Render for DevicesPage {
                         widgets::page_column()
                             .child(widgets::page_header(
                                 &theme,
-                                "Devices",
+                                i18n::translate(MessageId::SettingsSectionDevices, locale),
                                 (count > 0).then_some(count),
                             ))
                             .child(widgets::page_subtitle(
                                 &theme,
-                                devices_subtitle(workspace_scope),
+                                i18n::translate(devices_subtitle_message(workspace_scope), locale),
                             ))
                             .when_some(self.error.clone(), |el, message| {
                                 el.child(
@@ -473,28 +545,70 @@ mod tests {
     #[test]
     fn last_seen_formatting() {
         let now = Utc::now();
-        assert_eq!(format_last_seen(None, now), "never seen");
+        assert_eq!(format_last_seen(None, now, Locale::En), "never seen");
         assert_eq!(
-            format_last_seen(Some(now - TimeDelta::seconds(30)), now),
+            format_last_seen(Some(now - TimeDelta::seconds(30)), now, Locale::En),
             "just now"
         );
         assert_eq!(
-            format_last_seen(Some(now - TimeDelta::minutes(5)), now),
+            format_last_seen(Some(now - TimeDelta::minutes(5)), now, Locale::En),
             "5m ago"
         );
         assert_eq!(
-            format_last_seen(Some(now - TimeDelta::hours(3)), now),
+            format_last_seen(Some(now - TimeDelta::hours(3)), now, Locale::En),
             "3h ago"
         );
         assert_eq!(
-            format_last_seen(Some(now - TimeDelta::days(2)), now),
+            format_last_seen(Some(now - TimeDelta::days(2)), now, Locale::En),
             "2d ago"
+        );
+    }
+
+    /// The Chinese path, and the bucket the sidebar caches: the bucket carries
+    /// no language, so a language switch cannot leave a stale label behind.
+    #[test]
+    fn last_seen_buckets_are_locale_neutral() {
+        let now = Utc::now();
+        assert_eq!(last_seen_bucket(None, now), LastSeen::Never);
+        assert_eq!(
+            last_seen_bucket(Some(now - TimeDelta::seconds(30)), now),
+            LastSeen::JustNow
+        );
+        assert_eq!(
+            last_seen_bucket(Some(now - TimeDelta::minutes(5)), now),
+            LastSeen::Minutes(5)
+        );
+        assert_eq!(
+            last_seen_bucket(Some(now - TimeDelta::hours(3)), now),
+            LastSeen::Hours(3)
+        );
+        assert_eq!(
+            last_seen_bucket(Some(now - TimeDelta::days(2)), now),
+            LastSeen::Days(2)
+        );
+
+        assert_eq!(LastSeen::Never.label(Locale::ZhCn), "从未在线");
+        assert_eq!(LastSeen::JustNow.label(Locale::ZhCn), "刚刚");
+        assert_eq!(LastSeen::Minutes(5).label(Locale::ZhCn), "5 分钟前");
+        assert_eq!(LastSeen::Hours(3).label(Locale::ZhCn), "3 小时前");
+        assert_eq!(LastSeen::Days(2).label(Locale::ZhCn), "2 天前");
+        assert_eq!(
+            i18n::fill(
+                MessageId::DevicesLastSeen,
+                "{time}",
+                &LastSeen::Minutes(5).label(Locale::ZhCn),
+                Locale::ZhCn
+            ),
+            "上次在线 5 分钟前"
         );
     }
 
     #[test]
     fn local_subtitle_does_not_claim_synced_metadata() {
-        let copy = devices_subtitle(Some(WorkspaceScope::Local));
+        let copy = i18n::translate(
+            devices_subtitle_message(Some(WorkspaceScope::Local)),
+            Locale::En,
+        );
         assert!(copy.contains("local workspace"));
         assert!(!copy.contains("synced"));
     }

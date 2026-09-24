@@ -183,7 +183,7 @@ pub fn extract_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)
         text[..at].to_string(),
         crate::badges::MessageBadge {
             icon: crate::icons::CHAT_ROUND_LINE,
-            label: chip_label(details.len()).into(),
+            label: crate::badges::BadgeLabel::Comments(details.len()),
             details,
         },
     ))
@@ -244,14 +244,6 @@ fn split_file_bullet(bullet: &str) -> Option<(usize, &str, &str)> {
         line.parse::<u32>().ok()?;
         Some((at, location, &bullet[at + separator.len()..]))
     })
-}
-
-pub fn chip_label(count: usize) -> String {
-    if count == 1 {
-        "1 comment".to_string()
-    } else {
-        format!("{count} comments")
-    }
 }
 
 pub const CARD_PAD_V: f32 = 20.0;
@@ -356,13 +348,6 @@ mod tests {
         assert_eq!(badge.details[0].location.as_ref(), "a.rs:2");
         assert_eq!(badge.details[0].tag, None);
         assert_eq!(badge.details[0].body.as_ref(), "compare with (L): old code");
-    }
-
-    #[test]
-    fn chip_label_pluralizes() {
-        assert_eq!(chip_label(1), "1 comment");
-        assert_eq!(chip_label(2), "2 comments");
-        assert_eq!(chip_label(0), "0 comments");
     }
 
     #[test]

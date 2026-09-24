@@ -3,6 +3,7 @@ use crate::changes::ACCENT_BAR_WIDTH;
 use crate::{
     comments::{self, ReviewComment},
     composer::ComposerInput,
+    i18n::{self, MessageId},
     motion,
     theme::Theme,
 };
@@ -31,7 +32,10 @@ pub(crate) fn render_comment_adder<T: 'static>(
         .bg(theme.solid)
         .cursor_pointer()
         .role(gpui::Role::Button)
-        .aria_label("Add comment")
+        .aria_label(i18n::translate(
+            MessageId::FilesAddComment,
+            i18n::locale(cx),
+        ))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(cx.listener(move |this, _, window, cx| {
             cx.stop_propagation();
@@ -162,7 +166,10 @@ pub(crate) fn render_comment_edit<T: 'static>(
         .rounded(px(4.0))
         .cursor_pointer()
         .role(gpui::Role::Button)
-        .aria_label("Edit comment")
+        .aria_label(i18n::translate(
+            MessageId::FilesEditComment,
+            i18n::locale(cx),
+        ))
         .opacity(0.0)
         .group_hover(group, |style| style.opacity(1.0))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -194,6 +201,7 @@ pub(crate) fn render_comment_draft<T: 'static>(
     commit: fn(&mut T, &mut Context<T>),
     column: Option<CommentContentColumn>,
 ) -> AnyElement {
+    let locale = i18n::locale(cx);
     div()
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
@@ -269,13 +277,25 @@ pub(crate) fn render_comment_draft<T: 'static>(
                         .justify_end()
                         .gap(px(6.0))
                         .child(
-                            comment_action("cmt-cancel", "Cancel", false, theme)
-                                .on_click(cx.listener(move |this, _, _, cx| cancel(this, cx))),
+                            comment_action(
+                                "cmt-cancel",
+                                i18n::translate(MessageId::CommonCancel, locale),
+                                false,
+                                theme,
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| cancel(this, cx))),
                         )
                         .child(
                             comment_action(
                                 "cmt-commit",
-                                if editing { "Save" } else { "Comment" },
+                                i18n::translate(
+                                    if editing {
+                                        MessageId::FilesCommentSave
+                                    } else {
+                                        MessageId::FilesCommentCommit
+                                    },
+                                    locale,
+                                ),
                                 true,
                                 theme,
                             )

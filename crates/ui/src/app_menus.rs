@@ -16,6 +16,7 @@ use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window, ac
 
 use crate::appearance::{self, AppearanceMode};
 use crate::composer;
+use crate::i18n::{self, Locale, MessageId};
 use crate::shell;
 
 actions!(
@@ -156,66 +157,75 @@ fn app_key_bindings(macos: bool) -> Vec<KeyBinding> {
     bindings
 }
 
-/// The zeron menu bar. macOS renders this natively; mac-only entries are gated
-/// at runtime (`cfg!`) so the whole module compiles and tests on Linux.
-pub fn app_menus() -> Vec<Menu> {
+/// The zeron menu bar for `locale`. macOS renders this natively; mac-only
+/// entries are gated at runtime (`cfg!`) so the whole module compiles and tests
+/// on Linux. Called at boot and again by [`crate::i18n::set_preference`], so the
+/// titles always come from the translation table; the locale is a parameter
+/// rather than a global read so the tests here stay host-independent.
+pub fn app_menus(locale: Locale) -> Vec<Menu> {
     let macos = cfg!(target_os = "macos");
+    let t = |id: MessageId| i18n::translate(id, locale);
 
     // macOS titles the first menu with the bundle/process name regardless of
     // what we pass, but gpui still wants a name.
     let mut app_items = vec![
         // The native AppKit about panel; no equivalent elsewhere yet.
-        MenuItem::action("About Zeron", About).disabled(!macos),
+        MenuItem::action(t(MessageId::AppMenuAbout), About).disabled(!macos),
         MenuItem::separator(),
-        MenuItem::action("Settings", shell::OpenSettings),
+        MenuItem::action(t(MessageId::AppMenuSettings), shell::OpenSettings),
         MenuItem::separator(),
     ];
     if macos {
         app_items.extend([
-            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::os_submenu(t(MessageId::AppMenuServices), SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action("Hide Zeron", Hide),
-            MenuItem::action("Hide Others", HideOthers),
-            MenuItem::action("Show All", ShowAll),
+            MenuItem::action(t(MessageId::AppMenuHide), Hide),
+            MenuItem::action(t(MessageId::AppMenuHideOthers), HideOthers),
+            MenuItem::action(t(MessageId::AppMenuShowAll), ShowAll),
             MenuItem::separator(),
         ]);
     }
-    app_items.push(MenuItem::action("Quit Zeron", Quit));
+    app_items.push(MenuItem::action(t(MessageId::AppMenuQuit), Quit));
 
     let mut menus = vec![
+        // Product name: never translated.
         Menu::new("Zeron").items(app_items),
         // Standard clipboard verbs tied to the composer's existing actions via
         // their native selectors (`OsAction` → cut:/copy:/paste:/selectAll:),
         // so the OS Edit menu routes through the responder chain to the focused
         // input — zed wires its editor actions identically
         // (crates/zed/src/zed/app_menus.rs, Edit/Selection menus).
-        Menu::new("Edit").items([
+        Menu::new(t(MessageId::EditMenu)).items([
             // Undo/Redo have no `OsAction` counterpart — they dispatch as plain
             // actions to the focused input, same as the composer keymap.
-            MenuItem::action("Undo", composer::Undo),
-            MenuItem::action("Redo", composer::Redo),
+            MenuItem::action(t(MessageId::EditUndo), composer::Undo),
+            MenuItem::action(t(MessageId::EditRedo), composer::Redo),
             MenuItem::separator(),
-            MenuItem::os_action("Cut", composer::Cut, OsAction::Cut),
-            MenuItem::os_action("Copy", composer::Copy, OsAction::Copy),
-            MenuItem::os_action("Paste", composer::Paste, OsAction::Paste),
+            MenuItem::os_action(t(MessageId::EditCut), composer::Cut, OsAction::Cut),
+            MenuItem::os_action(t(MessageId::EditCopy), composer::Copy, OsAction::Copy),
+            MenuItem::os_action(t(MessageId::EditPaste), composer::Paste, OsAction::Paste),
             MenuItem::separator(),
-            MenuItem::os_action("Select All", composer::SelectAll, OsAction::SelectAll),
+            MenuItem::os_action(
+                t(MessageId::EditSelectAll),
+                composer::SelectAll,
+                OsAction::SelectAll,
+            ),
         ]),
     ];
     // Appearance lives under View on every platform — it is the only View verb
     // today, but "Appearance" as a top-level menu would read oddly next to Edit.
-    menus.push(Menu::new("View").items([
-        MenuItem::action("Appearance: System", AppearanceSystem),
-        MenuItem::action("Appearance: Light", AppearanceLight),
-        MenuItem::action("Appearance: Dark", AppearanceDark),
+    menus.push(Menu::new(t(MessageId::ViewMenu)).items([
+        MenuItem::action(t(MessageId::ViewAppearanceSystem), AppearanceSystem),
+        MenuItem::action(t(MessageId::ViewAppearanceLight), AppearanceLight),
+        MenuItem::action(t(MessageId::ViewAppearanceDark), AppearanceDark),
     ]));
     if macos {
         // Standard Window menu; macOS appends the open-window list itself.
-        menus.push(Menu::new("Window").items([
-            MenuItem::action("Minimize", Minimize),
-            MenuItem::action("Zoom", Zoom),
+        menus.push(Menu::new(t(MessageId::WindowMenu)).items([
+            MenuItem::action(t(MessageId::WindowMinimize), Minimize),
+            MenuItem::action(t(MessageId::WindowZoom), Zoom),
             MenuItem::separator(),
-            MenuItem::action("Close Window", CloseWindow),
+            MenuItem::action(t(MessageId::WindowClose), CloseWindow),
         ]));
     }
     menus
@@ -238,23 +248,27 @@ mod tests {
 
     #[test]
     fn app_menu_ends_with_quit() {
-        let menus = app_menus();
+        let menus = app_menus(Locale::En);
         assert_eq!(menus[0].name.as_ref(), "Zeron");
         let Some(MenuItem::Action { name, action, .. }) = menus[0].items.last() else {
             panic!("last app-menu item must be an action");
         };
-        assert_eq!(name.as_ref(), "Quit Zeron");
+        assert_eq!(
+            name.as_ref(),
+            i18n::translate(MessageId::AppMenuQuit, Locale::En)
+        );
         assert_eq!(action.name(), Quit.name());
     }
 
     #[test]
     fn app_menu_offers_settings() {
-        let menus = app_menus();
+        let menus = app_menus(Locale::En);
+        let settings = i18n::translate(MessageId::AppMenuSettings, Locale::En);
         assert!(
             menus[0].items.iter().any(|item| matches!(
                 item,
                 MenuItem::Action { name, action, .. }
-                    if name.as_ref() == "Settings" && action.name() == shell::OpenSettings.name()
+                    if name.as_ref() == settings && action.name() == shell::OpenSettings.name()
             )),
             "the application menu should expose Settings"
         );
@@ -262,7 +276,7 @@ mod tests {
 
     #[test]
     fn about_enabled_only_on_macos() {
-        let menus = app_menus();
+        let menus = app_menus(Locale::En);
         let Some(first @ MenuItem::Action { action, .. }) = menus[0].items.first() else {
             panic!("first app-menu item must be an action");
         };
@@ -272,10 +286,10 @@ mod tests {
 
     #[test]
     fn edit_menu_uses_composer_clipboard_os_actions() {
-        let menus = app_menus();
+        let menus = app_menus(Locale::En);
         let edit = menus
             .iter()
-            .find(|m| m.name.as_ref() == "Edit")
+            .find(|m| m.name.as_ref() == i18n::translate(MessageId::EditMenu, Locale::En))
             .expect("Edit menu present");
         // `OsAction` has no `Debug` impl at the pinned rev, so compare
         // per-field.
@@ -306,10 +320,10 @@ mod tests {
 
     #[test]
     fn view_menu_offers_all_three_appearance_modes() {
-        let menus = app_menus();
+        let menus = app_menus(Locale::En);
         let view = menus
             .iter()
-            .find(|m| m.name.as_ref() == "View")
+            .find(|m| m.name.as_ref() == i18n::translate(MessageId::ViewMenu, Locale::En))
             .expect("View menu present");
         assert_eq!(
             action_names(view),
@@ -319,6 +333,41 @@ mod tests {
                 AppearanceDark.name()
             ]
         );
+    }
+
+    /// Titles come from the translation table, so a Chinese UI gets a Chinese
+    /// menu bar; product names stay as written and the action behind each item
+    /// is locale-independent.
+    #[test]
+    fn chinese_menu_uses_the_translation_table() {
+        let menus = app_menus(Locale::ZhCn);
+        let titles: Vec<&str> = menus.iter().map(|menu| menu.name.as_ref()).collect();
+        assert_eq!(titles[0], "Zeron", "the product name is never translated");
+        assert!(titles.contains(&"编辑"), "{titles:?}");
+        assert!(titles.contains(&"显示"), "{titles:?}");
+        if cfg!(target_os = "macos") {
+            assert!(titles.contains(&"窗口"), "{titles:?}");
+        }
+
+        let Some(MenuItem::Action { name, action, .. }) = menus[0].items.last() else {
+            panic!("last app-menu item must be an action");
+        };
+        assert_eq!(name.as_ref(), "退出 Zeron");
+        assert_eq!(action.name(), Quit.name());
+
+        let edit = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "编辑")
+            .expect("Edit menu present");
+        let cut = edit
+            .items
+            .iter()
+            .find(|item| matches!(item, MenuItem::Action { action, .. } if action.name() == composer::Cut.name()))
+            .expect("Cut item present");
+        let MenuItem::Action { name, .. } = cut else {
+            panic!("Cut must stay an action");
+        };
+        assert_eq!(name.as_ref(), "剪切");
     }
 
     #[test]

@@ -12,7 +12,10 @@ use futures::channel::mpsc;
 use futures::{FutureExt as _, StreamExt as _};
 
 use super::WaylandStatus;
-use crate::appshots::{CapabilityState, CaptureError, CaptureTarget, CapturedAppshot};
+use crate::appshots::{
+    CapabilityState, CaptureError, CaptureFailure, CaptureTarget, CapturedAppshot,
+};
+use crate::i18n::MessageId;
 
 const SHORTCUT_ID: &str = "capture-appshot";
 
@@ -158,7 +161,10 @@ pub(super) async fn capture_target(target: CaptureTarget) -> Result<CapturedApps
     // Do not send an unsupported target: older portals may silently capture
     // the entire screen, even when interactive customization is requested.
     let proxy = ScreenshotProxy::new().await.map_err(|error| {
-        CaptureError::CaptureFailed(format!("Screenshot portal unavailable: {error}"))
+        CaptureError::CaptureFailed(
+            CaptureFailure::new(MessageId::AppshotErrorPortalUnavailable)
+                .with("{err}", error.to_string()),
+        )
     })?;
     let requested = match target {
         CaptureTarget::ActiveWindow => AvailableTargets::ActiveWindow,
@@ -170,9 +176,9 @@ pub(super) async fn capture_target(target: CaptureTarget) -> Result<CapturedApps
             .await
             .is_ok_and(|targets| targets.contains(requested))
     {
-        return Err(CaptureError::CaptureFailed(
-            "This screenshot portal does not support window-only capture. Update your desktop portal to use Appshots.".into(),
-        ));
+        return Err(CaptureError::CaptureFailed(CaptureFailure::new(
+            MessageId::AppshotErrorPortalUnsupported,
+        )));
     }
     // The Screenshot portal returns pixels but no verifiable native window
     // identity. Never attach text from whichever window happens to have focus.
@@ -190,34 +196,45 @@ pub(super) async fn capture_target(target: CaptureTarget) -> Result<CapturedApps
         .response()
         .map_err(portal_capture_error)?;
     let uri = url::Url::parse(response.uri().as_str()).map_err(|error| {
-        CaptureError::CaptureFailed(format!("Invalid portal image URI: {error}"))
+        CaptureError::CaptureFailed(
+            CaptureFailure::new(MessageId::AppshotErrorPortalImageUri)
+                .with("{err}", error.to_string()),
+        )
     })?;
     let path = uri.to_file_path().map_err(|_| {
-        CaptureError::CaptureFailed("Screenshot portal returned a non-file URI.".into())
+        CaptureError::CaptureFailed(CaptureFailure::new(MessageId::AppshotErrorPortalNonFileUri))
     })?;
     let file_len = fs::metadata(&path)
         .map_err(|error| {
-            CaptureError::CaptureFailed(format!("Could not inspect portal screenshot: {error}"))
+            CaptureError::CaptureFailed(
+                CaptureFailure::new(MessageId::AppshotErrorPortalInspect)
+                    .with("{err}", error.to_string()),
+            )
         })?
         .len();
     if file_len > crate::attachments::MAX_ATTACHMENT_BYTES {
-        return Err(CaptureError::CaptureFailed(
-            "The portal screenshot is larger than Zeron's 24 MB image limit.".into(),
-        ));
+        return Err(CaptureError::CaptureFailed(CaptureFailure::new(
+            MessageId::AppshotErrorPortalImageLimit,
+        )));
     }
     let file = fs::File::open(path).map_err(|error| {
-        CaptureError::CaptureFailed(format!("Could not open portal screenshot: {error}"))
+        CaptureError::CaptureFailed(
+            CaptureFailure::new(MessageId::AppshotErrorPortalOpen).with("{err}", error.to_string()),
+        )
     })?;
     let mut bytes = Vec::with_capacity(file_len as usize);
     file.take(crate::attachments::MAX_ATTACHMENT_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| {
-            CaptureError::CaptureFailed(format!("Could not read portal screenshot: {error}"))
+            CaptureError::CaptureFailed(
+                CaptureFailure::new(MessageId::AppshotErrorPortalRead)
+                    .with("{err}", error.to_string()),
+            )
         })?;
     if bytes.len() as u64 > crate::attachments::MAX_ATTACHMENT_BYTES {
-        return Err(CaptureError::CaptureFailed(
-            "The portal screenshot changed size while it was being read.".into(),
-        ));
+        return Err(CaptureError::CaptureFailed(CaptureFailure::new(
+            MessageId::AppshotErrorPortalSizeChanged,
+        )));
     }
     let app_name = "Selected window".to_string();
     let window_title = None;
@@ -246,7 +263,10 @@ fn portal_capture_error(error: ashpd::Error) -> CaptureError {
     match error {
         ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)
         | ashpd::Error::Portal(ashpd::PortalError::Cancelled(_)) => CaptureError::Cancelled,
-        error => CaptureError::CaptureFailed(format!("Screenshot portal failed: {error}")),
+        error => CaptureError::CaptureFailed(
+            CaptureFailure::new(MessageId::AppshotErrorPortalFailed)
+                .with("{err}", error.to_string()),
+        ),
     }
 }
 

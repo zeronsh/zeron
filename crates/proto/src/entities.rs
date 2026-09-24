@@ -12,17 +12,37 @@ use crate::{HarnessId, ReasoningLevel, SandboxLevel};
 /// existing pins remain visible, reorderable and removable without truncation.
 pub const MAX_SIDEBAR_PINS: usize = 200;
 
+/// Why an optimistic pin projection was rejected. Each client names the
+/// classification in its own language; `english` keeps the wording this crate
+/// produced before the copy moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarPinRejection {
+    /// An id was empty, or the same id appeared twice.
+    NotUnique,
+    /// A newly added pin pushed the list past [`MAX_SIDEBAR_PINS`].
+    Limit,
+}
+
+impl SidebarPinRejection {
+    pub fn english(self) -> &'static str {
+        match self {
+            Self::NotUnique => "Sidebar pins must be non-empty and unique",
+            Self::Limit => "You can pin up to 200 sessions",
+        }
+    }
+}
+
 /// Validate an optimistic projection without truncating concurrent overflow.
 pub fn validate_sidebar_pin_update(
     current: &[String],
     next: &[String],
-) -> Result<(), &'static str> {
+) -> Result<(), SidebarPinRejection> {
     let mut seen = std::collections::HashSet::new();
     if next.iter().any(|id| id.is_empty() || !seen.insert(id)) {
-        return Err("Sidebar pins must be non-empty and unique");
+        return Err(SidebarPinRejection::NotUnique);
     }
     if next.len() > MAX_SIDEBAR_PINS && next.iter().any(|id| !current.contains(id)) {
-        return Err("You can pin up to 200 sessions");
+        return Err(SidebarPinRejection::Limit);
     }
     Ok(())
 }

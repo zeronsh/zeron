@@ -2,6 +2,7 @@
 //! keyboard settings, while keeping capture setup on its own route.
 use super::*;
 use crate::appshots::{AppshotPlatform, CapabilityState};
+use crate::i18n::{self, MessageId};
 use crate::settings::widgets;
 
 fn row(
@@ -35,6 +36,7 @@ fn row(
 impl ShortcutsPage {
     pub(super) fn render_appshots(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
+        let locale = i18n::locale(cx);
         let accent = theme.accent;
         let capabilities = self.appshot_capabilities;
         let toggle = |id: &'static str, label: &'static str, enabled: bool| {
@@ -52,7 +54,7 @@ impl ShortcutsPage {
         };
         let capture = toggle(
             "appshots-enabled",
-            "Capture Appshots",
+            i18n::translate(MessageId::AppshotsCapture, locale),
             self.appshots_enabled,
         )
         .on_click(cx.listener(|this, _, _, cx| {
@@ -62,7 +64,7 @@ impl ShortcutsPage {
         }));
         let sound = toggle(
             "appshot-sound-enabled",
-            "Capture sound",
+            i18n::translate(MessageId::AppshotsCaptureSound, locale),
             self.appshot_sound_enabled,
         )
         .on_click(cx.listener(|this, _, _, cx| {
@@ -78,7 +80,7 @@ impl ShortcutsPage {
                 div()
                     .id(("appshot-destination", ix))
                     .role(gpui::Role::Button)
-                    .aria_label(destination.label())
+                    .aria_label(i18n::translate(destination.label_message(), locale))
                     .aria_toggled(if selected {
                         gpui::Toggled::True
                     } else {
@@ -112,25 +114,28 @@ impl ShortcutsPage {
                         this.commit_appshots(cx);
                         cx.notify();
                     }))
-                    .child(destination.label())
+                    .child(i18n::translate(destination.label_message(), locale))
             })
             .collect::<Vec<_>>();
         let destination_description = match self.appshot_destination {
             AppshotDestination::Automatic => {
-                "Use the open session, or the new-session composer when no session is open."
+                i18n::translate(MessageId::AppshotsDestinationAutomaticDescription, locale)
             }
             AppshotDestination::LastSession => {
-                "Use the open session, or return to the last session used for an Appshot."
+                i18n::translate(MessageId::AppshotsDestinationLastSessionDescription, locale)
             }
             AppshotDestination::NewSession => {
-                "Stage captures in a new-session composer, keeping existing drafts intact."
+                i18n::translate(MessageId::AppshotsDestinationNewSessionDescription, locale)
             }
         };
         let shortcut = div()
             .flex()
             .items_center()
             .gap(px(10.0))
-            .child(widgets::badge(&theme, capabilities.global_shortcut.badge()))
+            .child(widgets::badge(
+                &theme,
+                i18n::translate(capabilities.global_shortcut.badge_message(), locale),
+            ))
             .child(self.render_binding_control(
                 ShortcutId::CaptureAppshot,
                 0,
@@ -152,14 +157,17 @@ impl ShortcutsPage {
             .flex()
             .items_center()
             .gap(px(10.0))
-            .child(widgets::badge(&theme, capabilities.window_capture.badge()));
+            .child(widgets::badge(
+                &theme,
+                i18n::translate(capabilities.window_capture.badge_message(), locale),
+            ));
         if self.appshots_enabled
             && capabilities.window_capture == CapabilityState::PermissionRequired
         {
             let label = if self.capture_access_prompted {
-                "Open System Settings"
+                i18n::translate(MessageId::AppshotsOpenSystemSettings, locale)
             } else {
-                "Allow window capture"
+                i18n::translate(MessageId::AppshotsAllowWindowCapture, locale)
             };
             window_access = window_access.child(action("appshots-capture-access", label).on_click(
                 cx.listener(|this, _, _, cx| {
@@ -182,16 +190,16 @@ impl ShortcutsPage {
             .gap(px(10.0))
             .child(widgets::badge(
                 &theme,
-                capabilities.application_text.badge(),
+                i18n::translate(capabilities.application_text.badge_message(), locale),
             ));
         if self.appshots_enabled
             && capabilities.application_text == CapabilityState::PermissionRequired
             && crate::appshots::semantic_settings_url().is_some()
         {
             let label = if self.semantic_access_prompted {
-                "Open System Settings"
+                i18n::translate(MessageId::AppshotsOpenSystemSettings, locale)
             } else {
-                "Enable text capture"
+                i18n::translate(MessageId::AppshotsEnableTextCapture, locale)
             };
             text_access = text_access.child(action("appshots-semantic-access", label).on_click(
                 cx.listener(|this, _, _, cx| {
@@ -212,32 +220,32 @@ impl ShortcutsPage {
             .child(row(
                 &theme,
                 true,
-                "Capture Appshots",
-                "Captures are staged for review and never sent automatically.",
+                i18n::translate(MessageId::AppshotsCapture, locale),
+                i18n::translate(MessageId::AppshotsCaptureDescription, locale),
                 capture.into_any_element(),
             ))
             .child(row(
                 &theme,
                 false,
-                "Capture sound",
-                "Play a sound when an Appshot is ready.",
+                i18n::translate(MessageId::AppshotsCaptureSound, locale),
+                i18n::translate(MessageId::AppshotsCaptureSoundDescription, locale),
                 sound.into_any_element(),
             ))
             .child(row(
                 &theme,
                 false,
                 if capabilities.platform == AppshotPlatform::LinuxWayland {
-                    "Preferred shortcut"
+                    i18n::translate(MessageId::AppshotsPreferredShortcut, locale)
                 } else {
-                    "Global shortcut"
+                    i18n::translate(MessageId::AppshotsGlobalShortcut, locale)
                 },
-                capabilities.shortcut_description(),
+                i18n::translate(capabilities.shortcut_message(), locale),
                 shortcut.into_any_element(),
             ))
             .child(row(
                 &theme,
                 false,
-                "Destination",
+                i18n::translate(MessageId::AppshotsDestination, locale),
                 destination_description,
                 div()
                     .flex()
@@ -249,28 +257,34 @@ impl ShortcutsPage {
             .child(row(
                 &theme,
                 false,
-                "Window capture",
-                capabilities.capture_description(),
+                i18n::translate(MessageId::AppshotsWindowCapture, locale),
+                i18n::translate(capabilities.capture_message(), locale),
                 window_access.into_any_element(),
             ))
             .child(row(
                 &theme,
                 false,
-                "Application text",
-                capabilities.semantic_description(),
+                i18n::translate(MessageId::AppshotsApplicationText, locale),
+                i18n::translate(capabilities.semantic_message(), locale),
                 text_access.into_any_element(),
             ));
         let helper: SharedString = if self.recording.is_some() {
-            "Press Escape to cancel.".into()
+            i18n::translate(MessageId::CommonPressEscapeToCancel, locale).into()
         } else {
             self.conflict_notice.clone().unwrap_or_default()
         };
-        let refresh = action("appshots-refresh-permissions", "Check again")
-            .aria_label("Check permissions again")
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.appshot_capabilities = crate::appshots::capabilities();
-                cx.notify();
-            }));
+        let refresh = action(
+            "appshots-refresh-permissions",
+            i18n::translate(MessageId::AppshotsCheckAgain, locale),
+        )
+        .aria_label(i18n::translate(
+            MessageId::AppshotsCheckPermissionsAgain,
+            locale,
+        ))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.appshot_capabilities = crate::appshots::capabilities();
+            cx.notify();
+        }));
         let scrollbar = self.render_scrollbar(&theme, cx);
         div()
             .id("appshots-settings-page-host")
@@ -305,10 +319,17 @@ impl ShortcutsPage {
                     })
                     .child(
                         widgets::page_column()
-                            .child(widgets::page_header(&theme, "Appshots", None))
+                            .child(widgets::page_header(
+                                &theme,
+                                i18n::translate(MessageId::SettingsSectionAppshots, locale),
+                                None,
+                            ))
                             .child(
-                                widgets::page_subtitle(&theme, capabilities.setup_description())
-                                    .line_height(px(20.0)),
+                                widgets::page_subtitle(
+                                    &theme,
+                                    i18n::translate(capabilities.setup_message(), locale),
+                                )
+                                .line_height(px(20.0)),
                             )
                             .child(card)
                             .child(
@@ -331,9 +352,10 @@ impl ShortcutsPage {
                                             .flex_1()
                                             .text_size(px(12.0))
                                             .text_color(theme.text_muted)
-                                            .child(
-                                                "Changed a permission? Check again after returning to Zeron.",
-                                            ),
+                                            .child(i18n::translate(
+                                                MessageId::AppshotsPermissionRefreshHint,
+                                                locale,
+                                            )),
                                     )
                                     .child(refresh),
                             ),

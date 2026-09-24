@@ -15,8 +15,9 @@ use futures::channel::mpsc;
 
 use super::{
     AppshotBackend, AppshotCapabilities, AppshotPlatform, CapabilityState, CaptureError,
-    CaptureTarget, CapturedAppshot,
+    CaptureFailure, CaptureTarget, CapturedAppshot,
 };
+use crate::i18n::MessageId;
 
 const ACTIVATION_SOCKET: &str = "appshot-activation.sock";
 
@@ -136,18 +137,20 @@ fn start_activation_socket(data_dir: PathBuf, tx: mpsc::UnboundedSender<()>) {
 
 pub fn request_running_appshot(data_dir: &Path) -> Result<(), CaptureError> {
     let socket = UnixDatagram::unbound().map_err(|error| {
-        CaptureError::CaptureFailed(format!(
-            "Could not create Appshot activation socket: {error}"
-        ))
+        CaptureError::CaptureFailed(
+            CaptureFailure::new(MessageId::AppshotErrorActivationSocket)
+                .with("{err}", error.to_string()),
+        )
     })?;
     socket
         .connect(activation_socket_path(data_dir))
         .and_then(|_| socket.send(b"capture"))
         .map(|_| ())
         .map_err(|error| {
-            CaptureError::CaptureFailed(format!(
-                "Could not reach a running Zeron instance for Appshot capture: {error}"
-            ))
+            CaptureError::CaptureFailed(
+                CaptureFailure::new(MessageId::AppshotErrorActivationUnreachable)
+                    .with("{err}", error.to_string()),
+            )
         })
 }
 

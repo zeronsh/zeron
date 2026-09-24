@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,63 @@ const LIBRARY_FILE: &str = "theme-library.json";
 const MAX_LIBRARY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LIBRARY_ENTRIES: usize = 256;
 const MAX_LIBRARY_VARIANTS: usize = 1024;
+
+/// A library failure that reads as copy rather than as a diagnostic: a limit
+/// the user hit, an id that is gone, a family that will not validate. The
+/// English lives here because this crate also renders it for the CLI and the
+/// `tracing` lines; a localized client names each variant in its own table
+/// instead of reusing [`Display`](fmt::Display).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LibraryError {
+    /// No entry carries this id.
+    UnknownTheme { id: String },
+    /// The library already holds the maximum number of entries.
+    EntryLimit { limit: usize },
+    /// The library already holds the maximum number of variants, counting
+    /// every entry.
+    VariantLimit { limit: usize },
+    /// A compiled family whose variants were all deselected.
+    NoVariantSelected,
+    /// The compiled family failed `validate()`. `errors` are that validator's
+    /// own `variant: message` payloads and stay as it wrote them.
+    ValidationFailed { errors: Vec<String> },
+    /// Reloading an entry that was imported as a snapshot has no source.
+    SnapshotCannotReload,
+    /// A variant count that overflowed `usize` — an invariant, not a user
+    /// state.
+    VariantCountOverflow,
+}
+
+impl LibraryError {
+    /// Exactly the text this crate rendered before a localized client existed,
+    /// because some of it is persisted: `CustomThemeLibrary::reload` writes
+    /// these strings into `CustomThemeStatus::Warning`.
+    pub fn english(&self) -> String {
+        match self {
+            Self::UnknownTheme { id } => format!("unknown custom theme `{id}`"),
+            Self::EntryLimit { limit } => {
+                format!("custom theme library is limited to {limit} entries")
+            }
+            Self::VariantLimit { limit } => {
+                format!("custom theme library is limited to {limit} variants")
+            }
+            Self::NoVariantSelected => "select at least one successfully compiled variant".into(),
+            Self::ValidationFailed { errors } => {
+                format!("theme validation failed: {}", errors.join("; "))
+            }
+            Self::SnapshotCannotReload => "imported snapshots cannot reload".into(),
+            Self::VariantCountOverflow => "custom theme variant count overflow".into(),
+        }
+    }
+}
+
+impl fmt::Display for LibraryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.english())
+    }
+}
+
+impl std::error::Error for LibraryError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallMode {
@@ -172,7 +230,7 @@ impl CustomThemeLibrary {
             .variants
             .retain(|variant| selected.is_empty() || selected.contains(&variant.id));
         if family.variants.is_empty() {
-            bail!("select at least one successfully compiled variant");
+            return Err(LibraryError::NoVariantSelected.into());
         }
         self.ensure_capacity_for(family.variants.len())?;
         let entry_id = unique_id(
@@ -189,7 +247,7 @@ impl CustomThemeLibrary {
         }
         let errors = validation_errors(&family);
         if !errors.is_empty() {
-            bail!("theme validation failed: {}", errors.join("; "));
+            return Err(LibraryError::ValidationFailed { errors }.into());
         }
         let selected_variant_ids = family
             .variants
@@ -235,7 +293,7 @@ impl CustomThemeLibrary {
             .entries
             .iter_mut()
             .find(|entry| entry.id == id)
-            .ok_or_else(|| anyhow!("unknown custom theme `{id}`"))?;
+            .ok_or_else(|| LibraryError::UnknownTheme { id: id.to_owned() })?;
         let path = match &entry.source {
             CustomThemeSource::LinkedFile { path } | CustomThemeSource::LinkedPackage { path } => {
                 path.clone()
@@ -262,7 +320,9 @@ impl CustomThemeLibrary {
                 entry.status = CustomThemeStatus::Ready;
                 return Ok(());
             }
-            CustomThemeSource::ImportedSnapshot { .. } => bail!("imported snapshots cannot reload"),
+            CustomThemeSource::ImportedSnapshot { .. } => {
+                return Err(LibraryError::SnapshotCannotReload.into());
+            }
         };
         let wanted: HashSet<_> = entry.selected_variant_ids.iter().cloned().collect();
         let compilation = match Self::compile(&path, &entry.id, &entry.name) {
@@ -303,11 +363,11 @@ impl CustomThemeLibrary {
         }
         let errors = validation_errors(&family);
         if !errors.is_empty() {
-            let message = format!("theme validation failed: {}", errors.join("; "));
+            let error = LibraryError::ValidationFailed { errors };
             entry.status = CustomThemeStatus::Warning {
-                message: message.clone(),
+                message: error.english(),
             };
-            bail!(message);
+            return Err(error.into());
         }
         entry.family = family;
         entry.reports = compilation
@@ -324,7 +384,7 @@ impl CustomThemeLibrary {
             .entries
             .iter_mut()
             .find(|entry| entry.id == id)
-            .ok_or_else(|| anyhow!("unknown custom theme `{id}`"))?;
+            .ok_or_else(|| LibraryError::UnknownTheme { id: id.to_owned() })?;
         let imported_from = entry.source.path().map(Path::to_path_buf);
         entry.source = CustomThemeSource::ImportedSnapshot { imported_from };
         entry.status = CustomThemeStatus::Ready;
@@ -337,7 +397,7 @@ impl CustomThemeLibrary {
             .iter()
             .find(|entry| entry.id == id)
             .cloned()
-            .ok_or_else(|| anyhow!("unknown custom theme `{id}`"))?;
+            .ok_or_else(|| LibraryError::UnknownTheme { id: id.to_owned() })?;
         self.ensure_capacity_for(original.family.variants.len())?;
         let new_id = unique_id(
             &format!("{}-copy", original.id),
@@ -387,7 +447,7 @@ impl CustomThemeLibrary {
             .iter()
             .find(|entry| entry.id == id)
             .cloned()
-            .ok_or_else(|| anyhow!("unknown custom theme `{id}`"))?;
+            .ok_or_else(|| LibraryError::UnknownTheme { id: id.to_owned() })?;
         self.ensure_capacity_for(original.family.variants.len())?;
         let new_id = unique_id(
             &format!("{}-copy", original.id),
@@ -428,7 +488,10 @@ impl CustomThemeLibrary {
 
     fn validate_capacity(&self) -> Result<()> {
         if self.entries.len() > MAX_LIBRARY_ENTRIES {
-            bail!("custom theme library is limited to {MAX_LIBRARY_ENTRIES} entries");
+            return Err(LibraryError::EntryLimit {
+                limit: MAX_LIBRARY_ENTRIES,
+            }
+            .into());
         }
         let variants = self
             .entries
@@ -436,16 +499,22 @@ impl CustomThemeLibrary {
             .try_fold(0usize, |count, entry| {
                 count.checked_add(entry.family.variants.len())
             })
-            .ok_or_else(|| anyhow!("custom theme variant count overflow"))?;
+            .ok_or(LibraryError::VariantCountOverflow)?;
         if variants > MAX_LIBRARY_VARIANTS {
-            bail!("custom theme library is limited to {MAX_LIBRARY_VARIANTS} variants");
+            return Err(LibraryError::VariantLimit {
+                limit: MAX_LIBRARY_VARIANTS,
+            }
+            .into());
         }
         Ok(())
     }
 
     fn ensure_capacity_for(&self, additional_variants: usize) -> Result<()> {
         if self.entries.len() >= MAX_LIBRARY_ENTRIES {
-            bail!("custom theme library is limited to {MAX_LIBRARY_ENTRIES} entries");
+            return Err(LibraryError::EntryLimit {
+                limit: MAX_LIBRARY_ENTRIES,
+            }
+            .into());
         }
         let current = self
             .entries
@@ -453,12 +522,15 @@ impl CustomThemeLibrary {
             .try_fold(0usize, |count, entry| {
                 count.checked_add(entry.family.variants.len())
             })
-            .ok_or_else(|| anyhow!("custom theme variant count overflow"))?;
+            .ok_or(LibraryError::VariantCountOverflow)?;
         if current
             .checked_add(additional_variants)
             .is_none_or(|total| total > MAX_LIBRARY_VARIANTS)
         {
-            bail!("custom theme library is limited to {MAX_LIBRARY_VARIANTS} variants");
+            return Err(LibraryError::VariantLimit {
+                limit: MAX_LIBRARY_VARIANTS,
+            }
+            .into());
         }
         Ok(())
     }
@@ -793,5 +865,68 @@ mod tests {
         let entry = library.entry(&copy).unwrap();
         assert_eq!(entry.family, last_known_good);
         assert!(matches!(entry.status, CustomThemeStatus::Warning { .. }));
+    }
+
+    #[test]
+    fn named_library_errors_keep_their_english_wording() {
+        // These strings are persisted (`CustomThemeStatus::Warning`) and printed
+        // by the CLI, so the localized client must not have moved them.
+        let cases: Vec<(LibraryError, &str)> = vec![
+            (
+                LibraryError::UnknownTheme { id: "gone".into() },
+                "unknown custom theme `gone`",
+            ),
+            (
+                LibraryError::EntryLimit { limit: 256 },
+                "custom theme library is limited to 256 entries",
+            ),
+            (
+                LibraryError::VariantLimit { limit: 1024 },
+                "custom theme library is limited to 1024 variants",
+            ),
+            (
+                LibraryError::NoVariantSelected,
+                "select at least one successfully compiled variant",
+            ),
+            (
+                LibraryError::ValidationFailed {
+                    errors: vec!["dark: accent is 1.2:1".into(), "light: missing".into()],
+                },
+                "theme validation failed: dark: accent is 1.2:1; light: missing",
+            ),
+            (
+                LibraryError::SnapshotCannotReload,
+                "imported snapshots cannot reload",
+            ),
+            (
+                LibraryError::VariantCountOverflow,
+                "custom theme variant count overflow",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.english(), expected);
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn capacity_and_id_failures_carry_the_named_error() {
+        // The UI maps these by variant, so the `anyhow` error has to carry the
+        // type rather than only its text.
+        let error = CustomThemeLibrary::default()
+            .ensure_capacity_for(MAX_LIBRARY_VARIANTS + 1)
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<LibraryError>(),
+            Some(&LibraryError::VariantLimit {
+                limit: MAX_LIBRARY_VARIANTS
+            })
+        );
+
+        let error = CustomThemeLibrary::default().unlink("nope").unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<LibraryError>(),
+            Some(&LibraryError::UnknownTheme { id: "nope".into() })
+        );
     }
 }

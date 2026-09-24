@@ -12,9 +12,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use gpui::{App, Global, Task};
+use gpui::{App, Global, SharedString, Task};
 use serde::{Deserialize, Serialize};
 use zeron_proto::{AuthState, WorkspaceScope};
+
+use crate::i18n::{self, Locale, MessageId};
 
 pub mod accounts;
 pub mod appearance;
@@ -91,23 +93,35 @@ impl NewThreadBackgroundEffect {
         Self::Scanlines,
     ];
 
-    pub const fn label(self) -> &'static str {
+    /// Stable, locale-independent id fragment: the label is translated, so an
+    /// element id cannot be derived from it.
+    pub const fn slug(self) -> &'static str {
         match self {
-            Self::None => "None",
-            Self::Dither => "Dither",
-            Self::Ascii => "ASCII",
-            Self::Halftone => "Halftone",
-            Self::Scanlines => "Scanlines",
+            Self::None => "none",
+            Self::Dither => "dither",
+            Self::Ascii => "ascii",
+            Self::Halftone => "halftone",
+            Self::Scanlines => "scanlines",
         }
     }
 
-    pub const fn description(self) -> &'static str {
+    pub const fn label_message(self) -> crate::i18n::MessageId {
         match self {
-            Self::None => "Shows the original artwork.",
-            Self::Dither => "Rebuilds the artwork with a dithered color palette.",
-            Self::Ascii => "Recreates the artwork with colored characters on black.",
-            Self::Halftone => "Recreates the artwork with colored print dots on black.",
-            Self::Scanlines => "Adds a pronounced horizontal display-line texture.",
+            Self::None => crate::i18n::MessageId::BackgroundEffectNone,
+            Self::Dither => crate::i18n::MessageId::BackgroundEffectDither,
+            Self::Ascii => crate::i18n::MessageId::BackgroundEffectAscii,
+            Self::Halftone => crate::i18n::MessageId::BackgroundEffectHalftone,
+            Self::Scanlines => crate::i18n::MessageId::BackgroundEffectScanlines,
+        }
+    }
+
+    pub const fn description_message(self) -> crate::i18n::MessageId {
+        match self {
+            Self::None => crate::i18n::MessageId::BackgroundEffectNoneHint,
+            Self::Dither => crate::i18n::MessageId::BackgroundEffectDitherHint,
+            Self::Ascii => crate::i18n::MessageId::BackgroundEffectAsciiHint,
+            Self::Halftone => crate::i18n::MessageId::BackgroundEffectHalftoneHint,
+            Self::Scanlines => crate::i18n::MessageId::BackgroundEffectScanlinesHint,
         }
     }
 }
@@ -312,19 +326,28 @@ pub fn current(cx: &App) -> UiSettings {
 /// the new-thread canvas background. A unique file name avoids stale image
 /// caches when the background is replaced.
 pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Result<(), String> {
-    let staged = crate::attachments::stage_file(source)?;
+    let locale = crate::i18n::locale(cx);
+    let staged = crate::attachments::stage_file(source, locale)?;
     // Do not persist the candidate or retire the old managed file until the
     // renderer's decoder has accepted the exact bytes we are about to save.
     crate::new_thread_background_image::decode(staged.bytes()).map_err(|_| {
-        "This background image is unsupported or damaged. Choose a valid image such as PNG or JPEG.".to_string()
+        crate::i18n::translate(crate::i18n::MessageId::BackgroundImageUnsupported, locale)
+            .to_string()
     })?;
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Unable to save the image. Restart Zeron and try again.".to_string())?;
+        .ok_or_else(|| {
+            crate::i18n::translate(crate::i18n::MessageId::BackgroundSaveFailedRestart, locale)
+                .to_string()
+        })?;
     let backgrounds_dir = data_dir.join(NEW_THREAD_BACKGROUND_DIR);
     std::fs::create_dir_all(&backgrounds_dir).map_err(|_| {
-        "Unable to save the image. Check folder permissions and try again.".to_string()
+        crate::i18n::translate(
+            crate::i18n::MessageId::BackgroundSaveFailedPermissions,
+            locale,
+        )
+        .to_string()
     })?;
 
     let extension = Path::new(&staged.name)
@@ -342,9 +365,11 @@ pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Re
         .is_err()
     {
         let _ = std::fs::remove_file(&temporary);
-        return Err(
-            "Unable to save the image. Check folder permissions and try again.".to_string(),
-        );
+        return Err(crate::i18n::translate(
+            crate::i18n::MessageId::BackgroundSaveFailedPermissions,
+            locale,
+        )
+        .to_string());
     }
 
     let replacement = NewThreadComposerBackground {
@@ -360,9 +385,11 @@ pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Re
     // setting that order can leave disk pointing at an image we just deleted.
     if next.save(&data_dir).is_err() {
         let _ = std::fs::remove_file(&destination);
-        return Err(
-            "Unable to save the image. Check folder permissions and try again.".to_string(),
-        );
+        return Err(crate::i18n::translate(
+            crate::i18n::MessageId::BackgroundSaveFailedPermissions,
+            locale,
+        )
+        .to_string());
     }
     replace(next, SavePolicy::Immediate, cx);
     remove_managed_new_thread_background(previous.as_ref(), &backgrounds_dir);
@@ -371,19 +398,28 @@ pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Re
 }
 
 pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String> {
+    let locale = crate::i18n::locale(cx);
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Unable to remove the image. Restart Zeron and try again.".to_string())?;
+        .ok_or_else(|| {
+            crate::i18n::translate(
+                crate::i18n::MessageId::BackgroundRemoveFailedRestart,
+                locale,
+            )
+            .to_string()
+        })?;
     let mut next = current(cx);
     let previous = next.new_thread_composer_background.take();
     if previous.is_none() {
         return Ok(());
     }
     if next.save(&data_dir).is_err() {
-        return Err(
-            "Unable to remove the image. Check folder permissions and try again.".to_string(),
-        );
+        return Err(crate::i18n::translate(
+            crate::i18n::MessageId::BackgroundRemoveFailedPermissions,
+            locale,
+        )
+        .to_string());
     }
     replace(next, SavePolicy::Immediate, cx);
     remove_managed_new_thread_background(
@@ -753,6 +789,9 @@ pub struct UiSettings {
     pub escape_stops_active_agent: bool,
     /// Light/dark preference. Defaults to following the OS.
     pub appearance: crate::appearance::AppearanceMode,
+    /// Interface copy language. Device-local: it never reaches the agent,
+    /// documents, sync protocol, themes, or typography.
+    pub language: crate::i18n::LanguagePreference,
     /// Optional columns shown in every Git History pane.
     pub git_history_columns: GitHistoryColumns,
     /// User-adjusted widths for the resizable Git History columns.
@@ -857,6 +896,7 @@ impl Default for UiSettings {
             appshot_sound_enabled: true,
             appshot_destination: crate::appshots::AppshotDestination::Automatic,
             appearance: crate::appearance::AppearanceMode::default(),
+            language: crate::i18n::LanguagePreference::default(),
             git_history_columns: GitHistoryColumns::default(),
             git_history_column_widths: GitHistoryColumnWidths::default(),
             git_history_column_order: GitHistoryColumnOrder::default(),
@@ -895,20 +935,9 @@ impl Default for UiSettings {
 /// `THREAD_JUMP_KEYBINDING_COMMANDS`, nine slots).
 pub const JUMP_SLOTS: usize = 9;
 
-/// Default combo per jump slot, and the label the shortcuts table shows.
+/// Default combo per jump slot.
 const JUMP_DEFAULTS: [&str; JUMP_SLOTS] = [
     "mod-1", "mod-2", "mod-3", "mod-4", "mod-5", "mod-6", "mod-7", "mod-8", "mod-9",
-];
-const JUMP_LABELS: [&str; JUMP_SLOTS] = [
-    "Jump to session 1",
-    "Jump to session 2",
-    "Jump to session 3",
-    "Jump to session 4",
-    "Jump to session 5",
-    "Jump to session 6",
-    "Jump to session 7",
-    "Jump to session 8",
-    "Jump to session 9",
 ];
 
 /// The rebindable app shortcuts. `JumpSession(slot)` is zero-based; a slot at
@@ -962,23 +991,42 @@ impl ShortcutId {
         self != Self::CaptureAppshot || crate::appshots::is_desktop()
     }
 
-    /// Row label (zeron lib/shortcuts.ts `SHORTCUT_DEFINITIONS`, verbatim).
-    pub fn label(self) -> &'static str {
+    /// Row label key for the fixed shortcuts (zeron lib/shortcuts.ts
+    /// `SHORTCUT_DEFINITIONS`, verbatim). `JumpSession` has none — its label
+    /// carries the slot ordinal, see [`Self::label_text`].
+    pub const fn label_message(self) -> Option<MessageId> {
         match self {
-            ShortcutId::CaptureAppshot => "Capture Appshot",
-            ShortcutId::SaveFile => "Save file",
-            ShortcutId::BrowserReload => "Reload browser page",
-            ShortcutId::ToggleSidebar => "Toggle left sidebar",
-            ShortcutId::ToggleChanges => "Toggle right sidebar",
-            ShortcutId::ToggleFiles => "Toggle files panel",
-            ShortcutId::ToggleTerminal => "Toggle terminal",
-            ShortcutId::NewSession => "New session",
-            ShortcutId::NewProject => "New project",
-            ShortcutId::OpenModelPicker => "Open model picker",
-            ShortcutId::NextSession => "Next session",
-            ShortcutId::PrevSession => "Previous session",
-            ShortcutId::ArchiveSession => "Archive session",
-            ShortcutId::JumpSession(slot) => JUMP_LABELS.get(slot).copied().unwrap_or(""),
+            ShortcutId::CaptureAppshot => Some(MessageId::ShortcutCaptureAppshot),
+            ShortcutId::SaveFile => Some(MessageId::ShortcutSaveFile),
+            ShortcutId::BrowserReload => Some(MessageId::ShortcutBrowserReload),
+            ShortcutId::ToggleSidebar => Some(MessageId::ShortcutToggleSidebar),
+            ShortcutId::ToggleChanges => Some(MessageId::ShortcutToggleChanges),
+            ShortcutId::ToggleFiles => Some(MessageId::ShortcutToggleFiles),
+            ShortcutId::ToggleTerminal => Some(MessageId::ShortcutToggleTerminal),
+            ShortcutId::NewSession => Some(MessageId::ShortcutNewSession),
+            ShortcutId::NewProject => Some(MessageId::ShortcutNewProject),
+            ShortcutId::OpenModelPicker => Some(MessageId::ShortcutOpenModelPicker),
+            ShortcutId::NextSession => Some(MessageId::ShortcutNextSession),
+            ShortcutId::PrevSession => Some(MessageId::ShortcutPrevSession),
+            ShortcutId::ArchiveSession => Some(MessageId::ShortcutArchiveSession),
+            ShortcutId::JumpSession(_) => None,
+        }
+    }
+
+    /// Row label in `locale`. A jump slot past [`JUMP_SLOTS`] has no label, so
+    /// it reads as unbound rather than as slot zero.
+    pub fn label_text(self, locale: Locale) -> SharedString {
+        match self.label_message() {
+            Some(id) => i18n::translate(id, locale).into(),
+            None => match self.jump_slot() {
+                Some(slot) => SharedString::from(i18n::fill(
+                    MessageId::ShortcutJumpSession,
+                    "{n}",
+                    &(slot + 1).to_string(),
+                    locale,
+                )),
+                None => SharedString::default(),
+            },
         }
     }
 
@@ -2147,6 +2195,7 @@ mod tests {
             sidebar_width: 300.0,
             sidebar_collapsed: true,
             sidebar_grouped: true,
+            language: crate::i18n::LanguagePreference::SimplifiedChinese,
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,
             sidebar_compact: true,
@@ -2487,6 +2536,49 @@ mod tests {
         loaded.save(dir.path()).unwrap();
         let saved = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
         assert!(!saved.contains("accentColor"));
+    }
+
+    /// The language field is device-local and tolerant: a missing value keeps the
+    /// shipped default, an unknown one falls back to `System`, and neither may
+    /// disturb the rest of the file (`load` discards everything on a parse error).
+    #[test]
+    fn language_preference_survives_old_and_unknown_settings_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // Written by a build that predates the field.
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarWidth": 300, "diffWrap": true}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.language, crate::i18n::LanguagePreference::default());
+        assert_eq!(loaded.sidebar_width, 300.0);
+        assert!(loaded.diff_wrap);
+
+        // A value from a future build, or hand-edited.
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"language": "klingon", "sidebarWidth": 320, "diffWrap": true}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.language, crate::i18n::LanguagePreference::System);
+        assert_eq!(
+            loaded.sidebar_width, 320.0,
+            "an unknown language must not reset unrelated settings"
+        );
+        assert!(loaded.diff_wrap);
+
+        // A pinned choice is what reaches disk.
+        let mut settings = loaded;
+        settings.language = crate::i18n::LanguagePreference::SimplifiedChinese;
+        settings.save(dir.path()).unwrap();
+        assert_eq!(
+            UiSettings::load(dir.path()).language,
+            crate::i18n::LanguagePreference::SimplifiedChinese
+        );
+        let saved = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
+        assert!(saved.contains("\"simplifiedChinese\""));
     }
 
     #[test]
@@ -2992,7 +3084,7 @@ mod tests {
                     recorded.as_deref(),
                     Some(combo),
                     "{} default {combo:?} is unreachable from the recorder (mac={mac})",
-                    id.label()
+                    id.label_text(Locale::En)
                 );
             }
         }

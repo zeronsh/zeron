@@ -18,6 +18,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use builtins::builtin_registry;
 pub use library::{
     CustomThemeEntry, CustomThemeLibrary, CustomThemeSource, CustomThemeStatus, InstallMode,
+    LibraryError,
 };
 
 fn custom_families() -> &'static RwLock<Vec<ThemeFamily>> {

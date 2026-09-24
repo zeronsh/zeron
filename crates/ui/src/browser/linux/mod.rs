@@ -1,6 +1,7 @@
 //! WebKitGTK renders offscreen in an isolated helper process. GPUI composites
 //! its frames, so browser content uses the same clipping and blur as other UI.
-use super::model::{PageState, Presentation};
+use super::model::{PageFailure, PageState, Presentation};
+use crate::i18n::{self, MessageId};
 use gpui::{Bounds, Pixels, RenderImage};
 use serde_json::{Value, json};
 use std::{
@@ -50,16 +51,16 @@ struct Route {
     evaluation: Mutex<Option<Value>>,
 }
 
-fn helper_path() -> Result<std::path::PathBuf, String> {
+fn helper_path() -> Result<std::path::PathBuf, PageFailure> {
     use sha2::{Digest, Sha256};
     const HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/zeron-webkit"));
     let hash = format!("{:x}", Sha256::digest(HELPER));
     let root = std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|p| std::path::PathBuf::from(p).join(".cache")))
-        .ok_or("Could not locate the browser cache directory")?
+        .ok_or_else(|| PageFailure::message(MessageId::BrowserCacheDirUnavailable))?
         .join("zeron/browser");
-    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&root).map_err(|e| PageFailure::detail(e.to_string()))?;
     let path = root.join(format!("webkit-{hash}"));
     if std::fs::read(&path).ok().as_deref() != Some(HELPER) {
         let temp = root.join(format!(".webkit-{}", std::process::id()));
@@ -76,14 +77,14 @@ fn helper_path() -> Result<std::path::PathBuf, String> {
         if result.is_err() {
             let _ = std::fs::remove_file(&temp);
         }
-        result.map_err(|e| e.to_string())?;
+        result.map_err(|e| PageFailure::detail(e.to_string()))?;
     }
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| PageFailure::detail(e.to_string()))?;
     Ok(path)
 }
 impl BrowserData {
-    fn worker(&self) -> Result<Arc<Worker>, String> {
+    fn worker(&self) -> Result<Arc<Worker>, PageFailure> {
         let mut current = self.0.lock().unwrap();
         if let Some(worker) = current.upgrade() {
             if worker
@@ -91,76 +92,142 @@ impl BrowserData {
                 .lock()
                 .unwrap()
                 .try_wait()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| PageFailure::detail(e.to_string()))?
                 .is_none()
             {
                 return Ok(worker);
             }
         }
-        let mut child = Command::new(helper_path()?).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn()
-            .map_err(|e| format!("Could not start WebKitGTK: {e}. Install the WebKitGTK 4.1 runtime for your distribution."))?;
+        let mut child = Command::new(helper_path()?)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| {
+                PageFailure::message(MessageId::BrowserWebkitStartFailed)
+                    .with("{error}", e.to_string())
+            })?;
         let stdin = child.stdin.take().unwrap();
         let mut stdout = child.stdout.take().unwrap();
         let routes: Arc<Mutex<HashMap<u32, Weak<Route>>>> = Arc::default();
         let reader_routes = routes.clone();
-        std::thread::Builder::new().name("browser-frames".into()).spawn(move || {
-            let result = (|| -> std::io::Result<()> {
-                loop {
-                    let mut header = [0u8; 9]; stdout.read_exact(&mut header)?;
-                    let id = u32::from_le_bytes(header[1..5].try_into().unwrap());
-                    let length = u32::from_le_bytes(header[5..9].try_into().unwrap()) as usize;
-                    if length > 8192 * 8192 * 4 + 12 { return Err(std::io::Error::other("Browser packet is too large")); }
-                    let mut data = vec![0; length]; stdout.read_exact(&mut data)?;
-                    let route = reader_routes.lock().unwrap().get(&id).and_then(Weak::upgrade);
-                    let Some(route) = route else { continue; };
-                    let event = match header[0] {
-                        b'F' => {
-                            if data.len() < 12 { continue; }
-                            let width = u32::from_le_bytes(data[..4].try_into().unwrap());
-                            let height = u32::from_le_bytes(data[4..8].try_into().unwrap());
-                            let scale=f32::from_bits(u32::from_le_bytes(data[8..12].try_into().unwrap()));
-                            if !scale.is_finite() || !(0.5..=4.).contains(&scale) {continue;}
-                            data.drain(..12);
-                            let Some(pixels) = image::RgbaImage::from_raw(width, height, data) else { continue; };
-                            *route.frame.lock().unwrap() = Some((Arc::new(RenderImage::new([image::Frame::new(pixels)])),scale));
-                            NativeEvent::Frame
+        std::thread::Builder::new()
+            .name("browser-frames".into())
+            .spawn(move || {
+                let result = (|| -> std::io::Result<()> {
+                    loop {
+                        let mut header = [0u8; 9];
+                        stdout.read_exact(&mut header)?;
+                        let id = u32::from_le_bytes(header[1..5].try_into().unwrap());
+                        let length = u32::from_le_bytes(header[5..9].try_into().unwrap()) as usize;
+                        if length > 8192 * 8192 * 4 + 12 {
+                            return Err(std::io::Error::other("Browser packet is too large"));
                         }
-                        b'I' => {
-                            if let Ok(Value::Object(update))=serde_json::from_slice::<Value>(&data) {
-                                let mut input=route.input.lock().unwrap();
-                                if !input.is_object() {*input=json!({});}
-                                for (key,value) in update {input[&key]=value;}
+                        let mut data = vec![0; length];
+                        stdout.read_exact(&mut data)?;
+                        let route = reader_routes
+                            .lock()
+                            .unwrap()
+                            .get(&id)
+                            .and_then(Weak::upgrade);
+                        let Some(route) = route else {
+                            continue;
+                        };
+                        let event = match header[0] {
+                            b'F' => {
+                                if data.len() < 12 {
+                                    continue;
+                                }
+                                let width = u32::from_le_bytes(data[..4].try_into().unwrap());
+                                let height = u32::from_le_bytes(data[4..8].try_into().unwrap());
+                                let scale = f32::from_bits(u32::from_le_bytes(
+                                    data[8..12].try_into().unwrap(),
+                                ));
+                                if !scale.is_finite() || !(0.5..=4.).contains(&scale) {
+                                    continue;
+                                }
+                                data.drain(..12);
+                                let Some(pixels) = image::RgbaImage::from_raw(width, height, data)
+                                else {
+                                    continue;
+                                };
+                                *route.frame.lock().unwrap() = Some((
+                                    Arc::new(RenderImage::new([image::Frame::new(pixels)])),
+                                    scale,
+                                ));
+                                NativeEvent::Frame
                             }
-                            NativeEvent::Frame
+                            b'I' => {
+                                if let Ok(Value::Object(update)) =
+                                    serde_json::from_slice::<Value>(&data)
+                                {
+                                    let mut input = route.input.lock().unwrap();
+                                    if !input.is_object() {
+                                        *input = json!({});
+                                    }
+                                    for (key, value) in update {
+                                        input[&key] = value;
+                                    }
+                                }
+                                NativeEvent::Frame
+                            }
+                            b'S' => {
+                                let Ok(state) = serde_json::from_slice(&data) else {
+                                    continue;
+                                };
+                                *route.state.lock().unwrap() = state;
+                                NativeEvent::Changed
+                            }
+                            b'M' => {
+                                let Ok(menu) = serde_json::from_slice(&data) else {
+                                    continue;
+                                };
+                                NativeEvent::Menu(menu)
+                            }
+                            b'C' => {
+                                NativeEvent::Clipboard(String::from_utf8_lossy(&data).into_owned())
+                            }
+                            b'N' => {
+                                NativeEvent::NewTab(String::from_utf8_lossy(&data).into_owned())
+                            }
+                            #[cfg(feature = "browser-fixture")]
+                            b'J' => {
+                                *route.evaluation.lock().unwrap() =
+                                    serde_json::from_slice(&data).ok();
+                                continue;
+                            }
+                            _ => continue,
+                        };
+                        // At most one latest frame is retained per page. A busy UI
+                        // never accumulates video frames or blocks the engine.
+                        match event {
+                            NativeEvent::NewTab(_)
+                            | NativeEvent::Clipboard(_)
+                            | NativeEvent::Menu(_) => {
+                                let _ = route.tx.blocking_send(event);
+                            }
+                            _ => {
+                                let _ = route.tx.try_send(event);
+                            }
                         }
-                        b'S' => {
-                            let Ok(state) = serde_json::from_slice(&data) else { continue; };
-                            *route.state.lock().unwrap() = state; NativeEvent::Changed
-                        }
-                        b'M' => {let Ok(menu)=serde_json::from_slice(&data) else {continue;};NativeEvent::Menu(menu)}
-                        b'C' => NativeEvent::Clipboard(String::from_utf8_lossy(&data).into_owned()),
-                        b'N' => NativeEvent::NewTab(String::from_utf8_lossy(&data).into_owned()),
-                        #[cfg(feature = "browser-fixture")]
-                        b'J' => { *route.evaluation.lock().unwrap() = serde_json::from_slice(&data).ok(); continue; }
-                        _ => continue,
-                    };
-                    // At most one latest frame is retained per page. A busy UI
-                    // never accumulates video frames or blocks the engine.
-                    match event {
-                        NativeEvent::NewTab(_) | NativeEvent::Clipboard(_) | NativeEvent::Menu(_) => { let _ = route.tx.blocking_send(event); }
-                        _ => { let _ = route.tx.try_send(event); }
+                    }
+                })();
+                if result.is_err() {
+                    for route in reader_routes
+                        .lock()
+                        .unwrap()
+                        .values()
+                        .filter_map(Weak::upgrade)
+                    {
+                        let mut state = route.state.lock().unwrap();
+                        state.loading = false;
+                        state.error = Some(PageFailure::message(MessageId::BrowserHelperStopped));
+                        drop(state);
+                        let _ = route.tx.try_send(NativeEvent::Changed);
                     }
                 }
-            })();
-            if result.is_err() {
-                for route in reader_routes.lock().unwrap().values().filter_map(Weak::upgrade) {
-                    let mut state = route.state.lock().unwrap();
-                    state.loading = false;
-                    state.error = Some("The browser helper stopped. Check that WebKitGTK 4.1 is installed, then reopen the tab.".into());
-                    drop(state); let _ = route.tx.try_send(NativeEvent::Changed);
-                }
-            }
-        }).map_err(|e| e.to_string())?;
+            })
+            .map_err(|e| PageFailure::detail(e.to_string()))?;
         let worker = Arc::new(Worker {
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
@@ -172,13 +239,13 @@ impl BrowserData {
     }
 }
 impl Worker {
-    fn send(&self, id: u32, mut command: Value) -> Result<(), String> {
+    fn send(&self, id: u32, mut command: Value) -> Result<(), PageFailure> {
         command["id"] = id.into();
-        let data = serde_json::to_vec(&command).map_err(|e| e.to_string())?;
+        let data = serde_json::to_vec(&command).map_err(|e| PageFailure::detail(e.to_string()))?;
         let mut pipe = self.stdin.lock().unwrap();
         pipe.write_all(&(data.len() as u32).to_le_bytes())
             .and_then(|_| pipe.write_all(&data))
-            .map_err(|e| e.to_string())
+            .map_err(|e| PageFailure::detail(e.to_string()))
     }
 }
 
@@ -202,7 +269,7 @@ impl NativePage {
         _: &gpui::Window,
         data: &BrowserData,
         tx: Sender<NativeEvent>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, PageFailure> {
         let worker = data.worker()?;
         let id = worker.next_id.fetch_add(1, Ordering::Relaxed);
         let route = Arc::new(Route {
@@ -235,7 +302,7 @@ impl NativePage {
             pressed: std::cell::Cell::new(None),
         })
     }
-    pub fn load(&self, url: &str) -> Result<(), String> {
+    pub fn load(&self, url: &str) -> Result<(), PageFailure> {
         self.worker.send(self.id, json!({"cmd":"load","url":url}))
     }
     pub fn reload(&self) {
@@ -417,6 +484,22 @@ impl super::BrowserSurface {
         };
         native.command(json!({"cmd":if down {"key_down"} else {"key_up"},"key":key,"text":stroke.key_char.as_deref().unwrap_or(""),"mods":modifiers_mask(stroke.modifiers)}));
     }
+}
+/// The helper sends an action id with each context-menu row. Actions this UI
+/// owns render their own copy; anything else is page content — a `<select>`
+/// option arrives as `option:<index>` and must stay verbatim.
+fn menu_label(action: &str) -> Option<MessageId> {
+    Some(match action {
+        "open-link" => MessageId::BrowserMenuOpenLink,
+        "copy-link" => MessageId::MarkdownCopyLinkAddress,
+        "copy" => MessageId::EditCopy,
+        "text" => MessageId::EditPaste,
+        "select-all" => MessageId::BrowserMenuSelectAll,
+        "back" => MessageId::CommonBack,
+        "forward" => MessageId::BrowserForward,
+        "reload" => MessageId::BrowserMenuReload,
+        _ => return None,
+    })
 }
 pub(super) fn modifiers_mask(m: gpui::Modifiers) -> u32 {
     u32::from(m.shift)
@@ -631,6 +714,7 @@ impl super::BrowserSurface {
     ) -> Option<gpui::AnyElement> {
         let theme = &theme.for_popup();
         use gpui::{IntoElement, div, prelude::*, px};
+        let locale = i18n::locale(cx);
         let native = self.native.as_ref()?;
         let menu = native.menu.as_ref()?;
         let items = menu["items"].as_array()?;
@@ -650,15 +734,18 @@ impl super::BrowserSurface {
             .overflow_y_scroll();
         for (index, item) in items.iter().enumerate() {
             let enabled = item["enabled"].as_bool().unwrap_or(false);
+            let label = item["action"]
+                .as_str()
+                .and_then(menu_label)
+                .map(|id| i18n::translate(id, locale).to_owned())
+                .unwrap_or_else(|| item["label"].as_str().unwrap_or("").to_owned());
             let row = crate::popover::menu_row(
                 theme,
                 index == native.menu_active,
                 format!("browser-option-{index}"),
             )
             .id(("browser-option", index))
-            .child(gpui::SharedString::from(
-                item["label"].as_str().unwrap_or("").to_owned(),
-            ))
+            .child(gpui::SharedString::from(label))
             .when(!enabled, |el| el.opacity(0.4))
             .when(enabled, |el| {
                 el.on_click(cx.listener(move |this, _, _, cx| this.linux_choose_menu(index, cx)))
