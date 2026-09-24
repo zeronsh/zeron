@@ -1142,10 +1142,27 @@ pub enum ConnectivityState {
     Connected,
 }
 
+/// Additive per-chat admission status; legacy peers omit it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChatSyncState {
+    Local,
+    Waiting,
+    Connecting,
+    Synced,
+    Offline,
+    StorageError,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatConnectivity {
     pub chat_id: String,
+    #[serde(default)]
+    pub sync_state: ChatSyncState,
     pub connected: bool,
     /// Local update batches not yet acked by the chat's edge room.
     #[serde(default)]

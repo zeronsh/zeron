@@ -1989,6 +1989,7 @@ impl RpcService for EngineRpc {
                         serde_json::json!({
                             "chatId": chat_id,
                             "room": room.as_ref().map(chat2_json),
+                            "state": self.doc_host.chat_sync_state(chat_id),
                         })
                     })
                     .collect();
@@ -1997,6 +1998,7 @@ impl RpcService for EngineRpc {
                     "nowMs": crate::now_ms(),
                     "workspace": workspace.as_ref().map(room_json),
                     "chats": chats,
+                    "resources": self.doc_host.sync_resources(),
                 }))
             }
             methods::WATCH_CONNECTIVITY => Ok(RpcReply::Stream(watch_stream(

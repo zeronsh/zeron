@@ -433,12 +433,11 @@ impl EngineCore {
             zeron_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth));
         let doc_host = self.doc_host.clone();
         let on_nudge: zeron_rpc::NudgeHandler = Arc::new(move |chat_id: String| {
-            // Opening the doc joins its room + syncs; drain fires on the change
-            // subscription — the command executes with no standing per-chat socket.
-            match doc_host.open(&chat_id) {
-                Ok(_) => tracing::info!(chat = %chat_id, "nudge: chat doc opened"),
+            match doc_host.enqueue_wakeup(&chat_id) {
+                Ok(()) => true,
                 Err(err) => {
-                    tracing::warn!(chat = %chat_id, error = %err, "nudge: open failed")
+                    tracing::warn!(chat = %chat_id, %err, "nudge: durable admission failed; withholding ACK");
+                    false
                 }
             }
         });

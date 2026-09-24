@@ -234,22 +234,24 @@ impl BinConnector for WsBinConnector {
     fn connect(&self) -> BoxFuture<'static, Result<BinPipe, SyncError>> {
         let provider = self.url.clone();
         Box::pin(async move {
+            let socket_permit = crate::budget::shared().socket().await?;
+            let dial_permit = crate::budget::shared().dial().await?;
             let url = provider.url().await?;
-            let ws = crate::dial::connect_ws(&url)
-                .await
-                .map_err(|e| SyncError::WebSocket(e.to_string()))?;
+            let ws = crate::dial::connect_ws(&url).await.map_err(|e| {
+                crate::budget::shared().observe_error(&e);
+                SyncError::WebSocket(e.to_string())
+            })?;
+            drop(dial_permit);
             let (out_tx, out_rx) = mpsc::channel(64);
             let (in_tx, in_rx) = mpsc::channel(64);
-            tokio::spawn(crate::socket::pump(
-                ws,
-                out_rx,
-                in_tx,
-                WsMessage::Binary,
-                |frame| match frame {
+            tokio::spawn(async move {
+                let _socket_permit = socket_permit;
+                crate::socket::pump(ws, out_rx, in_tx, WsMessage::Binary, |frame| match frame {
                     WsMessage::Binary(bytes) => Some(bytes),
                     _ => None,
-                },
-            ));
+                })
+                .await;
+            });
             Ok(BinPipe {
                 tx: out_tx,
                 rx: in_rx,
@@ -270,6 +272,7 @@ struct PendingPush {
 #[derive(Default)]
 struct Shared {
     cursor: u64,
+    caught_up: bool,
     pending: VecDeque<PendingPush>,
     /// Last hello/probe view of the server log (checkpoint-policy inputs).
     server: Option<wire::StateHeader>,
@@ -425,6 +428,11 @@ pub struct ChatStatsSnapshot {
     /// Times a hello found the server behind our cursor (room reset/wiped).
     /// Nonzero means the host owes the room a re-seed checkpoint.
     pub server_resets: u64,
+}
+
+fn retry_jitter(max: Duration) -> Duration {
+    let random = u64::from_le_bytes(uuid::Uuid::new_v4().as_bytes()[..8].try_into().unwrap());
+    Duration::from_millis(random % (max.as_millis() as u64 + 1))
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -604,28 +612,25 @@ impl ChatClient {
         };
         let task = tokio::spawn(actor.run(ready_tx));
 
+        // Own both actor tasks BEFORE the await. Cancelling a timed-out
+        // construction must not detach its JoinHandle and leak a live socket.
+        let client = Self {
+            sink,
+            shared,
+            events,
+            shutdown: shutdown_tx,
+            nudge: nudge_tx,
+            probe: probe_tx,
+            redial: redial_tx,
+            presence_out: presence_tx,
+            flags,
+            task: Some(task),
+            offline_task,
+        };
         match ready_rx.await {
-            Ok(Ok(())) => Ok(Self {
-                sink,
-                shared,
-                events,
-                shutdown: shutdown_tx,
-                nudge: nudge_tx,
-                probe: probe_tx,
-                redial: redial_tx,
-                presence_out: presence_tx,
-                flags,
-                task: Some(task),
-                offline_task,
-            }),
-            Ok(Err(err)) => {
-                task.abort();
-                Err(err)
-            }
-            Err(_) => {
-                task.abort();
-                Err(SyncError::Closed)
-            }
+            Ok(Ok(())) => Ok(client),
+            Ok(Err(err)) => Err(err),
+            Err(_) => Err(SyncError::Closed),
         }
     }
 
@@ -712,6 +717,23 @@ impl ChatClient {
         }
     }
 
+    pub fn delivery_live(&self) -> bool {
+        let shared = lock(&self.shared);
+        shared.caught_up
+            && !shared.needs_checkpoint
+            && !shared.gap_repair
+            && (self
+                .flags
+                .connected
+                .load(std::sync::atomic::Ordering::Relaxed)
+                || shared.http_live_epoch == Some(shared.http_replay_epoch))
+    }
+
+    pub fn caught_up(&self) -> bool {
+        let shared = lock(&self.shared);
+        shared.caught_up && !shared.needs_checkpoint && !shared.gap_repair
+    }
+
     pub fn stats(&self) -> ChatStatsSnapshot {
         use std::sync::atomic::Ordering::Relaxed;
         let shared = lock(&self.shared);
@@ -747,9 +769,12 @@ impl ChatClient {
     /// Leave cleanly and stop the actor.
     pub async fn shutdown(mut self) {
         let _ = self.shutdown.send(true);
-        if let Some(task) = self.task.take() {
+        // Retain abort ownership while awaiting: cancelling this future must
+        // still run Drop with the actor handle, rather than detach the actor.
+        if let Some(task) = self.task.as_mut() {
             let _ = task.await;
         }
+        self.task.take();
         // A fallback pull may still be importing after the socket actor exits.
         // Join its cancellation before the host takes its final snapshot.
         let offline = lock(&self.offline_task).take();
@@ -886,7 +911,16 @@ impl Actor {
             };
 
             let session_started = tokio::time::Instant::now();
-            match self.run_session(pipe, &mut ready).await {
+            // Cover the whole session, including backpressured sends, HELLO
+            // and row backfill. A peer need not close or reach a deadline for
+            // shutdown to complete. The clone avoids borrowing self twice.
+            let mut shutdown = self.shutdown.clone();
+            let end = tokio::select! {
+                biased;
+                _ = shutdown.wait_for(|stop| *stop) => SessionEnd::Stop,
+                end = self.run_session(pipe, &mut ready) => end,
+            };
+            match end {
                 SessionEnd::Stop => return,
                 SessionEnd::Reconnect => {
                     use std::sync::atomic::Ordering::Relaxed;
@@ -943,9 +977,9 @@ impl Actor {
             wait
         };
         tokio::select! {
-            _ = tokio::time::sleep(wait) => Waited::Elapsed,
-            _ = wake.recv() => Waited::Woke,
-            _ = online.recv() => Waited::Woke,
+            _ = tokio::time::sleep(wait + retry_jitter(wait / 4)) => Waited::Elapsed,
+            _ = wake.recv() => { tokio::time::sleep(retry_jitter(BACKOFF_BASE)).await; Waited::Woke },
+            _ = online.recv() => { tokio::time::sleep(retry_jitter(BACKOFF_BASE)).await; Waited::Woke },
             _ = self.shutdown.changed() => {
                 if *self.shutdown.borrow() {
                     Waited::Shutdown
@@ -1193,6 +1227,7 @@ impl Actor {
             let _ = ready.send(Ok(()));
         }
         if !lock(&self.shared).needs_checkpoint {
+            lock(&self.shared).caught_up = true;
             let _ = self.events.send(ChatEvent::CaughtUp { head_seq });
         }
 
@@ -1499,6 +1534,7 @@ impl Actor {
                                 && !sh.needs_checkpoint
                             {
                                 sh.http_live_epoch = Some(replay_epoch);
+                                sh.caught_up = true;
                             }
                         }
                     }

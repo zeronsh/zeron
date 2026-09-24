@@ -21,7 +21,7 @@ pub enum StoreError {
 /// Synchronous command/doc callbacks still need commit-before-send semantics.
 /// Relinquish a multithread runtime's core BEFORE either SQLite or its mutex
 /// can block; moving only the snapshot writer leaves these contenders fatal.
-fn store_blocking<T>(f: impl FnOnce() -> T) -> T {
+pub(crate) fn store_blocking<T>(f: impl FnOnce() -> T) -> T {
     if tokio::runtime::Handle::try_current()
         .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
     {
@@ -64,6 +64,16 @@ const MIGRATIONS: &[&str] = &[
     // Older cursors may have advanced over parked imports. Trust only writes
     // made by the causal-aware persister, not every legacy epoch-2 snapshot.
     "ALTER TABLE snapshots ADD COLUMN cursor_verified INTEGER NOT NULL DEFAULT 0;",
+    // Durable wake/recovery receipts, independent of live document handles.
+    "CREATE TABLE chat_sync_jobs (
+        doc_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY(doc_id, kind)
+    ) STRICT;
+    CREATE TABLE sync_job_clock (id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL) STRICT;
+    INSERT INTO sync_job_clock VALUES (1,0);",
+    "ALTER TABLE chat_sync_jobs ADD COLUMN cursor TEXT NOT NULL DEFAULT '';",
 ];
 
 /// SQLite-backed store under a data directory (`{data_dir}/docs.sqlite3`).
@@ -127,6 +137,17 @@ impl DocsStore {
 
     pub fn pending_chat_updates(&self, doc_id: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
         store_blocking(|| self.pending_chat_updates_blocking(doc_id))
+    }
+
+    /// Admission/lifetime checks must not copy the pending payloads.
+    pub fn has_pending_chat_updates(&self, doc_id: &str) -> Result<bool, StoreError> {
+        store_blocking(|| {
+            Ok(self.conn().query_row(
+                "SELECT EXISTS(SELECT 1 FROM chat_outbox WHERE doc_id=?1)",
+                params![doc_id],
+                |row| row.get(0),
+            )?)
+        })
     }
 
     fn pending_chat_updates_blocking(
@@ -408,6 +429,10 @@ impl DocsStore {
         tx.execute("DELETE FROM snapshots WHERE doc_id = ?1", params![doc_id])?;
         tx.execute("DELETE FROM chat_outbox WHERE doc_id = ?1", params![doc_id])?;
         tx.execute(
+            "DELETE FROM chat_sync_jobs WHERE doc_id = ?1",
+            params![doc_id],
+        )?;
+        tx.execute(
             "DELETE FROM chat_outbox_initialized WHERE doc_id = ?1",
             params![doc_id],
         )?;
@@ -522,7 +547,7 @@ impl DocsStore {
         Ok(())
     }
 
-    fn conn(&self) -> MutexGuard<'_, Connection> {
+    pub(crate) fn conn(&self) -> MutexGuard<'_, Connection> {
         // A poisoned lock only means another thread panicked mid-query; the
         // connection itself is still usable.
         self.conn.lock().unwrap_or_else(PoisonError::into_inner)
