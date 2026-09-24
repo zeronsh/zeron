@@ -3855,6 +3855,23 @@ fn urlencode(input: &str) -> String {
 /// than writing through it. A crash leaves at worst an owner-only temp file
 /// and never a torn target.
 fn write_file_atomic(file: &Path, bytes: &[u8], secret: bool) -> Result<(), EngineError> {
+    stage_file_atomic(file, bytes, secret)?
+        .persist(file)
+        .map_err(|e| EngineError::from(e.error))?;
+    Ok(())
+}
+
+/// The first half of [`write_file_atomic`]: `bytes` written and synced to a
+/// fresh, exclusive, same-directory temp file with the final permissions,
+/// ready to `persist` over `file`. Callers that must re-check the target
+/// right before replacing it (see `stores::merge_json_entry`) stage first, so
+/// only the comparison and the rename remain between their check and the
+/// swap. Dropping the returned file deletes it.
+fn stage_file_atomic(
+    file: &Path,
+    bytes: &[u8],
+    secret: bool,
+) -> Result<tempfile::NamedTempFile, EngineError> {
     use std::io::Write;
     let dir = file
         .parent()
@@ -3887,8 +3904,7 @@ fn write_file_atomic(file: &Path, bytes: &[u8], secret: bool) -> Result<(), Engi
     let _ = secret;
     tmp.write_all(bytes)?;
     tmp.as_file().sync_all()?;
-    tmp.persist(file).map_err(|e| EngineError::from(e.error))?;
-    Ok(())
+    Ok(tmp)
 }
 
 #[cfg(test)]

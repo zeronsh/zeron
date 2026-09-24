@@ -20,11 +20,37 @@ pub fn redact_output(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut previous = String::new();
     let mut word = String::new();
-    let flush = |word: &mut String, previous: &mut String, out: &mut String| {
+    // Set by a secret label whose value is the NEXT word: `token: abc`,
+    // `state = xyz`, pretty-printed `"access_token": "abc"`.
+    let mut value_next = false;
+    let mut flush = |word: &mut String, previous: &mut String, out: &mut String| {
         if word.is_empty() {
             return;
         }
-        out.push_str(&redact_word(word, previous));
+        let label = secret_label(word);
+        let bare_separator = matches!(word.as_str(), "=" | ":" | "=>");
+        let auth_scheme = matches!(
+            word.to_ascii_lowercase().as_str(),
+            "bearer" | "basic" | "digest"
+        );
+        if value_next && auth_scheme {
+            // `Authorization: Bearer <token>` — the scheme stays; the word
+            // after it is redacted by the `previous` rule in `redact_word`.
+            out.push_str(word);
+            value_next = false;
+        } else if value_next && !bare_separator {
+            out.push_str(&redact_labeled_value(word));
+            value_next = false;
+        } else {
+            out.push_str(&redact_word(word, previous));
+            value_next = match label {
+                // `token:` / `"access_token":` — the separator is attached.
+                Some(true) => true,
+                // `state` — wait for a bare `=` / `:` before the value.
+                Some(false) => false,
+                None => value_next || (bare_separator && secret_label(previous) == Some(false)),
+            };
+        }
         *previous = word.to_ascii_lowercase();
         word.clear();
     };
@@ -38,6 +64,53 @@ pub fn redact_output(text: &str) -> String {
     }
     flush(&mut word, &mut previous, &mut out);
     out
+}
+
+/// Whether `word` is a secret label on its own — `Some(true)` when it ends
+/// in its separator (`token:`, `"state":`, `password=`), `Some(false)` when
+/// the separator should follow as its own word (`token`, `"state"`), `None`
+/// when it isn't a label. A word carrying its value (`token=abc`) is not a
+/// label: [`redact_core`] handles it in place.
+fn secret_label(word: &str) -> Option<bool> {
+    let trimmed = word.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | ',' | '{' | '('));
+    let (key, separated) = match trimmed.strip_suffix([':', '=']) {
+        Some(key) => (
+            key.trim_matches(|c: char| matches!(c, '"' | '\'' | '`')),
+            true,
+        ),
+        None => (trimmed, false),
+    };
+    if key.is_empty()
+        || !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    let lower = key.to_ascii_lowercase();
+    SECRET_KEYS
+        .iter()
+        .any(|k| lower.contains(k))
+        .then_some(separated)
+}
+
+/// The value after a secret label, with its quotes and trailing punctuation
+/// kept. Short plain numbers (`status code: 503`) stay readable.
+fn redact_labeled_value(word: &str) -> String {
+    const EDGE: &[char] = &['"', '\'', '`', ',', ';', ')', '}', ']'];
+    let start = word.len() - word.trim_start_matches(EDGE).len();
+    let core = word[start..].trim_end_matches(EDGE);
+    if core.is_empty() || (core.len() <= 4 && core.chars().all(|c| c.is_ascii_digit())) {
+        return word.to_string();
+    }
+    let end = start + core.len();
+    // A device code keeps its own marker so a sign-in hint still reads right.
+    let mask = if looks_like_device_code(core) {
+        "[code]"
+    } else {
+        REDACTED
+    };
+    format!("{}{mask}{}", &word[..start], &word[end..])
 }
 
 const REDACTED: &str = "[redacted]";
@@ -229,6 +302,38 @@ pub fn strip_ansi(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn spaced_and_pretty_printed_labels_hide_their_values() {
+        let cases = [
+            ("token: abc123def", "token: [redacted]"),
+            ("state = secret-value", "state = [redacted]"),
+            ("password: hunter2", "password: [redacted]"),
+            (
+                r#""access_token": "abc123""#,
+                r#""access_token": "[redacted]""#,
+            ),
+            (
+                "{\n  \"refresh_token\": \"r-1\",\n  \"expires\": 3600\n}",
+                "{\n  \"refresh_token\": \"[redacted]\",\n  \"expires\": 3600\n}",
+            ),
+            ("api_key : zzz", "api_key : [redacted]"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(redact_output(input), want, "{input}");
+        }
+    }
+
+    #[test]
+    fn ordinary_labels_and_short_codes_stay_readable() {
+        assert_eq!(redact_output("status code: 503"), "status code: 503");
+        assert_eq!(redact_output("retry after: 30s"), "retry after: 30s");
+        assert_eq!(
+            redact_output("Sign-in failed: network"),
+            "Sign-in failed: network"
+        );
+    }
+
     use super::*;
 
     #[test]

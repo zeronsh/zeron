@@ -1318,7 +1318,7 @@ fn credential_defined_endpoints_must_be_the_vendors_own_https_hosts() {
         assert_eq!(ok(raw, GROK_ISSUERS), None, "{raw}");
     }
     assert!(trusted_base("http://127.0.0.1:9", GROK_ISSUERS, true).is_some());
-    // GitHub Enterprise: a plain host the user configured, https only.
+    // GitHub Enterprise Cloud: `<tenant>.ghe.com` only, https only.
     let ghe = |raw: &str| {
         copilot_api_base(
             &serde_json::json!({ "enterpriseUrl": raw }),
@@ -1341,6 +1341,17 @@ fn credential_defined_endpoints_must_be_the_vendors_own_https_hosts() {
         "localhost",
         "company.ghe.com?x=1",
         "10.0.0.1",
+        // Any plain host outside ghe.com — the review's case: the file
+        // alone must never pick where the GitHub token goes.
+        "evil.example",
+        "https://evil.example",
+        // Self-hosted GHES: skipped (its REST root is /api/v3, and the
+        // host isn't one zeron can vouch for).
+        "github.company.com",
+        // Look-alikes and nesting.
+        "ghe.com",
+        "company.ghe.com.evil.example",
+        "a.b.ghe.com",
     ] {
         assert_eq!(ghe(raw), None, "{raw}");
     }

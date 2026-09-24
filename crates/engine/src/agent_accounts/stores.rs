@@ -528,10 +528,11 @@ const MERGE_ATTEMPTS: usize = 3;
 /// again right before the rename, and a change since the first read (an
 /// agent that writes without taking the lock — OpenCode takes none — or a
 /// CLI mid-refresh) restarts the cycle from the new contents instead of
-/// clobbering it. RESIDUAL RISK: a writer that ignores the lock and lands
-/// between that second read and the rename is overwritten; the window is a
-/// single rename, and the entry it would have changed is re-detected (and
-/// re-snapshotted) on the next list.
+/// clobbering it. The replacement is staged (written and synced to its temp
+/// file) before that second read, so the unguarded window is only the
+/// comparison plus the rename. RESIDUAL RISK: a writer that ignores the lock
+/// and lands inside that window is overwritten; the entry it would have
+/// changed is re-detected (and re-snapshotted) on the next list.
 ///
 /// An existing store that doesn't parse is never overwritten — writing only
 /// our entry would wipe the user's other logins.
@@ -578,11 +579,18 @@ pub(super) fn merge_json_entry(
         if let Some(dir) = file.parent() {
             std::fs::create_dir_all(dir)?;
         }
+        // Stage (create, write, fsync) BEFORE the final comparison, so the
+        // unguarded window is just compare + rename, not the temp-file I/O.
+        let staged = stage_file_atomic(file, json.as_bytes(), true)?;
         if read()? != before {
+            drop(staged); // deletes the temp file
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
-        return write_file_atomic(file, json.as_bytes(), true);
+        staged
+            .persist(file)
+            .map_err(|e| EngineError::from(e.error))?;
+        return Ok(());
     }
     Err(EngineError::Other(format!(
         "{} kept changing while zeron was switching — try again in a moment.",
@@ -599,10 +607,11 @@ pub(super) fn merge_json_entry(
 pub(super) enum HostPolicy {
     /// The vendor's own domains (and their subdomains).
     Domains(&'static [&'static str]),
-    /// Any plain DNS host — ONLY for a value that names an enterprise
-    /// deployment the user configured in the CLI itself (Copilot's
-    /// `enterpriseUrl`, i.e. GitHub Enterprise).
-    EnterpriseHost,
+    /// GitHub Enterprise Cloud with data residency: a single-label subdomain
+    /// of `ghe.com` (Copilot's `enterpriseUrl`). Self-hosted GHES hosts are
+    /// deliberately NOT accepted — a credential field alone never decides
+    /// where a GitHub token is sent.
+    GheCom,
 }
 
 /// Grok OIDC issuers (`oidc_issuer`, refresh only).
@@ -616,7 +625,7 @@ pub(super) const NOUS_PORTALS: HostPolicy = HostPolicy::Domains(&["nousresearch.
 /// `raw` as a base url safe to send a secret to: `https`, a DNS host the
 /// policy allows, no userinfo, port, query or fragment, and no path beyond
 /// `/`. A bare host (how OpenCode and Pi store `enterpriseUrl`) reads as
-/// `https://host` under [`HostPolicy::EnterpriseHost`]. `allow_loopback`
+/// `https://host` under [`HostPolicy::GheCom`]. `allow_loopback`
 /// additionally admits `http://127.0.0.1|localhost:<port>` — tests' mock
 /// servers only, never production. `None` = don't send anything.
 pub(super) fn trusted_base(
@@ -627,7 +636,7 @@ pub(super) fn trusted_base(
     let raw = raw.trim();
     let candidate = match (raw.contains("://"), policy) {
         (true, _) => raw.to_string(),
-        (false, HostPolicy::EnterpriseHost) => format!("https://{}", raw.trim_end_matches('/')),
+        (false, HostPolicy::GheCom) => format!("https://{}", raw.trim_end_matches('/')),
         (false, _) => return None,
     };
     let url = reqwest::Url::parse(&candidate).ok()?;
@@ -654,13 +663,18 @@ pub(super) fn trusted_base(
         HostPolicy::Domains(domains) => domains
             .iter()
             .any(|d| host == *d || host.ends_with(&format!(".{d}"))),
-        HostPolicy::EnterpriseHost => host.contains('.') && !host.ends_with('.'),
+        HostPolicy::GheCom => host
+            .strip_suffix(".ghe.com")
+            .is_some_and(|tenant| !tenant.is_empty() && !tenant.contains('.')),
     };
     allowed.then_some(url)
 }
 
-/// The REST root for a Copilot login: GitHub's, or `https://api.<host>` for
-/// a (validated) GitHub Enterprise `enterpriseUrl`. `None` = untrusted.
+/// The REST root for a Copilot login: GitHub's, or `https://api.<tenant>.ghe.com`
+/// for a GitHub Enterprise Cloud (`*.ghe.com`) `enterpriseUrl`. Any other
+/// enterprise host — self-hosted GHES included, whose REST root would be
+/// `https://<host>/api/v3` — is `None`: zeron skips identity/usage probes
+/// rather than send the token to a host the credential file alone names.
 pub(super) fn copilot_api_base(
     entry: &serde_json::Value,
     github_api: &str,
@@ -669,7 +683,7 @@ pub(super) fn copilot_api_base(
     match str_field(entry, "enterpriseUrl") {
         None => Some(github_api.trim_end_matches('/').to_string()),
         Some(raw) => {
-            let url = trusted_base(&raw, HostPolicy::EnterpriseHost, allow_loopback)?;
+            let url = trusted_base(&raw, HostPolicy::GheCom, allow_loopback)?;
             Some(match url.scheme() {
                 "https" => format!("https://api.{}", url.host_str()?),
                 _ => url.as_str().trim_end_matches('/').to_string(),
