@@ -915,6 +915,10 @@ impl Server {
 
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
+        // Every call goes to our own loopback `opencode serve` and carries its
+        // Basic-auth password. reqwest's system/env proxy has no loopback
+        // exemption, so without this a machine-wide proxy would receive it.
+        .no_proxy()
         .connect_timeout(Duration::from_secs(2))
         // No global timeout: the SSE stream lives for the whole run and
         // sync calls are bounded per call site.

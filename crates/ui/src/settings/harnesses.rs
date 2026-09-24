@@ -198,6 +198,16 @@ impl HarnessesPage {
         value
     }
 
+    /// Escape that reached Settings unclaimed goes to the expanded provider's
+    /// accounts (an open login) first. Returns whether it was consumed.
+    pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        self.expanded_harness.is_some()
+            && self
+                .accounts_page
+                .as_ref()
+                .is_some_and(|accounts| accounts.update(cx, |page, cx| page.dismiss_on_escape(cx)))
+    }
+
     /// Retarget the page at another device: a different device is a different
     /// install/enablement world, so drop the rows and reload through it.
     fn set_target_device(&mut self, target: Option<String>, cx: &mut Context<Self>) {

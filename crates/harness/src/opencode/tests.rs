@@ -650,6 +650,61 @@ async fn read_http_request_headers(socket: &mut tokio::net::TcpStream) {
     }
 }
 
+/// The loopback `opencode serve` gets our Basic-auth password on every call,
+/// so a system/env proxy must never see that traffic.
+#[test]
+fn http_client_never_proxies_the_loopback_server() {
+    const NAME: &str = "opencode::tests::http_client_never_proxies_the_loopback_server";
+    const CHILD: &str = "ZERON_OPENCODE_PROXY_PROBE";
+    if std::env::var_os(CHILD).is_none() {
+        // reqwest reads the proxy from the environment, and mutating it here
+        // would race sibling tests, so run the body in a child process.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([NAME, "--exact", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("HTTP_PROXY", "http://127.0.0.1:1")
+            .env("http_proxy", "http://127.0.0.1:1")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .env_remove("REQUEST_METHOD")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "child probe failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/global/health", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_http_request_headers(&mut socket).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        // Control: a default client does route loopback through the dead
+        // proxy, so this test cannot pass vacuously.
+        assert!(reqwest::Client::new().get(&url).send().await.is_err());
+        let response = http_client()
+            .get(&url)
+            .send()
+            .await
+            .expect("opencode client must reach loopback directly");
+        assert!(response.status().is_success());
+    });
+}
+
 #[tokio::test]
 async fn catalog_decodes_fragmented_http_without_retaining_unused_fields() {
     use tokio::io::AsyncWriteExt;
