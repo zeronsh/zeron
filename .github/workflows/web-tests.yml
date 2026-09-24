@@ -1,0 +1,89 @@
+name: Web client
+
+on:
+  pull_request:
+    paths:
+      - 'web/**'
+      - 'crates/engine/**'
+      - 'crates/proto/**'
+      - 'crates/rpc/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/web-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'crates/engine/**'
+      - 'crates/proto/**'
+      - 'crates/rpc/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/web-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-tests:
+    name: Typecheck, build, and unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck and build every package
+        run: pnpm -r build
+      - name: Engine-client unit tests
+        run: pnpm -C packages/engine-client vitest run --project unit
+      - name: App test suite
+        run: pnpm -C packages/app vitest run
+
+  engine-conformance:
+    name: Remote listener + live-engine conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Install
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+      # Build the app first so the engine's rust-embed staging picks up the
+      # real bundle (build.rs falls back to placeholder pages in debug).
+      - name: Build the web bundle
+        working-directory: web
+        run: pnpm -C packages/app exec vite build
+      - name: Remote listener tests (WorkOS gate, web routes, dev bearer)
+        run: cargo test --locked -p zeron-engine --test remote_listener
+      # The conformance and smoke suites spawn the web_conformance /
+      # web_smoke examples (the real listener in dev-auth mode) and drive
+      # the full sign-in, watch, and send flow over the wire.
+      - name: Build the engine examples
+        run: cargo build --locked -p zeron-engine --examples
+      - name: Live-engine conformance and smoke suites
+        working-directory: web/packages/engine-client
+        run: pnpm vitest run --project conformance --project smoke

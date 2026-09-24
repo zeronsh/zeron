@@ -1,0 +1,36 @@
+{
+  "name": "@zeron/app",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The Zeron web client app — Vite + React + TanStack Router, themed through the @zeron/theme tokens. The Vite dev server proxies a live engine; the production build drops into the engine's assets/web slots (index.html + pair.html).",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "packageManager": "pnpm@11.17.0",
+  "dependencies": {
+    "@base-ui/react": "1.8.0",
+    "@zeron/engine-client": "workspace:*",
+    "@zeron/icons": "workspace:*",
+    "@zeron/proto": "workspace:*",
+    "@zeron/theme": "workspace:*",
+    "@tanstack/react-router": "^1.132.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.2.5",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.0.0",
+    "jsdom": "^30.1.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.3.0",
+    "vitest": "^3.2.4"
+  }
+}

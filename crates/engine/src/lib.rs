@@ -24,11 +24,16 @@ pub mod diff_sync;
 pub mod doc_host;
 mod http_error;
 pub mod instance_lock;
+pub mod listener;
+
 pub mod local_import;
 mod model_catalogs;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;
+pub mod remote_access;
+pub mod remote_auth;
+
 pub mod repos;
 pub mod rpc;
 pub mod run_journal;
@@ -39,6 +44,8 @@ pub mod terminals;
 pub mod titles;
 mod transcript_history;
 pub mod uploads;
+mod web;
+
 pub mod workspace_files;
 pub mod workspace_host;
 
@@ -898,7 +905,24 @@ impl Engine {
             inner: runtime.core().rpc_service(),
             stop_tx,
         });
-        let server = serve_ipc(config.ipc_port, service).await?;
+        let server = serve_ipc(config.ipc_port, service.clone()).await?;
+
+        // Opt-in remote listener: the same RPC surface as IPC, served over
+        // HTTP + WebSocket to browsers and native remote clients, every
+        // bearer verified by `remote_auth` (WorkOS access tokens, or the dev
+        // bearer). Configuration comes from the remote-access settings file
+        // plus the `ZERON_NETWORK` startup override.
+        let remote_access = remote_access::RemoteAccessController::new(&config.data_dir);
+        remote_access
+            .initialize(
+                service,
+                remote_access::NetworkOptions::from_environment(None, None),
+                Arc::new(remote_auth::RemoteAuthorizer::new(
+                    config.workos_client_id.as_deref(),
+                    Some(config.edge_url.as_str()),
+                )),
+            )
+            .await;
 
         tokio::select! {
             result = shutdown_signal() => result?,
@@ -918,6 +942,7 @@ impl Engine {
         }
         tracing::info!("shutting down");
         server.abort();
+        remote_access.shutdown().await;
         runtime.shutdown().await;
         Ok(())
     }
@@ -972,6 +997,41 @@ pub async fn serve_ipc(
     Ok(tokio::spawn(zeron_rpc::serve_ws_listener(
         listener, service,
     )))
+}
+
+/// Owns the opt-in remote bind and its connections. Dropping it closes both.
+pub struct EngineListener {
+    pub address: std::net::SocketAddr,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl EngineListener {
+    /// Wait until the bind and accepted connections have been released.
+    pub async fn stop(&mut self) {
+        self.task.abort();
+        let _ = (&mut self.task).await;
+    }
+}
+
+impl Drop for EngineListener {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Bind the engine's remote listener: the same RPC surface as `serve_ipc`,
+/// served over HTTP + WebSocket with every bearer verified by `authorizer`
+/// (WorkOS access tokens, or the dev bearer). Opt-in; see
+/// [`remote_access::RemoteAccessController`].
+pub async fn serve_engine_remote(
+    address: std::net::SocketAddr,
+    service: Arc<dyn zeron_rpc::RpcService>,
+    authorizer: Arc<remote_auth::RemoteAuthorizer>,
+) -> anyhow::Result<EngineListener> {
+    let socket = tokio::net::TcpListener::bind(address).await?;
+    let address = socket.local_addr()?;
+    let task = tokio::spawn(listener::serve_remote_listener(socket, service, authorizer));
+    Ok(EngineListener { address, task })
 }
 
 /// Block until the WorkOS session is signed in AND org-scoped. On a TTY, print the

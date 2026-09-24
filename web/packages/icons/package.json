@@ -1,0 +1,26 @@
+{
+  "name": "@zeron/icons",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The Zeron control-icon set for the web client — the same SVG assets the desktop embeds (crates/ui/assets/icons), generated into one module plus a React <Icon> that tints with currentColor. Generation is manual: run `pnpm regenerate` after changing the Rust assets; `pnpm check` verifies the generated module is fresh (nothing in CI runs it).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.tsx",
+    "./generated": "./src/generated/index.ts",
+    "./generated/file-icons": "./src/generated/file-icons-manifest.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "regenerate": "node scripts/generate.mjs",
+    "regenerate:file-icons": "node scripts/generate-file-icons.mjs",
+    "check": "node scripts/generate.mjs --check && node scripts/generate-file-icons.mjs --check"
+  },
+  "packageManager": "pnpm@11.17.0",
+  "peerDependencies": {
+    "react": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.5",
+    "typescript": "5.9.3"
+  }
+}

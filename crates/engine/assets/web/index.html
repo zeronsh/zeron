@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zeron</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 2rem;
+    background: #101014; color: #e4e4e7;
+    font: 14px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  main { max-width: 40rem; margin: 0 auto; }
+  h1 { font-size: 1.25rem; }
+  a { color: #7dd3fc; }
+  pre {
+    padding: 1rem; overflow: auto;
+    background: #18181b; border: 1px solid #27272a; border-radius: 8px;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  [hidden] { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Zeron</h1>
+  <p id="status">Opening the engine connection…</p>
+  <p id="pair" hidden><a href="/pair">Pair this browser</a></p>
+  <pre id="info" hidden></pre>
+</main>
+<script>
+// Placeholder web client: proves the browser path end-to-end — first-frame
+// Auth, then an EngineInfo call. The session credential lives in this
+// origin's storage, written by /pair.
+const status = document.getElementById("status");
+const pair = document.getElementById("pair");
+const info = document.getElementById("info");
+const credential = localStorage.getItem("zeron.credential");
+
+if (!credential) {
+  status.textContent = "This browser is not paired with the engine yet.";
+  pair.hidden = false;
+} else {
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(scheme + "://" + location.host + "/");
+  let answered = false;
+
+  ws.onopen = () => {
+    // Browsers cannot set Authorization on the WebSocket handshake, so the
+    // session credential travels as the first frame instead.
+    ws.send(JSON.stringify({ auth: credential }));
+    ws.send(JSON.stringify({ id: 1, method: "EngineInfo", params: {} }));
+  };
+  ws.onmessage = (event) => {
+    // The engine may batch several newline-separated frames per message.
+    for (const line of String(event.data).split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let frame;
+      try { frame = JSON.parse(trimmed); } catch { continue; }
+      if (frame.id !== 1) continue;
+      answered = true;
+      if (frame.ok) {
+        status.textContent = "Paired with engine " + frame.ok.deviceId + ".";
+        info.textContent = JSON.stringify(frame.ok, null, 2);
+        info.hidden = false;
+      } else {
+        status.textContent = "Engine call failed: " + (frame.err || "unknown error");
+      }
+      ws.close();
+    }
+  };
+  ws.onclose = (event) => {
+    if (answered) return;
+    if (event.code === 4401) {
+      status.textContent = "The session was refused — it may have been revoked. Pair again to continue.";
+      localStorage.removeItem("zeron.credential");
+      localStorage.removeItem("zeron.session");
+      pair.hidden = false;
+    } else {
+      status.textContent = "The engine connection closed before answering.";
+    }
+  };
+}
+</script>
+</body>
+</html>

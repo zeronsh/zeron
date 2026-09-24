@@ -1,0 +1,16 @@
+{
+  "name": "zeron-web",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@11.17.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "codegen": "cargo run -p wiregen",
+    "codegen:check": "cargo run -p wiregen -- --check"
+  }
+}

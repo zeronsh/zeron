@@ -1,0 +1,28 @@
+{
+  "name": "@zeron/engine-client",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Framework-agnostic connection core for the Zeron web client: WebSocket dialing with first-frame Auth, identity re-verification, backoff, park-on-revoked, typed calls, and the ndjson frame codec. Behavior mirrors the desktop's engine registry (crates/ui/src/engine_registry.rs); no code is shared.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:conformance": "vitest run --project conformance",
+    "test:smoke": "vitest run --project smoke"
+  },
+  "dependencies": {
+    "@zeron/proto": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
+    "ws": "^8.18.0"
+  }
+}

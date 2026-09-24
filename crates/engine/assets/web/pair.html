@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pair this browser — Zeron</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 2rem;
+    background: #101014; color: #e4e4e7;
+    font: 14px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  main { max-width: 40rem; margin: 0 auto; }
+  h1 { font-size: 1.25rem; }
+  a { color: #7dd3fc; }
+  [hidden] { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Pair this browser</h1>
+  <p id="status">Redeeming the pairing link…</p>
+  <p id="open" hidden><a href="/">Open Zeron</a></p>
+</main>
+<script>
+// Pairing landing: the pair code rides in the URL fragment, which is never
+// sent to the engine. Redeeming it here grants this origin a session.
+const status = document.getElementById("status");
+const open = document.getElementById("open");
+const pairCode = new URLSearchParams(location.hash.slice(1)).get("token");
+
+if (!pairCode) {
+  status.textContent = "This page needs a pairing link from the engine.";
+} else {
+  fetch("/pairing/redeem", {
+    method: "POST",
+    headers: {
+      "authorization": "Bearer " + pairCode,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ label: "Web client" }),
+  }).then(async (response) => {
+    if (!response.ok) {
+      throw new Error("redeem failed with " + response.status);
+    }
+    const grant = await response.json();
+    localStorage.setItem("zeron.credential", grant.credential);
+    localStorage.setItem("zeron.session", JSON.stringify(grant.session));
+    status.textContent = "This browser is paired with the engine.";
+    open.hidden = false;
+  }).catch(() => {
+    status.textContent = "That pairing link did not work — it may have expired or already been used. Mint a fresh one from the engine.";
+  });
+}
+</script>
+</body>
+</html>

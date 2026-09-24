@@ -1,0 +1,8 @@
+# The generated wire types are byte-compared by `wiregen --check` across
+# platforms; never let Windows checkouts convert them to CRLF.
+* text=lf eol=lf
+# Bundled fonts are binary; a text attribute would strip 0x0D bytes out of
+# their tables on checkout and corrupt them.
+packages/theme/fonts/** -text
+# The bundled new-thread background artwork is binary for the same reason.
+packages/app/public/** -text

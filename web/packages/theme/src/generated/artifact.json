@@ -1,0 +1,6726 @@
+{
+  "schemaVersion": 2,
+  "generator": "zeron-theme-export",
+  "families": [
+    {
+      "id": "zeron",
+      "name": "Zeron",
+      "variants": [
+        {
+          "id": "zeron-light",
+          "familyId": "zeron",
+          "name": "Zeron Light",
+          "appearance": "light",
+          "recommendedSurfaceTreatment": "frosted",
+          "colors": {
+            "background": "#ffffff",
+            "shell": "#f3f3f5",
+            "raised": "#ededf0",
+            "raisedHover": "#dedede",
+            "card": "#ffffff",
+            "dialog": "#fefefe",
+            "overlay": "#ffffff",
+            "hover": "#0000000f",
+            "active": "#5b43e81a",
+            "border": "#0000001f",
+            "borderStrong": "#00000038",
+            "text": "#303035",
+            "textMuted": "#62626a",
+            "textFaint": "#797981",
+            "textDim": "#636363",
+            "solid": "#232328",
+            "onSolid": "#ffffff",
+            "danger": "#dc2626",
+            "dangerStrong": "#be1022",
+            "dangerMuted": "#ac292a",
+            "warning": "#a16207",
+            "warningMuted": "#855613",
+            "success": "#15803d",
+            "successMuted": "#1c6c3b",
+            "input": "#ffffff",
+            "cursor": "#3030358c",
+            "diffAdd": "#15803d",
+            "diffDelete": "#dc2626",
+            "diffHunk": "#5b43e812"
+          },
+          "accent": {
+            "primary": "#5b43e8",
+            "strong": "#5b43e8",
+            "wash": "#5b43e81f",
+            "on": "#ffffff",
+            "selection": "#5b43e83d",
+            "caret": "#5b43e8",
+            "activity": "#5b43e8",
+            "glyph": [
+              "#7965ec",
+              "#5b43e8",
+              "#4332ac"
+            ]
+          },
+          "syntax": {
+            "attribute": "#0e7490",
+            "boolean": "#a16207",
+            "comment": "#6b7280",
+            "constant": "#a16207",
+            "constructor": "#7e22ce",
+            "embedded": "#52525b",
+            "escape": "#0e7490",
+            "function": "#2563eb",
+            "functionBuiltin": "#2563eb",
+            "invalid": "#b91c1c",
+            "keyword": "#5b43e8",
+            "label": "#2563eb",
+            "macro": "#5b43e8",
+            "number": "#a16207",
+            "operator": "#5b43e8",
+            "parameter": "#303035",
+            "property": "#be185d",
+            "punctuation": "#52525b",
+            "string": "#15803d",
+            "stringSpecial": "#0e7490",
+            "tag": "#be185d",
+            "type": "#7e22ce",
+            "typeBuiltin": "#7e22ce",
+            "variable": "#303035",
+            "variableSpecial": "#5b43e8"
+          },
+          "terminal": {
+            "background": "#fafafa",
+            "foreground": "#303035",
+            "selection": "#00000029",
+            "ansi": [
+              "#1f1f1f",
+              "#dc2626",
+              "#16a34a",
+              "#b45309",
+              "#2563eb",
+              "#9333ea",
+              "#0e7490",
+              "#3f3f46",
+              "#71717a",
+              "#b91c1c",
+              "#15803d",
+              "#92400e",
+              "#1d4ed8",
+              "#7e22ce",
+              "#155e75",
+              "#18181b"
+            ]
+          },
+          "source": {
+            "format": "native",
+            "url": "https://github.com/zeronsh/comet",
+            "revision": "d138049",
+            "license": "MIT",
+            "assetHash": "sha256:b939f30d54a286f00186d9c49b0d958cca5caaa3e83563bf0ebea23a9c366668"
+          }
+        },
+        {
+          "id": "zeron-dark",
+          "familyId": "zeron",
+          "name": "Zeron Dark",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "frosted",
+          "colors": {
+            "background": "#060606",
+            "shell": "#0d0d0d",
+            "raised": "#343438",
+            "raisedHover": "#2b2b2b",
+            "card": "#0e0e0e",
+            "dialog": "#151516",
+            "overlay": "#1b1b1c",
+            "hover": "#ffffff1c",
+            "active": "#8b7cf62e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#e8e8ea",
+            "textMuted": "#a9a9ae",
+            "textFaint": "#85858a",
+            "textDim": "#989898",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#f87171",
+            "dangerStrong": "#c74b47",
+            "dangerMuted": "#f49293",
+            "warning": "#facc15",
+            "warningMuted": "#f6d34a",
+            "success": "#34d399",
+            "successMuted": "#61d8ad",
+            "input": "#343438b8",
+            "cursor": "#e8e8ea66",
+            "diffAdd": "#34d399",
+            "diffDelete": "#f87171",
+            "diffHunk": "#8b7cf614"
+          },
+          "accent": {
+            "primary": "#8b7cf6",
+            "strong": "#8b7cf6",
+            "wash": "#8b7cf638",
+            "on": "#000000",
+            "selection": "#8b7cf659",
+            "caret": "#8b7cf6",
+            "activity": "#8b7cf6",
+            "glyph": [
+              "#aba1f9",
+              "#8b7cf6",
+              "#7266ca"
+            ]
+          },
+          "syntax": {
+            "attribute": "#22d3ee",
+            "boolean": "#facc15",
+            "comment": "#92929a",
+            "constant": "#facc15",
+            "constructor": "#c084fc",
+            "embedded": "#a1a1aa",
+            "escape": "#22d3ee",
+            "function": "#60a5fa",
+            "functionBuiltin": "#60a5fa",
+            "invalid": "#f87171",
+            "keyword": "#8b7cf6",
+            "label": "#60a5fa",
+            "macro": "#8b7cf6",
+            "number": "#facc15",
+            "operator": "#8b7cf6",
+            "parameter": "#e8e8ea",
+            "property": "#f472b6",
+            "punctuation": "#a1a1aa",
+            "string": "#34d399",
+            "stringSpecial": "#22d3ee",
+            "tag": "#f472b6",
+            "type": "#c084fc",
+            "typeBuiltin": "#c084fc",
+            "variable": "#e8e8ea",
+            "variableSpecial": "#8b7cf6"
+          },
+          "terminal": {
+            "background": "#090909",
+            "foreground": "#e8e8ea",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#242424",
+              "#f87171",
+              "#4ade80",
+              "#facc15",
+              "#60a5fa",
+              "#c084fc",
+              "#22d3ee",
+              "#d4d4d8",
+              "#52525b",
+              "#fca5a5",
+              "#86efac",
+              "#fde047",
+              "#93c5fd",
+              "#d8b4fe",
+              "#67e8f9",
+              "#fafafa"
+            ]
+          },
+          "source": {
+            "format": "native",
+            "url": "https://github.com/zeronsh/comet",
+            "revision": "d138049",
+            "license": "MIT",
+            "assetHash": "sha256:a6bd1a31e810b7ed84d451debf201f4897754b7e85a9614e6e79042beab60e7c"
+          }
+        }
+      ]
+    },
+    {
+      "id": "vscode-default",
+      "name": "VS Code Default",
+      "variants": [
+        {
+          "id": "vscode-light-plus",
+          "familyId": "vscode-default",
+          "name": "Light+",
+          "appearance": "light",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#ffffff",
+            "shell": "#f3f3f3",
+            "raised": "#e8e8e8",
+            "raisedHover": "#e8e8e8",
+            "card": "#ffffff",
+            "dialog": "#fefefe",
+            "overlay": "#ffffff",
+            "hover": "#0000000f",
+            "active": "#0078d41a",
+            "border": "#0000001f",
+            "borderStrong": "#00000038",
+            "text": "#1f1f1f",
+            "textMuted": "#616161",
+            "textFaint": "#767676",
+            "textDim": "#616161",
+            "solid": "#232328",
+            "onSolid": "#ffffff",
+            "danger": "#a1260d",
+            "dangerStrong": "#a1260d",
+            "dangerMuted": "#7d2412",
+            "warning": "#895503",
+            "warningMuted": "#6f480a",
+            "success": "#008000",
+            "successMuted": "#086808",
+            "input": "#ffffff",
+            "cursor": "#1f1f1f8c",
+            "diffAdd": "#008000",
+            "diffDelete": "#a1260d",
+            "diffHunk": "#0078d412"
+          },
+          "accent": {
+            "primary": "#0078d4",
+            "strong": "#0078d4",
+            "wash": "#0078d41f",
+            "on": "#000000",
+            "selection": "#0078d43d",
+            "caret": "#0078d4",
+            "activity": "#0078d4",
+            "glyph": [
+              "#2e90dc",
+              "#0078d4",
+              "#00599d"
+            ]
+          },
+          "syntax": {
+            "attribute": "#ff0000",
+            "boolean": "#098658",
+            "comment": "#008000",
+            "constant": "#098658",
+            "constructor": "#267f99",
+            "embedded": "#1f1f1f",
+            "escape": "#ff0000",
+            "function": "#795e26",
+            "functionBuiltin": "#795e26",
+            "invalid": "#cd3131",
+            "keyword": "#0000ff",
+            "label": "#795e26",
+            "macro": "#0000ff",
+            "number": "#098658",
+            "operator": "#0000ff",
+            "parameter": "#1f1f1f",
+            "property": "#001080",
+            "punctuation": "#1f1f1f",
+            "string": "#a31515",
+            "stringSpecial": "#ff0000",
+            "tag": "#800000",
+            "type": "#267f99",
+            "typeBuiltin": "#267f99",
+            "variable": "#1f1f1f",
+            "variableSpecial": "#0000ff"
+          },
+          "terminal": {
+            "background": "#ffffff",
+            "foreground": "#1f1f1f",
+            "selection": "#00000029",
+            "ansi": [
+              "#1f1f1f",
+              "#dc2626",
+              "#16a34a",
+              "#b45309",
+              "#2563eb",
+              "#9333ea",
+              "#0e7490",
+              "#3f3f46",
+              "#71717a",
+              "#b91c1c",
+              "#15803d",
+              "#92400e",
+              "#1d4ed8",
+              "#7e22ce",
+              "#155e75",
+              "#18181b"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/microsoft/vscode",
+            "revision": "e33d147d4c0fa65ce17cb73ec9d798f064b4bf1f",
+            "license": "MIT",
+            "assetHash": "sha256:218064b8b7860b6992c953483fde1d4ee081db285d3742a7e38cb588f57ca363"
+          }
+        },
+        {
+          "id": "vscode-dark-plus",
+          "familyId": "vscode-default",
+          "name": "Dark+",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#1e1e1e",
+            "shell": "#181818",
+            "raised": "#2a2d2e",
+            "raisedHover": "#2a2d2e",
+            "card": "#252526",
+            "dialog": "#262627",
+            "overlay": "#272829",
+            "hover": "#ffffff1c",
+            "active": "#007acc2e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#d4d4d4",
+            "textMuted": "#a8a8a8",
+            "textFaint": "#858585",
+            "textDim": "#a8a8a8",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#f48771",
+            "dangerStrong": "#f48771",
+            "dangerMuted": "#eb9d8d",
+            "warning": "#cca700",
+            "warningMuted": "#ceb235",
+            "success": "#89d185",
+            "successMuted": "#9cd299",
+            "input": "#2a2d2eb8",
+            "cursor": "#d4d4d466",
+            "diffAdd": "#89d185",
+            "diffDelete": "#f48771",
+            "diffHunk": "#007acc14"
+          },
+          "accent": {
+            "primary": "#007acc",
+            "strong": "#007acc",
+            "wash": "#007acc38",
+            "on": "#000000",
+            "selection": "#007acc59",
+            "caret": "#007acc",
+            "activity": "#007acc",
+            "glyph": [
+              "#479fda",
+              "#007acc",
+              "#0064a7"
+            ]
+          },
+          "syntax": {
+            "attribute": "#9cdcfe",
+            "boolean": "#b5cea8",
+            "comment": "#6a9955",
+            "constant": "#b5cea8",
+            "constructor": "#4ec9b0",
+            "embedded": "#d4d4d4",
+            "escape": "#9cdcfe",
+            "function": "#dcdcaa",
+            "functionBuiltin": "#dcdcaa",
+            "invalid": "#f44747",
+            "keyword": "#c586c0",
+            "label": "#dcdcaa",
+            "macro": "#c586c0",
+            "number": "#b5cea8",
+            "operator": "#c586c0",
+            "parameter": "#d4d4d4",
+            "property": "#9cdcfe",
+            "punctuation": "#d4d4d4",
+            "string": "#ce9178",
+            "stringSpecial": "#9cdcfe",
+            "tag": "#569cd6",
+            "type": "#4ec9b0",
+            "typeBuiltin": "#4ec9b0",
+            "variable": "#d4d4d4",
+            "variableSpecial": "#c586c0"
+          },
+          "terminal": {
+            "background": "#1e1e1e",
+            "foreground": "#d4d4d4",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#000000",
+              "#cd3131",
+              "#0dbc79",
+              "#e5e510",
+              "#2472c8",
+              "#bc3fbc",
+              "#11a8cd",
+              "#e5e5e5",
+              "#666666",
+              "#f14c4c",
+              "#23d18b",
+              "#f5f543",
+              "#3b8eea",
+              "#d670d6",
+              "#29b8db",
+              "#e5e5e5"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/microsoft/vscode",
+            "revision": "e33d147d4c0fa65ce17cb73ec9d798f064b4bf1f",
+            "license": "MIT",
+            "assetHash": "sha256:a2dacdc1a15a194acc2f01601674ae6d8172332d43a1ddb1f8bd28bbf8aa340c"
+          }
+        }
+      ]
+    },
+    {
+      "id": "catppuccin",
+      "name": "Catppuccin",
+      "variants": [
+        {
+          "id": "catppuccin-latte",
+          "familyId": "catppuccin",
+          "name": "Catppuccin Latte",
+          "appearance": "light",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#eff1f5",
+            "shell": "#e6e9ef",
+            "raised": "#dce0e8",
+            "raisedHover": "#dce0e8",
+            "card": "#f7f8fa",
+            "dialog": "#f6f7f9",
+            "overlay": "#f6f8fa",
+            "hover": "#0000000f",
+            "active": "#8839ef1a",
+            "border": "#0000001f",
+            "borderStrong": "#00000038",
+            "text": "#4c4f69",
+            "textMuted": "#5c5f77",
+            "textFaint": "#6c6f85",
+            "textDim": "#5c5f77",
+            "solid": "#232328",
+            "onSolid": "#ffffff",
+            "danger": "#d20f39",
+            "dangerStrong": "#d20f39",
+            "dangerMuted": "#ac2146",
+            "warning": "#df8e1d",
+            "warningMuted": "#ba7e30",
+            "success": "#40a02b",
+            "successMuted": "#438c3b",
+            "input": "#f7f8fa",
+            "cursor": "#4c4f698c",
+            "diffAdd": "#40a02b",
+            "diffDelete": "#d20f39",
+            "diffHunk": "#8839ef12"
+          },
+          "accent": {
+            "primary": "#8839ef",
+            "strong": "#8839ef",
+            "wash": "#8839ef1f",
+            "on": "#ffffff",
+            "selection": "#8839ef3d",
+            "caret": "#8839ef",
+            "activity": "#8839ef",
+            "glyph": [
+              "#9b5af0",
+              "#8839ef",
+              "#652ab1"
+            ]
+          },
+          "syntax": {
+            "attribute": "#ea76cb",
+            "boolean": "#fe640b",
+            "comment": "#8c8fa1",
+            "constant": "#fe640b",
+            "constructor": "#df8e1d",
+            "embedded": "#6c6f85",
+            "escape": "#ea76cb",
+            "function": "#1e66f5",
+            "functionBuiltin": "#1e66f5",
+            "invalid": "#d20f39",
+            "keyword": "#8839ef",
+            "label": "#1e66f5",
+            "macro": "#8839ef",
+            "number": "#fe640b",
+            "operator": "#8839ef",
+            "parameter": "#4c4f69",
+            "property": "#179299",
+            "punctuation": "#6c6f85",
+            "string": "#40a02b",
+            "stringSpecial": "#ea76cb",
+            "tag": "#d20f39",
+            "type": "#df8e1d",
+            "typeBuiltin": "#df8e1d",
+            "variable": "#4c4f69",
+            "variableSpecial": "#8839ef"
+          },
+          "terminal": {
+            "background": "#eff1f5",
+            "foreground": "#4c4f69",
+            "selection": "#00000029",
+            "ansi": [
+              "#5c5f77",
+              "#d20f39",
+              "#40a02b",
+              "#df8e1d",
+              "#1e66f5",
+              "#ea76cb",
+              "#179299",
+              "#acb0be",
+              "#6c6f85",
+              "#d20f39",
+              "#40a02b",
+              "#df8e1d",
+              "#1e66f5",
+              "#ea76cb",
+              "#179299",
+              "#bcc0cc"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/catppuccin/vscode",
+            "revision": "befc9e6fc41980f4241408f7049755d47c06ff45",
+            "license": "MIT",
+            "assetHash": "sha256:58949b1c7496942bc037170bfd568095220550388eb8a0123190374556fc9c9d"
+          }
+        },
+        {
+          "id": "catppuccin-mocha",
+          "familyId": "catppuccin",
+          "name": "Catppuccin Mocha",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#1e1e2e",
+            "shell": "#181825",
+            "raised": "#313244",
+            "raisedHover": "#313244",
+            "card": "#242436",
+            "dialog": "#262739",
+            "overlay": "#28293b",
+            "hover": "#ffffff1c",
+            "active": "#cba6f72e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#cdd6f4",
+            "textMuted": "#a6adc8",
+            "textFaint": "#9399b2",
+            "textDim": "#a6adc8",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#f38ba8",
+            "dangerStrong": "#f38ba8",
+            "dangerMuted": "#e8a0bd",
+            "warning": "#f9e2af",
+            "warningMuted": "#eedfc0",
+            "success": "#a6e3a1",
+            "successMuted": "#b0e0b6",
+            "input": "#313244b8",
+            "cursor": "#cdd6f466",
+            "diffAdd": "#a6e3a1",
+            "diffDelete": "#f38ba8",
+            "diffHunk": "#cba6f714"
+          },
+          "accent": {
+            "primary": "#cba6f7",
+            "strong": "#cba6f7",
+            "wash": "#cba6f738",
+            "on": "#000000",
+            "selection": "#cba6f759",
+            "caret": "#cba6f7",
+            "activity": "#cba6f7",
+            "glyph": [
+              "#dabff9",
+              "#cba6f7",
+              "#a688cb"
+            ]
+          },
+          "syntax": {
+            "attribute": "#f5c2e7",
+            "boolean": "#fab387",
+            "comment": "#6c7086",
+            "constant": "#fab387",
+            "constructor": "#f9e2af",
+            "embedded": "#bac2de",
+            "escape": "#f5c2e7",
+            "function": "#89b4fa",
+            "functionBuiltin": "#89b4fa",
+            "invalid": "#f38ba8",
+            "keyword": "#cba6f7",
+            "label": "#89b4fa",
+            "macro": "#cba6f7",
+            "number": "#fab387",
+            "operator": "#cba6f7",
+            "parameter": "#cdd6f4",
+            "property": "#94e2d5",
+            "punctuation": "#bac2de",
+            "string": "#a6e3a1",
+            "stringSpecial": "#f5c2e7",
+            "tag": "#f38ba8",
+            "type": "#f9e2af",
+            "typeBuiltin": "#f9e2af",
+            "variable": "#cdd6f4",
+            "variableSpecial": "#cba6f7"
+          },
+          "terminal": {
+            "background": "#1e1e2e",
+            "foreground": "#cdd6f4",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#45475a",
+              "#f38ba8",
+              "#a6e3a1",
+              "#f9e2af",
+              "#89b4fa",
+              "#f5c2e7",
+              "#94e2d5",
+              "#bac2de",
+              "#585b70",
+              "#f38ba8",
+              "#a6e3a1",
+              "#f9e2af",
+              "#89b4fa",
+              "#f5c2e7",
+              "#94e2d5",
+              "#a6adc8"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/catppuccin/vscode",
+            "revision": "befc9e6fc41980f4241408f7049755d47c06ff45",
+            "license": "MIT",
+            "assetHash": "sha256:c3cfe3d9cb7f249f93ba34ad9e97661d61029c15338c1a2bd4a47cebfc53e306"
+          }
+        }
+      ]
+    },
+    {
+      "id": "tokyo-night",
+      "name": "Tokyo Night",
+      "variants": [
+        {
+          "id": "tokyo-night-light",
+          "familyId": "tokyo-night",
+          "name": "Tokyo Night Light",
+          "appearance": "light",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#d5d6db",
+            "shell": "#cbccd1",
+            "raised": "#bfc0c6",
+            "raisedHover": "#bfc0c6",
+            "card": "#e1e2e7",
+            "dialog": "#e0e1e6",
+            "overlay": "#e0e1e6",
+            "hover": "#0000000f",
+            "active": "#34548a1a",
+            "border": "#0000001f",
+            "borderStrong": "#00000038",
+            "text": "#343b59",
+            "textMuted": "#485e7d",
+            "textFaint": "#5a6378",
+            "textDim": "#485e7d",
+            "solid": "#232328",
+            "onSolid": "#ffffff",
+            "danger": "#8c4351",
+            "dangerStrong": "#8c4351",
+            "dangerMuted": "#734153",
+            "warning": "#8f5e15",
+            "warningMuted": "#785526",
+            "success": "#33635c",
+            "successMuted": "#33595b",
+            "input": "#e1e2e7",
+            "cursor": "#343b598c",
+            "diffAdd": "#33635c",
+            "diffDelete": "#8c4351",
+            "diffHunk": "#34548a12"
+          },
+          "accent": {
+            "primary": "#34548a",
+            "strong": "#34548a",
+            "wash": "#34548a1f",
+            "on": "#ffffff",
+            "selection": "#34548a3d",
+            "caret": "#34548a",
+            "activity": "#34548a",
+            "glyph": [
+              "#516b99",
+              "#34548a",
+              "#263e66"
+            ]
+          },
+          "syntax": {
+            "attribute": "#8f5e15",
+            "boolean": "#965027",
+            "comment": "#6c6e75",
+            "constant": "#965027",
+            "constructor": "#0f4b6e",
+            "embedded": "#485e7d",
+            "escape": "#8f5e15",
+            "function": "#34548a",
+            "functionBuiltin": "#34548a",
+            "invalid": "#8c4351",
+            "keyword": "#5a4a78",
+            "label": "#34548a",
+            "macro": "#5a4a78",
+            "number": "#965027",
+            "operator": "#5a4a78",
+            "parameter": "#343b59",
+            "property": "#166775",
+            "punctuation": "#485e7d",
+            "string": "#33635c",
+            "stringSpecial": "#8f5e15",
+            "tag": "#8c4351",
+            "type": "#0f4b6e",
+            "typeBuiltin": "#0f4b6e",
+            "variable": "#343b59",
+            "variableSpecial": "#5a4a78"
+          },
+          "terminal": {
+            "background": "#d5d6db",
+            "foreground": "#343b59",
+            "selection": "#00000029",
+            "ansi": [
+              "#0f0f14",
+              "#8c4351",
+              "#33635c",
+              "#8f5e15",
+              "#34548a",
+              "#5a4a78",
+              "#0f4b6e",
+              "#828594",
+              "#4c505e",
+              "#8c4351",
+              "#33635c",
+              "#8f5e15",
+              "#34548a",
+              "#5a4a78",
+              "#0f4b6e",
+              "#343b59"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/tokyo-night/tokyo-night-vscode-theme",
+            "revision": "7c0f11eaef322f293621ca7befe462214b7ea468",
+            "license": "MIT",
+            "assetHash": "sha256:88798a1d26205910d09c4f51d63a6f04e5119cfe3fdc03b0541618b271f00b1a"
+          }
+        },
+        {
+          "id": "tokyo-night",
+          "familyId": "tokyo-night",
+          "name": "Tokyo Night",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#1a1b26",
+            "shell": "#16161e",
+            "raised": "#292e42",
+            "raisedHover": "#292e42",
+            "card": "#1f2335",
+            "dialog": "#212537",
+            "overlay": "#222739",
+            "hover": "#ffffff1c",
+            "active": "#7aa2f72e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#c0caf5",
+            "textMuted": "#9aa5ce",
+            "textFaint": "#7f87ad",
+            "textDim": "#9aa5ce",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#f7768e",
+            "dangerStrong": "#f7768e",
+            "dangerMuted": "#e88eab",
+            "warning": "#e0af68",
+            "warningMuted": "#d8b68b",
+            "success": "#9ece6a",
+            "successMuted": "#a7cd8d",
+            "input": "#292e42b8",
+            "cursor": "#c0caf566",
+            "diffAdd": "#9ece6a",
+            "diffDelete": "#f7768e",
+            "diffHunk": "#7aa2f714"
+          },
+          "accent": {
+            "primary": "#7aa2f7",
+            "strong": "#7aa2f7",
+            "wash": "#7aa2f738",
+            "on": "#000000",
+            "selection": "#7aa2f759",
+            "caret": "#7aa2f7",
+            "activity": "#7aa2f7",
+            "glyph": [
+              "#9fbcf9",
+              "#7aa2f7",
+              "#6485cb"
+            ]
+          },
+          "syntax": {
+            "attribute": "#e0af68",
+            "boolean": "#ff9e64",
+            "comment": "#565f89",
+            "constant": "#ff9e64",
+            "constructor": "#2ac3de",
+            "embedded": "#9abdf5",
+            "escape": "#e0af68",
+            "function": "#7aa2f7",
+            "functionBuiltin": "#7aa2f7",
+            "invalid": "#f7768e",
+            "keyword": "#bb9af7",
+            "label": "#7aa2f7",
+            "macro": "#bb9af7",
+            "number": "#ff9e64",
+            "operator": "#bb9af7",
+            "parameter": "#c0caf5",
+            "property": "#73daca",
+            "punctuation": "#9abdf5",
+            "string": "#9ece6a",
+            "stringSpecial": "#e0af68",
+            "tag": "#f7768e",
+            "type": "#2ac3de",
+            "typeBuiltin": "#2ac3de",
+            "variable": "#c0caf5",
+            "variableSpecial": "#bb9af7"
+          },
+          "terminal": {
+            "background": "#1a1b26",
+            "foreground": "#c0caf5",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#15161e",
+              "#f7768e",
+              "#9ece6a",
+              "#e0af68",
+              "#7aa2f7",
+              "#bb9af7",
+              "#7dcfff",
+              "#a9b1d6",
+              "#414868",
+              "#f7768e",
+              "#9ece6a",
+              "#e0af68",
+              "#7aa2f7",
+              "#bb9af7",
+              "#7dcfff",
+              "#c0caf5"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/tokyo-night/tokyo-night-vscode-theme",
+            "revision": "7c0f11eaef322f293621ca7befe462214b7ea468",
+            "license": "MIT",
+            "assetHash": "sha256:21314cc4f71bed70d9ae1c855f71a450e19e195e41eeeed693ea7a78f8a7f781"
+          }
+        }
+      ]
+    },
+    {
+      "id": "dracula",
+      "name": "Dracula",
+      "variants": [
+        {
+          "id": "dracula",
+          "familyId": "dracula",
+          "name": "Dracula",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#282a36",
+            "shell": "#21222c",
+            "raised": "#44475a",
+            "raisedHover": "#44475a",
+            "card": "#2d303e",
+            "dialog": "#313443",
+            "overlay": "#353848",
+            "hover": "#ffffff1c",
+            "active": "#bd93f92e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#f8f8f2",
+            "textMuted": "#c5c8c6",
+            "textFaint": "#9a9cab",
+            "textDim": "#c5c8c6",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#ff5555",
+            "dangerStrong": "#ff5555",
+            "dangerMuted": "#fd8381",
+            "warning": "#f1fa8c",
+            "warningMuted": "#f3faa6",
+            "success": "#50fa7b",
+            "successMuted": "#7afa99",
+            "input": "#44475ab8",
+            "cursor": "#f8f8f266",
+            "diffAdd": "#50fa7b",
+            "diffDelete": "#ff5555",
+            "diffHunk": "#bd93f914"
+          },
+          "accent": {
+            "primary": "#bd93f9",
+            "strong": "#bd93f9",
+            "wash": "#bd93f938",
+            "on": "#000000",
+            "selection": "#bd93f959",
+            "caret": "#bd93f9",
+            "activity": "#bd93f9",
+            "glyph": [
+              "#cfb1fb",
+              "#bd93f9",
+              "#9b79cc"
+            ]
+          },
+          "syntax": {
+            "attribute": "#50fa7b",
+            "boolean": "#bd93f9",
+            "comment": "#6272a4",
+            "constant": "#bd93f9",
+            "constructor": "#8be9fd",
+            "embedded": "#f8f8f2",
+            "escape": "#50fa7b",
+            "function": "#50fa7b",
+            "functionBuiltin": "#50fa7b",
+            "invalid": "#ff5555",
+            "keyword": "#ff79c6",
+            "label": "#50fa7b",
+            "macro": "#ff79c6",
+            "number": "#bd93f9",
+            "operator": "#ff79c6",
+            "parameter": "#f8f8f2",
+            "property": "#8be9fd",
+            "punctuation": "#f8f8f2",
+            "string": "#f1fa8c",
+            "stringSpecial": "#50fa7b",
+            "tag": "#ff79c6",
+            "type": "#8be9fd",
+            "typeBuiltin": "#8be9fd",
+            "variable": "#f8f8f2",
+            "variableSpecial": "#ff79c6"
+          },
+          "terminal": {
+            "background": "#282a36",
+            "foreground": "#f8f8f2",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#21222c",
+              "#ff5555",
+              "#50fa7b",
+              "#f1fa8c",
+              "#bd93f9",
+              "#ff79c6",
+              "#8be9fd",
+              "#f8f8f2",
+              "#6272a4",
+              "#ff6e6e",
+              "#69ff94",
+              "#ffffa5",
+              "#d6acff",
+              "#ff92df",
+              "#a4ffff",
+              "#ffffff"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/dracula/visual-studio-code",
+            "revision": "1b9ecf4d7e0c8cc2e2e890a7a41ad1db5fff1e6c",
+            "license": "MIT",
+            "assetHash": "sha256:8a6b5e7e9fa16074b15a29e8bd68a5032340a6eca1a7631cf603b04f62b5d806"
+          }
+        }
+      ]
+    },
+    {
+      "id": "github",
+      "name": "GitHub",
+      "variants": [
+        {
+          "id": "github-light",
+          "familyId": "github",
+          "name": "GitHub Light",
+          "appearance": "light",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#ffffff",
+            "shell": "#f6f8fa",
+            "raised": "#d0d7de",
+            "raisedHover": "#d0d7de",
+            "card": "#ffffff",
+            "dialog": "#fdfdfe",
+            "overlay": "#fefefe",
+            "hover": "#0000000f",
+            "active": "#0969da1a",
+            "border": "#0000001f",
+            "borderStrong": "#00000038",
+            "text": "#1f2328",
+            "textMuted": "#656d76",
+            "textFaint": "#818b98",
+            "textDim": "#656d76",
+            "solid": "#232328",
+            "onSolid": "#ffffff",
+            "danger": "#cf222e",
+            "dangerStrong": "#cf222e",
+            "dangerMuted": "#9e222c",
+            "warning": "#9a6700",
+            "warningMuted": "#7b560a",
+            "success": "#1a7f37",
+            "successMuted": "#1b6833",
+            "input": "#ffffff",
+            "cursor": "#1f23288c",
+            "diffAdd": "#1a7f37",
+            "diffDelete": "#cf222e",
+            "diffHunk": "#0969da12"
+          },
+          "accent": {
+            "primary": "#0969da",
+            "strong": "#0969da",
+            "wash": "#0969da1f",
+            "on": "#ffffff",
+            "selection": "#0969da3d",
+            "caret": "#0969da",
+            "activity": "#0969da",
+            "glyph": [
+              "#3584e1",
+              "#0969da",
+              "#074ea1"
+            ]
+          },
+          "syntax": {
+            "attribute": "#953800",
+            "boolean": "#0550ae",
+            "comment": "#6e7781",
+            "constant": "#0550ae",
+            "constructor": "#953800",
+            "embedded": "#57606a",
+            "escape": "#953800",
+            "function": "#8250df",
+            "functionBuiltin": "#8250df",
+            "invalid": "#cf222e",
+            "keyword": "#cf222e",
+            "label": "#8250df",
+            "macro": "#cf222e",
+            "number": "#0550ae",
+            "operator": "#cf222e",
+            "parameter": "#1f2328",
+            "property": "#116329",
+            "punctuation": "#57606a",
+            "string": "#0a3069",
+            "stringSpecial": "#953800",
+            "tag": "#116329",
+            "type": "#953800",
+            "typeBuiltin": "#953800",
+            "variable": "#1f2328",
+            "variableSpecial": "#cf222e"
+          },
+          "terminal": {
+            "background": "#ffffff",
+            "foreground": "#1f2328",
+            "selection": "#00000029",
+            "ansi": [
+              "#24292f",
+              "#cf222e",
+              "#1a7f37",
+              "#9a6700",
+              "#0969da",
+              "#8250df",
+              "#1b7c83",
+              "#6e7781",
+              "#57606a",
+              "#a40e26",
+              "#116329",
+              "#7d4e00",
+              "#0550ae",
+              "#6639ba",
+              "#0a6b74",
+              "#1f2328"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/primer/github-vscode-theme",
+            "revision": "cd78e5e4e7bcf132a6f428ae0f32264bb1b729cf",
+            "license": "MIT",
+            "assetHash": "sha256:411e4fbc2e4a65e594b31062385bc389a04c51676dfc669fe0e01dee5d3ebdf2"
+          }
+        },
+        {
+          "id": "github-dark",
+          "familyId": "github",
+          "name": "GitHub Dark",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#0d1117",
+            "shell": "#010409",
+            "raised": "#21262d",
+            "raisedHover": "#21262d",
+            "card": "#161b22",
+            "dialog": "#181d24",
+            "overlay": "#1a1f26",
+            "hover": "#ffffff1c",
+            "active": "#2f81f72e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#e6edf3",
+            "textMuted": "#8b949e",
+            "textFaint": "#6e7681",
+            "textDim": "#8b949e",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#f85149",
+            "dangerStrong": "#f85149",
+            "dangerMuted": "#f37d79",
+            "warning": "#d29922",
+            "warningMuted": "#d7ae56",
+            "success": "#3fb950",
+            "successMuted": "#69c679",
+            "input": "#21262db8",
+            "cursor": "#e6edf366",
+            "diffAdd": "#3fb950",
+            "diffDelete": "#f85149",
+            "diffHunk": "#2f81f714"
+          },
+          "accent": {
+            "primary": "#2f81f7",
+            "strong": "#2f81f7",
+            "wash": "#2f81f738",
+            "on": "#000000",
+            "selection": "#2f81f759",
+            "caret": "#2f81f7",
+            "activity": "#2f81f7",
+            "glyph": [
+              "#69a4f9",
+              "#2f81f7",
+              "#276acb"
+            ]
+          },
+          "syntax": {
+            "attribute": "#ffa657",
+            "boolean": "#79c0ff",
+            "comment": "#8b949e",
+            "constant": "#79c0ff",
+            "constructor": "#ffa657",
+            "embedded": "#b1bac4",
+            "escape": "#ffa657",
+            "function": "#d2a8ff",
+            "functionBuiltin": "#d2a8ff",
+            "invalid": "#f85149",
+            "keyword": "#ff7b72",
+            "label": "#d2a8ff",
+            "macro": "#ff7b72",
+            "number": "#79c0ff",
+            "operator": "#ff7b72",
+            "parameter": "#e6edf3",
+            "property": "#7ee787",
+            "punctuation": "#b1bac4",
+            "string": "#a5d6ff",
+            "stringSpecial": "#ffa657",
+            "tag": "#7ee787",
+            "type": "#ffa657",
+            "typeBuiltin": "#ffa657",
+            "variable": "#e6edf3",
+            "variableSpecial": "#ff7b72"
+          },
+          "terminal": {
+            "background": "#0d1117",
+            "foreground": "#e6edf3",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#484f58",
+              "#ff7b72",
+              "#3fb950",
+              "#d29922",
+              "#58a6ff",
+              "#bc8cff",
+              "#39c5cf",
+              "#b1bac4",
+              "#6e7681",
+              "#ffa198",
+              "#56d364",
+              "#e3b341",
+              "#79c0ff",
+              "#d2a8ff",
+              "#56d4dd",
+              "#f0f6fc"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/primer/github-vscode-theme",
+            "revision": "cd78e5e4e7bcf132a6f428ae0f32264bb1b729cf",
+            "license": "MIT",
+            "assetHash": "sha256:58340b58e260a9e443f1628a2da542edfbb1d2162532f4e1303d81bd2dffab35"
+          }
+        }
+      ]
+    },
+    {
+      "id": "ayu",
+      "name": "Ayu",
+      "variants": [
+        {
+          "id": "ayu-light",
+          "familyId": "ayu",
+          "name": "Ayu Light",
+          "appearance": "light",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#fcfcfc",
+            "shell": "#f8f9fa",
+            "raised": "#e6e9ed",
+            "raisedHover": "#e6e9ed",
+            "card": "#fafafa",
+            "dialog": "#f9f9f9",
+            "overlay": "#fafafa",
+            "hover": "#0000000f",
+            "active": "#ce80141a",
+            "border": "#0000001f",
+            "borderStrong": "#00000038",
+            "text": "#5c6166",
+            "textMuted": "#68727f",
+            "textFaint": "#969da8",
+            "textDim": "#68727f",
+            "solid": "#232328",
+            "onSolid": "#ffffff",
+            "danger": "#e65050",
+            "dangerStrong": "#e65050",
+            "dangerMuted": "#bf5556",
+            "warning": "#eba400",
+            "warningMuted": "#c7931a",
+            "success": "#6cbf43",
+            "successMuted": "#68a84c",
+            "input": "#fafafa",
+            "cursor": "#5c61668c",
+            "diffAdd": "#6cbf43",
+            "diffDelete": "#e65050",
+            "diffHunk": "#ce801412"
+          },
+          "accent": {
+            "primary": "#ce8014",
+            "strong": "#ce8014",
+            "wash": "#ce80141f",
+            "on": "#000000",
+            "selection": "#ce80143d",
+            "caret": "#ce8014",
+            "activity": "#ce8014",
+            "glyph": [
+              "#d6963e",
+              "#ce8014",
+              "#985f0f"
+            ]
+          },
+          "syntax": {
+            "attribute": "#e59645",
+            "boolean": "#a37acc",
+            "comment": "#adaeb1",
+            "constant": "#a37acc",
+            "constructor": "#55b4d4",
+            "embedded": "#828e9f",
+            "escape": "#e59645",
+            "function": "#f29718",
+            "functionBuiltin": "#f29718",
+            "invalid": "#e65050",
+            "keyword": "#fa8532",
+            "label": "#f29718",
+            "macro": "#fa8532",
+            "number": "#a37acc",
+            "operator": "#fa8532",
+            "parameter": "#5c6166",
+            "property": "#f07171",
+            "punctuation": "#828e9f",
+            "string": "#86b300",
+            "stringSpecial": "#e59645",
+            "tag": "#55b4d4",
+            "type": "#55b4d4",
+            "typeBuiltin": "#55b4d4",
+            "variable": "#5c6166",
+            "variableSpecial": "#fa8532"
+          },
+          "terminal": {
+            "background": "#f8f9fa",
+            "foreground": "#5c6166",
+            "selection": "#00000029",
+            "ansi": [
+              "#000000",
+              "#f06b6c",
+              "#6cbf43",
+              "#e7a100",
+              "#21a1e2",
+              "#a176cb",
+              "#4abc96",
+              "#c7c7c7",
+              "#686868",
+              "#f07171",
+              "#86b300",
+              "#eba400",
+              "#22a4e6",
+              "#a37acc",
+              "#4cbf99",
+              "#d1d1d1"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/ayu-theme/vscode-ayu",
+            "revision": "444ef92911cb75c3933c8003e3a7c79b6b6c914f",
+            "license": "MIT",
+            "assetHash": "sha256:b3eba386386dffdafcf0cda4ce477e977aa923d1d27efd8129ae9d83f1a5c205"
+          }
+        },
+        {
+          "id": "ayu-dark",
+          "familyId": "ayu",
+          "name": "Ayu Dark",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#10141c",
+            "shell": "#0d1017",
+            "raised": "#1b1f29",
+            "raisedHover": "#1b1f29",
+            "card": "#141821",
+            "dialog": "#151922",
+            "overlay": "#161a24",
+            "hover": "#ffffff1c",
+            "active": "#e6b4502e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#bfbdb6",
+            "textMuted": "#8a9199",
+            "textFaint": "#5a6673",
+            "textDim": "#8a9199",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#d95757",
+            "dangerStrong": "#d95757",
+            "dangerMuted": "#d27472",
+            "warning": "#ffb454",
+            "warningMuted": "#efb66d",
+            "success": "#70bf56",
+            "successMuted": "#84bf6e",
+            "input": "#1b1f29b8",
+            "cursor": "#bfbdb666",
+            "diffAdd": "#70bf56",
+            "diffDelete": "#d95757",
+            "diffHunk": "#e6b45014"
+          },
+          "accent": {
+            "primary": "#e6b450",
+            "strong": "#e6b450",
+            "wash": "#e6b45038",
+            "on": "#000000",
+            "selection": "#e6b45059",
+            "caret": "#e6b450",
+            "activity": "#e6b450",
+            "glyph": [
+              "#edc981",
+              "#e6b450",
+              "#bd9442"
+            ]
+          },
+          "syntax": {
+            "attribute": "#e6c08a",
+            "boolean": "#d2a6ff",
+            "comment": "#5a6673",
+            "constant": "#d2a6ff",
+            "constructor": "#39bae6",
+            "embedded": "#8a9199",
+            "escape": "#e6c08a",
+            "function": "#ffb454",
+            "functionBuiltin": "#ffb454",
+            "invalid": "#d95757",
+            "keyword": "#ff8f40",
+            "label": "#ffb454",
+            "macro": "#ff8f40",
+            "number": "#d2a6ff",
+            "operator": "#ff8f40",
+            "parameter": "#bfbdb6",
+            "property": "#f07178",
+            "punctuation": "#8a9199",
+            "string": "#aad94c",
+            "stringSpecial": "#e6c08a",
+            "tag": "#39bae6",
+            "type": "#39bae6",
+            "typeBuiltin": "#39bae6",
+            "variable": "#bfbdb6",
+            "variableSpecial": "#ff8f40"
+          },
+          "terminal": {
+            "background": "#0d1017",
+            "foreground": "#bfbdb6",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#1b1f29",
+              "#f06b73",
+              "#70bf56",
+              "#fdb04c",
+              "#4fbfff",
+              "#d0a1ff",
+              "#93e2c8",
+              "#c7c7c7",
+              "#686868",
+              "#f07178",
+              "#aad94c",
+              "#ffb454",
+              "#59c2ff",
+              "#d2a6ff",
+              "#95e6cb",
+              "#ffffff"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/ayu-theme/vscode-ayu",
+            "revision": "444ef92911cb75c3933c8003e3a7c79b6b6c914f",
+            "license": "MIT",
+            "assetHash": "sha256:8b1b85fd8755829472317a175ee61e149c1106ff38328fd245d42541b6006cb5"
+          }
+        },
+        {
+          "id": "ayu-mirage",
+          "familyId": "ayu",
+          "name": "Ayu Mirage",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#242936",
+            "shell": "#1f2430",
+            "raised": "#343d4d",
+            "raisedHover": "#343d4d",
+            "card": "#282e3b",
+            "dialog": "#2a313e",
+            "overlay": "#2c3341",
+            "hover": "#ffffff1c",
+            "active": "#ffcc662e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#cccac2",
+            "textMuted": "#8a94a6",
+            "textFaint": "#6e7c8f",
+            "textDim": "#8a94a6",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#ff6666",
+            "dangerStrong": "#ff6666",
+            "dangerMuted": "#f18280",
+            "warning": "#ffcc66",
+            "warningMuted": "#f2cc7d",
+            "success": "#87d96c",
+            "successMuted": "#98d582",
+            "input": "#343d4db8",
+            "cursor": "#cccac266",
+            "diffAdd": "#87d96c",
+            "diffDelete": "#ff6666",
+            "diffHunk": "#ffcc6614"
+          },
+          "accent": {
+            "primary": "#ffcc66",
+            "strong": "#ffcc66",
+            "wash": "#ffcc6638",
+            "on": "#000000",
+            "selection": "#ffcc6659",
+            "caret": "#ffcc66",
+            "activity": "#ffcc66",
+            "glyph": [
+              "#ffda91",
+              "#ffcc66",
+              "#d1a754"
+            ]
+          },
+          "syntax": {
+            "attribute": "#d9be98",
+            "boolean": "#dfbfff",
+            "comment": "#6e7c8f",
+            "constant": "#dfbfff",
+            "constructor": "#5ccfe6",
+            "embedded": "#8a94a6",
+            "escape": "#d9be98",
+            "function": "#ffcd66",
+            "functionBuiltin": "#ffcd66",
+            "invalid": "#ff6666",
+            "keyword": "#ffa659",
+            "label": "#ffcd66",
+            "macro": "#ffa659",
+            "number": "#dfbfff",
+            "operator": "#ffa659",
+            "parameter": "#cccac2",
+            "property": "#f28779",
+            "punctuation": "#8a94a6",
+            "string": "#d5ff80",
+            "stringSpecial": "#d9be98",
+            "tag": "#5ccfe6",
+            "type": "#5ccfe6",
+            "typeBuiltin": "#5ccfe6",
+            "variable": "#cccac2",
+            "variableSpecial": "#ffa659"
+          },
+          "terminal": {
+            "background": "#1f2430",
+            "foreground": "#cccac2",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#171b24",
+              "#f28273",
+              "#87d96c",
+              "#fcca60",
+              "#6acdff",
+              "#ddbbff",
+              "#93e2c8",
+              "#c7c7c7",
+              "#686868",
+              "#f28779",
+              "#d5ff80",
+              "#ffcd66",
+              "#73d0ff",
+              "#dfbfff",
+              "#95e6cb",
+              "#ffffff"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/ayu-theme/vscode-ayu",
+            "revision": "444ef92911cb75c3933c8003e3a7c79b6b6c914f",
+            "license": "MIT",
+            "assetHash": "sha256:df1486ee5d361e522da36b1cb62393d71519b661aa04b5e5d83a21694ef0c049"
+          }
+        }
+      ]
+    },
+    {
+      "id": "gruvbox",
+      "name": "Gruvbox",
+      "variants": [
+        {
+          "id": "gruvbox-light",
+          "familyId": "gruvbox",
+          "name": "Gruvbox Light",
+          "appearance": "light",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#fbf1c7",
+            "shell": "#f2e5bc",
+            "raised": "#d5c4a1",
+            "raisedHover": "#d5c4a1",
+            "card": "#f9f5d7",
+            "dialog": "#f8f3d5",
+            "overlay": "#f8f4d6",
+            "hover": "#0000000f",
+            "active": "#0766781a",
+            "border": "#0000001f",
+            "borderStrong": "#00000038",
+            "text": "#3c3836",
+            "textMuted": "#665c54",
+            "textFaint": "#7c6f64",
+            "textDim": "#665c54",
+            "solid": "#232328",
+            "onSolid": "#ffffff",
+            "danger": "#9d0006",
+            "dangerStrong": "#9d0006",
+            "dangerMuted": "#821013",
+            "warning": "#b57614",
+            "warningMuted": "#97671d",
+            "success": "#79740e",
+            "successMuted": "#6a6518",
+            "input": "#f9f5d7",
+            "cursor": "#3c38368c",
+            "diffAdd": "#79740e",
+            "diffDelete": "#9d0006",
+            "diffHunk": "#07667812"
+          },
+          "accent": {
+            "primary": "#076678",
+            "strong": "#076678",
+            "wash": "#0766781f",
+            "on": "#ffffff",
+            "selection": "#0766783d",
+            "caret": "#076678",
+            "activity": "#076678",
+            "glyph": [
+              "#337f86",
+              "#076678",
+              "#054b59"
+            ]
+          },
+          "syntax": {
+            "attribute": "#af3a03",
+            "boolean": "#8f3f71",
+            "comment": "#928374",
+            "constant": "#8f3f71",
+            "constructor": "#b57614",
+            "embedded": "#665c54",
+            "escape": "#af3a03",
+            "function": "#076678",
+            "functionBuiltin": "#076678",
+            "invalid": "#cc241d",
+            "keyword": "#9d0006",
+            "label": "#076678",
+            "macro": "#9d0006",
+            "number": "#8f3f71",
+            "operator": "#9d0006",
+            "parameter": "#3c3836",
+            "property": "#427b58",
+            "punctuation": "#665c54",
+            "string": "#79740e",
+            "stringSpecial": "#af3a03",
+            "tag": "#9d0006",
+            "type": "#b57614",
+            "typeBuiltin": "#b57614",
+            "variable": "#3c3836",
+            "variableSpecial": "#9d0006"
+          },
+          "terminal": {
+            "background": "#fbf1c7",
+            "foreground": "#3c3836",
+            "selection": "#00000029",
+            "ansi": [
+              "#ebdbb2",
+              "#cc241d",
+              "#98971a",
+              "#d79921",
+              "#458588",
+              "#b16286",
+              "#689d6a",
+              "#7c6f64",
+              "#928374",
+              "#9d0006",
+              "#79740e",
+              "#b57614",
+              "#076678",
+              "#8f3f71",
+              "#427b58",
+              "#3c3836"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/jdinhify/vscode-theme-gruvbox",
+            "revision": "ca3b8ad203e84a884ca33fb84b5795cf43032709",
+            "license": "MIT",
+            "assetHash": "sha256:e44b99a01a272e9c9a15028512542d6dd72ea17b55a08866f2d85d7dc14a4017"
+          }
+        },
+        {
+          "id": "gruvbox-dark",
+          "familyId": "gruvbox",
+          "name": "Gruvbox Dark",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#282828",
+            "shell": "#1d2021",
+            "raised": "#504945",
+            "raisedHover": "#504945",
+            "card": "#32302f",
+            "dialog": "#373533",
+            "overlay": "#3c3936",
+            "hover": "#ffffff1c",
+            "active": "#8ec07c2e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#ebdbb2",
+            "textMuted": "#bdae93",
+            "textFaint": "#928374",
+            "textDim": "#bdae93",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#fb4934",
+            "dangerStrong": "#fb4934",
+            "dangerMuted": "#f77257",
+            "warning": "#fabd2f",
+            "warningMuted": "#f6c550",
+            "success": "#b8bb26",
+            "successMuted": "#c5c349",
+            "input": "#504945b8",
+            "cursor": "#ebdbb266",
+            "diffAdd": "#b8bb26",
+            "diffDelete": "#fb4934",
+            "diffHunk": "#8ec07c14"
+          },
+          "accent": {
+            "primary": "#8ec07c",
+            "strong": "#8ec07c",
+            "wash": "#8ec07c38",
+            "on": "#000000",
+            "selection": "#8ec07c59",
+            "caret": "#8ec07c",
+            "activity": "#8ec07c",
+            "glyph": [
+              "#aed2a1",
+              "#8ec07c",
+              "#749d66"
+            ]
+          },
+          "syntax": {
+            "attribute": "#fe8019",
+            "boolean": "#d3869b",
+            "comment": "#928374",
+            "constant": "#d3869b",
+            "constructor": "#fabd2f",
+            "embedded": "#bdae93",
+            "escape": "#fe8019",
+            "function": "#83a598",
+            "functionBuiltin": "#83a598",
+            "invalid": "#fb4934",
+            "keyword": "#fb4934",
+            "label": "#83a598",
+            "macro": "#fb4934",
+            "number": "#d3869b",
+            "operator": "#fb4934",
+            "parameter": "#ebdbb2",
+            "property": "#8ec07c",
+            "punctuation": "#bdae93",
+            "string": "#b8bb26",
+            "stringSpecial": "#fe8019",
+            "tag": "#fb4934",
+            "type": "#fabd2f",
+            "typeBuiltin": "#fabd2f",
+            "variable": "#ebdbb2",
+            "variableSpecial": "#fb4934"
+          },
+          "terminal": {
+            "background": "#282828",
+            "foreground": "#ebdbb2",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#3c3836",
+              "#cc241d",
+              "#98971a",
+              "#d79921",
+              "#458588",
+              "#b16286",
+              "#689d6a",
+              "#a89984",
+              "#928374",
+              "#fb4934",
+              "#b8bb26",
+              "#fabd2f",
+              "#83a598",
+              "#d3869b",
+              "#8ec07c",
+              "#ebdbb2"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/jdinhify/vscode-theme-gruvbox",
+            "revision": "ca3b8ad203e84a884ca33fb84b5795cf43032709",
+            "license": "MIT",
+            "assetHash": "sha256:307cc6241ab5997c0d5f409c0d6873cb19e3ccb320679ff1c19785604834e3ab"
+          }
+        }
+      ]
+    },
+    {
+      "id": "rose-pine",
+      "name": "Rosé Pine",
+      "variants": [
+        {
+          "id": "rose-pine-dawn",
+          "familyId": "rose-pine",
+          "name": "Rosé Pine Dawn",
+          "appearance": "light",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#faf4ed",
+            "shell": "#f2e9e1",
+            "raised": "#dfdad9",
+            "raisedHover": "#dfdad9",
+            "card": "#fffaf3",
+            "dialog": "#fef9f2",
+            "overlay": "#fef9f2",
+            "hover": "#0000000f",
+            "active": "#907aa91a",
+            "border": "#0000001f",
+            "borderStrong": "#00000038",
+            "text": "#575279",
+            "textMuted": "#6d6984",
+            "textFaint": "#9893a5",
+            "textDim": "#6d6984",
+            "solid": "#232328",
+            "onSolid": "#ffffff",
+            "danger": "#b4637a",
+            "dangerStrong": "#b4637a",
+            "dangerMuted": "#9a5e7a",
+            "warning": "#ea9d34",
+            "warningMuted": "#c58a45",
+            "success": "#56949f",
+            "successMuted": "#568496",
+            "input": "#fffaf3",
+            "cursor": "#5752798c",
+            "diffAdd": "#56949f",
+            "diffDelete": "#b4637a",
+            "diffHunk": "#907aa912"
+          },
+          "accent": {
+            "primary": "#907aa9",
+            "strong": "#907aa9",
+            "wash": "#907aa91f",
+            "on": "#000000",
+            "selection": "#907aa93d",
+            "caret": "#907aa9",
+            "activity": "#907aa9",
+            "glyph": [
+              "#a390b5",
+              "#907aa9",
+              "#6b5a7d"
+            ]
+          },
+          "syntax": {
+            "attribute": "#907aa9",
+            "boolean": "#d7827e",
+            "comment": "#9893a5",
+            "constant": "#d7827e",
+            "constructor": "#56949f",
+            "embedded": "#797593",
+            "escape": "#907aa9",
+            "function": "#b4637a",
+            "functionBuiltin": "#b4637a",
+            "invalid": "#b4637a",
+            "keyword": "#286983",
+            "label": "#b4637a",
+            "macro": "#286983",
+            "number": "#d7827e",
+            "operator": "#286983",
+            "parameter": "#d7827e",
+            "property": "#56949f",
+            "punctuation": "#797593",
+            "string": "#ea9d34",
+            "stringSpecial": "#907aa9",
+            "tag": "#56949f",
+            "type": "#56949f",
+            "typeBuiltin": "#56949f",
+            "variable": "#d7827e",
+            "variableSpecial": "#286983"
+          },
+          "terminal": {
+            "background": "#faf4ed",
+            "foreground": "#575279",
+            "selection": "#00000029",
+            "ansi": [
+              "#f2e9e1",
+              "#b4637a",
+              "#286983",
+              "#ea9d34",
+              "#56949f",
+              "#907aa9",
+              "#d7827e",
+              "#575279",
+              "#797593",
+              "#b4637a",
+              "#286983",
+              "#ea9d34",
+              "#56949f",
+              "#907aa9",
+              "#d7827e",
+              "#575279"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/rose-pine/vscode",
+            "revision": "d8f5ebe8e096fa833e997c07eb7685ee1677a4ba",
+            "license": "MIT",
+            "assetHash": "sha256:c47a024623f4aa59842769c6a7993dac3f3b515dbd03c512797dd05d5da74bd8"
+          }
+        },
+        {
+          "id": "rose-pine-moon",
+          "familyId": "rose-pine",
+          "name": "Rosé Pine Moon",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#232136",
+            "shell": "#1f1d2e",
+            "raised": "#393552",
+            "raisedHover": "#393552",
+            "card": "#2a273f",
+            "dialog": "#2d2a42",
+            "overlay": "#2f2c45",
+            "hover": "#ffffff1c",
+            "active": "#c4a7e72e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#e0def4",
+            "textMuted": "#908caa",
+            "textFaint": "#6e6a86",
+            "textDim": "#908caa",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#eb6f92",
+            "dangerStrong": "#eb6f92",
+            "dangerMuted": "#e88ead",
+            "warning": "#f6c177",
+            "warningMuted": "#f1c896",
+            "success": "#9ccfd8",
+            "successMuted": "#add3df",
+            "input": "#393552b8",
+            "cursor": "#e0def466",
+            "diffAdd": "#9ccfd8",
+            "diffDelete": "#eb6f92",
+            "diffHunk": "#c4a7e714"
+          },
+          "accent": {
+            "primary": "#c4a7e7",
+            "strong": "#c4a7e7",
+            "wash": "#c4a7e738",
+            "on": "#000000",
+            "selection": "#c4a7e759",
+            "caret": "#c4a7e7",
+            "activity": "#c4a7e7",
+            "glyph": [
+              "#d5c0ee",
+              "#c4a7e7",
+              "#a189bd"
+            ]
+          },
+          "syntax": {
+            "attribute": "#c4a7e7",
+            "boolean": "#ea9a97",
+            "comment": "#6e6a86",
+            "constant": "#ea9a97",
+            "constructor": "#9ccfd8",
+            "embedded": "#908caa",
+            "escape": "#c4a7e7",
+            "function": "#eb6f92",
+            "functionBuiltin": "#eb6f92",
+            "invalid": "#eb6f92",
+            "keyword": "#3e8fb0",
+            "label": "#eb6f92",
+            "macro": "#3e8fb0",
+            "number": "#ea9a97",
+            "operator": "#3e8fb0",
+            "parameter": "#ea9a97",
+            "property": "#9ccfd8",
+            "punctuation": "#908caa",
+            "string": "#f6c177",
+            "stringSpecial": "#c4a7e7",
+            "tag": "#9ccfd8",
+            "type": "#9ccfd8",
+            "typeBuiltin": "#9ccfd8",
+            "variable": "#ea9a97",
+            "variableSpecial": "#3e8fb0"
+          },
+          "terminal": {
+            "background": "#232136",
+            "foreground": "#e0def4",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#393552",
+              "#eb6f92",
+              "#3e8fb0",
+              "#f6c177",
+              "#9ccfd8",
+              "#c4a7e7",
+              "#ea9a97",
+              "#e0def4",
+              "#908caa",
+              "#eb6f92",
+              "#3e8fb0",
+              "#f6c177",
+              "#9ccfd8",
+              "#c4a7e7",
+              "#ea9a97",
+              "#e0def4"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/rose-pine/vscode",
+            "revision": "d8f5ebe8e096fa833e997c07eb7685ee1677a4ba",
+            "license": "MIT",
+            "assetHash": "sha256:fdd3f640d0d46086f5bd5c0700f779307113b20ce69802612015fac68d6965bd"
+          }
+        }
+      ]
+    },
+    {
+      "id": "nord",
+      "name": "Nord",
+      "variants": [
+        {
+          "id": "nord",
+          "familyId": "nord",
+          "name": "Nord",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#2e3440",
+            "shell": "#292e39",
+            "raised": "#434c5e",
+            "raisedHover": "#434c5e",
+            "card": "#3b4252",
+            "dialog": "#3c4454",
+            "overlay": "#3e4556",
+            "hover": "#ffffff1c",
+            "active": "#88c0d02e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#d8dee9",
+            "textMuted": "#aeb6c4",
+            "textFaint": "#7f899b",
+            "textDim": "#aeb6c4",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#bf616a",
+            "dangerStrong": "#bf616a",
+            "dangerMuted": "#c6848e",
+            "warning": "#ebcb8b",
+            "warningMuted": "#e6d0a3",
+            "success": "#a3be8c",
+            "successMuted": "#b0c6a3",
+            "input": "#434c5eb8",
+            "cursor": "#d8dee966",
+            "diffAdd": "#a3be8c",
+            "diffDelete": "#bf616a",
+            "diffHunk": "#88c0d014"
+          },
+          "accent": {
+            "primary": "#88c0d0",
+            "strong": "#88c0d0",
+            "wash": "#88c0d038",
+            "on": "#000000",
+            "selection": "#88c0d059",
+            "caret": "#88c0d0",
+            "activity": "#88c0d0",
+            "glyph": [
+              "#a9d2dd",
+              "#88c0d0",
+              "#709dab"
+            ]
+          },
+          "syntax": {
+            "attribute": "#8fbcbb",
+            "boolean": "#b48ead",
+            "comment": "#616e88",
+            "constant": "#b48ead",
+            "constructor": "#8fbcbb",
+            "embedded": "#aeb6c4",
+            "escape": "#8fbcbb",
+            "function": "#88c0d0",
+            "functionBuiltin": "#88c0d0",
+            "invalid": "#bf616a",
+            "keyword": "#81a1c1",
+            "label": "#88c0d0",
+            "macro": "#81a1c1",
+            "number": "#b48ead",
+            "operator": "#81a1c1",
+            "parameter": "#d8dee9",
+            "property": "#d08770",
+            "punctuation": "#aeb6c4",
+            "string": "#a3be8c",
+            "stringSpecial": "#8fbcbb",
+            "tag": "#81a1c1",
+            "type": "#8fbcbb",
+            "typeBuiltin": "#8fbcbb",
+            "variable": "#d8dee9",
+            "variableSpecial": "#81a1c1"
+          },
+          "terminal": {
+            "background": "#2e3440",
+            "foreground": "#d8dee9",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#3b4252",
+              "#bf616a",
+              "#a3be8c",
+              "#ebcb8b",
+              "#81a1c1",
+              "#b48ead",
+              "#88c0d0",
+              "#e5e9f0",
+              "#4c566a",
+              "#bf616a",
+              "#a3be8c",
+              "#ebcb8b",
+              "#81a1c1",
+              "#b48ead",
+              "#8fbcbb",
+              "#eceff4"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/nordtheme/visual-studio-code",
+            "revision": "8ead09822c02d0d49d0f764104505e5a34d3689f",
+            "license": "MIT",
+            "assetHash": "sha256:24e43838477b3d53a362b17a2e3e085fe98d3765fa3ae8d2c2bd037d589421a6"
+          }
+        }
+      ]
+    },
+    {
+      "id": "one-dark-pro",
+      "name": "One Dark Pro",
+      "variants": [
+        {
+          "id": "one-dark-pro",
+          "familyId": "one-dark-pro",
+          "name": "One Dark Pro",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#282c34",
+            "shell": "#21252b",
+            "raised": "#2c313a",
+            "raisedHover": "#2c313a",
+            "card": "#21252b",
+            "dialog": "#23272e",
+            "overlay": "#252930",
+            "hover": "#ffffff1c",
+            "active": "#528bff2e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#abb2bf",
+            "textMuted": "#9da5b4",
+            "textFaint": "#7f848e",
+            "textDim": "#9da5b4",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#e05561",
+            "dangerStrong": "#e05561",
+            "dangerMuted": "#d16f7b",
+            "warning": "#d19a66",
+            "warningMuted": "#c8a07c",
+            "success": "#8cc265",
+            "successMuted": "#94be7c",
+            "input": "#2c313ab8",
+            "cursor": "#abb2bf66",
+            "diffAdd": "#8cc265",
+            "diffDelete": "#e05561",
+            "diffHunk": "#528bff14"
+          },
+          "accent": {
+            "primary": "#528bff",
+            "strong": "#528bff",
+            "wash": "#528bff38",
+            "on": "#000000",
+            "selection": "#528bff59",
+            "caret": "#528bff",
+            "activity": "#528bff",
+            "glyph": [
+              "#82abff",
+              "#528bff",
+              "#4372d1"
+            ]
+          },
+          "syntax": {
+            "attribute": "#56b6c2",
+            "boolean": "#c678dd",
+            "comment": "#7f848e",
+            "constant": "#c678dd",
+            "constructor": "#e5c07b",
+            "embedded": "#abb2bf",
+            "escape": "#56b6c2",
+            "function": "#e5c07b",
+            "functionBuiltin": "#e5c07b",
+            "invalid": "#e05561",
+            "keyword": "#c678dd",
+            "label": "#e5c07b",
+            "macro": "#c678dd",
+            "number": "#c678dd",
+            "operator": "#c678dd",
+            "parameter": "#abb2bf",
+            "property": "#d19a66",
+            "punctuation": "#abb2bf",
+            "string": "#e06c75",
+            "stringSpecial": "#56b6c2",
+            "tag": "#c678dd",
+            "type": "#e5c07b",
+            "typeBuiltin": "#e5c07b",
+            "variable": "#abb2bf",
+            "variableSpecial": "#c678dd"
+          },
+          "terminal": {
+            "background": "#282c34",
+            "foreground": "#abb2bf",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#3f4451",
+              "#e05561",
+              "#8cc265",
+              "#d18f52",
+              "#4aa5f0",
+              "#c162de",
+              "#42b3c2",
+              "#d7dae0",
+              "#4f5666",
+              "#ff616e",
+              "#a5e075",
+              "#f0a45d",
+              "#4dc4ff",
+              "#de73ff",
+              "#4cd1e0",
+              "#e6e6e6"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/Binaryify/OneDark-Pro",
+            "revision": "e6ccf638d5b69aa38cd1005edb0ee7ba7ef6fedc",
+            "license": "MIT",
+            "assetHash": "sha256:106d79fd7b31ee01e820f6eaf485184df66a840f0e8e31c1e4c5bbcc5dfe8172"
+          }
+        }
+      ]
+    },
+    {
+      "id": "atom-one-dark",
+      "name": "Atom One Dark",
+      "variants": [
+        {
+          "id": "atom-one-dark",
+          "familyId": "atom-one-dark",
+          "name": "Atom One Dark",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#282c34",
+            "shell": "#21252b",
+            "raised": "#2c313a",
+            "raisedHover": "#2c313a",
+            "card": "#21252b",
+            "dialog": "#23272e",
+            "overlay": "#252930",
+            "hover": "#ffffff1c",
+            "active": "#528bff2e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#abb2bf",
+            "textMuted": "#9da5b4",
+            "textFaint": "#5c6370",
+            "textDim": "#9da5b4",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#e06c75",
+            "dangerStrong": "#e06c75",
+            "dangerMuted": "#d1808a",
+            "warning": "#d19a66",
+            "warningMuted": "#c8a07c",
+            "success": "#98c379",
+            "successMuted": "#9dbf8b",
+            "input": "#2c313ab8",
+            "cursor": "#abb2bf66",
+            "diffAdd": "#98c379",
+            "diffDelete": "#e06c75",
+            "diffHunk": "#528bff14"
+          },
+          "accent": {
+            "primary": "#528bff",
+            "strong": "#528bff",
+            "wash": "#528bff38",
+            "on": "#000000",
+            "selection": "#528bff59",
+            "caret": "#528bff",
+            "activity": "#528bff",
+            "glyph": [
+              "#82abff",
+              "#528bff",
+              "#4372d1"
+            ]
+          },
+          "syntax": {
+            "attribute": "#61afef",
+            "boolean": "#d19a66",
+            "comment": "#5c6370",
+            "constant": "#d19a66",
+            "constructor": "#e5c07b",
+            "embedded": "#abb2bf",
+            "escape": "#61afef",
+            "function": "#61afef",
+            "functionBuiltin": "#61afef",
+            "invalid": "#e06c75",
+            "keyword": "#c678dd",
+            "label": "#61afef",
+            "macro": "#c678dd",
+            "number": "#d19a66",
+            "operator": "#c678dd",
+            "parameter": "#e06c75",
+            "property": "#56b6c2",
+            "punctuation": "#abb2bf",
+            "string": "#98c379",
+            "stringSpecial": "#61afef",
+            "tag": "#e06c75",
+            "type": "#e5c07b",
+            "typeBuiltin": "#e5c07b",
+            "variable": "#e06c75",
+            "variableSpecial": "#c678dd"
+          },
+          "terminal": {
+            "background": "#282c34",
+            "foreground": "#abb2bf",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#282c34",
+              "#e06c75",
+              "#98c379",
+              "#e5c07b",
+              "#61afef",
+              "#c678dd",
+              "#56b6c2",
+              "#abb2bf",
+              "#5c6370",
+              "#e06c75",
+              "#98c379",
+              "#e5c07b",
+              "#61afef",
+              "#c678dd",
+              "#56b6c2",
+              "#ffffff"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/akamud/vscode-theme-onedark",
+            "revision": "a8be970644982221f9b61fb1c4b3da74b4beab79",
+            "license": "MIT",
+            "assetHash": "sha256:35035a084ce1b00fb98b59baa428f073d1bbc50bbb2f5bf157dbf9715281f0aa"
+          }
+        }
+      ]
+    },
+    {
+      "id": "night-owl",
+      "name": "Night Owl",
+      "variants": [
+        {
+          "id": "night-owl-light",
+          "familyId": "night-owl",
+          "name": "Night Owl Light",
+          "appearance": "light",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#fbfbfb",
+            "shell": "#f0f0f0",
+            "raised": "#d3e8f8",
+            "raisedHover": "#d3e8f8",
+            "card": "#ffffff",
+            "dialog": "#fdfeff",
+            "overlay": "#feffff",
+            "hover": "#0000000f",
+            "active": "#4876d61a",
+            "border": "#0000001f",
+            "borderStrong": "#00000038",
+            "text": "#403f53",
+            "textMuted": "#66657a",
+            "textFaint": "#7a8297",
+            "textDim": "#66657a",
+            "solid": "#232328",
+            "onSolid": "#ffffff",
+            "danger": "#de3d3b",
+            "dangerStrong": "#de3d3b",
+            "dangerMuted": "#b23e42",
+            "warning": "#a67d00",
+            "warningMuted": "#8d6e15",
+            "success": "#08916a",
+            "successMuted": "#167d64",
+            "input": "#ffffff",
+            "cursor": "#403f538c",
+            "diffAdd": "#08916a",
+            "diffDelete": "#de3d3b",
+            "diffHunk": "#4876d612"
+          },
+          "accent": {
+            "primary": "#4876d6",
+            "strong": "#4876d6",
+            "wash": "#4876d61f",
+            "on": "#000000",
+            "selection": "#4876d63d",
+            "caret": "#4876d6",
+            "activity": "#4876d6",
+            "glyph": [
+              "#688edd",
+              "#4876d6",
+              "#35579e"
+            ]
+          },
+          "syntax": {
+            "attribute": "#aa0982",
+            "boolean": "#aa0982",
+            "comment": "#6f7896",
+            "constant": "#aa0982",
+            "constructor": "#111111",
+            "embedded": "#4876d6",
+            "escape": "#aa0982",
+            "function": "#4876d6",
+            "functionBuiltin": "#4876d6",
+            "invalid": "#de3d3b",
+            "keyword": "#4876d6",
+            "label": "#4876d6",
+            "macro": "#4876d6",
+            "number": "#aa0982",
+            "operator": "#4876d6",
+            "parameter": "#403f53",
+            "property": "#111111",
+            "punctuation": "#4876d6",
+            "string": "#0c8f75",
+            "stringSpecial": "#aa0982",
+            "tag": "#111111",
+            "type": "#111111",
+            "typeBuiltin": "#111111",
+            "variable": "#403f53",
+            "variableSpecial": "#4876d6"
+          },
+          "terminal": {
+            "background": "#f6f6f6",
+            "foreground": "#403f53",
+            "selection": "#00000029",
+            "ansi": [
+              "#403f53",
+              "#de3d3b",
+              "#08916a",
+              "#e0af02",
+              "#288ed7",
+              "#d6438a",
+              "#2aa298",
+              "#93a1a1",
+              "#403f53",
+              "#de3d3b",
+              "#08916a",
+              "#daaa01",
+              "#288ed7",
+              "#d6438a",
+              "#2aa298",
+              "#403f53"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/sdras/night-owl-vscode-theme",
+            "revision": "cc291eba7976b20d7c66bde6883c27b902196b07",
+            "license": "MIT",
+            "assetHash": "sha256:7cce60b01cab60cceb356130879626a8cf580937be60a2d66a61cc6654e7edcd"
+          }
+        },
+        {
+          "id": "night-owl",
+          "familyId": "night-owl",
+          "name": "Night Owl",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#011627",
+            "shell": "#01111d",
+            "raised": "#0b253a",
+            "raisedHover": "#0b253a",
+            "card": "#071d2e",
+            "dialog": "#081e30",
+            "overlay": "#082032",
+            "hover": "#ffffff1c",
+            "active": "#82aaff2e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#d6deeb",
+            "textMuted": "#8ca6ba",
+            "textFaint": "#637777",
+            "textDim": "#8ca6ba",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#ef5350",
+            "dangerStrong": "#ef5350",
+            "dangerMuted": "#e87a7b",
+            "warning": "#ffeb95",
+            "warningMuted": "#f5e8ab",
+            "success": "#22da6e",
+            "successMuted": "#4fdb8d",
+            "input": "#0b253ab8",
+            "cursor": "#d6deeb66",
+            "diffAdd": "#22da6e",
+            "diffDelete": "#ef5350",
+            "diffHunk": "#82aaff14"
+          },
+          "accent": {
+            "primary": "#82aaff",
+            "strong": "#82aaff",
+            "wash": "#82aaff38",
+            "on": "#000000",
+            "selection": "#82aaff59",
+            "caret": "#82aaff",
+            "activity": "#82aaff",
+            "glyph": [
+              "#a5c2ff",
+              "#82aaff",
+              "#6b8bd1"
+            ]
+          },
+          "syntax": {
+            "attribute": "#f78c6c",
+            "boolean": "#f78c6c",
+            "comment": "#637777",
+            "constant": "#f78c6c",
+            "constructor": "#ffcb8b",
+            "embedded": "#82aaff",
+            "escape": "#f78c6c",
+            "function": "#c5e478",
+            "functionBuiltin": "#c5e478",
+            "invalid": "#ef5350",
+            "keyword": "#82aaff",
+            "label": "#c5e478",
+            "macro": "#82aaff",
+            "number": "#f78c6c",
+            "operator": "#82aaff",
+            "parameter": "#d7dbe0",
+            "property": "#bec5d4",
+            "punctuation": "#82aaff",
+            "string": "#c5e478",
+            "stringSpecial": "#f78c6c",
+            "tag": "#7fdbca",
+            "type": "#ffcb8b",
+            "typeBuiltin": "#ffcb8b",
+            "variable": "#d7dbe0",
+            "variableSpecial": "#82aaff"
+          },
+          "terminal": {
+            "background": "#011627",
+            "foreground": "#d6deeb",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#011627",
+              "#ef5350",
+              "#22da6e",
+              "#c5e478",
+              "#82aaff",
+              "#c792ea",
+              "#21c7a8",
+              "#ffffff",
+              "#575656",
+              "#ef5350",
+              "#22da6e",
+              "#ffeb95",
+              "#82aaff",
+              "#c792ea",
+              "#7fdbca",
+              "#ffffff"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/sdras/night-owl-vscode-theme",
+            "revision": "cc291eba7976b20d7c66bde6883c27b902196b07",
+            "license": "MIT",
+            "assetHash": "sha256:12cb3cb13107b769246d4003018d65c782e2b66cf0f2535856d12d90a47ade7b"
+          }
+        }
+      ]
+    },
+    {
+      "id": "winter-is-coming",
+      "name": "Winter is Coming",
+      "variants": [
+        {
+          "id": "winter-light",
+          "familyId": "winter-is-coming",
+          "name": "Winter is Coming Light",
+          "appearance": "light",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#ffffff",
+            "shell": "#f3f3f3",
+            "raised": "#e5e5e5",
+            "raisedHover": "#e5e5e5",
+            "card": "#ffffff",
+            "dialog": "#fefefe",
+            "overlay": "#fefefe",
+            "hover": "#0000000f",
+            "active": "#2f86d21a",
+            "border": "#0000001f",
+            "borderStrong": "#00000038",
+            "text": "#1857a4",
+            "textMuted": "#62626a",
+            "textFaint": "#66768a",
+            "textDim": "#62626a",
+            "solid": "#232328",
+            "onSolid": "#ffffff",
+            "danger": "#de3d3b",
+            "dangerStrong": "#de3d3b",
+            "dangerMuted": "#a74458",
+            "warning": "#9b6a00",
+            "warningMuted": "#7a6529",
+            "success": "#08916a",
+            "successMuted": "#0c8379",
+            "input": "#ffffff",
+            "cursor": "#1857a48c",
+            "diffAdd": "#08916a",
+            "diffDelete": "#de3d3b",
+            "diffHunk": "#2f86d212"
+          },
+          "accent": {
+            "primary": "#2f86d2",
+            "strong": "#2f86d2",
+            "wash": "#2f86d21f",
+            "on": "#000000",
+            "selection": "#2f86d23d",
+            "caret": "#2f86d2",
+            "activity": "#2f86d2",
+            "glyph": [
+              "#549cda",
+              "#2f86d2",
+              "#23639b"
+            ]
+          },
+          "syntax": {
+            "attribute": "#b46a0f",
+            "boolean": "#174781",
+            "comment": "#357b42",
+            "constant": "#174781",
+            "constructor": "#0444ac",
+            "embedded": "#4f7aa0",
+            "escape": "#b46a0f",
+            "function": "#b1108e",
+            "functionBuiltin": "#b1108e",
+            "invalid": "#c73532",
+            "keyword": "#7942a8",
+            "label": "#b1108e",
+            "macro": "#7942a8",
+            "number": "#174781",
+            "operator": "#7942a8",
+            "parameter": "#224555",
+            "property": "#207b76",
+            "punctuation": "#4f7aa0",
+            "string": "#87429a",
+            "stringSpecial": "#b46a0f",
+            "tag": "#0444ac",
+            "type": "#0444ac",
+            "typeBuiltin": "#0444ac",
+            "variable": "#224555",
+            "variableSpecial": "#7942a8"
+          },
+          "terminal": {
+            "background": "#ffffff",
+            "foreground": "#1857a4",
+            "selection": "#00000029",
+            "ansi": [
+              "#011627",
+              "#de3d3b",
+              "#08916a",
+              "#c5a332",
+              "#236ebf",
+              "#7c4dff",
+              "#0097a7",
+              "#7e8993",
+              "#403f53",
+              "#f76c6c",
+              "#49d0b0",
+              "#e7c244",
+              "#4e8cdf",
+              "#b15a91",
+              "#00bcd4",
+              "#403f53"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/johnpapa/vscode-winteriscoming",
+            "revision": "260547834cb6ac37dd5b8bb5842cc1c8d3164946",
+            "license": "MIT",
+            "assetHash": "sha256:c14fb2fa404c4a3145d38b2fd0a1ac2f479297fca3e03bd26fd5d8a8af4498a3"
+          }
+        },
+        {
+          "id": "winter-dark-blue",
+          "familyId": "winter-is-coming",
+          "name": "Winter is Coming Dark Blue",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#011627",
+            "shell": "#01111d",
+            "raised": "#0b253a",
+            "raisedHover": "#0b253a",
+            "card": "#071d2e",
+            "dialog": "#081e30",
+            "overlay": "#082032",
+            "hover": "#ffffff1c",
+            "active": "#219fd52e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#d6deeb",
+            "textMuted": "#8ca6ba",
+            "textFaint": "#5f7e97",
+            "textDim": "#8ca6ba",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#ef5350",
+            "dangerStrong": "#ef5350",
+            "dangerMuted": "#e87a7b",
+            "warning": "#ffca28",
+            "warningMuted": "#f5cf59",
+            "success": "#22da6e",
+            "successMuted": "#4fdb8d",
+            "input": "#0b253ab8",
+            "cursor": "#d6deeb66",
+            "diffAdd": "#22da6e",
+            "diffDelete": "#ef5350",
+            "diffHunk": "#219fd514"
+          },
+          "accent": {
+            "primary": "#219fd5",
+            "strong": "#219fd5",
+            "wash": "#219fd538",
+            "on": "#000000",
+            "selection": "#219fd559",
+            "caret": "#219fd5",
+            "activity": "#219fd5",
+            "glyph": [
+              "#5fbae1",
+              "#219fd5",
+              "#1b82af"
+            ]
+          },
+          "syntax": {
+            "attribute": "#f7ecb5",
+            "boolean": "#8dec95",
+            "comment": "#8095a8",
+            "constant": "#8dec95",
+            "constructor": "#d29ffc",
+            "embedded": "#4fb4d8",
+            "escape": "#f7ecb5",
+            "function": "#87aff4",
+            "functionBuiltin": "#87aff4",
+            "invalid": "#ef5350",
+            "keyword": "#c792ea",
+            "label": "#87aff4",
+            "macro": "#c792ea",
+            "number": "#8dec95",
+            "operator": "#c792ea",
+            "parameter": "#cbcdd2",
+            "property": "#7fdbca",
+            "punctuation": "#4fb4d8",
+            "string": "#78bd65",
+            "stringSpecial": "#f7ecb5",
+            "tag": "#6dbdfa",
+            "type": "#d29ffc",
+            "typeBuiltin": "#d29ffc",
+            "variable": "#cbcdd2",
+            "variableSpecial": "#c792ea"
+          },
+          "terminal": {
+            "background": "#011627",
+            "foreground": "#d6deeb",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#011627",
+              "#ef5350",
+              "#22da6e",
+              "#f7ecb5",
+              "#219fd5",
+              "#c792ea",
+              "#80cbc4",
+              "#d6deeb",
+              "#5f7e97",
+              "#ef9a9a",
+              "#addb67",
+              "#ffcb6b",
+              "#82aaff",
+              "#c792ea",
+              "#7fdbca",
+              "#ffffff"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/johnpapa/vscode-winteriscoming",
+            "revision": "260547834cb6ac37dd5b8bb5842cc1c8d3164946",
+            "license": "MIT",
+            "assetHash": "sha256:5688946564f852060e57eda06057ca0baa7d2dd51b7d605960a7dabaaf52b689"
+          }
+        }
+      ]
+    },
+    {
+      "id": "palenight",
+      "name": "Palenight",
+      "variants": [
+        {
+          "id": "palenight",
+          "familyId": "palenight",
+          "name": "Palenight",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#292d3e",
+            "shell": "#232635",
+            "raised": "#34384c",
+            "raisedHover": "#34384c",
+            "card": "#292d3e",
+            "dialog": "#2b2f41",
+            "overlay": "#2d3143",
+            "hover": "#ffffff1c",
+            "active": "#82aaff2e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#eeffff",
+            "textMuted": "#a6accd",
+            "textFaint": "#697098",
+            "textDim": "#a6accd",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#ff5572",
+            "dangerStrong": "#ff5572",
+            "dangerMuted": "#fa8599",
+            "warning": "#ffcb6b",
+            "warningMuted": "#fbd890",
+            "success": "#c3e88d",
+            "successMuted": "#ceeeaa",
+            "input": "#34384cb8",
+            "cursor": "#eeffff66",
+            "diffAdd": "#c3e88d",
+            "diffDelete": "#ff5572",
+            "diffHunk": "#82aaff14"
+          },
+          "accent": {
+            "primary": "#82aaff",
+            "strong": "#82aaff",
+            "wash": "#82aaff38",
+            "on": "#000000",
+            "selection": "#82aaff59",
+            "caret": "#82aaff",
+            "activity": "#82aaff",
+            "glyph": [
+              "#a5c2ff",
+              "#82aaff",
+              "#6b8bd1"
+            ]
+          },
+          "syntax": {
+            "attribute": "#7986e7",
+            "boolean": "#f78c6c",
+            "comment": "#697098",
+            "constant": "#f78c6c",
+            "constructor": "#eeffff",
+            "embedded": "#82aaff",
+            "escape": "#7986e7",
+            "function": "#ffcb6b",
+            "functionBuiltin": "#ffcb6b",
+            "invalid": "#ff5572",
+            "keyword": "#c792ea",
+            "label": "#ffcb6b",
+            "macro": "#c792ea",
+            "number": "#f78c6c",
+            "operator": "#c792ea",
+            "parameter": "#bfc7d5",
+            "property": "#89ddff",
+            "punctuation": "#82aaff",
+            "string": "#c3e88d",
+            "stringSpecial": "#7986e7",
+            "tag": "#89ddff",
+            "type": "#eeffff",
+            "typeBuiltin": "#eeffff",
+            "variable": "#bfc7d5",
+            "variableSpecial": "#c792ea"
+          },
+          "terminal": {
+            "background": "#292d3e",
+            "foreground": "#eeffff",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#676e95",
+              "#ff5572",
+              "#a9c77d",
+              "#ffcb6b",
+              "#82aaff",
+              "#c792ea",
+              "#89ddff",
+              "#ffffff",
+              "#676e95",
+              "#ff5572",
+              "#c3e88d",
+              "#ffcb6b",
+              "#82aaff",
+              "#c792ea",
+              "#89ddff",
+              "#ffffff"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/whizkydee/vscode-palenight-theme",
+            "revision": "6291efaace90855abe3d79025327ca41b9a3138c",
+            "license": "MIT",
+            "assetHash": "sha256:887960a7fe859057c9d84dcc2e58f2abaa9b0e848f25a4423a0da7d6023ca2ec"
+          }
+        }
+      ]
+    },
+    {
+      "id": "synthwave-84",
+      "name": "SynthWave '84",
+      "variants": [
+        {
+          "id": "synthwave-84",
+          "familyId": "synthwave-84",
+          "name": "SynthWave '84",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#262335",
+            "shell": "#241b2f",
+            "raised": "#37294d",
+            "raisedHover": "#37294d",
+            "card": "#2a2139",
+            "dialog": "#2c223d",
+            "overlay": "#2e2440",
+            "hover": "#ffffff1c",
+            "active": "#ff7edb2e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#ffffff",
+            "textMuted": "#b8b5c6",
+            "textFaint": "#848bbd",
+            "textDim": "#b8b5c6",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#fe4450",
+            "dangerStrong": "#fe4450",
+            "dangerMuted": "#fe7881",
+            "warning": "#fede5d",
+            "warningMuted": "#fee686",
+            "success": "#72f1b8",
+            "successMuted": "#95f5ca",
+            "input": "#37294db8",
+            "cursor": "#ffffff66",
+            "diffAdd": "#72f1b8",
+            "diffDelete": "#fe4450",
+            "diffHunk": "#ff7edb14"
+          },
+          "accent": {
+            "primary": "#ff7edb",
+            "strong": "#ff7edb",
+            "wash": "#ff7edb38",
+            "on": "#000000",
+            "selection": "#ff7edb59",
+            "caret": "#ff7edb",
+            "activity": "#ff7edb",
+            "glyph": [
+              "#ffa2e5",
+              "#ff7edb",
+              "#d167b4"
+            ]
+          },
+          "syntax": {
+            "attribute": "#dd5500",
+            "boolean": "#2ee2fa",
+            "comment": "#848bbd",
+            "constant": "#2ee2fa",
+            "constructor": "#fe4450",
+            "embedded": "#72f1b8",
+            "escape": "#dd5500",
+            "function": "#72f1b8",
+            "functionBuiltin": "#72f1b8",
+            "invalid": "#fe4450",
+            "keyword": "#72f1b8",
+            "label": "#72f1b8",
+            "macro": "#72f1b8",
+            "number": "#2ee2fa",
+            "operator": "#72f1b8",
+            "parameter": "#f8f8f2",
+            "property": "#2ee2fa",
+            "punctuation": "#72f1b8",
+            "string": "#f97e72",
+            "stringSpecial": "#dd5500",
+            "tag": "#72f1b8",
+            "type": "#fe4450",
+            "typeBuiltin": "#fe4450",
+            "variable": "#f8f8f2",
+            "variableSpecial": "#72f1b8"
+          },
+          "terminal": {
+            "background": "#262335",
+            "foreground": "#ffffff",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#242424",
+              "#fe4450",
+              "#72f1b8",
+              "#f3e70f",
+              "#03edf9",
+              "#ff7edb",
+              "#03edf9",
+              "#d4d4d8",
+              "#52525b",
+              "#fe4450",
+              "#72f1b8",
+              "#fede5d",
+              "#03edf9",
+              "#ff7edb",
+              "#03edf9",
+              "#fafafa"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/robb0wen/synthwave-vscode",
+            "revision": "ecfa2fe1279f7233663fa3f98a96e6756000567b",
+            "license": "MIT",
+            "assetHash": "sha256:cd85b2ef6ffa6d669fbe1f508850e0f98c914b9ed78f6abd62789a141d2ace6e"
+          }
+        }
+      ]
+    },
+    {
+      "id": "shades-of-purple",
+      "name": "Shades of Purple",
+      "variants": [
+        {
+          "id": "shades-of-purple",
+          "familyId": "shades-of-purple",
+          "name": "Shades of Purple",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#2d2b55",
+            "shell": "#222244",
+            "raised": "#393668",
+            "raisedHover": "#393668",
+            "card": "#1e1e3f",
+            "dialog": "#232246",
+            "overlay": "#27264d",
+            "hover": "#ffffff1c",
+            "active": "#fad0002e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#ffffff",
+            "textMuted": "#b8afea",
+            "textFaint": "#8d84c7",
+            "textDim": "#b8afea",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#ec3a37",
+            "dangerStrong": "#ec3a37",
+            "dangerMuted": "#f1716f",
+            "warning": "#fad000",
+            "warningMuted": "#fbdc40",
+            "success": "#3ad900",
+            "successMuted": "#6be340",
+            "input": "#393668b8",
+            "cursor": "#ffffff66",
+            "diffAdd": "#3ad900",
+            "diffDelete": "#ec3a37",
+            "diffHunk": "#fad00014"
+          },
+          "accent": {
+            "primary": "#fad000",
+            "strong": "#fad000",
+            "wash": "#fad00038",
+            "on": "#000000",
+            "selection": "#fad00059",
+            "caret": "#fad000",
+            "activity": "#fad000",
+            "glyph": [
+              "#fbdd47",
+              "#fad000",
+              "#cdab00"
+            ]
+          },
+          "syntax": {
+            "attribute": "#ff9d00",
+            "boolean": "#fad000",
+            "comment": "#b362ff",
+            "constant": "#fad000",
+            "constructor": "#fb94ff",
+            "embedded": "#fad000",
+            "escape": "#ff9d00",
+            "function": "#fad000",
+            "functionBuiltin": "#fad000",
+            "invalid": "#ec3a37",
+            "keyword": "#ff628c",
+            "label": "#fad000",
+            "macro": "#ff628c",
+            "number": "#fad000",
+            "operator": "#ff628c",
+            "parameter": "#9effff",
+            "property": "#fad000",
+            "punctuation": "#fad000",
+            "string": "#fb94ff",
+            "stringSpecial": "#ff9d00",
+            "tag": "#fad000",
+            "type": "#fb94ff",
+            "typeBuiltin": "#fb94ff",
+            "variable": "#9effff",
+            "variableSpecial": "#ff628c"
+          },
+          "terminal": {
+            "background": "#1e1e3f",
+            "foreground": "#ffffff",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#000000",
+              "#ec3a37",
+              "#3ad900",
+              "#fad000",
+              "#7857fe",
+              "#ff2c70",
+              "#80fcff",
+              "#ffffff",
+              "#5c5c61",
+              "#ec3a37",
+              "#3ad900",
+              "#fad000",
+              "#6943ff",
+              "#fb94ff",
+              "#80fcff",
+              "#ffffff"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/ahmadawais/shades-of-purple-vscode",
+            "revision": "e8eb49f33e5db05ceba6677367b33ddb27ad821c",
+            "license": "MIT with additional upstream condition; see THIRD_PARTY_NOTICES.md",
+            "assetHash": "sha256:67c2940750e49bd8fb7f4ae07bed8e5784d726597babb4b16f982526bf159884"
+          }
+        }
+      ]
+    },
+    {
+      "id": "cobalt2",
+      "name": "Cobalt2",
+      "variants": [
+        {
+          "id": "cobalt2",
+          "familyId": "cobalt2",
+          "name": "Cobalt2",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#193549",
+            "shell": "#15232d",
+            "raised": "#20455e",
+            "raisedHover": "#20455e",
+            "card": "#122738",
+            "dialog": "#152c3f",
+            "overlay": "#173145",
+            "hover": "#ffffff1c",
+            "active": "#ffc6002e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#ffffff",
+            "textMuted": "#b7c9d3",
+            "textFaint": "#7da1b5",
+            "textDim": "#b7c9d3",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#ff628c",
+            "dangerStrong": "#ff628c",
+            "dangerMuted": "#ff8eac",
+            "warning": "#ffc600",
+            "warningMuted": "#ffd440",
+            "success": "#3ad900",
+            "successMuted": "#6be340",
+            "input": "#20455eb8",
+            "cursor": "#ffffff66",
+            "diffAdd": "#3ad900",
+            "diffDelete": "#ff628c",
+            "diffHunk": "#ffc60014"
+          },
+          "accent": {
+            "primary": "#ffc600",
+            "strong": "#ffc600",
+            "wash": "#ffc60038",
+            "on": "#000000",
+            "selection": "#ffc60059",
+            "caret": "#ffc600",
+            "activity": "#ffc600",
+            "glyph": [
+              "#ffd647",
+              "#ffc600",
+              "#d1a200"
+            ]
+          },
+          "syntax": {
+            "attribute": "#ffb454",
+            "boolean": "#ffc600",
+            "comment": "#0088ff",
+            "constant": "#ffc600",
+            "constructor": "#ff68b8",
+            "embedded": "#ffee80",
+            "escape": "#ffb454",
+            "function": "#ffc600",
+            "functionBuiltin": "#ffc600",
+            "invalid": "#f44542",
+            "keyword": "#ff9d00",
+            "label": "#ffc600",
+            "macro": "#ff9d00",
+            "number": "#ffc600",
+            "operator": "#ff9d00",
+            "parameter": "#ffffff",
+            "property": "#9effff",
+            "punctuation": "#ffee80",
+            "string": "#ffee80",
+            "stringSpecial": "#ffb454",
+            "tag": "#ffc600",
+            "type": "#ff68b8",
+            "typeBuiltin": "#ff68b8",
+            "variable": "#ffffff",
+            "variableSpecial": "#ff9d00"
+          },
+          "terminal": {
+            "background": "#122738",
+            "foreground": "#ffffff",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#000000",
+              "#ff628c",
+              "#3ad900",
+              "#ffc600",
+              "#0088ff",
+              "#fb94ff",
+              "#80fcff",
+              "#ffffff",
+              "#0050a4",
+              "#ff628c",
+              "#3ad900",
+              "#ffc600",
+              "#0088ff",
+              "#fb94ff",
+              "#80fcff",
+              "#ffffff"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/wesbos/cobalt2-vscode",
+            "revision": "c4e9574372b85afad1682ed0fdd1ac0411c62512",
+            "license": "MIT",
+            "assetHash": "sha256:0fe27a93cc9b6bd4dff2ef5a527b9863914e1dfefffd30abfa2277e477aeec9b"
+          }
+        }
+      ]
+    },
+    {
+      "id": "andromeda",
+      "name": "Andromeda",
+      "variants": [
+        {
+          "id": "andromeda",
+          "familyId": "andromeda",
+          "name": "Andromeda",
+          "appearance": "dark",
+          "recommendedSurfaceTreatment": "opaque",
+          "colors": {
+            "background": "#23262e",
+            "shell": "#1e2027",
+            "raised": "#2d313b",
+            "raisedHover": "#2d313b",
+            "card": "#23262e",
+            "dialog": "#252830",
+            "overlay": "#262a32",
+            "hover": "#ffffff1c",
+            "active": "#00e8c62e",
+            "border": "#ffffff1a",
+            "borderStrong": "#ffffff2e",
+            "text": "#d5ced9",
+            "textMuted": "#a6a0aa",
+            "textFaint": "#746f77",
+            "textDim": "#a6a0aa",
+            "solid": "#ebebef",
+            "onSolid": "#000000",
+            "danger": "#ee5d43",
+            "dangerStrong": "#ee5d43",
+            "dangerMuted": "#e77d6d",
+            "warning": "#ff9f2e",
+            "warningMuted": "#f5ab59",
+            "success": "#96e072",
+            "successMuted": "#a6dc8c",
+            "input": "#2d313bb8",
+            "cursor": "#d5ced966",
+            "diffAdd": "#96e072",
+            "diffDelete": "#ee5d43",
+            "diffHunk": "#00e8c614"
+          },
+          "accent": {
+            "primary": "#00e8c6",
+            "strong": "#00e8c6",
+            "wash": "#00e8c638",
+            "on": "#000000",
+            "selection": "#00e8c659",
+            "caret": "#00e8c6",
+            "activity": "#00e8c6",
+            "glyph": [
+              "#47eed6",
+              "#00e8c6",
+              "#00bea2"
+            ]
+          },
+          "syntax": {
+            "attribute": "#ee5d43",
+            "boolean": "#f39c12",
+            "comment": "#a0a1a7",
+            "constant": "#f39c12",
+            "constructor": "#ffe66d",
+            "embedded": "#96e072",
+            "escape": "#ee5d43",
+            "function": "#ffe66d",
+            "functionBuiltin": "#ffe66d",
+            "invalid": "#ee5d43",
+            "keyword": "#ee5d43",
+            "label": "#ffe66d",
+            "macro": "#ee5d43",
+            "number": "#f39c12",
+            "operator": "#ee5d43",
+            "parameter": "#f39c12",
+            "property": "#d5ced9",
+            "punctuation": "#96e072",
+            "string": "#96e072",
+            "stringSpecial": "#ee5d43",
+            "tag": "#f92672",
+            "type": "#ffe66d",
+            "typeBuiltin": "#ffe66d",
+            "variable": "#f39c12",
+            "variableSpecial": "#ee5d43"
+          },
+          "terminal": {
+            "background": "#23262e",
+            "foreground": "#d5ced9",
+            "selection": "#ffffff38",
+            "ansi": [
+              "#242424",
+              "#ee5d43",
+              "#96e072",
+              "#ffe66d",
+              "#7cb7ff",
+              "#ff00aa",
+              "#00e8c6",
+              "#d4d4d8",
+              "#52525b",
+              "#ee5d43",
+              "#96e072",
+              "#ffe66d",
+              "#7cb7ff",
+              "#ff00aa",
+              "#00e8c6",
+              "#fafafa"
+            ]
+          },
+          "source": {
+            "format": "vscode",
+            "url": "https://github.com/EliverLara/Andromeda",
+            "revision": "d1abb48c69493000aa0133a32d594eb25e523d4f",
+            "license": "MIT",
+            "assetHash": "sha256:331d009703c80909e4718818f4a793efd740f2aeffdb7d2c5e418db412bf1f93"
+          }
+        }
+      ]
+    }
+  ],
+  "accentPresets": [
+    {
+      "id": "zeron",
+      "label": "Zeron",
+      "dark": "#8b7cf6",
+      "light": "#5b43e8"
+    },
+    {
+      "id": "orange",
+      "label": "Orange",
+      "dark": "#fb923c",
+      "light": "#c2410c"
+    },
+    {
+      "id": "amber",
+      "label": "Amber",
+      "dark": "#fbbf24",
+      "light": "#a16207"
+    },
+    {
+      "id": "green",
+      "label": "Green",
+      "dark": "#4ade80",
+      "light": "#15803d"
+    },
+    {
+      "id": "cyan",
+      "label": "Cyan",
+      "dark": "#22d3ee",
+      "light": "#0e7490"
+    },
+    {
+      "id": "blue",
+      "label": "Blue",
+      "dark": "#60a5fa",
+      "light": "#2563eb"
+    },
+    {
+      "id": "pink",
+      "label": "Pink",
+      "dark": "#f472b6",
+      "light": "#be185d"
+    }
+  ],
+  "accents": {
+    "andromeda": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "atom-one-dark": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "ayu-dark": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "ayu-light": {
+      "amber": {
+        "primary": "#a16207",
+        "strong": "#a16207",
+        "wash": "#a162071f",
+        "on": "#ffffff",
+        "selection": "#a162073d",
+        "caret": "#a16207",
+        "activity": "#a16207",
+        "glyph": [
+          "#b17e33",
+          "#a16207",
+          "#774905"
+        ]
+      },
+      "blue": {
+        "primary": "#2563eb",
+        "strong": "#2563eb",
+        "wash": "#2563eb1f",
+        "on": "#ffffff",
+        "selection": "#2563eb3d",
+        "caret": "#2563eb",
+        "activity": "#2563eb",
+        "glyph": [
+          "#4c7fee",
+          "#2563eb",
+          "#1b49ae"
+        ]
+      },
+      "cyan": {
+        "primary": "#0e7490",
+        "strong": "#0e7490",
+        "wash": "#0e74901f",
+        "on": "#ffffff",
+        "selection": "#0e74903d",
+        "caret": "#0e7490",
+        "activity": "#0e7490",
+        "glyph": [
+          "#398ca3",
+          "#0e7490",
+          "#0a566b"
+        ]
+      },
+      "green": {
+        "primary": "#15803d",
+        "strong": "#15803d",
+        "wash": "#15803d1f",
+        "on": "#ffffff",
+        "selection": "#15803d3d",
+        "caret": "#15803d",
+        "activity": "#15803d",
+        "glyph": [
+          "#3f965f",
+          "#15803d",
+          "#105f2d"
+        ]
+      },
+      "orange": {
+        "primary": "#c2410c",
+        "strong": "#c2410c",
+        "wash": "#c2410c1f",
+        "on": "#ffffff",
+        "selection": "#c2410c3d",
+        "caret": "#c2410c",
+        "activity": "#c2410c",
+        "glyph": [
+          "#cc6337",
+          "#c2410c",
+          "#903009"
+        ]
+      },
+      "pink": {
+        "primary": "#be185d",
+        "strong": "#be185d",
+        "wash": "#be185d1f",
+        "on": "#ffffff",
+        "selection": "#be185d3d",
+        "caret": "#be185d",
+        "activity": "#be185d",
+        "glyph": [
+          "#c9417a",
+          "#be185d",
+          "#8d1245"
+        ]
+      },
+      "zeron": {
+        "primary": "#5b43e8",
+        "strong": "#5b43e8",
+        "wash": "#5b43e81f",
+        "on": "#ffffff",
+        "selection": "#5b43e83d",
+        "caret": "#5b43e8",
+        "activity": "#5b43e8",
+        "glyph": [
+          "#7864ec",
+          "#5b43e8",
+          "#4332ac"
+        ]
+      }
+    },
+    "ayu-mirage": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "catppuccin-latte": {
+      "amber": {
+        "primary": "#a16207",
+        "strong": "#a16207",
+        "wash": "#a162071f",
+        "on": "#ffffff",
+        "selection": "#a162073d",
+        "caret": "#a16207",
+        "activity": "#a16207",
+        "glyph": [
+          "#af7c32",
+          "#a16207",
+          "#774905"
+        ]
+      },
+      "blue": {
+        "primary": "#2563eb",
+        "strong": "#2563eb",
+        "wash": "#2563eb1f",
+        "on": "#ffffff",
+        "selection": "#2563eb3d",
+        "caret": "#2563eb",
+        "activity": "#2563eb",
+        "glyph": [
+          "#497ded",
+          "#2563eb",
+          "#1b49ae"
+        ]
+      },
+      "cyan": {
+        "primary": "#0e7490",
+        "strong": "#0e7490",
+        "wash": "#0e74901f",
+        "on": "#ffffff",
+        "selection": "#0e74903d",
+        "caret": "#0e7490",
+        "activity": "#0e7490",
+        "glyph": [
+          "#378ba2",
+          "#0e7490",
+          "#0a566b"
+        ]
+      },
+      "green": {
+        "primary": "#15803d",
+        "strong": "#15803d",
+        "wash": "#15803d1f",
+        "on": "#ffffff",
+        "selection": "#15803d3d",
+        "caret": "#15803d",
+        "activity": "#15803d",
+        "glyph": [
+          "#3c945e",
+          "#15803d",
+          "#105f2d"
+        ]
+      },
+      "orange": {
+        "primary": "#c2410c",
+        "strong": "#c2410c",
+        "wash": "#c2410c1f",
+        "on": "#ffffff",
+        "selection": "#c2410c3d",
+        "caret": "#c2410c",
+        "activity": "#c2410c",
+        "glyph": [
+          "#ca6136",
+          "#c2410c",
+          "#903009"
+        ]
+      },
+      "pink": {
+        "primary": "#be185d",
+        "strong": "#be185d",
+        "wash": "#be185d1f",
+        "on": "#ffffff",
+        "selection": "#be185d3d",
+        "caret": "#be185d",
+        "activity": "#be185d",
+        "glyph": [
+          "#c73f78",
+          "#be185d",
+          "#8d1245"
+        ]
+      },
+      "zeron": {
+        "primary": "#5b43e8",
+        "strong": "#5b43e8",
+        "wash": "#5b43e81f",
+        "on": "#ffffff",
+        "selection": "#5b43e83d",
+        "caret": "#5b43e8",
+        "activity": "#5b43e8",
+        "glyph": [
+          "#7662ea",
+          "#5b43e8",
+          "#4332ac"
+        ]
+      }
+    },
+    "catppuccin-mocha": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "cobalt2": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "dracula": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "github-dark": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "github-light": {
+      "amber": {
+        "primary": "#a16207",
+        "strong": "#a16207",
+        "wash": "#a162071f",
+        "on": "#ffffff",
+        "selection": "#a162073d",
+        "caret": "#a16207",
+        "activity": "#a16207",
+        "glyph": [
+          "#b27e34",
+          "#a16207",
+          "#774905"
+        ]
+      },
+      "blue": {
+        "primary": "#2563eb",
+        "strong": "#2563eb",
+        "wash": "#2563eb1f",
+        "on": "#ffffff",
+        "selection": "#2563eb3d",
+        "caret": "#2563eb",
+        "activity": "#2563eb",
+        "glyph": [
+          "#4c7fef",
+          "#2563eb",
+          "#1b49ae"
+        ]
+      },
+      "cyan": {
+        "primary": "#0e7490",
+        "strong": "#0e7490",
+        "wash": "#0e74901f",
+        "on": "#ffffff",
+        "selection": "#0e74903d",
+        "caret": "#0e7490",
+        "activity": "#0e7490",
+        "glyph": [
+          "#398da4",
+          "#0e7490",
+          "#0a566b"
+        ]
+      },
+      "green": {
+        "primary": "#15803d",
+        "strong": "#15803d",
+        "wash": "#15803d1f",
+        "on": "#ffffff",
+        "selection": "#15803d3d",
+        "caret": "#15803d",
+        "activity": "#15803d",
+        "glyph": [
+          "#3f9760",
+          "#15803d",
+          "#105f2d"
+        ]
+      },
+      "orange": {
+        "primary": "#c2410c",
+        "strong": "#c2410c",
+        "wash": "#c2410c1f",
+        "on": "#ffffff",
+        "selection": "#c2410c3d",
+        "caret": "#c2410c",
+        "activity": "#c2410c",
+        "glyph": [
+          "#cd6338",
+          "#c2410c",
+          "#903009"
+        ]
+      },
+      "pink": {
+        "primary": "#be185d",
+        "strong": "#be185d",
+        "wash": "#be185d1f",
+        "on": "#ffffff",
+        "selection": "#be185d3d",
+        "caret": "#be185d",
+        "activity": "#be185d",
+        "glyph": [
+          "#ca427a",
+          "#be185d",
+          "#8d1245"
+        ]
+      },
+      "zeron": {
+        "primary": "#5b43e8",
+        "strong": "#5b43e8",
+        "wash": "#5b43e81f",
+        "on": "#ffffff",
+        "selection": "#5b43e83d",
+        "caret": "#5b43e8",
+        "activity": "#5b43e8",
+        "glyph": [
+          "#7965ec",
+          "#5b43e8",
+          "#4332ac"
+        ]
+      }
+    },
+    "gruvbox-dark": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "gruvbox-light": {
+      "amber": {
+        "primary": "#a16207",
+        "strong": "#a16207",
+        "wash": "#a162071f",
+        "on": "#ffffff",
+        "selection": "#a162073d",
+        "caret": "#a16207",
+        "activity": "#a16207",
+        "glyph": [
+          "#b17c2a",
+          "#a16207",
+          "#774905"
+        ]
+      },
+      "blue": {
+        "primary": "#2563eb",
+        "strong": "#2563eb",
+        "wash": "#2563eb1f",
+        "on": "#ffffff",
+        "selection": "#2563eb3d",
+        "caret": "#2563eb",
+        "activity": "#2563eb",
+        "glyph": [
+          "#4c7de5",
+          "#2563eb",
+          "#1b49ae"
+        ]
+      },
+      "cyan": {
+        "primary": "#0e7490",
+        "strong": "#0e7490",
+        "wash": "#0e74901f",
+        "on": "#ffffff",
+        "selection": "#0e74903d",
+        "caret": "#0e7490",
+        "activity": "#0e7490",
+        "glyph": [
+          "#398b9a",
+          "#0e7490",
+          "#0a566b"
+        ]
+      },
+      "green": {
+        "primary": "#15803d",
+        "strong": "#15803d",
+        "wash": "#15803d1f",
+        "on": "#ffffff",
+        "selection": "#15803d3d",
+        "caret": "#15803d",
+        "activity": "#15803d",
+        "glyph": [
+          "#3e9456",
+          "#15803d",
+          "#105f2d"
+        ]
+      },
+      "orange": {
+        "primary": "#c2410c",
+        "strong": "#c2410c",
+        "wash": "#c2410c1f",
+        "on": "#ffffff",
+        "selection": "#c2410c3d",
+        "caret": "#c2410c",
+        "activity": "#c2410c",
+        "glyph": [
+          "#cc612e",
+          "#c2410c",
+          "#903009"
+        ]
+      },
+      "pink": {
+        "primary": "#be185d",
+        "strong": "#be185d",
+        "wash": "#be185d1f",
+        "on": "#ffffff",
+        "selection": "#be185d3d",
+        "caret": "#be185d",
+        "activity": "#be185d",
+        "glyph": [
+          "#c93f70",
+          "#be185d",
+          "#8d1245"
+        ]
+      },
+      "zeron": {
+        "primary": "#5b43e8",
+        "strong": "#5b43e8",
+        "wash": "#5b43e81f",
+        "on": "#ffffff",
+        "selection": "#5b43e83d",
+        "caret": "#5b43e8",
+        "activity": "#5b43e8",
+        "glyph": [
+          "#7862e2",
+          "#5b43e8",
+          "#4332ac"
+        ]
+      }
+    },
+    "night-owl": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "night-owl-light": {
+      "amber": {
+        "primary": "#a16207",
+        "strong": "#a16207",
+        "wash": "#a162071f",
+        "on": "#ffffff",
+        "selection": "#a162073d",
+        "caret": "#a16207",
+        "activity": "#a16207",
+        "glyph": [
+          "#b17e33",
+          "#a16207",
+          "#774905"
+        ]
+      },
+      "blue": {
+        "primary": "#2563eb",
+        "strong": "#2563eb",
+        "wash": "#2563eb1f",
+        "on": "#ffffff",
+        "selection": "#2563eb3d",
+        "caret": "#2563eb",
+        "activity": "#2563eb",
+        "glyph": [
+          "#4c7eee",
+          "#2563eb",
+          "#1b49ae"
+        ]
+      },
+      "cyan": {
+        "primary": "#0e7490",
+        "strong": "#0e7490",
+        "wash": "#0e74901f",
+        "on": "#ffffff",
+        "selection": "#0e74903d",
+        "caret": "#0e7490",
+        "activity": "#0e7490",
+        "glyph": [
+          "#398ca3",
+          "#0e7490",
+          "#0a566b"
+        ]
+      },
+      "green": {
+        "primary": "#15803d",
+        "strong": "#15803d",
+        "wash": "#15803d1f",
+        "on": "#ffffff",
+        "selection": "#15803d3d",
+        "caret": "#15803d",
+        "activity": "#15803d",
+        "glyph": [
+          "#3e965f",
+          "#15803d",
+          "#105f2d"
+        ]
+      },
+      "orange": {
+        "primary": "#c2410c",
+        "strong": "#c2410c",
+        "wash": "#c2410c1f",
+        "on": "#ffffff",
+        "selection": "#c2410c3d",
+        "caret": "#c2410c",
+        "activity": "#c2410c",
+        "glyph": [
+          "#cc6237",
+          "#c2410c",
+          "#903009"
+        ]
+      },
+      "pink": {
+        "primary": "#be185d",
+        "strong": "#be185d",
+        "wash": "#be185d1f",
+        "on": "#ffffff",
+        "selection": "#be185d3d",
+        "caret": "#be185d",
+        "activity": "#be185d",
+        "glyph": [
+          "#c94179",
+          "#be185d",
+          "#8d1245"
+        ]
+      },
+      "zeron": {
+        "primary": "#5b43e8",
+        "strong": "#5b43e8",
+        "wash": "#5b43e81f",
+        "on": "#ffffff",
+        "selection": "#5b43e83d",
+        "caret": "#5b43e8",
+        "activity": "#5b43e8",
+        "glyph": [
+          "#7864eb",
+          "#5b43e8",
+          "#4332ac"
+        ]
+      }
+    },
+    "nord": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "one-dark-pro": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "palenight": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "zeron-dark": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "zeron-light": {
+      "amber": {
+        "primary": "#a16207",
+        "strong": "#a16207",
+        "wash": "#a162071f",
+        "on": "#ffffff",
+        "selection": "#a162073d",
+        "caret": "#a16207",
+        "activity": "#a16207",
+        "glyph": [
+          "#b27e34",
+          "#a16207",
+          "#774905"
+        ]
+      },
+      "blue": {
+        "primary": "#2563eb",
+        "strong": "#2563eb",
+        "wash": "#2563eb1f",
+        "on": "#ffffff",
+        "selection": "#2563eb3d",
+        "caret": "#2563eb",
+        "activity": "#2563eb",
+        "glyph": [
+          "#4c7fef",
+          "#2563eb",
+          "#1b49ae"
+        ]
+      },
+      "cyan": {
+        "primary": "#0e7490",
+        "strong": "#0e7490",
+        "wash": "#0e74901f",
+        "on": "#ffffff",
+        "selection": "#0e74903d",
+        "caret": "#0e7490",
+        "activity": "#0e7490",
+        "glyph": [
+          "#398da4",
+          "#0e7490",
+          "#0a566b"
+        ]
+      },
+      "green": {
+        "primary": "#15803d",
+        "strong": "#15803d",
+        "wash": "#15803d1f",
+        "on": "#ffffff",
+        "selection": "#15803d3d",
+        "caret": "#15803d",
+        "activity": "#15803d",
+        "glyph": [
+          "#3f9760",
+          "#15803d",
+          "#105f2d"
+        ]
+      },
+      "orange": {
+        "primary": "#c2410c",
+        "strong": "#c2410c",
+        "wash": "#c2410c1f",
+        "on": "#ffffff",
+        "selection": "#c2410c3d",
+        "caret": "#c2410c",
+        "activity": "#c2410c",
+        "glyph": [
+          "#cd6338",
+          "#c2410c",
+          "#903009"
+        ]
+      },
+      "pink": {
+        "primary": "#be185d",
+        "strong": "#be185d",
+        "wash": "#be185d1f",
+        "on": "#ffffff",
+        "selection": "#be185d3d",
+        "caret": "#be185d",
+        "activity": "#be185d",
+        "glyph": [
+          "#ca427a",
+          "#be185d",
+          "#8d1245"
+        ]
+      },
+      "zeron": {
+        "primary": "#5b43e8",
+        "strong": "#5b43e8",
+        "wash": "#5b43e81f",
+        "on": "#ffffff",
+        "selection": "#5b43e83d",
+        "caret": "#5b43e8",
+        "activity": "#5b43e8",
+        "glyph": [
+          "#7965ec",
+          "#5b43e8",
+          "#4332ac"
+        ]
+      }
+    },
+    "rose-pine-dawn": {
+      "amber": {
+        "primary": "#a16207",
+        "strong": "#a16207",
+        "wash": "#a162071f",
+        "on": "#ffffff",
+        "selection": "#a162073d",
+        "caret": "#a16207",
+        "activity": "#a16207",
+        "glyph": [
+          "#b17c30",
+          "#a16207",
+          "#774905"
+        ]
+      },
+      "blue": {
+        "primary": "#2563eb",
+        "strong": "#2563eb",
+        "wash": "#2563eb1f",
+        "on": "#ffffff",
+        "selection": "#2563eb3d",
+        "caret": "#2563eb",
+        "activity": "#2563eb",
+        "glyph": [
+          "#4b7deb",
+          "#2563eb",
+          "#1b49ae"
+        ]
+      },
+      "cyan": {
+        "primary": "#0e7490",
+        "strong": "#0e7490",
+        "wash": "#0e74901f",
+        "on": "#ffffff",
+        "selection": "#0e74903d",
+        "caret": "#0e7490",
+        "activity": "#0e7490",
+        "glyph": [
+          "#388ba1",
+          "#0e7490",
+          "#0a566b"
+        ]
+      },
+      "green": {
+        "primary": "#15803d",
+        "strong": "#15803d",
+        "wash": "#15803d1f",
+        "on": "#ffffff",
+        "selection": "#15803d3d",
+        "caret": "#15803d",
+        "activity": "#15803d",
+        "glyph": [
+          "#3e955d",
+          "#15803d",
+          "#105f2d"
+        ]
+      },
+      "orange": {
+        "primary": "#c2410c",
+        "strong": "#c2410c",
+        "wash": "#c2410c1f",
+        "on": "#ffffff",
+        "selection": "#c2410c3d",
+        "caret": "#c2410c",
+        "activity": "#c2410c",
+        "glyph": [
+          "#cc6135",
+          "#c2410c",
+          "#903009"
+        ]
+      },
+      "pink": {
+        "primary": "#be185d",
+        "strong": "#be185d",
+        "wash": "#be185d1f",
+        "on": "#ffffff",
+        "selection": "#be185d3d",
+        "caret": "#be185d",
+        "activity": "#be185d",
+        "glyph": [
+          "#c94077",
+          "#be185d",
+          "#8d1245"
+        ]
+      },
+      "zeron": {
+        "primary": "#5b43e8",
+        "strong": "#5b43e8",
+        "wash": "#5b43e81f",
+        "on": "#ffffff",
+        "selection": "#5b43e83d",
+        "caret": "#5b43e8",
+        "activity": "#5b43e8",
+        "glyph": [
+          "#7863e9",
+          "#5b43e8",
+          "#4332ac"
+        ]
+      }
+    },
+    "rose-pine-moon": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "shades-of-purple": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "synthwave-84": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "tokyo-night": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "tokyo-night-light": {
+      "amber": {
+        "primary": "#a16207",
+        "strong": "#a16207",
+        "wash": "#a162071f",
+        "on": "#ffffff",
+        "selection": "#a162073d",
+        "caret": "#a16207",
+        "activity": "#a16207",
+        "glyph": [
+          "#aa772d",
+          "#a16207",
+          "#774905"
+        ]
+      },
+      "blue": {
+        "primary": "#2563eb",
+        "strong": "#2563eb",
+        "wash": "#2563eb1f",
+        "on": "#ffffff",
+        "selection": "#2563eb3d",
+        "caret": "#2563eb",
+        "activity": "#2563eb",
+        "glyph": [
+          "#4578e8",
+          "#2563eb",
+          "#1b49ae"
+        ]
+      },
+      "cyan": {
+        "primary": "#0e7490",
+        "strong": "#0e7490",
+        "wash": "#0e74901f",
+        "on": "#ffffff",
+        "selection": "#0e74903d",
+        "caret": "#0e7490",
+        "activity": "#0e7490",
+        "glyph": [
+          "#32869e",
+          "#0e7490",
+          "#0a566b"
+        ]
+      },
+      "green": {
+        "primary": "#15803d",
+        "strong": "#15803d",
+        "wash": "#15803d1f",
+        "on": "#ffffff",
+        "selection": "#15803d3d",
+        "caret": "#15803d",
+        "activity": "#15803d",
+        "glyph": [
+          "#388f59",
+          "#15803d",
+          "#105f2d"
+        ]
+      },
+      "orange": {
+        "primary": "#c2410c",
+        "strong": "#c2410c",
+        "wash": "#c2410c1f",
+        "on": "#ffffff",
+        "selection": "#c2410c3d",
+        "caret": "#c2410c",
+        "activity": "#c2410c",
+        "glyph": [
+          "#c55c31",
+          "#c2410c",
+          "#903009"
+        ]
+      },
+      "pink": {
+        "primary": "#be185d",
+        "strong": "#be185d",
+        "wash": "#be185d1f",
+        "on": "#ffffff",
+        "selection": "#be185d3d",
+        "caret": "#be185d",
+        "activity": "#be185d",
+        "glyph": [
+          "#c23a74",
+          "#be185d",
+          "#8d1245"
+        ]
+      },
+      "zeron": {
+        "primary": "#5b43e8",
+        "strong": "#5b43e8",
+        "wash": "#5b43e81f",
+        "on": "#ffffff",
+        "selection": "#5b43e83d",
+        "caret": "#5b43e8",
+        "activity": "#5b43e8",
+        "glyph": [
+          "#715de6",
+          "#5b43e8",
+          "#4332ac"
+        ]
+      }
+    },
+    "vscode-dark-plus": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "vscode-light-plus": {
+      "amber": {
+        "primary": "#a16207",
+        "strong": "#a16207",
+        "wash": "#a162071f",
+        "on": "#ffffff",
+        "selection": "#a162073d",
+        "caret": "#a16207",
+        "activity": "#a16207",
+        "glyph": [
+          "#b27e34",
+          "#a16207",
+          "#774905"
+        ]
+      },
+      "blue": {
+        "primary": "#2563eb",
+        "strong": "#2563eb",
+        "wash": "#2563eb1f",
+        "on": "#ffffff",
+        "selection": "#2563eb3d",
+        "caret": "#2563eb",
+        "activity": "#2563eb",
+        "glyph": [
+          "#4c7fef",
+          "#2563eb",
+          "#1b49ae"
+        ]
+      },
+      "cyan": {
+        "primary": "#0e7490",
+        "strong": "#0e7490",
+        "wash": "#0e74901f",
+        "on": "#ffffff",
+        "selection": "#0e74903d",
+        "caret": "#0e7490",
+        "activity": "#0e7490",
+        "glyph": [
+          "#398da4",
+          "#0e7490",
+          "#0a566b"
+        ]
+      },
+      "green": {
+        "primary": "#15803d",
+        "strong": "#15803d",
+        "wash": "#15803d1f",
+        "on": "#ffffff",
+        "selection": "#15803d3d",
+        "caret": "#15803d",
+        "activity": "#15803d",
+        "glyph": [
+          "#3f9760",
+          "#15803d",
+          "#105f2d"
+        ]
+      },
+      "orange": {
+        "primary": "#c2410c",
+        "strong": "#c2410c",
+        "wash": "#c2410c1f",
+        "on": "#ffffff",
+        "selection": "#c2410c3d",
+        "caret": "#c2410c",
+        "activity": "#c2410c",
+        "glyph": [
+          "#cd6338",
+          "#c2410c",
+          "#903009"
+        ]
+      },
+      "pink": {
+        "primary": "#be185d",
+        "strong": "#be185d",
+        "wash": "#be185d1f",
+        "on": "#ffffff",
+        "selection": "#be185d3d",
+        "caret": "#be185d",
+        "activity": "#be185d",
+        "glyph": [
+          "#ca427a",
+          "#be185d",
+          "#8d1245"
+        ]
+      },
+      "zeron": {
+        "primary": "#5b43e8",
+        "strong": "#5b43e8",
+        "wash": "#5b43e81f",
+        "on": "#ffffff",
+        "selection": "#5b43e83d",
+        "caret": "#5b43e8",
+        "activity": "#5b43e8",
+        "glyph": [
+          "#7965ec",
+          "#5b43e8",
+          "#4332ac"
+        ]
+      }
+    },
+    "winter-dark-blue": {
+      "amber": {
+        "primary": "#fbbf24",
+        "strong": "#fbbf24",
+        "wash": "#fbbf2438",
+        "on": "#000000",
+        "selection": "#fbbf2459",
+        "caret": "#fbbf24",
+        "activity": "#fbbf24",
+        "glyph": [
+          "#fcd161",
+          "#fbbf24",
+          "#ce9d1e"
+        ]
+      },
+      "blue": {
+        "primary": "#60a5fa",
+        "strong": "#60a5fa",
+        "wash": "#60a5fa38",
+        "on": "#000000",
+        "selection": "#60a5fa59",
+        "caret": "#60a5fa",
+        "activity": "#60a5fa",
+        "glyph": [
+          "#8dbefb",
+          "#60a5fa",
+          "#4f87cd"
+        ]
+      },
+      "cyan": {
+        "primary": "#22d3ee",
+        "strong": "#22d3ee",
+        "wash": "#22d3ee38",
+        "on": "#000000",
+        "selection": "#22d3ee59",
+        "caret": "#22d3ee",
+        "activity": "#22d3ee",
+        "glyph": [
+          "#60dff3",
+          "#22d3ee",
+          "#1cadc3"
+        ]
+      },
+      "green": {
+        "primary": "#4ade80",
+        "strong": "#4ade80",
+        "wash": "#4ade8038",
+        "on": "#000000",
+        "selection": "#4ade8059",
+        "caret": "#4ade80",
+        "activity": "#4ade80",
+        "glyph": [
+          "#7de7a4",
+          "#4ade80",
+          "#3db669"
+        ]
+      },
+      "orange": {
+        "primary": "#fb923c",
+        "strong": "#fb923c",
+        "wash": "#fb923c38",
+        "on": "#000000",
+        "selection": "#fb923c59",
+        "caret": "#fb923c",
+        "activity": "#fb923c",
+        "glyph": [
+          "#fcb173",
+          "#fb923c",
+          "#ce7831"
+        ]
+      },
+      "pink": {
+        "primary": "#f472b6",
+        "strong": "#f472b6",
+        "wash": "#f472b638",
+        "on": "#000000",
+        "selection": "#f472b659",
+        "caret": "#f472b6",
+        "activity": "#f472b6",
+        "glyph": [
+          "#f799ca",
+          "#f472b6",
+          "#c85d95"
+        ]
+      },
+      "zeron": {
+        "primary": "#8b7cf6",
+        "strong": "#8b7cf6",
+        "wash": "#8b7cf638",
+        "on": "#000000",
+        "selection": "#8b7cf659",
+        "caret": "#8b7cf6",
+        "activity": "#8b7cf6",
+        "glyph": [
+          "#aba1f9",
+          "#8b7cf6",
+          "#7266ca"
+        ]
+      }
+    },
+    "winter-light": {
+      "amber": {
+        "primary": "#a16207",
+        "strong": "#a16207",
+        "wash": "#a162071f",
+        "on": "#ffffff",
+        "selection": "#a162073d",
+        "caret": "#a16207",
+        "activity": "#a16207",
+        "glyph": [
+          "#b27e34",
+          "#a16207",
+          "#774905"
+        ]
+      },
+      "blue": {
+        "primary": "#2563eb",
+        "strong": "#2563eb",
+        "wash": "#2563eb1f",
+        "on": "#ffffff",
+        "selection": "#2563eb3d",
+        "caret": "#2563eb",
+        "activity": "#2563eb",
+        "glyph": [
+          "#4c7fef",
+          "#2563eb",
+          "#1b49ae"
+        ]
+      },
+      "cyan": {
+        "primary": "#0e7490",
+        "strong": "#0e7490",
+        "wash": "#0e74901f",
+        "on": "#ffffff",
+        "selection": "#0e74903d",
+        "caret": "#0e7490",
+        "activity": "#0e7490",
+        "glyph": [
+          "#398da4",
+          "#0e7490",
+          "#0a566b"
+        ]
+      },
+      "green": {
+        "primary": "#15803d",
+        "strong": "#15803d",
+        "wash": "#15803d1f",
+        "on": "#ffffff",
+        "selection": "#15803d3d",
+        "caret": "#15803d",
+        "activity": "#15803d",
+        "glyph": [
+          "#3f9760",
+          "#15803d",
+          "#105f2d"
+        ]
+      },
+      "orange": {
+        "primary": "#c2410c",
+        "strong": "#c2410c",
+        "wash": "#c2410c1f",
+        "on": "#ffffff",
+        "selection": "#c2410c3d",
+        "caret": "#c2410c",
+        "activity": "#c2410c",
+        "glyph": [
+          "#cd6338",
+          "#c2410c",
+          "#903009"
+        ]
+      },
+      "pink": {
+        "primary": "#be185d",
+        "strong": "#be185d",
+        "wash": "#be185d1f",
+        "on": "#ffffff",
+        "selection": "#be185d3d",
+        "caret": "#be185d",
+        "activity": "#be185d",
+        "glyph": [
+          "#ca427a",
+          "#be185d",
+          "#8d1245"
+        ]
+      },
+      "zeron": {
+        "primary": "#5b43e8",
+        "strong": "#5b43e8",
+        "wash": "#5b43e81f",
+        "on": "#ffffff",
+        "selection": "#5b43e83d",
+        "caret": "#5b43e8",
+        "activity": "#5b43e8",
+        "glyph": [
+          "#7965ec",
+          "#5b43e8",
+          "#4332ac"
+        ]
+      }
+    }
+  },
+  "layout": {
+    "space": {
+      "xs": 4.0,
+      "sm": 8.0,
+      "md": 12.0,
+      "lg": 16.0,
+      "textStackGap": 1.0
+    },
+    "radius": {
+      "bubble": 16.0,
+      "panel": 10.0,
+      "control": 6.0
+    },
+    "chrome": {
+      "headerHeight": 44.0,
+      "titlebarHeight": 38.0,
+      "titlebarTopPad": 4.0,
+      "statusStripHeight": 24.0,
+      "transcriptFadeBand": 24.0
+    },
+    "glass": {
+      "windowAlpha": 0.8,
+      "windowAlphaOpaque": 1.0,
+      "overlayAlphaDark": 0.5,
+      "overlayAlphaLight": 0.85,
+      "inputAlphaLight": 0.3,
+      "cardAlpha": 0.4,
+      "selectedWashAlphaDark": 0.11,
+      "selectedWashAlphaLight": 0.06,
+      "bandAlphaDark": 0.16,
+      "bandAlphaLight": 0.045,
+      "scrimAlphaDark": 0.6,
+      "scrimAlphaLight": 0.32
+    }
+  },
+  "motion": {
+    "curves": {
+      "ease": [
+        0.25,
+        0.1,
+        0.25,
+        1.0
+      ],
+      "easeInOut": [
+        0.42,
+        0.0,
+        0.58,
+        1.0
+      ],
+      "easeOut": [
+        0.0,
+        0.0,
+        0.58,
+        1.0
+      ],
+      "easeOutExpo": [
+        0.16,
+        1.0,
+        0.3,
+        1.0
+      ],
+      "easeOutQuint": [
+        0.22,
+        1.0,
+        0.36,
+        1.0
+      ],
+      "easeTailwind": [
+        0.4,
+        0.0,
+        0.2,
+        1.0
+      ]
+    },
+    "specs": [
+      {
+        "name": "fadeIn",
+        "durationMs": 500,
+        "delayMs": 0,
+        "curve": "easeOutExpo"
+      },
+      {
+        "name": "fadeQuick",
+        "durationMs": 150,
+        "delayMs": 0,
+        "curve": "ease"
+      },
+      {
+        "name": "menuIn",
+        "durationMs": 140,
+        "delayMs": 0,
+        "curve": "ease"
+      },
+      {
+        "name": "menuOut",
+        "durationMs": 100,
+        "delayMs": 0,
+        "curve": "ease"
+      },
+      {
+        "name": "dialogIn",
+        "durationMs": 180,
+        "delayMs": 0,
+        "curve": "ease"
+      },
+      {
+        "name": "splashOut",
+        "durationMs": 500,
+        "delayMs": 150,
+        "curve": "ease"
+      },
+      {
+        "name": "resize",
+        "durationMs": 200,
+        "delayMs": 0,
+        "curve": "easeOut"
+      },
+      {
+        "name": "tabSlide",
+        "durationMs": 150,
+        "delayMs": 0,
+        "curve": "easeOut"
+      },
+      {
+        "name": "collapse",
+        "durationMs": 180,
+        "delayMs": 0,
+        "curve": "easeOut"
+      },
+      {
+        "name": "newThreadTransition",
+        "durationMs": 420,
+        "delayMs": 0,
+        "curve": "easeOutQuint"
+      },
+      {
+        "name": "chevron",
+        "durationMs": 200,
+        "delayMs": 0,
+        "curve": "ease"
+      },
+      {
+        "name": "scrollGlide",
+        "durationMs": 500,
+        "delayMs": 0,
+        "curve": "easeInOut"
+      },
+      {
+        "name": "hoverFade",
+        "durationMs": 150,
+        "delayMs": 0,
+        "curve": "easeTailwind"
+      },
+      {
+        "name": "zeronPulse",
+        "durationMs": 2400,
+        "delayMs": 0,
+        "curve": "ease"
+      },
+      {
+        "name": "gradientSpin",
+        "durationMs": 750,
+        "delayMs": 0,
+        "curve": "ease"
+      }
+    ],
+    "resizeBounce": {
+      "nudgePx": 5.0,
+      "durationMs": 220,
+      "outFraction": 0.32
+    },
+    "stickSpring": {
+      "damping": 0.7,
+      "stiffness": 0.05,
+      "mass": 1.25,
+      "frameMs": 16.666666,
+      "maxCatchupFrames": 8.0,
+      "growthEma": 0.12,
+      "chaseMaxLeadPx": 32.0,
+      "atBottomPx": 2.0,
+      "stickThresholdPx": 70.0,
+      "settleGraceMs": 500,
+      "glideMaxViewports": 2.5
+    },
+    "dockGlide": {
+      "timeConstants": 12.0,
+      "dockSeconds": 0.42,
+      "undockSeconds": 0.47,
+      "settlePosition": 0.0005,
+      "settleVelocity": 0.005
+    }
+  },
+  "fonts": [
+    {
+      "family": "Geist",
+      "file": "Geist.ttf",
+      "weight": 400,
+      "style": "normal"
+    },
+    {
+      "family": "Geist",
+      "file": "Geist-Italic.ttf",
+      "weight": 400,
+      "style": "italic"
+    },
+    {
+      "family": "Geist",
+      "file": "Geist-Medium.ttf",
+      "weight": 500,
+      "style": "normal"
+    },
+    {
+      "family": "Geist",
+      "file": "Geist-MediumItalic.ttf",
+      "weight": 500,
+      "style": "italic"
+    },
+    {
+      "family": "Geist",
+      "file": "Geist-SemiBold.ttf",
+      "weight": 600,
+      "style": "normal"
+    },
+    {
+      "family": "Geist",
+      "file": "Geist-SemiBoldItalic.ttf",
+      "weight": 600,
+      "style": "italic"
+    },
+    {
+      "family": "Geist",
+      "file": "Geist-Bold.ttf",
+      "weight": 700,
+      "style": "normal"
+    },
+    {
+      "family": "Geist",
+      "file": "Geist-BoldItalic.ttf",
+      "weight": 700,
+      "style": "italic"
+    },
+    {
+      "family": "Geist Mono",
+      "file": "GeistMono.ttf",
+      "weight": 400,
+      "style": "normal"
+    },
+    {
+      "family": "Geist Mono",
+      "file": "GeistMono-Italic.ttf",
+      "weight": 400,
+      "style": "italic"
+    },
+    {
+      "family": "Geist Mono",
+      "file": "GeistMono-Medium.ttf",
+      "weight": 500,
+      "style": "normal"
+    },
+    {
+      "family": "Geist Mono",
+      "file": "GeistMono-MediumItalic.ttf",
+      "weight": 500,
+      "style": "italic"
+    },
+    {
+      "family": "Geist Mono",
+      "file": "GeistMono-SemiBold.ttf",
+      "weight": 600,
+      "style": "normal"
+    },
+    {
+      "family": "Geist Mono",
+      "file": "GeistMono-SemiBoldItalic.ttf",
+      "weight": 600,
+      "style": "italic"
+    },
+    {
+      "family": "Geist Mono",
+      "file": "GeistMono-Bold.ttf",
+      "weight": 700,
+      "style": "normal"
+    },
+    {
+      "family": "Geist Mono",
+      "file": "GeistMono-BoldItalic.ttf",
+      "weight": 700,
+      "style": "italic"
+    }
+  ]
+}

@@ -338,7 +338,33 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Dial a WebSocket RPC server (`ws://127.0.0.1:{ipc_port}`).
 pub async fn connect_ws(url: &str) -> Result<RpcClient, RpcError> {
-    let (ws, _) = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url))
+    connect_ws_with_session(url, None).await
+}
+
+/// Dial an engine's remote listener, presenting a Bearer credential on the
+/// WebSocket handshake. Browsers cannot set `Authorization` on a handshake
+/// and use the first-frame `Auth` envelope instead; native remote clients
+/// use this dial.
+pub async fn connect_ws_authenticated(url: &str, credential: &str) -> Result<RpcClient, RpcError> {
+    connect_ws_with_session(url, Some(credential)).await
+}
+
+async fn connect_ws_with_session(
+    url: &str,
+    credential: Option<&str>,
+) -> Result<RpcClient, RpcError> {
+    let mut request =
+        tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url)
+            .map_err(|_| RpcError::Transport("invalid engine URL".into()))?;
+    if let Some(credential) = credential {
+        let mut header = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&format!(
+            "Bearer {credential}"
+        ))
+        .map_err(|_| RpcError::Transport("invalid credential".into()))?;
+        header.set_sensitive(true);
+        request.headers_mut().insert("authorization", header);
+    }
+    let (ws, _) = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(request))
         .await
         .map_err(|_| RpcError::Transport(format!("timed out dialing {url}")))?
         .map_err(|e| RpcError::Transport(e.to_string()))?;

@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 };
 use tokio_tungstenite::tungstenite::http::StatusCode;
 
-use crate::{ClientFrame, RpcError, RpcReply, RpcService, ServerFrame};
+use crate::{ClientFrame, Connection, RpcError, RpcReply, RpcService, ServerFrame};
 
 /// Serve one connection: read client frames from `inbound`, write server frames to `out`.
 /// Returns when `inbound` closes; all in-flight request tasks are aborted on exit.
@@ -213,6 +213,27 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
         }
     });
 
+    serve_connection(service, out_tx, in_rx).await;
+    pump.abort();
+}
+
+/// Run the same RPC dispatch over an already upgraded HTTP connection.
+///
+/// The connection rides the bounded pump: a stalled socket (write that stops
+/// progressing, silent peer, wedged consumer) tears the session down instead
+/// of wedging the dispatch loop forever, and large frames are fragmented with
+/// interleaved pings so slow transfers keep progressing. The engine's remote
+/// listener upgrades HTTP itself so it can gate the handshake on a Bearer
+/// credential, then hands the socket here.
+pub async fn serve_websocket<S>(ws: Connection<S>, service: Arc<dyn RpcService>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let (out_tx, out_rx) = mpsc::channel::<String>(256);
+    let (in_tx, in_rx) = mpsc::channel::<String>(256);
+
+    // Pump: socket <-> string channels. Ends when either side closes.
+    let pump = tokio::spawn(crate::pump::pump(ws, out_rx, in_tx));
     serve_connection(service, out_tx, in_rx).await;
     pump.abort();
 }
