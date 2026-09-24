@@ -182,6 +182,18 @@ impl Shell {
         entries
     }
 
+    /// Pointer motion moves the highlight, so hover and keyboard never light
+    /// two rows. Motion only: rows scrolling under a resting pointer must not
+    /// steal the keyboard's place.
+    fn hover_command(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(palette) = self.command_palette.as_mut()
+            && palette.active != ix
+        {
+            palette.active = ix;
+            cx.notify();
+        }
+    }
+
     fn activate_command(&mut self, entry: Entry, window: &mut Window, cx: &mut Context<Self>) {
         if let Entry::Theme(mode) = entry {
             // Keep the palette open so this ordinary action updates to its next state.
@@ -225,6 +237,9 @@ impl Shell {
             let mut row = div()
                 .id(("command-result", ix))
                 .flex_none()
+                .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                    this.hover_command(ix, cx)
+                }))
                 .when(ix == 0, |row| row.pt(px(8.0)))
                 .when(ix + 1 == entries.len(), |row| row.pb(px(8.0)));
             if ix == action_count && action_count > 0 {

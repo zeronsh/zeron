@@ -2041,6 +2041,38 @@ pub(super) struct AddSpaceFlow {
     _search_events: Subscription,
 }
 
+/// Folder crumbs shown before the middle folds into `…`, and how many of the
+/// deepest stay visible once it does.
+const CRUMB_FOLDERS_MAX: usize = 3;
+const CRUMB_FOLDERS_TAIL: usize = 2;
+
+/// Fold the middle of a deep trail: returns the folders hidden behind `…`,
+/// leaving the deepest [`CRUMB_FOLDERS_TAIL`] in `folders`.
+fn fold_crumb_folders<T>(folders: &mut Vec<T>) -> Vec<T> {
+    if folders.len() <= CRUMB_FOLDERS_MAX {
+        return Vec::new();
+    }
+    folders
+        .drain(..folders.len() - CRUMB_FOLDERS_TAIL)
+        .collect()
+}
+
+struct Crumb {
+    name: SharedString,
+    glyph: Option<&'static str>,
+    current: bool,
+    target: CrumbTarget,
+}
+
+enum CrumbTarget {
+    Devices,
+    Locations,
+    Location(String, Option<String>),
+    Folder(String),
+    /// The `…` fold; opens [`Shell::render_project_crumb_menu`].
+    More,
+}
+
 fn device_glyph(platform: &str) -> &'static str {
     match platform {
         "macos" | "darwin" => icons::LAPTOP,
@@ -5008,6 +5040,7 @@ impl Shell {
 
     pub(super) fn open_add_space(&mut self, cx: &mut Context<Self>) {
         self.command_palette = None;
+        self.project_crumb_menu = popover::Popup::default();
         // "PaletteSearch" context: navigation keys stay unbound so ↑↓/←/→/⏎
         // bubble to the palette frame (`add_space_key`) instead of moving the
         // text caret — Enter and ⌘Enter are both handled there.
@@ -5659,6 +5692,56 @@ impl Shell {
         }
     }
 
+    pub(super) fn close_project_crumb_menu(&mut self, cx: &mut Context<Self>) {
+        if self.project_crumb_menu.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.project_crumb_menu);
+            cx.notify();
+        }
+    }
+
+    /// The folders folded into the `…` crumb, in path order.
+    fn render_project_crumb_menu(
+        &self,
+        hidden: &[(String, String)],
+        closing: Option<std::time::Instant>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let rows = hidden.iter().enumerate().map(|(ix, (name, full))| {
+            let full = full.clone();
+            popover::menu_row(theme, false, format!("project-crumb-menu-{ix}"))
+                .id(("project-crumb-menu", ix))
+                .child(
+                    icon(icons::FOLDER)
+                        .size(px(16.0))
+                        .flex_none()
+                        .text_color(theme.text_muted),
+                )
+                .child(div().min_w_0().truncate().child(name.clone()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.project_crumb_menu = popover::Popup::default();
+                    this.add_space_descend(full.clone(), false, cx);
+                }))
+        });
+        let card = popover::popover_card(theme)
+            .id("project-crumb-menu")
+            .min_w(px(180.0))
+            .max_w(px(280.0))
+            .max_h(px(280.0))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_project_crumb_menu(cx)))
+            .children(rows);
+        popover::anchored_menu_below_layer(
+            "project-crumb-menu",
+            card.into_any_element(),
+            closing,
+            6.0,
+            3,
+        )
+    }
+
     /// The same glass, header, row rhythm, scroll gutters and footer as Cmd+K.
     pub(super) fn render_add_space_overlay(
         &mut self,
@@ -5679,6 +5762,7 @@ impl Shell {
         let listing = flow.browser.ready().cloned();
         let location = flow.location.clone();
         let home = flow.home.clone();
+        let browser_path = flow.browser_path.clone();
         let load_error = flow.browser.error().map(str::to_string);
         let error = flow.error.clone();
         let busy = flow.submit_busy;
@@ -5699,6 +5783,17 @@ impl Shell {
                 .rounded(px(popover::PALETTE_ITEM_RADIUS))
                 .min_h(px(30.0))
                 .py(px(4.0))
+                // Pointer motion moves the highlight, so hover and keyboard
+                // never light two rows. Motion only: rows scrolling under a
+                // resting pointer must not steal the keyboard's place.
+                .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                    if let Some(flow) = this.add_space.as_mut()
+                        && flow.active != ix
+                    {
+                        flow.active = ix;
+                        cx.notify();
+                    }
+                }))
         };
         let glyph_el = |glyph: &'static str| {
             icon(glyph)
@@ -5863,113 +5958,171 @@ impl Shell {
         let results = command_palette::palette_results_fade(results, &scroll);
 
         // Breadcrumbs: one line that scrolls sideways under edge fades rather
-        // than wrapping, and follows the open folder as the path grows.
-        let crumb =
-            |id: SharedString, name: SharedString, glyph: Option<&'static str>, current: bool| {
-                let color = if current {
-                    theme.text
-                } else {
-                    theme.text_muted
-                };
-                div()
-                    .id(id)
-                    .flex_none()
-                    .h(px(24.0))
-                    .px(px(6.0))
-                    .rounded(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .cursor_pointer()
-                    .text_color(color)
-                    .hover(|s| s.bg(theme.element_hover).text_color(theme.text))
-                    .when_some(glyph, |el, glyph| {
-                        el.child(icon(glyph).size(px(14.0)).flex_none().text_color(color))
-                    })
-                    .child(div().max_w(px(180.0)).truncate().child(name))
-            };
-        let chevron = || {
-            icon(icons::ALT_ARROW_RIGHT)
-                .size(px(12.0))
-                .flex_none()
-                .text_color(theme.text_faint)
-        };
-        let mut trail: Vec<AnyElement> = vec![
-            crumb(
-                "project-crumb-root".into(),
-                "New project".into(),
-                None,
-                step == ProjectStep::Devices,
-            )
-            .on_click(
-                cx.listener(|this, _, _, cx| this.add_space_back_to(ProjectStep::Devices, cx)),
-            )
-            .into_any_element(),
-        ];
+        // than wrapping, and follows the open folder as the path grows. Deep
+        // paths fold their middle folders into a `…` menu.
+        let mut specs: Vec<Crumb> = vec![Crumb {
+            name: "New project".into(),
+            glyph: None,
+            current: step == ProjectStep::Devices,
+            target: CrumbTarget::Devices,
+        }];
         let mut crumb_key = String::new();
         if let Some(device) = device {
             crumb_key.push_str(&device.id);
-            trail.push(chevron().into_any_element());
-            trail.push(
-                crumb(
-                    "project-crumb-device".into(),
-                    device.name.into(),
-                    Some(device_glyph(&device.platform)),
-                    step == ProjectStep::Locations,
-                )
-                .on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.add_space_back_to(ProjectStep::Locations, cx)
-                    }),
-                )
-                .into_any_element(),
-            );
+            specs.push(Crumb {
+                name: device.name.into(),
+                glyph: Some(device_glyph(&device.platform)),
+                current: step == ProjectStep::Locations,
+                target: CrumbTarget::Locations,
+            });
         }
+        let mut hidden: Vec<(String, String)> = Vec::new();
         if let Some((name, path)) = location {
-            let glyph = if path.is_none() {
-                icons::HOME
-            } else {
-                icons::HARD_DRIVE
-            };
-            let root = path.clone().or(home);
-            let at_root = listing
+            let root = path.clone().or(home.clone());
+            // While a descend loads, keep showing the REQUESTED path so the
+            // trail doesn't collapse to the location and pop back.
+            let open_path = listing
                 .as_ref()
-                .is_none_or(|l| root.as_deref() == Some(l.path.as_str()));
+                .map(|l| l.path.clone())
+                .or(browser_path)
+                .or(root.clone());
+            let at_root = open_path.is_none() || open_path == root;
             crumb_key.push_str(&name);
-            trail.push(chevron().into_any_element());
-            trail.push(
-                crumb(
-                    "project-crumb-location".into(),
-                    name.clone().into(),
-                    Some(glyph),
-                    at_root,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.add_space_goto_location(name.clone(), path.clone(), cx)
-                }))
-                .into_any_element(),
-            );
-            if let Some(listing) = listing.as_ref() {
-                crumb_key.push_str(&listing.path);
-                for (ix, (name, full)) in breadcrumbs(&listing.path).into_iter().enumerate() {
-                    if root.as_deref().is_some_and(|root| path_under(root, &full)) {
-                        continue;
-                    }
-                    trail.push(chevron().into_any_element());
-                    trail.push(
-                        crumb(
-                            format!("project-crumb-folder-{ix}").into(),
-                            name.into(),
-                            None,
-                            full == listing.path,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.add_space_descend(full.clone(), false, cx)
-                        }))
-                        .into_any_element(),
-                    );
+            specs.push(Crumb {
+                name: name.clone().into(),
+                glyph: Some(if path.is_none() {
+                    icons::HOME
+                } else {
+                    icons::HARD_DRIVE
+                }),
+                current: at_root,
+                target: CrumbTarget::Location(name, path),
+            });
+            if let Some(open_path) = open_path {
+                crumb_key.push_str(&open_path);
+                let mut folders: Vec<(String, String)> = breadcrumbs(&open_path)
+                    .into_iter()
+                    .filter(|(_, full)| !root.as_deref().is_some_and(|root| path_under(root, full)))
+                    .collect();
+                hidden = fold_crumb_folders(&mut folders);
+                if !hidden.is_empty() {
+                    specs.push(Crumb {
+                        name: "…".into(),
+                        glyph: None,
+                        current: false,
+                        target: CrumbTarget::More,
+                    });
+                }
+                for (name, full) in folders {
+                    specs.push(Crumb {
+                        name: name.into(),
+                        glyph: None,
+                        current: full == open_path,
+                        target: CrumbTarget::Folder(full),
+                    });
                 }
             }
+        }
+        if hidden.is_empty() && self.project_crumb_menu.get().is_some() {
+            self.project_crumb_menu = popover::Popup::default();
+        }
+        let menu_open = self.project_crumb_menu.is_open();
+        let menu_closing = self.project_crumb_menu.closing_since();
+        let menu_mounted = self.project_crumb_menu.get().is_some();
+        let mut trail: Vec<AnyElement> = Vec::new();
+        for (ix, spec) in specs.into_iter().enumerate() {
+            if ix > 0 {
+                trail.push(
+                    icon(icons::ALT_ARROW_RIGHT)
+                        .size(px(12.0))
+                        .flex_none()
+                        .text_color(theme.text_faint)
+                        .into_any_element(),
+                );
+            }
+            let group: SharedString = format!("project-crumb-{ix}").into();
+            let more = matches!(spec.target, CrumbTarget::More);
+            let color = if spec.current || (more && menu_open) {
+                theme.text
+            } else {
+                theme.text_muted
+            };
+            let long = spec.name.chars().count() > 26;
+            let mut el = div()
+                .id(group.clone())
+                .group(group.clone())
+                .relative()
+                .flex_none()
+                .h(px(24.0))
+                .px(px(6.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .text_color(color)
+                .when(more, |el| el.min_w(px(24.0)).justify_center())
+                .when(more && menu_open, |el| el.bg(theme.element_hover))
+                .when_some(spec.glyph, |el, glyph| {
+                    el.child(
+                        icon(glyph)
+                            .size(px(14.0))
+                            .flex_none()
+                            .text_color(color)
+                            .group_hover(group.clone(), |s| s.text_color(theme.text)),
+                    )
+                })
+                .child(div().max_w(px(180.0)).truncate().child(spec.name.clone()))
+                .when(long, |el| {
+                    el.tooltip(crate::settings::widgets::text_tooltip(spec.name.clone()))
+                });
+            // The open crumb is where you already are: no hover, no click.
+            if !spec.current {
+                el = el
+                    .cursor_pointer()
+                    .role(gpui::Role::Button)
+                    .aria_label(if more {
+                        SharedString::from("Show hidden folders")
+                    } else {
+                        spec.name.clone()
+                    })
+                    .hover(|s| s.bg(theme.element_hover).text_color(theme.text));
+                el = match spec.target {
+                    CrumbTarget::Devices => el.on_click(cx.listener(|this, _, _, cx| {
+                        this.add_space_back_to(ProjectStep::Devices, cx)
+                    })),
+                    CrumbTarget::Locations => el.on_click(cx.listener(|this, _, _, cx| {
+                        this.add_space_back_to(ProjectStep::Locations, cx)
+                    })),
+                    CrumbTarget::Location(name, path) => {
+                        el.on_click(cx.listener(move |this, _, _, cx| {
+                            this.add_space_goto_location(name.clone(), path.clone(), cx)
+                        }))
+                    }
+                    CrumbTarget::Folder(full) => el.on_click(cx.listener(move |this, _, _, cx| {
+                        this.add_space_descend(full.clone(), false, cx)
+                    })),
+                    CrumbTarget::More => el
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, _, _| {
+                                this.project_crumb_menu.note_trigger_press()
+                            }),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            // A press that found the menu open closes it.
+                            if this.project_crumb_menu.take_press_was_open() {
+                                this.close_project_crumb_menu(cx);
+                            } else {
+                                this.project_crumb_menu.open(());
+                            }
+                            cx.notify();
+                        })),
+                };
+            }
+            if more && menu_mounted {
+                el = el.child(self.render_project_crumb_menu(&hidden, menu_closing, &theme, cx));
+            }
+            trail.push(el.into_any_element());
         }
         let crumb_scroll = self.add_space.as_mut().map(|flow| {
             // Reveal the open folder whenever the path changes; otherwise
@@ -5992,6 +6145,13 @@ impl Shell {
             .overflow_x_scroll()
             .track_scroll(&crumb_scroll)
             .children(trail);
+        // ← mirrors the Left key: up one level, and back to Cmd+K from the
+        // first step.
+        let back_label = if step == ProjectStep::Devices {
+            "Back to commands"
+        } else {
+            "Back"
+        };
         let crumbs = div()
             .h(px(36.0))
             .flex_none()
@@ -6005,6 +6165,7 @@ impl Shell {
             .child(
                 div()
                     .id("project-crumb-back")
+                    .group("project-crumb-back")
                     .size(px(24.0))
                     .flex_none()
                     .flex()
@@ -6013,16 +6174,22 @@ impl Shell {
                     .rounded(px(6.0))
                     .cursor_pointer()
                     .role(gpui::Role::Button)
-                    .aria_label("Back to commands")
+                    .aria_label(back_label)
+                    .tooltip(crate::settings::widgets::text_tooltip(back_label))
                     .hover(|s| s.bg(theme.element_hover))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.add_space = None;
-                        this.toggle_command_palette(window, cx);
+                        if this.add_space.as_ref().map(|f| f.step) == Some(ProjectStep::Devices) {
+                            this.add_space = None;
+                            this.toggle_command_palette(window, cx);
+                        } else {
+                            this.add_space_go_up(cx);
+                        }
                     }))
                     .child(
                         icon(icons::ARROW_LEFT)
                             .size(px(16.0))
-                            .text_color(theme.text_muted),
+                            .text_color(theme.text_muted)
+                            .group_hover("project-crumb-back", |s| s.text_color(theme.text)),
                     ),
             )
             .child(
@@ -6093,6 +6260,11 @@ impl Shell {
                     this.add_space_key(event, cx)
                 }))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    // The crumb menu floats outside the card; its own
+                    // mouse-down-out dismisses it without closing the palette.
+                    if this.project_crumb_menu.get().is_some() {
+                        return;
+                    }
                     this.add_space = None;
                     cx.notify();
                 }))
@@ -6471,6 +6643,16 @@ impl Shell {
 #[cfg(test)]
 mod project_flow_tests {
     use super::*;
+
+    #[test]
+    fn deep_crumb_trails_fold_all_but_the_deepest_folders() {
+        let mut short = vec!["a", "b", "c"];
+        assert!(fold_crumb_folders(&mut short).is_empty());
+        assert_eq!(short, ["a", "b", "c"]);
+        let mut deep = vec!["a", "b", "c", "d", "e"];
+        assert_eq!(fold_crumb_folders(&mut deep), ["a", "b", "c"]);
+        assert_eq!(deep, ["d", "e"]);
+    }
 
     #[gpui::test]
     fn devices_locations_folders_and_back_clear_stale_state(cx: &mut gpui::TestAppContext) {
