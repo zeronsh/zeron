@@ -11557,15 +11557,27 @@ impl Render for Shell {
                 // A run finishing while you're LOOKING at the session must not
                 // badge "completed" until you leave and return — mark it seen
                 // live while the window is active (idempotent guard inside;
-                // one extra frame settles it).
+                // one extra frame settles it). A side chat showing in the
+                // right pane counts as looked at too: its tab marks it seen
+                // only once, when first opened.
                 if window_active {
-                    let unseen_selected = {
-                        let s = self.state.read(cx);
-                        s.selected_chat_row()
-                            .filter(|c| c.unseen())
-                            .map(|c| c.id.clone())
+                    let visible_side_chat = match self.resolved_right_active(cx) {
+                        RightSurface::SideChat(id) if self.right_pane_open(cx) => self
+                            .side_chats
+                            .get(&id)
+                            .and_then(|tab| tab.state.read(cx).selected_chat.clone()),
+                        _ => None,
                     };
-                    if let Some(chat_id) = unseen_selected {
+                    let unseen: Vec<String> = {
+                        let s = self.state.read(cx);
+                        s.selected_chat
+                            .iter()
+                            .chain(visible_side_chat.iter())
+                            .filter(|id| s.chats.iter().any(|c| &c.id == *id && c.unseen()))
+                            .cloned()
+                            .collect()
+                    };
+                    for chat_id in unseen {
                         self.state
                             .update(cx, |s, cx| s.mark_chat_seen(&chat_id, cx));
                     }
