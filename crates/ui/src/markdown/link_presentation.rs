@@ -4,13 +4,16 @@ use gpui::{SharedString, TextRun};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
+/// Replaced ranges, `(original, shown)` in document order. A shown range may
+/// be shorter (a truncated link label) or longer (a math placeholder) than
+/// the text it stands for.
 #[derive(Clone, Debug, Default)]
 pub struct OffsetMap {
     pub omissions: Vec<(Range<usize>, Range<usize>)>,
 }
 impl OffsetMap {
     pub fn original(&self, displayed: usize) -> usize {
-        let mut shift = 0;
+        let mut shift = 0isize;
         for (original, shown) in &self.omissions {
             if displayed < shown.start {
                 break;
@@ -18,12 +21,12 @@ impl OffsetMap {
             if displayed < shown.end {
                 return original.start;
             }
-            shift = original.end - shown.end;
+            shift = original.end as isize - shown.end as isize;
         }
-        displayed + shift
+        displayed.saturating_add_signed(shift)
     }
     pub fn displayed(&self, original: usize) -> usize {
-        let mut shift = 0;
+        let mut shift = 0isize;
         for (source, shown) in &self.omissions {
             if original < source.start {
                 break;
@@ -31,9 +34,31 @@ impl OffsetMap {
             if original < source.end {
                 return shown.start;
             }
-            shift = source.end - shown.end;
+            shift = source.end as isize - shown.end as isize;
         }
-        original - shift
+        original.saturating_add_signed(-shift)
+    }
+    /// This map followed by `next`, which presents this map's shown text
+    /// again. The two must replace disjoint ranges.
+    pub fn then(&self, next: &OffsetMap) -> OffsetMap {
+        let mut omissions: Vec<(Range<usize>, Range<usize>)> = self
+            .omissions
+            .iter()
+            .map(|(original, shown)| {
+                (
+                    original.clone(),
+                    next.displayed(shown.start)..next.displayed(shown.end),
+                )
+            })
+            .chain(next.omissions.iter().map(|(shown, displayed)| {
+                (
+                    self.original(shown.start)..self.original(shown.end),
+                    displayed.clone(),
+                )
+            }))
+            .collect();
+        omissions.sort_by_key(|(original, _)| original.start);
+        OffsetMap { omissions }
     }
     pub fn displayed_range(&self, range: Range<usize>) -> Range<usize> {
         let mut result = self.displayed(range.start)..self.displayed(range.end);
@@ -76,6 +101,15 @@ pub fn truncate(
     let mut omissions = Vec::new();
     for (range, url) in &flat.links {
         if super::links::LinkTarget::new("", url).navigation.is_err() {
+            continue;
+        }
+        // A label holding a formula keeps its full width: a cut placeholder
+        // would leave the formula nowhere to sit.
+        if flat
+            .math
+            .iter()
+            .any(|math| math.range.start < range.end && math.range.end > range.start)
+        {
             continue;
         }
         let label = &flat.text[range.clone()];
@@ -139,11 +173,114 @@ pub fn truncate(
             .iter()
             .map(|r| offsets.displayed_range(r.clone()))
             .collect(),
-        original: Some(OriginalText {
-            text: flat.text.clone(),
-            offsets,
+        math: flat
+            .math
+            .iter()
+            .map(|math| super::render::MathPlacement {
+                range: offsets.displayed_range(math.range.clone()),
+                ..math.clone()
+            })
+            .collect(),
+        // Selection and copy always resolve to the source text: math
+        // placeholders already map there, so truncation composes onto them.
+        original: Some(match &flat.original {
+            Some(original) => OriginalText {
+                text: original.text.clone(),
+                offsets: original.offsets.then(&offsets),
+            },
+            None => OriginalText {
+                text: flat.text.clone(),
+                offsets,
+            },
         }),
     }
+}
+
+/// Shrink inline formulas wider than `width` until their placeholders fit a
+/// row: the line breaker would otherwise split an over-wide placeholder and
+/// leave its tail indenting the next row. A fitted formula leaves room for
+/// the space after it, which would otherwise start the next row.
+/// `placeholder` builds a placeholder that many pixels wide. `None` when
+/// every formula already fits.
+pub fn fit_math(
+    flat: &FlatText,
+    width: f32,
+    measure: impl Fn(&str, &[TextRun]) -> f32,
+    placeholder: impl Fn(f32) -> String,
+) -> Option<FlatText> {
+    let mut fitted: Vec<(usize, String, f32)> = Vec::new();
+    for (ix, math) in flat.math.iter().enumerate() {
+        if math.display {
+            continue;
+        }
+        let runs = slice_runs(&flat.runs, math.range.clone());
+        let shown = measure(&flat.text[math.range.clone()], &runs);
+        let mut space = runs[0].clone();
+        space.len = 1;
+        let room = (width - measure(" ", &[space]) - 1.0).max(1.0);
+        if shown <= room || shown <= 0.0 {
+            continue;
+        }
+        fitted.push((ix, placeholder(room), room / shown));
+    }
+    if fitted.is_empty() {
+        return None;
+    }
+    let mut text = String::new();
+    let mut runs = Vec::new();
+    let mut offsets = OffsetMap::default();
+    let mut at = 0;
+    for (ix, placeholder, _) in &fitted {
+        let range = flat.math[*ix].range.clone();
+        text.push_str(&flat.text[at..range.start]);
+        runs.extend(slice_runs(&flat.runs, at..range.start));
+        let start = text.len();
+        text.push_str(placeholder);
+        let mut run = slice_runs(&flat.runs, range.clone()).remove(0);
+        run.len = placeholder.len();
+        runs.push(run);
+        at = range.end;
+        offsets.omissions.push((range, start..text.len()));
+    }
+    text.push_str(&flat.text[at..]);
+    runs.extend(slice_runs(&flat.runs, at..flat.text.len()));
+    Some(FlatText {
+        text: text.into(),
+        runs,
+        links: flat
+            .links
+            .iter()
+            .map(|(r, url)| (offsets.displayed_range(r.clone()), url.clone()))
+            .collect(),
+        code_ranges: flat
+            .code_ranges
+            .iter()
+            .map(|r| offsets.displayed_range(r.clone()))
+            .collect(),
+        math: flat
+            .math
+            .iter()
+            .enumerate()
+            .map(|(ix, math)| super::render::MathPlacement {
+                range: offsets.displayed_range(math.range.clone()),
+                scale: fitted
+                    .iter()
+                    .find(|(fit, _, _)| *fit == ix)
+                    .map_or(math.scale, |(_, _, scale)| math.scale * scale),
+                ..math.clone()
+            })
+            .collect(),
+        original: Some(match &flat.original {
+            Some(original) => OriginalText {
+                text: original.text.clone(),
+                offsets: original.offsets.then(&offsets),
+            },
+            None => OriginalText {
+                text: flat.text.clone(),
+                offsets,
+            },
+        }),
+    })
 }
 
 use super::render::RenderOptions;
@@ -159,14 +296,20 @@ pub struct ResponsiveText {
     pub opts: RenderOptions,
     pub theme: Theme,
     pub ix: usize,
+    /// Cut over-wide link labels (links that open inside the app).
+    pub truncate_links: bool,
 }
+/// Width-dependent presentation: over-wide inline formulas shrink to fit,
+/// then (with `truncate_links`) over-wide link labels are cut.
 pub(super) fn present(
     flat: &FlatText,
     width: Pixels,
     font_size: Pixels,
     window: &Window,
+    truncate_links: bool,
+    theme: &Theme,
 ) -> FlatText {
-    truncate(flat, f32::from(width), |text, runs| {
+    let measure = |text: &str, runs: &[TextRun]| {
         window
             .text_system()
             .shape_text(text.to_owned().into(), font_size, runs, None, None)
@@ -177,7 +320,17 @@ pub(super) fn present(
                     .fold(0., f32::max)
             })
             .unwrap_or(f32::INFINITY)
-    })
+    };
+    let fitted = fit_math(flat, f32::from(width), &measure, |target| {
+        let font = super::render::math_placeholder_font(theme);
+        super::math::spacer(&font, window).fill(target / f32::from(font_size))
+    });
+    let flat = fitted.as_ref().unwrap_or(flat);
+    if truncate_links {
+        truncate(flat, f32::from(width), &measure)
+    } else {
+        flat.clone()
+    }
 }
 impl IntoElement for ResponsiveText {
     type Element = Self;
@@ -209,6 +362,8 @@ impl Element for ResponsiveText {
                 .to_pixels(font_size.into(), window.rem_size()),
         );
         let flat = self.flat.clone();
+        let theme = self.theme.clone();
+        let truncate_links = self.truncate_links;
         let id = window.request_measured_layout(
             Default::default(),
             move |known, available, window, _| {
@@ -216,7 +371,8 @@ impl Element for ResponsiveText {
                     AvailableSpace::Definite(width) => Some(width),
                     _ => None,
                 });
-                let shown = width.map(|width| present(&flat, width, font_size, window));
+                let shown = width
+                    .map(|width| present(&flat, width, font_size, window, truncate_links, &theme));
                 let flat = shown.as_ref().unwrap_or(&flat);
                 let lines = window
                     .text_system()
@@ -247,7 +403,14 @@ impl Element for ResponsiveText {
         cx: &mut App,
     ) -> AnyElement {
         let font_size = window.text_style().font_size.to_pixels(window.rem_size());
-        let flat = present(&self.flat, bounds.size.width, font_size, window);
+        let flat = present(
+            &self.flat,
+            bounds.size.width,
+            font_size,
+            window,
+            self.truncate_links,
+            &self.theme,
+        );
         let mut child =
             super::render::flat_text_presented_element(&flat, self.ix, &self.opts, &self.theme);
         child.prepaint_as_root(
@@ -378,6 +541,103 @@ mod tests {
             growing.text.len()
         );
     }
+    #[test]
+    fn longer_replacements_map_both_ways() {
+        // A 3-byte formula shown as a 5-byte placeholder.
+        let map = OffsetMap {
+            omissions: vec![(2..5, 2..7)],
+        };
+        assert_eq!(map.original(0), 0);
+        assert_eq!(map.original(4), 2);
+        assert_eq!(map.original(7), 5);
+        assert_eq!(map.original(9), 7);
+        assert_eq!(map.displayed(3), 2);
+        assert_eq!(map.displayed(5), 7);
+        assert_eq!(map.displayed(7), 9);
+        assert_eq!(map.displayed_range(1..6), 1..8);
+    }
+
+    #[test]
+    fn over_wide_formulas_shrink_to_fit_and_still_copy_as_tex() {
+        let source = "see $x_1 + x_2 + x_3 + x_4$ now";
+        let tree = super::super::parser::parse_full(source);
+        let super::super::parser::Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("paragraph");
+        };
+        let spacer = super::super::math::Spacer::new([('M', 1.0), ('i', 0.25)]);
+        let flat = super::super::render::flatten_runs_weighted(
+            runs,
+            &Theme::dark(),
+            gpui::FontWeight::NORMAL,
+            Some(&spacer),
+        );
+        let wide = flat.math[0].range.len();
+        let placeholder = |width: f32| "M".repeat(width.floor().max(1.0) as usize);
+        assert!(
+            fit_math(&flat, 1000., measured, placeholder).is_none(),
+            "a formula that fits is left alone"
+        );
+        // Room for the placeholder and the space after it: 8 - 1 - 1.
+        let fitted = fit_math(&flat, 8., measured, placeholder).expect("shrinks");
+        let math = &fitted.math[0];
+        assert_eq!(math.range.len(), 6);
+        assert!((math.scale - 6.0 / wide as f32).abs() < 1e-6);
+        assert_eq!(
+            fitted.runs.iter().map(|r| r.len).sum::<usize>(),
+            fitted.text.len()
+        );
+        let original = fitted.original.as_ref().unwrap();
+        let map = &original.offsets;
+        assert_eq!(original.text.as_ref(), source);
+        assert_eq!(
+            &original.text[map.original(math.range.start)..map.original(math.range.end)],
+            "$x_1 + x_2 + x_3 + x_4$"
+        );
+        assert_eq!(
+            &original.text[map.original(0)..map.original(fitted.text.len())],
+            source
+        );
+    }
+
+    #[test]
+    fn truncation_composes_with_math_placeholders() {
+        let tree = super::super::parser::parse_full(
+            "$\\alpha$ see [https://example.com/a/very/long/path](https://example.com/a/very/long/path) $\\beta$",
+        );
+        let super::super::parser::Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("paragraph");
+        };
+        let spacer = super::super::math::Spacer::new([('M', 0.83), ('n', 0.55), ('i', 0.22)]);
+        let flat = super::super::render::flatten_runs_weighted(
+            runs,
+            &Theme::dark(),
+            gpui::FontWeight::NORMAL,
+            Some(&spacer),
+        );
+        let source = flat.original.as_ref().unwrap().text.clone();
+        let shown = truncate(&flat, 24., measured);
+        assert!(shown.text.len() < flat.text.len(), "the link label was cut");
+        let original = shown.original.as_ref().unwrap();
+        assert_eq!(
+            original.text, source,
+            "copy still resolves to the TeX source"
+        );
+        let map = &original.offsets;
+        assert_eq!(
+            &source[map.original(0)..map.original(shown.text.len())],
+            source.as_ref()
+        );
+        let formulas: Vec<&str> = shown
+            .math
+            .iter()
+            .map(|m| &source[map.original(m.range.start)..map.original(m.range.end)])
+            .collect();
+        assert_eq!(formulas, ["$\\alpha$", "$\\beta$"]);
+        let link = &shown.links[0].0;
+        assert!(shown.text[link.clone()].ends_with('…'));
+        assert!(source[map.original(link.start)..map.original(link.end)].starts_with("https://"));
+    }
+
     #[test]
     fn styled_link_runs_are_trimmed_without_corrupting_offsets() {
         let mut bold = link("very-long-bold-suffix");

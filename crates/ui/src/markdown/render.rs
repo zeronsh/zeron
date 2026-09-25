@@ -23,8 +23,10 @@ use zeron_syntax::{HighlightKind, HighlightSpan, HighlightedDocument};
 
 use crate::theme::Theme;
 
+use super::link_presentation::{OffsetMap, OriginalText};
+use super::math::{self, MATH_SCALE, MathRender};
 use super::parser::{Block, BlockTree, InlineRun, TableAlign};
-use super::veil::{RowVeil, apply_veil, slice_spans};
+use super::veil::{RowVeil, VeilSpan, apply_veil, slice_spans};
 
 /// Gap between markdown blocks inside one message (zeron mdBlockGap).
 pub const MD_BLOCK_GAP: f32 = 12.0;
@@ -511,10 +513,11 @@ pub fn render_block(
             ix,
             opts,
             theme,
+            window,
         ),
         Block::Heading { level, runs } => {
             let (size, line) = heading_metrics(*level);
-            text_element(runs, size, line, true, top_ix, ix, opts, theme)
+            text_element(runs, size, line, true, top_ix, ix, opts, theme, window)
         }
         Block::CodeBlock { language, code } => render_code_block(
             language.as_deref(),
@@ -799,7 +802,15 @@ fn render_table(
                 out.push(None);
                 continue;
             };
-            let flat = flatten_cached(runs, weight, top_ix, table_cell_ix(ix, r, c), opts, theme);
+            let flat = flatten_cached(
+                runs,
+                weight,
+                top_ix,
+                table_cell_ix(ix, r, c),
+                opts,
+                theme,
+                window,
+            );
             if !flat.text.is_empty() {
                 // Intrinsic table proportions use the same bounded link presentation;
                 // each cell then resolves its exact width during measured layout.
@@ -808,7 +819,14 @@ fn render_table(
                     .as_ref()
                     .filter(|ui| ui.source_session.is_some())
                     .map(|_| {
-                        super::link_presentation::present(&flat, px(560.), px(MD_TEXT_SIZE), window)
+                        super::link_presentation::present(
+                            &flat,
+                            px(560.),
+                            px(MD_TEXT_SIZE),
+                            window,
+                            true,
+                            theme,
+                        )
                     });
                 let flat = measured.as_ref().unwrap_or(&flat);
                 // Cell sources are single-line; guard anyway (same byte count,
@@ -876,6 +894,7 @@ fn render_table(
                     table_cell_ix(ix, r, c),
                     opts,
                     theme,
+                    window,
                 ));
             } else if let Some(flat) = cell_flat {
                 cell = cell.child(flat_text_element(
@@ -912,6 +931,20 @@ pub struct FlatText {
     pub runs: Vec<TextRun>,
     pub links: Vec<(Range<usize>, String)>,
     pub code_ranges: Vec<Range<usize>>,
+    /// Formulas painted over their placeholder text (see [`math`]).
+    pub math: Vec<MathPlacement>,
+}
+
+/// A typeset formula and the placeholder byte range it covers in
+/// [`FlatText::text`]. The original text maps that range back to the TeX.
+#[derive(Clone, Debug)]
+pub struct MathPlacement {
+    pub range: Range<usize>,
+    pub render: std::sync::Arc<MathRender>,
+    /// Display math centers in its line box; inline math sits on the baseline.
+    pub display: bool,
+    /// Below 1 when an inline formula was shrunk to fit a narrow column.
+    pub scale: f32,
 }
 
 /// Inline-code tint: a text-safe use of the selected accent identity.
@@ -927,7 +960,8 @@ pub const INLINE_CODE_RADIUS: f32 = 4.5;
 pub const INLINE_CODE_PAD_X: f32 = 2.0;
 pub const INLINE_CODE_INSET_Y: f32 = 2.0;
 
-/// Flatten inline runs into shaped-text inputs. Pure given a theme.
+/// Flatten inline runs into shaped-text inputs. Pure given a theme. Math
+/// keeps its TeX source here; the renderer's flatten swaps in placeholders.
 pub fn flatten_runs(runs: &[InlineRun], theme: &Theme, bold_default: bool) -> FlatText {
     flatten_runs_weighted(
         runs,
@@ -937,22 +971,79 @@ pub fn flatten_runs(runs: &[InlineRun], theme: &Theme, bold_default: bool) -> Fl
         } else {
             FontWeight::NORMAL
         },
+        None,
     )
 }
 
+/// The face inline-math placeholders are shaped in: the body face at regular
+/// weight, whatever emphasis surrounds the formula.
+pub(super) fn math_placeholder_font(theme: &Theme) -> gpui::Font {
+    font(theme.font_sans.clone())
+}
+
+/// Room before an inline formula (em of the text): italic math leans into
+/// the preceding word space, which reads tight next to Geist. The formula
+/// ends flush with its placeholder, so punctuation after it stays close.
+const INLINE_MATH_LEAD_EM: f32 = 0.1;
+/// How far (em of the text) an inline formula's ink may reach past its line
+/// box into the gap between lines before the lines spread apart.
+const INLINE_MATH_SPILL_EM: f32 = 0.15;
+
 /// [`flatten_runs`] with an explicit base weight (table headers are 700 per
 /// zeron's `table.headerWeight`; strong runs never drop below semibold).
-fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWeight) -> FlatText {
+/// With a `spacer`, each formula that typesets becomes a transparent
+/// placeholder as wide as the formula (recorded in [`FlatText::math`]) and
+/// the original text keeps its TeX; without one, or when the TeX does not
+/// parse, the source shows as text.
+pub(super) fn flatten_runs_weighted(
+    runs: &[InlineRun],
+    theme: &Theme,
+    base_weight: FontWeight,
+    spacer: Option<&math::Spacer>,
+) -> FlatText {
     let mut text = String::new();
+    let mut source = String::new();
+    let mut offsets = OffsetMap::default();
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
     let mut code_ranges: Vec<Range<usize>> = Vec::new();
+    let mut formulas: Vec<MathPlacement> = Vec::new();
     for run in runs {
         if run.text.is_empty() {
             continue;
         }
         let start = text.len();
-        text.push_str(&run.text);
+        let formula = run
+            .style
+            .math
+            .as_ref()
+            .zip(spacer)
+            .and_then(|(tex, spacer)| {
+                let render = math::render(&tex.tex, tex.display)?;
+                let lead = if tex.display {
+                    0.0
+                } else {
+                    INLINE_MATH_LEAD_EM
+                };
+                let placeholder = spacer.fill(render.width * MATH_SCALE + lead);
+                Some((placeholder, render, tex.display))
+            });
+        if let Some((placeholder, render, display)) = &formula {
+            offsets.omissions.push((
+                source.len()..source.len() + run.text.len(),
+                start..start + placeholder.len(),
+            ));
+            formulas.push(MathPlacement {
+                range: start..start + placeholder.len(),
+                render: render.clone(),
+                display: *display,
+                scale: 1.0,
+            });
+            text.push_str(placeholder);
+        } else {
+            text.push_str(&run.text);
+        }
+        source.push_str(&run.text);
         let mut f = if run.style.code {
             font(theme.font_mono.clone())
         } else {
@@ -968,13 +1059,18 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         } else {
             FontStyle::Normal
         };
+        if formula.is_some() {
+            f = math_placeholder_font(theme);
+        }
         // Links stay monochrome — foreground with an underline (zeron's md
         // theme underlines in the text color; indigo is reserved for primary
         // actions).
         let is_link = run.style.link.is_some();
         // Inline code uses the spectrum's code tone; everything else
-        // stays the monochrome foreground.
-        let color = if run.style.code {
+        // stays the monochrome foreground. A placeholder only holds space.
+        let color = if formula.is_some() {
+            gpui::transparent_black()
+        } else if run.style.code {
             inline_code_text(theme)
         } else {
             theme.text
@@ -1001,7 +1097,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
             }
         }
         out.push(TextRun {
-            len: run.text.len(),
+            len: text.len() - start,
             font: f,
             color,
             // Inline code's wash is painted as ROUNDED quads by the canvas
@@ -1020,17 +1116,22 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         });
     }
     FlatText {
-        original: None,
+        original: (!formulas.is_empty()).then(|| OriginalText {
+            text: source.into(),
+            offsets,
+        }),
         text: text.into(),
         runs: out,
         links,
         code_ranges,
+        math: formulas,
     }
 }
 
 /// Flatten through the cross-frame cache when one is wired: settled blocks
 /// reuse text + runs untouched (O(1) per block per frame); only blocks the
-/// incremental parser invalidated rebuild.
+/// incremental parser invalidated rebuild. Placeholder widths depend on the
+/// body face, which the style generation covers like every other font input.
 fn flatten_cached(
     runs: &[InlineRun],
     base_weight: FontWeight,
@@ -1038,7 +1139,20 @@ fn flatten_cached(
     ix: usize,
     opts: &RenderOptions,
     theme: &Theme,
+    window: &Window,
 ) -> Rc<FlatText> {
+    let flatten = || {
+        let spacer = runs
+            .iter()
+            .any(|run| run.style.math.is_some())
+            .then(|| math::spacer(&math_placeholder_font(theme), window));
+        Rc::new(flatten_runs_weighted(
+            runs,
+            theme,
+            base_weight,
+            spacer.as_deref(),
+        ))
+    };
     match &opts.cache {
         Some(cache) => {
             let mut cache = cache.borrow_mut();
@@ -1046,10 +1160,10 @@ fn flatten_cached(
             cache
                 .flats
                 .entry((opts.row_key.clone(), top_ix, ix))
-                .or_insert_with(|| Rc::new(flatten_runs_weighted(runs, theme, base_weight)))
+                .or_insert_with(flatten)
                 .clone()
         }
-        None => Rc::new(flatten_runs_weighted(runs, theme, base_weight)),
+        None => flatten(),
     }
 }
 
@@ -1060,17 +1174,20 @@ fn flat_text_element(
     opts: &RenderOptions,
     theme: &Theme,
 ) -> AnyElement {
-    if opts
+    let truncate_links = opts
         .link
         .as_ref()
         .is_some_and(|ui| ui.source_session.is_some())
-        && !flat.links.is_empty()
-    {
+        && !flat.links.is_empty();
+    // Inline formulas shrink when the column is narrower than they are.
+    let fit_math = flat.math.iter().any(|math| !math.display);
+    if truncate_links || fit_math {
         return super::link_presentation::ResponsiveText {
             flat: flat.clone(),
             ix,
             opts: opts.clone(),
             theme: theme.clone(),
+            truncate_links,
         }
         .into_any_element();
     }
@@ -1086,14 +1203,14 @@ pub(super) fn flat_text_presented_element(
     // Streaming veil: opacity-only recolor of the runs covering newly appended
     // chunks. Same text, same fonts, same lengths — layout is untouched.
     // Settled elements return no spans and reuse the cached runs unsplit.
-    let text_runs = match &opts.veil {
+    let spans: Vec<VeilSpan> = match &opts.veil {
         Some(veil) => {
             let original = flat
                 .original
                 .as_ref()
                 .map_or(&flat.text, |original| &original.text);
             let spans = veil.borrow_mut().advance(ix, original, opts.now);
-            let spans = if let Some(original) = &flat.original {
+            if let Some(original) = &flat.original {
                 spans
                     .into_iter()
                     .filter_map(|(range, opacity)| {
@@ -1104,11 +1221,29 @@ pub(super) fn flat_text_presented_element(
                     .collect()
             } else {
                 spans
-            };
-            apply_veil(flat.runs.clone(), &spans)
+            }
         }
-        None => flat.runs.clone(),
+        None => Vec::new(),
     };
+    let text_runs = if spans.is_empty() {
+        flat.runs.clone()
+    } else {
+        apply_veil(flat.runs.clone(), &spans)
+    };
+    // Formulas fade in with the text they replace.
+    let math: Vec<(MathPlacement, Hsla)> = flat
+        .math
+        .iter()
+        .map(|placement| {
+            let opacity = spans
+                .iter()
+                .filter(|(range, _)| {
+                    range.start < placement.range.end && range.end > placement.range.start
+                })
+                .fold(1.0f32, |opacity, (_, alpha)| opacity.min(*alpha));
+            (placement.clone(), theme.text.opacity(opacity))
+        })
+        .collect();
     let styled = StyledText::new(flat.text.clone()).with_runs(text_runs);
     let layout = styled.layout().clone();
     let text_el = styled.into_any_element();
@@ -1132,7 +1267,7 @@ pub(super) fn flat_text_presented_element(
     let sel_wash = selection_wash(theme);
     let underlay = canvas(
         |_, _, _| (),
-        move |_, _, window, _| {
+        move |_, _, window, cx| {
             for range in &code_ranges {
                 for rect in range_rects(&layout, range, INLINE_CODE_PAD_X, INLINE_CODE_INSET_Y) {
                     window.paint_quad(quad(
@@ -1159,6 +1294,10 @@ pub(super) fn flat_text_presented_element(
                         BorderStyle::default(),
                     ));
                 }
+            }
+            // Formulas over their transparent placeholders (above the washes).
+            for (placement, color) in &math {
+                paint_math(&layout, placement, *color, window, cx);
             }
             // Register this element into the frame's document-ordered
             // registry (paint order IS document order), then the frame's
@@ -1562,6 +1701,53 @@ pub(crate) fn range_rects(
     )
 }
 
+/// Paint one formula over its placeholder: inline at the end of the
+/// placeholder's row box on the text baseline (the placeholder's extra width
+/// is lead-in room), display centered in the line box. The math size follows
+/// the laid-out font size, so headings and body text each get proportionate
+/// formulas.
+fn paint_math(
+    layout: &gpui::TextLayout,
+    placement: &MathPlacement,
+    color: Hsla,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    let rows = range_rects(layout, &placement.range, 0.0, 0.0);
+    let Some(row) = rows.first() else {
+        return;
+    };
+    let Some(line) = layout.line_layout_for_index(placement.range.start) else {
+        return;
+    };
+    let line = &line.unwrapped_layout;
+    let line_height = layout.line_height();
+    let render = &placement.render;
+    let mut em = line.font_size * (MATH_SCALE * placement.scale);
+    if rows.len() == 1 && !placement.display && render.width > 0.0 {
+        // Never wider than the space shaping reserved for it.
+        em = em.min(row.size.width / render.width);
+    }
+    // Only a placeholder wider than the element itself (no presentation
+    // pass fitted it) spans rows; the formula then starts at the first row.
+    let left = if rows.len() > 1 {
+        row.left()
+    } else if placement.display {
+        row.left() + (row.size.width - em * render.width) / 2.0
+    } else {
+        row.right() - em * render.width
+    };
+    let top = if placement.display {
+        // Center the ink (which may reach past the layout box) in the line.
+        row.top() + (line_height - em * render.ink_height()) / 2.0 - em * render.ink[1]
+    } else {
+        // GPUI's baseline: the glyph box centered in the line box.
+        let baseline = row.top() + (line_height - line.ascent - line.descent) / 2.0 + line.ascent;
+        baseline - em * render.height
+    };
+    math::paint(render, point(left, top), em, color, window, cx);
+}
+
 fn range_rects_with_positions(
     bounds: Bounds<gpui::Pixels>,
     line_height: gpui::Pixels,
@@ -1628,6 +1814,93 @@ fn range_rects_with_positions(
     rects
 }
 
+/// Vertical breathing room above and below a display formula, in px.
+const DISPLAY_MATH_PAD_Y: f32 = 4.0;
+
+fn is_display_math(run: &InlineRun) -> bool {
+    run.style.math.as_ref().is_some_and(|math| math.display)
+}
+
+/// `runs` without the whitespace at either end: the soft breaks around a
+/// `$$` block would otherwise pad the text beside it.
+fn trim_edge_whitespace(runs: &[InlineRun]) -> Vec<InlineRun> {
+    let mut runs = runs.to_vec();
+    while let Some(first) = runs.first_mut() {
+        let trimmed = first.text.trim_start();
+        if !trimmed.is_empty() {
+            first.text = trimmed.to_owned();
+            break;
+        }
+        runs.remove(0);
+    }
+    while let Some(last) = runs.last_mut() {
+        let trimmed = last.text.trim_end();
+        if !trimmed.is_empty() {
+            last.text = trimmed.to_owned();
+            break;
+        }
+        runs.pop();
+    }
+    runs
+}
+
+/// A display formula on a centered line of its own. The line box grows to
+/// the formula; one wider than the column scrolls sideways instead of
+/// wrapping. It stays a text element, so a selection across it copies the
+/// TeX source.
+#[allow(clippy::too_many_arguments)]
+fn display_math_element(
+    run: &InlineRun,
+    size: f32,
+    line_height: f32,
+    top_ix: usize,
+    ix: usize,
+    opts: &RenderOptions,
+    theme: &Theme,
+    window: &Window,
+) -> AnyElement {
+    let flat = flatten_cached(
+        std::slice::from_ref(run),
+        FontWeight::NORMAL,
+        top_ix,
+        ix,
+        opts,
+        theme,
+        window,
+    );
+    let text_size = crate::typography::ui_rems(size);
+    let Some(placement) = flat.math.first() else {
+        // The TeX did not parse: its source reads like any paragraph.
+        return div()
+            .text_size(text_size)
+            .line_height(crate::typography::ui_rems(line_height))
+            .child(flat_text_element(&flat, ix, opts, theme))
+            .into_any_element();
+    };
+    let text_px = f32::from(text_size.to_pixels(window.rem_size()));
+    let math_line = placement.render.ink_height() * text_px * MATH_SCALE + 2.0 * DISPLAY_MATH_PAD_Y;
+    let line = math_line.max(text_px * line_height / size);
+    div()
+        .id(SharedString::from(format!("{}-math{ix}", opts.row_key)))
+        .w_full()
+        .overflow_x_scroll()
+        .child(
+            // Auto margins center a formula that fits and start one that does
+            // not at the left edge, so all of it stays scrollable (centering
+            // would push its start past the scroll origin).
+            div().min_w_full().flex().child(
+                div()
+                    .flex_none()
+                    .mx_auto()
+                    .whitespace_nowrap()
+                    .text_size(text_size)
+                    .line_height(px(line))
+                    .child(flat_text_element(&flat, ix, opts, theme)),
+            ),
+        )
+        .into_any_element()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn text_element(
     runs: &[InlineRun],
@@ -1638,7 +1911,64 @@ fn text_element(
     ix: usize,
     opts: &RenderOptions,
     theme: &Theme,
+    window: &Window,
 ) -> AnyElement {
+    if runs.iter().any(is_display_math) {
+        // `$$…$$` inside a paragraph breaks it: text, the formula on its own
+        // line, text.
+        let mut elements = Vec::new();
+        let mut start = 0;
+        for (index, run) in runs.iter().enumerate() {
+            if !is_display_math(run) {
+                continue;
+            }
+            let before = trim_edge_whitespace(&runs[start..index]);
+            if !before.is_empty() {
+                elements.push(text_element(
+                    &before,
+                    size,
+                    line_height,
+                    bold_default,
+                    top_ix,
+                    ix.wrapping_mul(4099).wrapping_add(start + 3000),
+                    opts,
+                    theme,
+                    window,
+                ));
+            }
+            elements.push(display_math_element(
+                run,
+                size,
+                line_height,
+                top_ix,
+                ix.wrapping_mul(4099).wrapping_add(index + 5000),
+                opts,
+                theme,
+                window,
+            ));
+            start = index + 1;
+        }
+        let after = trim_edge_whitespace(&runs[start..]);
+        if !after.is_empty() {
+            elements.push(text_element(
+                &after,
+                size,
+                line_height,
+                bold_default,
+                top_ix,
+                ix.wrapping_mul(4099).wrapping_add(start + 3000),
+                opts,
+                theme,
+                window,
+            ));
+        }
+        return div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .children(elements)
+            .into_any_element();
+    }
     if let Some(media) = &opts.media {
         if runs.iter().any(|run| run.style.image.is_some()) {
             let mut elements = Vec::new();
@@ -1655,6 +1985,7 @@ fn text_element(
                             ix.wrapping_mul(4099).wrapping_add(start + 1000),
                             opts,
                             theme,
+                            window,
                         ));
                     }
                     elements.push((media.image)(
@@ -1675,6 +2006,7 @@ fn text_element(
                     ix.wrapping_mul(4099).wrapping_add(start + 1000),
                     opts,
                     theme,
+                    window,
                 ));
             }
             return div()
@@ -1707,6 +2039,7 @@ fn text_element(
                     ix.wrapping_mul(4099).wrapping_add(line_ix + 2000),
                     opts,
                     theme,
+                    window,
                 )
             }))
             .into_any_element();
@@ -1716,7 +2049,7 @@ fn text_element(
     } else {
         FontWeight::NORMAL
     };
-    let flat = flatten_cached(runs, weight, top_ix, ix, opts, theme);
+    let flat = flatten_cached(runs, weight, top_ix, ix, opts, theme, window);
     let inner = flat_text_element(&flat, ix, opts, theme);
     let direct_file = opts
         .workspace_root
@@ -1750,11 +2083,48 @@ fn text_element(
     } else {
         inner
     };
-    div()
-        .text_size(crate::typography::ui_rems(size))
-        .line_height(crate::typography::ui_rems(line_height))
-        .child(content)
-        .into_any_element()
+    let wrapper = div().text_size(crate::typography::ui_rems(size));
+    let wrapper = match inline_math_line_height(&flat, size, line_height, theme, window) {
+        Some(taller) => wrapper.line_height(taller),
+        None => wrapper.line_height(crate::typography::ui_rems(line_height)),
+    };
+    wrapper.child(content).into_any_element()
+}
+
+/// The line height that keeps every inline formula of `flat` inside its line
+/// box (give or take [`INLINE_MATH_SPILL_EM`]), or `None` when the regular
+/// one does. GPUI lines share one height per text element, so a matrix in a
+/// sentence spreads that paragraph's lines rather than overlapping them.
+fn inline_math_line_height(
+    flat: &FlatText,
+    size: f32,
+    line_height: f32,
+    theme: &Theme,
+    window: &Window,
+) -> Option<gpui::Pixels> {
+    let mut formulas = flat.math.iter().filter(|m| !m.display).peekable();
+    formulas.peek()?;
+    let rem = window.rem_size();
+    let text_px = crate::typography::ui_rems(size).to_pixels(rem);
+    let regular = f32::from(crate::typography::ui_rems(line_height).to_pixels(rem));
+    let text_system = window.text_system();
+    let font_id = text_system.resolve_font(&math_placeholder_font(theme));
+    // GPUI centers the face's ascent + descent in the line box; the baseline
+    // sits `(ascent - descent) / 2` below its middle.
+    let skew = f32::from(text_system.ascent(font_id, text_px))
+        - f32::from(text_system.descent(font_id, text_px)).abs();
+    let text_px = f32::from(text_px);
+    let em = text_px * MATH_SCALE;
+    let spill = text_px * INLINE_MATH_SPILL_EM;
+    let needed = formulas.fold(regular, |needed, formula| {
+        let render = &formula.render;
+        let above = em * (render.height - render.ink[1]);
+        let below = em * (render.ink[3] - render.height);
+        needed
+            .max(2.0 * (above - spill) - skew)
+            .max(2.0 * (below - spill) + skew)
+    });
+    (needed > regular + 0.5).then(|| px(needed.ceil()))
 }
 
 /// A file icon belongs beside a link only when the whole visible paragraph is
@@ -1763,7 +2133,7 @@ fn text_element(
 fn sole_workspace_file_link(runs: &[InlineRun], workspace_root: &str) -> Option<String> {
     let mut target = None;
     for run in runs.iter().filter(|run| !run.text.is_empty()) {
-        if run.style.image.is_some() || run.style.task.is_some() {
+        if run.style.image.is_some() || run.style.task.is_some() || run.style.math.is_some() {
             return None;
         }
         let link = run.style.link.as_deref()?;
@@ -1792,6 +2162,7 @@ fn sole_plain_file_reference(runs: &[InlineRun], workspace_root: &str) -> Option
         if run.style.link.is_some()
             || run.style.image.is_some()
             || run.style.task.is_some()
+            || run.style.math.is_some()
             || run.style.code
         {
             return None;
@@ -1814,6 +2185,7 @@ fn plain_file_reference_lines(runs: &[InlineRun], workspace_root: &str) -> Optio
     if run.style.link.is_some()
         || run.style.image.is_some()
         || run.style.task.is_some()
+        || run.style.math.is_some()
         || run.style.code
         || !run.text.contains('\n')
     {
@@ -2393,7 +2765,7 @@ mod tests {
     struct CodeSelectionHarness;
 
     impl Render for CodeSelectionHarness {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
             let opts = RenderOptions::settled("code-selection-test".into());
             let plain = |text: &str| {
@@ -2416,6 +2788,7 @@ mod tests {
                     0,
                     &opts,
                     &theme,
+                    window,
                 ))
                 .child(render_code_block_source(
                     None,
@@ -2435,6 +2808,7 @@ mod tests {
                     2,
                     &opts,
                     &theme,
+                    window,
                 ))
         }
     }
@@ -2865,6 +3239,92 @@ mod tests {
         assert_ne!(token_color(HighlightKind::Comment, &theme), theme.text);
     }
 
+    fn test_spacer() -> math::Spacer {
+        math::Spacer::new([
+            ('M', 0.83),
+            ('n', 0.55),
+            ('0', 0.6),
+            ('l', 0.23),
+            ('i', 0.22),
+        ])
+    }
+
+    #[test]
+    fn inline_math_flattens_to_a_placeholder_that_copies_as_tex() {
+        let theme = Theme::dark();
+        let tree = super::super::parser::parse_full("Let $x^2$ be \\(\\alpha\\).");
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("paragraph");
+        };
+        let flat = flatten_runs_weighted(runs, &theme, FontWeight::NORMAL, Some(&test_spacer()));
+        assert_eq!(flat.math.len(), 2);
+        assert_eq!(
+            flat.runs.iter().map(|r| r.len).sum::<usize>(),
+            flat.text.len()
+        );
+        let original = flat.original.as_ref().expect("math keeps its source");
+        assert_eq!(original.text.as_ref(), "Let $x^2$ be \\(\\alpha\\).");
+        let copy = |range: Range<usize>| {
+            original.text
+                [original.offsets.original(range.start)..original.offsets.original(range.end)]
+                .to_string()
+        };
+        assert_eq!(copy(0..flat.text.len()), original.text.as_ref());
+        assert_eq!(copy(flat.math[0].range.clone()), "$x^2$");
+        assert_eq!(copy(flat.math[1].range.clone()), "\\(\\alpha\\)");
+        for placement in &flat.math {
+            let placeholder = &flat.text[placement.range.clone()];
+            assert!(
+                placeholder.chars().all(|c| c.is_ascii_alphanumeric()),
+                "{placeholder:?} stays one unbreakable word"
+            );
+            assert!(!placement.display);
+            let mut at = 0;
+            let run = flat
+                .runs
+                .iter()
+                .find(|run| {
+                    at += run.len;
+                    at > placement.range.start
+                })
+                .unwrap();
+            assert_eq!(run.color.a, 0.0, "placeholders only hold space");
+        }
+        // Without placeholders (no spacer, or TeX that does not parse) the
+        // source reads as text.
+        let plain = flatten_runs(runs, &theme, false);
+        assert!(plain.math.is_empty() && plain.original.is_none());
+        assert_eq!(plain.text.as_ref(), "Let $x^2$ be \\(\\alpha\\).");
+        let broken = super::super::parser::parse_full("bad $\\frac{a}$ tex");
+        let Block::Paragraph { runs } = &broken.blocks[0].block else {
+            panic!("paragraph");
+        };
+        let flat = flatten_runs_weighted(runs, &theme, FontWeight::NORMAL, Some(&test_spacer()));
+        assert!(flat.math.is_empty());
+        assert_eq!(flat.text.as_ref(), "bad $\\frac{a}$ tex");
+    }
+
+    #[test]
+    fn display_math_splits_its_paragraph_without_padding_neighbors() {
+        let tree = super::super::parser::parse_full("Before\n$$\nx\n$$\nafter");
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("paragraph");
+        };
+        let at = runs.iter().position(is_display_math).expect("display run");
+        let before = trim_edge_whitespace(&runs[..at]);
+        let after = trim_edge_whitespace(&runs[at + 1..]);
+        let text = |runs: &[InlineRun]| runs.iter().map(|r| r.text.clone()).collect::<String>();
+        assert_eq!(text(&before), "Before");
+        assert_eq!(text(&after), "after");
+        assert!(
+            trim_edge_whitespace(&[InlineRun {
+                text: " \n ".into(),
+                style: InlineStyle::default(),
+            }])
+            .is_empty()
+        );
+    }
+
     #[test]
     fn flatten_runs_maps_links_and_styles() {
         let theme = Theme::dark();
@@ -2925,7 +3385,7 @@ mod tests {
             text: "Header".into(),
             style: InlineStyle::default(),
         }];
-        let flat = flatten_runs_weighted(&runs, &theme, TABLE_HEADER_WEIGHT);
+        let flat = flatten_runs_weighted(&runs, &theme, TABLE_HEADER_WEIGHT, None);
         assert_eq!(flat.runs[0].font.weight, FontWeight::BOLD);
         // Strong runs inside a 700 header stay 700 (never drop to semibold).
         let bold_runs = vec![InlineRun {
@@ -2935,7 +3395,7 @@ mod tests {
                 ..Default::default()
             },
         }];
-        let flat = flatten_runs_weighted(&bold_runs, &theme, TABLE_HEADER_WEIGHT);
+        let flat = flatten_runs_weighted(&bold_runs, &theme, TABLE_HEADER_WEIGHT, None);
         assert_eq!(flat.runs[0].font.weight, FontWeight::BOLD);
     }
 
@@ -2975,6 +3435,7 @@ mod tests {
                     runs: Vec::new(),
                     links: Vec::new(),
                     code_ranges: Vec::new(),
+                    math: Vec::new(),
                 }),
             );
             cache.code.insert(
@@ -3019,6 +3480,7 @@ mod tests {
                 runs: Vec::new(),
                 links: Vec::new(),
                 code_ranges: Vec::new(),
+                math: Vec::new(),
             }),
         );
         cache.sync_generation(10);
