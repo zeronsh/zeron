@@ -564,8 +564,8 @@ pub(super) enum StoreLock {
 /// Rounds of compare-before-write before a store that keeps changing wins.
 const MERGE_ATTEMPTS: usize = 3;
 
-/// Replace ONE entry of a JSON-object credential store, keeping every other
-/// key as it is, under `lock` — then compare-before-write: the file is read
+/// Replace (or, with `entry` = `None`, remove) ONE entry of a JSON-object
+/// credential store, keeping every other key as it is, under `lock` — then compare-before-write: the file is read
 /// again right before the rename, and a change since the first read (an
 /// agent that writes without taking the lock — OpenCode takes none — or a
 /// CLI mid-refresh) restarts the cycle from the new contents instead of
@@ -580,7 +580,7 @@ const MERGE_ATTEMPTS: usize = 3;
 pub(super) fn merge_json_entry(
     file: &Path,
     key: &str,
-    entry: &serde_json::Value,
+    entry: Option<&serde_json::Value>,
     lock: StoreLock,
 ) -> Result<(), EngineError> {
     // Held for its Drop (the unlock) only.
@@ -600,6 +600,9 @@ pub(super) fn merge_json_entry(
     };
     for _ in 0..MERGE_ATTEMPTS {
         let before = read()?;
+        if before.is_none() && entry.is_none() {
+            return Ok(()); // nothing to remove
+        }
         let mut store = match &before {
             Some(bytes) => serde_json::from_slice::<serde_json::Value>(bytes)
                 .ok()
@@ -613,7 +616,16 @@ pub(super) fn merge_json_entry(
             None => serde_json::json!({}),
         };
         if let Some(map) = store.as_object_mut() {
-            map.insert(key.to_string(), entry.clone());
+            match entry {
+                Some(entry) => {
+                    map.insert(key.to_string(), entry.clone());
+                }
+                None => {
+                    if map.remove(key).is_none() {
+                        return Ok(()); // already gone
+                    }
+                }
+            }
         }
         let json = serde_json::to_string_pretty(&store)
             .map_err(|e| EngineError::Other(format!("serialize {}: {e}", file.display())))?;
@@ -785,7 +797,19 @@ impl AgentAccounts {
         let map_key = map_key
             .ok_or_else(|| EngineError::Other("That saved Grok login names no issuer.".into()))?;
         let file = self.grok_auth_file();
-        merge_json_entry(&file, map_key, entry, StoreLock::File(lock_path(&file)))
+        merge_json_entry(
+            &file,
+            map_key,
+            Some(entry),
+            StoreLock::File(lock_path(&file)),
+        )
+    }
+
+    /// Sign grok out of one issuer's login: drop that entry from the live
+    /// `auth.json` (under grok's lock), leaving any other issuer's alone.
+    pub(super) fn remove_grok_entry(&self, map_key: &str) -> Result<(), EngineError> {
+        let file = self.grok_auth_file();
+        merge_json_entry(&file, map_key, None, StoreLock::File(lock_path(&file)))
     }
 
     pub(super) fn write_devin_credentials(
@@ -827,7 +851,7 @@ impl AgentAccounts {
         &self,
         harness: HarnessId,
         store_key: &str,
-        entry: &serde_json::Value,
+        entry: Option<&serde_json::Value>,
     ) -> Result<(), EngineError> {
         let file = self.keyed_file(harness);
         let lock = match harness {
@@ -850,19 +874,46 @@ impl AgentAccounts {
             let Some(entry) = store.get(store_key).filter(|e| oauth_entry(e)) else {
                 continue;
             };
-            let detected = match upstream {
-                Upstream::OpenAi => openai_detected(store_key, entry, None),
-                Upstream::Anthropic | Upstream::Copilot => {
-                    self.identify_opaque(harness, store_key, upstream, entry)
-                        .await
-                }
-            };
-            match detected {
+            match self
+                .identify_entry(harness, store_key, upstream, entry)
+                .await
+            {
                 Some(detected) => resolved.push(detected),
                 None => unidentified.push(unresolved(store_key, upstream)),
             }
         }
         (resolved, unidentified)
+    }
+
+    /// The live login under ONE store key: `Some(None)` when an OAuth entry
+    /// is there but couldn't be identified, `None` when there is none.
+    pub(super) async fn detect_keyed_entry(
+        &self,
+        harness: HarnessId,
+        store_key: &str,
+    ) -> Option<Option<Detected>> {
+        let upstream = upstream_of(harness, store_key)?;
+        let entry = self.live_keyed_entry(harness, store_key)?;
+        Some(
+            self.identify_entry(harness, store_key, upstream, &entry)
+                .await,
+        )
+    }
+
+    async fn identify_entry(
+        &self,
+        harness: HarnessId,
+        store_key: &str,
+        upstream: Upstream,
+        entry: &serde_json::Value,
+    ) -> Option<Detected> {
+        match upstream {
+            Upstream::OpenAi => openai_detected(store_key, entry, None),
+            Upstream::Anthropic | Upstream::Copilot => {
+                self.identify_opaque(harness, store_key, upstream, entry)
+                    .await
+            }
+        }
     }
 
     /// Who an opaque live entry is: the slot already holding this exact
@@ -1008,33 +1059,25 @@ impl AgentAccounts {
         ))
     }
 
-    /// Persist a fresh login as a slot. With no live login for it yet it
-    /// becomes the live one too — "Connect" means runs work afterwards; a
-    /// live login is never replaced (switching stays explicit).
-    pub(super) fn save_new_login(
+    /// Persist a fresh login as a slot, then let it take over the live login
+    /// where [`AgentAccounts::adopt_if_live`] says so: no live login yet
+    /// ("Connect" means runs work afterwards), or a re-login of the live
+    /// account (else the next list would snapshot the old, possibly revoked,
+    /// live tokens straight back over the fresh slot). Any other live login
+    /// is left alone — switching stays explicit. Under [`Inner::ops`], so a
+    /// concurrent list can't land between the two writes.
+    pub(super) async fn save_new_login(
         &self,
         harness: HarnessId,
         detected: &Detected,
     ) -> Result<(), EngineError> {
+        let _ops = self.inner.ops.lock().await;
         self.snapshot_detected(harness, detected)?;
-        let Some(credentials) = &detected.credentials else {
-            return Ok(());
-        };
-        match harness {
-            HarnessId::Grok if self.detect_grok().is_none() => {
-                self.write_grok_entry(detected.store_key.as_deref(), credentials)
-            }
-            HarnessId::Devin if self.detect_devin().is_none() => {
-                self.write_devin_credentials(credentials)
-            }
-            HarnessId::Opencode | HarnessId::Pi => match &detected.store_key {
-                Some(key) if self.live_keyed_entry(harness, key).is_none() => {
-                    self.write_keyed_entry(harness, key, credentials)
-                }
-                _ => Ok(()),
-            },
-            _ => Ok(()),
+        let id = slot_id_for(harness, &detected.account_key);
+        if let Some(slot) = self.read_slot(harness, &id) {
+            self.adopt_if_live(&slot).await?;
         }
+        Ok(())
     }
 
     // ── Hermes ──────────────────────────────────────────────────────────────
@@ -1304,18 +1347,23 @@ impl AgentAccounts {
                 .await
                 .map_err(|e| e.to_string());
             watcher.abort();
-            let outcome = signed_in.and_then(|()| {
+            let detected = signed_in.and_then(|()| {
                 let file = data.join("devin").join("credentials.toml");
-                let detected = std::fs::read_to_string(&file)
+                std::fs::read_to_string(&file)
                     .ok()
                     .and_then(|text| parse_devin_toml(&text))
                     .and_then(parse_devin_credentials)
                     .ok_or_else(|| {
                         "Devin reported a successful sign-in, but saved no credentials.".to_string()
-                    })?;
-                this.save_new_login(HarnessId::Devin, &detected)
-                    .map_err(|e| e.to_string())
+                    })
             });
+            let outcome = match detected {
+                Ok(detected) => this
+                    .save_new_login(HarnessId::Devin, &detected)
+                    .await
+                    .map_err(|e| e.to_string()),
+                Err(message) => Err(message),
+            };
             let _ = std::fs::remove_dir_all(&task_home);
             lock(&task_state).outcome = Some(outcome);
         });

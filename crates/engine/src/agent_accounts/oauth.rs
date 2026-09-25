@@ -229,7 +229,7 @@ impl AgentAccounts {
             openai_detected(store_key, &entry, id_token.as_deref()).ok_or_else(|| {
                 EngineError::Other("Could not identify the signed-in ChatGPT account.".into())
             })?;
-        self.save_new_login(harness, &detected)
+        self.save_new_login(harness, &detected).await
     }
 
     /// GitHub Copilot for OpenCode: GitHub's device flow. The start asks
@@ -377,7 +377,7 @@ impl AgentAccounts {
                 EngineError::Other("Could not identify the signed-in GitHub account.".into())
             })?;
         let detected = Detected::known(account_key, profile, entry).keyed("github-copilot");
-        self.save_new_login(harness, &detected)
+        self.save_new_login(harness, &detected).await
     }
 }
 

@@ -1107,7 +1107,7 @@ impl AgentAccounts {
                 let key = slot.store_key.as_deref().ok_or_else(|| {
                     EngineError::Other("That saved login names no provider.".into())
                 })?;
-                self.write_keyed_entry(harness, key, &slot.credentials)?;
+                self.write_keyed_entry(harness, key, Some(&slot.credentials))?;
             }
             other => {
                 return Err(EngineError::Other(format!(
@@ -1181,8 +1181,15 @@ impl AgentAccounts {
         write_file_atomic(&self.inner.config.codex_auth_file(), json.as_bytes(), true)
     }
 
-    /// The live login's account key, from the identity alone (no secret read).
-    fn live_account_key(&self, harness: HarnessId) -> Option<String> {
+    /// The live login's account key, from the identity alone (no secret read
+    /// for Claude). `store_key` names the entry for agents that keep one
+    /// login per model provider (OpenCode, Pi); an entry that is there but
+    /// can't be identified has no key.
+    async fn live_account_key(
+        &self,
+        harness: HarnessId,
+        store_key: Option<&str>,
+    ) -> Option<String> {
         match harness {
             HarnessId::ClaudeCode => {
                 let cfg = read_json(&self.inner.config.claude_config_file)?;
@@ -1191,7 +1198,26 @@ impl AgentAccounts {
             }
             HarnessId::Codex => self.detect_codex().map(|d| d.account_key),
             HarnessId::Cursor => self.detect_cursor().map(|d| d.account_key),
+            HarnessId::Grok => self.detect_grok().map(|d| d.account_key),
+            HarnessId::Devin => self.detect_devin().map(|d| d.account_key),
+            HarnessId::Opencode | HarnessId::Pi => self
+                .detect_keyed_entry(harness, store_key?)
+                .await
+                .flatten()
+                .map(|d| d.account_key),
             _ => None,
+        }
+    }
+
+    /// Whether a per-provider agent has a live entry under `store_key` at
+    /// all, identified or not — a live login zeron can't identify is still
+    /// never replaced unasked.
+    fn has_live_entry(&self, harness: HarnessId, store_key: Option<&str>) -> bool {
+        match harness {
+            HarnessId::Opencode | HarnessId::Pi => {
+                store_key.is_none_or(|key| self.live_keyed_entry(harness, key).is_some())
+            }
+            _ => false,
         }
     }
 
@@ -1201,10 +1227,11 @@ impl AgentAccounts {
     /// is no live login at all (nothing to strand; "add" must mean "works").
     /// Any other live login stays untouched — switching remains explicit.
     async fn adopt_if_live(&self, slot: &Slot) -> Result<(), EngineError> {
-        let live = self.live_account_key(slot.harness);
+        let store_key = slot.store_key.as_deref();
+        let live = self.live_account_key(slot.harness, store_key).await;
         let usable = match slot.harness {
             HarnessId::Cursor => self.cursor_live_usable(),
-            _ => live.is_some(),
+            _ => live.is_some() || self.has_live_entry(slot.harness, store_key),
         };
         if usable && live.as_deref() != Some(slot.account_key.as_str()) {
             return Ok(());
@@ -1213,6 +1240,13 @@ impl AgentAccounts {
             HarnessId::ClaudeCode => self.activate_claude(slot).await?,
             HarnessId::Codex => self.activate_codex(slot)?,
             HarnessId::Cursor => self.write_cursor_auth(&slot.credentials)?,
+            HarnessId::Grok => self.write_grok_entry(store_key, &slot.credentials)?,
+            HarnessId::Devin => self.write_devin_credentials(&slot.credentials)?,
+            HarnessId::Opencode | HarnessId::Pi => {
+                if let Some(key) = store_key {
+                    self.write_keyed_entry(slot.harness, key, Some(&slot.credentials))?;
+                }
+            }
             _ => {}
         }
         *lock(&self.inner.claude_credentials) = None;
@@ -1223,18 +1257,21 @@ impl AgentAccounts {
     async fn sign_out(
         &self,
         harness: HarnessId,
+        store_key: Option<&str>,
         expected_account_key: &str,
     ) -> Result<(), EngineError> {
-        if self.live_account_key(harness).as_deref() != Some(expected_account_key) {
+        if self.live_account_key(harness, store_key).await.as_deref() != Some(expected_account_key)
+        {
             return Err(EngineError::Other(
-                "The live login changed while it was being removed — refresh and try again."
-                    .into(),
+                "The live login changed while it was being removed — refresh and try again.".into(),
             ));
         }
         match harness {
             HarnessId::ClaudeCode => {
                 let (live, warning) = self.read_claude_credentials().await;
-                if self.live_account_key(harness).as_deref() != Some(expected_account_key) {
+                if self.live_account_key(harness, None).await.as_deref()
+                    != Some(expected_account_key)
+                {
                     return Err(EngineError::Other(
                         "The live login changed while it was being removed — refresh and try again."
                             .into(),
@@ -1263,6 +1300,23 @@ impl AgentAccounts {
             }
             HarnessId::Codex => remove_if_exists(&self.inner.config.codex_auth_file())?,
             HarnessId::Cursor => remove_if_exists(&self.inner.config.cursor_sdk_auth_file)?,
+            // Only this login's own entry goes: other issuers (Grok) and
+            // other providers' logins and API keys (OpenCode, Pi) stay.
+            HarnessId::Grok => {
+                let map_key = self
+                    .detect_grok()
+                    .and_then(|d| d.store_key)
+                    .ok_or_else(|| {
+                        EngineError::Other("Couldn't find grok's live login to sign out.".into())
+                    })?;
+                self.remove_grok_entry(&map_key)?;
+            }
+            HarnessId::Devin => remove_if_exists(&self.inner.config.devin_credentials_file)?,
+            HarnessId::Opencode | HarnessId::Pi => {
+                let key = store_key
+                    .ok_or_else(|| EngineError::Other("That login names no provider.".into()))?;
+                self.write_keyed_entry(harness, key, None)?;
+            }
             _ => {
                 return Err(EngineError::Other(
                     "That's the live login — it can't be removed here.".into(),
@@ -1299,27 +1353,33 @@ impl AgentAccounts {
         }
         let _ops = self.inner.ops.lock().await;
         let snapshot = self.list_locked(false).await?;
-        let active = snapshot
+        let row = snapshot
             .accounts
             .iter()
-            .any(|a| a.harness == harness && a.id == account_id && a.active);
-        if active {
+            .find(|a| a.harness == harness && a.id == account_id);
+        // Per-provider agents (OpenCode, Pi): the store entry this row is.
+        let store_key = row.and_then(|a| a.provider.clone());
+        if row.is_some_and(|a| a.active) {
             // Removing the live login signs the CLI out — dropping only the
             // slot would re-detect (and re-snapshot) it on the next list, and
             // the only account must stay removable.
-            let expected = self.live_account_key(harness).ok_or_else(|| {
-                EngineError::Other(
+            let expected = self
+                .live_account_key(harness, store_key.as_deref())
+                .await
+                .ok_or_else(|| {
+                    EngineError::Other(
                     "The live login changed while it was being removed — refresh and try again."
                         .into(),
                 )
-            })?;
+                })?;
             if slot_id_for(harness, &expected) != account_id {
                 return Err(EngineError::Other(
                     "The live login changed while it was being removed — refresh and try again."
                         .into(),
                 ));
             }
-            self.sign_out(harness, &expected).await?;
+            self.sign_out(harness, store_key.as_deref(), &expected)
+                .await?;
         }
         let file = self.slots_dir(harness)?.join(format!("{account_id}.json"));
         if file.exists() {

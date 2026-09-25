@@ -329,8 +329,7 @@ async fn grok_logins_snapshot_swap_and_forget() {
     #[cfg(unix)]
     assert_eq!(mode(&live), 0o600);
 
-    // The live login can't be forgotten; the other one can.
-    assert!(accounts.forget(HarnessId::Grok, &a_id).await.is_err());
+    // A saved login is just forgotten.
     let b_id = grok
         .iter()
         .find(|a| a.email.as_deref() == Some("b@x.ai"))
@@ -342,6 +341,74 @@ async fn grok_logins_snapshot_swap_and_forget() {
         HarnessId::Grok,
     );
     assert_eq!(grok.len(), 1);
+    // The live (and only) one signs grok out of that issuer, so it isn't
+    // re-detected — the only account stays removable (#546 parity).
+    let grok = rows(
+        &accounts.forget(HarnessId::Grok, &a_id).await.unwrap(),
+        HarnessId::Grok,
+    );
+    assert!(grok.is_empty(), "{grok:?}");
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&live).unwrap()).unwrap();
+    assert!(written.get("https://auth.x.ai::client-1").is_none());
+}
+
+/// Removing a per-provider agent's live login drops that store entry only:
+/// other issuers (Grok), other providers' logins and API keys (OpenCode)
+/// stay; Devin's key file goes.
+#[tokio::test]
+async fn forgetting_a_live_login_signs_out_only_that_login() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let grok_file = config.grok_home.join("auth.json");
+    let mut grok = grok_auth("user-a", "a@x.ai", "key-a");
+    grok.as_object_mut().unwrap().insert(
+        "https://sso.corp.example::cli".into(),
+        serde_json::json!({ "refresh_token": "keep-me" }),
+    );
+    write(&grok_file, &grok.to_string());
+    write(
+        &config.opencode_auth_file,
+        &serde_json::json!({
+            "openai": openai_entry("a@example.com", "acct-a"),
+            "anthropic": { "type": "api", "key": "sk-ant-keep" },
+        })
+        .to_string(),
+    );
+    write(
+        &config.devin_credentials_file,
+        "windsurf_api_key = \"devin-key-1234\"\n",
+    );
+    let snapshot = accounts.list(false).await.unwrap();
+    for harness in [HarnessId::Grok, HarnessId::Opencode, HarnessId::Devin] {
+        let live = rows(&snapshot, harness);
+        assert_eq!(live.len(), 1, "{harness:?}");
+        assert!(live[0].active);
+        let left = rows(
+            &accounts.forget(harness, &live[0].id).await.unwrap(),
+            harness,
+        );
+        assert!(left.is_empty(), "{harness:?}: {left:?}");
+        assert!(accounts.read_slots(harness).is_empty(), "{harness:?}");
+    }
+    let grok: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&grok_file).unwrap()).unwrap();
+    assert!(grok.get("https://auth.x.ai::client-1").is_none());
+    assert_eq!(
+        grok["https://sso.corp.example::cli"]["refresh_token"],
+        "keep-me"
+    );
+    let opencode: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config.opencode_auth_file).unwrap())
+            .unwrap();
+    assert!(opencode.get("openai").is_none());
+    assert_eq!(opencode["anthropic"]["key"], "sk-ant-keep");
+    assert!(!config.devin_credentials_file.exists());
+    // Nothing comes back on the next list.
+    let snapshot = accounts.list(false).await.unwrap();
+    for harness in [HarnessId::Grok, HarnessId::Opencode, HarnessId::Devin] {
+        assert!(rows(&snapshot, harness).is_empty(), "{harness:?}");
+    }
 }
 
 #[tokio::test]
@@ -677,7 +744,7 @@ async fn opencode_swaps_one_provider_entry_and_leaves_the_rest() {
         .write_keyed_entry(
             HarnessId::Opencode,
             "openai",
-            &openai_entry("a@example.com", "acct-a"),
+            Some(&openai_entry("a@example.com", "acct-a")),
         )
         .unwrap_err();
     assert!(err.to_string().contains("could not be parsed"), "{err}");
@@ -716,7 +783,7 @@ async fn pi_swaps_under_its_lockfile_and_groups_rows_per_provider() {
     let blocked = accounts.write_keyed_entry(
         HarnessId::Pi,
         "openai-codex",
-        &openai_entry("b@example.com", "acct-b"),
+        Some(&openai_entry("b@example.com", "acct-b")),
     );
     assert!(blocked.unwrap_err().to_string().contains("locked"));
     let written: serde_json::Value =
@@ -869,6 +936,118 @@ async fn chatgpt_sign_in_for_pi_lands_on_the_loopback_and_connects_the_first_log
         .await
         .unwrap_err();
     assert!(refused.to_string().contains("/login"), "{refused}");
+}
+
+/// Signing in again as the live account (its tokens dead or revoked) makes
+/// the fresh login live — otherwise the next list would snapshot the dead
+/// live tokens straight back over the fresh slot (#546, for per-provider
+/// stores too).
+#[tokio::test]
+async fn re_signing_in_the_live_chatgpt_account_replaces_its_dead_tokens() {
+    let server = MockServer::start(|method, path, _| match (method, path) {
+        ("POST", "/oauth/token") => (
+            200,
+            serde_json::json!({
+                "access_token": chatgpt_access("a@example.com", "acct-a", "pro"),
+                "refresh_token": "fresh-refresh",
+                "expires_in": 3600,
+            })
+            .to_string(),
+        ),
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    let file = config.pi_agent_dir.join("auth.json");
+    let mut dead = openai_entry("a@example.com", "acct-a");
+    dead["refresh"] = "dead-refresh".into();
+    write(
+        &file,
+        &serde_json::json!({
+            "openai-codex": dead,
+            "anthropic": { "type": "api", "key": "sk-ant-keep" },
+        })
+        .to_string(),
+    );
+    accounts.list(false).await.unwrap();
+
+    let start = accounts.start_login(HarnessId::Pi).await.unwrap();
+    let port = start.callback_port.unwrap();
+    let state = query_param(&start.url, "state");
+    let reply = browser_get(port, &format!("/auth/callback?code=c&state={state}")).await;
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+    let polls = settle(&accounts, &start.login_id).await;
+    assert_eq!(polls.last().unwrap().status, AgentLoginStatus::Done);
+
+    let live: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(live["openai-codex"]["refresh"], "fresh-refresh");
+    assert_eq!(live["anthropic"]["key"], "sk-ant-keep");
+    // A list afterwards keeps the fresh tokens in the slot.
+    let pi = rows(&accounts.list(false).await.unwrap(), HarnessId::Pi);
+    assert_eq!(pi.len(), 1);
+    assert!(pi[0].active);
+    let slot = accounts.read_slots(HarnessId::Pi).pop().unwrap();
+    assert_eq!(slot.credentials["refresh"], "fresh-refresh");
+}
+
+/// A live login zeron can't identify (an opaque token whose profile call
+/// failed) is never replaced by a new sign-in — it has no slot, so it would
+/// be lost.
+#[tokio::test]
+async fn a_new_login_never_replaces_an_unidentified_live_one() {
+    let user_calls = Arc::new(AtomicUsize::new(0));
+    let calls = user_calls.clone();
+    let server = MockServer::start(move |method, path, _| match (method, path) {
+        ("POST", "/login/device/code") => (
+            200,
+            r#"{"device_code":"dc","user_code":"ABCD-1234","verification_uri":"https://github.com/login/device","interval":1}"#.into(),
+        ),
+        ("POST", "/login/oauth/access_token") => {
+            (200, r#"{"access_token":"gho_new","token_type":"bearer"}"#.into())
+        }
+        // The live token's lookup fails; the new login's succeeds.
+        ("GET", "/user") if calls.fetch_add(1, Ordering::SeqCst) == 0 => (401, String::new()),
+        ("GET", "/user") => (200, r#"{"id":42,"login":"octo"}"#.into()),
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&server.base));
+    write(
+        &config.opencode_auth_file,
+        &serde_json::json!({ "github-copilot": {
+            "type": "oauth", "access": "gho_old", "refresh": "gho_old", "expires": 0,
+        }})
+        .to_string(),
+    );
+    let before = rows(&accounts.list(false).await.unwrap(), HarnessId::Opencode);
+    assert!(before[0].active && !before[0].switchable);
+
+    let start = accounts
+        .start_login_with(HarnessId::Opencode, Some("github-copilot"), None)
+        .await
+        .unwrap();
+    let polls = settle(&accounts, &start.login_id).await;
+    assert_eq!(
+        polls.last().unwrap().status,
+        AgentLoginStatus::Done,
+        "{polls:?}"
+    );
+    let live: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config.opencode_auth_file).unwrap())
+            .unwrap();
+    assert_eq!(
+        live["github-copilot"]["refresh"], "gho_old",
+        "live untouched"
+    );
+    let rows = rows(&accounts.list(false).await.unwrap(), HarnessId::Opencode);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        rows.iter()
+            .any(|a| a.email.as_deref() == Some("octo") && !a.active && a.switchable)
+    );
 }
 
 #[tokio::test]
@@ -1693,7 +1872,7 @@ fn opencode_writes_hold_a_zeron_side_lock_only_while_writing() {
     merge_json_entry(
         &file,
         "openai",
-        &serde_json::json!({ "type": "oauth", "access": "a" }),
+        Some(&serde_json::json!({ "type": "oauth", "access": "a" })),
         StoreLock::File(lock.clone()),
     )
     .unwrap();
