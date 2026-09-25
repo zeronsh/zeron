@@ -2904,17 +2904,14 @@ impl Pickers {
         // right after send mints it) still renders the DRAFT footer — the
         // values are identical, so the toolbar never blinks through a
         // half-empty locked state.
-        let (space, session, change_request) = {
+        let (space, session) = {
             let state = self.state.read(cx);
             let space = state.selected_space_row().cloned();
             let session = state
                 .selected_chat
                 .as_ref()
                 .and_then(|_| state.selected_chat_row().cloned());
-            let change_request = session
-                .as_ref()
-                .and_then(|chat| state.change_request_for_chat(chat).cloned());
-            (space, session, change_request)
+            (space, session)
         };
         let row = || {
             // The composer owns the row's animated reveal and negative bottom
@@ -2966,26 +2963,9 @@ impl Pickers {
                         .unwrap_or_else(|| SharedString::from("No ref")),
                     &theme,
                 ));
-            // Checkout + branch stay together. PR and usage form the trailing
-            // status group, independently of the branch label's length.
-            return Some(
-                row()
-                    .pr_0()
-                    .child(left)
-                    .child(right)
-                    .child(div().flex_1().min_w_0())
-                    .when_some(change_request, |el, summary| {
-                        el.child(div().flex_none().child(
-                            crate::change_requests::pull_request_badge(
-                                "composer-pull-request".into(),
-                                summary,
-                                crate::change_requests::ChangeRequestBadgeSurface::Composer,
-                                &theme,
-                            ),
-                        ))
-                    })
-                    .into_any_element(),
-            );
+            // The composer groups activity, PR and usage together to the
+            // right of these workspace labels.
+            return Some(row().child(left).child(right).into_any_element());
         }
 
         // New-session draft: checkout + ref only, LEFT-aligned (device +
@@ -3558,7 +3538,7 @@ impl Pickers {
                             theme.text_muted
                         }),
                 )
-                .when(favorites_view, |el| el.child(tab_indicator(theme.accent))),
+                .when(favorites_view, |el| el.child(popover::tab_indicator(theme.accent))),
         );
         for (ix, descriptor) in descriptors.iter().enumerate() {
             let harness = descriptor.id;
@@ -3590,7 +3570,7 @@ impl Pickers {
                                 theme.text_muted
                             }),
                         ))
-                        .when(is_viewed, |el| el.child(tab_indicator(theme.accent))),
+                        .when(is_viewed, |el| el.child(popover::tab_indicator(theme.accent))),
                 );
         }
 
@@ -4360,23 +4340,6 @@ fn default_badge(theme: &Theme) -> gpui::Div {
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(theme.for_popup().text_muted)
         .child(SharedString::from("Default"))
-}
-
-/// Brand mark + optional tint for a harness (the Claude mark keeps its brand
-/// orange even on the monochrome surface; the mock harness scripts
-/// Claude-flavoured runs, so it wears the Claude mark).
-/// The 2px underline marking the viewed top tab: sits on the tab row's
-/// bottom hairline (the tab is 32px tall inside a 40px row, so -4px lands
-/// exactly on the border), rounded like a capsule.
-fn tab_indicator(tint: gpui::Hsla) -> gpui::Div {
-    div()
-        .absolute()
-        .bottom(px(-4.0))
-        .left(px(6.0))
-        .right(px(6.0))
-        .h(px(2.0))
-        .rounded(px(1.0))
-        .bg(tint)
 }
 
 /// Flatten the picker's visible rows for one tab. The QUERY NEVER LEAVES THE

@@ -334,6 +334,20 @@ pub fn popover_card(theme: &Theme) -> gpui::Div {
         .text_color(theme.text)
 }
 
+/// The 2px underline marking the viewed top tab: sits on the tab row's
+/// bottom hairline (the tab is 32px tall inside a 40px row, so -4px lands
+/// exactly on the border), rounded like a capsule.
+pub(crate) fn tab_indicator(tint: gpui::Hsla) -> gpui::Div {
+    div()
+        .absolute()
+        .bottom(px(-4.0))
+        .left(px(6.0))
+        .right(px(6.0))
+        .h(px(2.0))
+        .rounded(px(1.0))
+        .bg(tint)
+}
+
 /// [`popover_card`] without the shared inset — for popovers that manage their
 /// own internal panes (the harness/model picker's rail + list split).
 pub fn popover_card_flush(theme: &Theme) -> gpui::Div {
@@ -785,6 +799,18 @@ pub fn menu_at(
     content: AnyElement,
     closing: Option<std::time::Instant>,
 ) -> AnyElement {
+    menu_at_with_priority(id, position, content, closing, 1)
+}
+
+/// Context menus launched from another popover need a higher layer so their
+/// rows receive clicks before the parent menu's outside-click guard.
+pub(crate) fn menu_at_with_priority(
+    id: impl Into<SharedString>,
+    position: Point<Pixels>,
+    content: AnyElement,
+    closing: Option<std::time::Instant>,
+    priority: usize,
+) -> AnyElement {
     let exit = closing.map(exit_progress);
     let content = frosted_menu(exit, content);
     gpui::deferred(
@@ -794,7 +820,7 @@ pub fn menu_at(
             .snap_to_window_with_margin(px(8.0))
             .child(menu_motion(id.into(), exit, div().occlude().child(content))),
     )
-    .priority(1)
+    .priority(priority)
     .into_any_element()
 }
 

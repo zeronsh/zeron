@@ -5241,6 +5241,8 @@ pub struct Composer {
     /// Composer actions row plus the new-session floating target tab
     /// ([`Pickers::render_new_thread_target_selectors`]).
     pickers: Entity<Pickers>,
+    /// Installed only on the main conversation's composer by the shell.
+    pub(crate) chat_activity: Option<Entity<crate::chat_activity::ChatActivity>>,
     /// Draft text per chat key ("" = new-chat canvas), surviving navigation.
     drafts: HashMap<String, String>,
     /// Staged-but-unsent attachments per chat key (use-attachments.ts `stash`):
@@ -5516,6 +5518,7 @@ impl Composer {
             input,
             queue_edit_draft: None,
             pickers,
+            chat_activity: None,
             drafts: HashMap::new(),
             attachments: HashMap::new(),
             appshots: HashMap::new(),
@@ -9548,7 +9551,14 @@ impl Render for Composer {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
-            let usage = self.state.read(cx).context_usage;
+            let state = self.state.read(cx);
+            let usage = state.context_usage;
+            let change_request = state
+                .selected_space_row()
+                .filter(|space| space.git_detected)
+                .and_then(|_| state.selected_chat_row())
+                .and_then(|chat| state.change_request_for_chat(chat))
+                .cloned();
             container.child(
                 div()
                     .w_full()
@@ -9579,15 +9589,30 @@ impl Render for Composer {
                                 .items_center()
                                 .opacity(session_chrome_opacity)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
-                                .children(crate::context_usage::has_window(usage).then(|| {
-                                    div().flex_none().pr(px(10.0)).child(
-                                        crate::context_usage::render(
-                                            usage,
-                                            self.state.clone(),
-                                            &theme,
-                                        ),
-                                    )
-                                })),
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.0))
+                                        .pr(px(10.0))
+                                        .children(self.chat_activity.clone())
+                                        .children(change_request.map(|summary| {
+                                            crate::change_requests::pull_request_badge(
+                                                "composer-pull-request".into(),
+                                                summary,
+                                                crate::change_requests::ChangeRequestBadgeSurface::Composer,
+                                                &theme,
+                                            )
+                                        }))
+                                        .children(crate::context_usage::has_window(usage).then(|| {
+                                            crate::context_usage::render(
+                                                usage,
+                                                self.state.clone(),
+                                                &theme,
+                                            )
+                                        })),
+                                ),
                         )
                     }),
             )

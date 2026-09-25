@@ -60,6 +60,8 @@ use crate::transcript::{self, Transcript, TranscriptEvent};
 use crate::workspace_links::resolve_workspace_file_link;
 
 mod actions_ui;
+#[cfg(test)]
+mod chat_activity_tests;
 mod command_palette;
 mod files_panel;
 mod project_icon;
@@ -1473,6 +1475,7 @@ pub struct Shell {
     sidebar_pane: Entity<SidebarPane>,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
+    chat_activity: Entity<crate::chat_activity::ChatActivity>,
     /// Measured height of the bottom chrome stack (status strip + composer +
     /// terminal dock) the full-height transcript scrolls under. Paint-time
     /// measurement schedules another frame whenever this value changes.
@@ -1756,6 +1759,7 @@ pub struct Shell {
     _ticker: Task<()>,
     _state_observation: Subscription,
     _composer_events: Subscription,
+    _chat_activity_events: Subscription,
     /// The primary transcript's spawn-chip events (subagent tabs).
     _transcript_events: Subscription,
     _transcript_invalidation: Subscription,
@@ -1770,6 +1774,42 @@ impl Shell {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        let composer_focus = composer.focus_handle(cx);
+        let chat_activity =
+            cx.new(|cx| crate::chat_activity::ChatActivity::new(state.clone(), composer_focus, cx));
+        composer.update(cx, |composer, _| {
+            composer.chat_activity = Some(chat_activity.clone());
+        });
+        let chat_activity_events = cx.subscribe(&chat_activity, |this: &mut Self, _, event, cx| {
+            use crate::chat_activity::ChatActivityEvent;
+            match event {
+                ChatActivityEvent::OpenSubagent {
+                    doc_id,
+                    title,
+                    frozen,
+                } => {
+                    this.add_subagent_surface(
+                        this.active_chat.clone(),
+                        doc_id.clone(),
+                        title.clone(),
+                        *frozen,
+                        cx,
+                    );
+                }
+                ChatActivityEvent::OpenChildChat(chat_id) => this.open_child_chat_tab(chat_id, cx),
+                ChatActivityEvent::ChildChatContextMenu { chat_id, position } => {
+                    this.chat_menu.open(ChatMenuState {
+                        chat_id: chat_id.clone(),
+                        tab: None,
+                        position: *position,
+                        page: ChatMenuPage::Root,
+                    });
+                    cx.notify();
+                }
+                ChatActivityEvent::NewChildChat => this.create_child_chat(None, cx),
+                ChatActivityEvent::ForkChat => this.create_side_chat(cx),
+            }
+        });
         let links = Self::session_links(None, cx);
         transcript.update(cx, |transcript, _| {
             transcript.set_workspace_link_handler(links)
@@ -1847,6 +1887,9 @@ impl Shell {
                     if live || minute_changed {
                         cx.notify();
                     }
+                    if minute_changed && shell.chat_activity.read(cx).is_open() {
+                        shell.chat_activity.update(cx, |_, cx| cx.notify());
+                    }
                 });
                 if alive.is_err() {
                     break;
@@ -1920,6 +1963,7 @@ impl Shell {
             sidebar_pane,
             transcript,
             composer,
+            chat_activity,
             // Seed with the compact composer stack's rough height so the
             // first frame's clearance isn't zero (the measure corrects it).
             bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),
@@ -2074,6 +2118,7 @@ impl Shell {
             _ticker: ticker,
             _state_observation: observation,
             _composer_events: composer_events,
+            _chat_activity_events: chat_activity_events,
             _transcript_events: transcript_events,
             _transcript_invalidation: transcript_invalidation,
         }
@@ -3088,13 +3133,6 @@ impl Shell {
                     FilesEvent::CloseReady => {
                         this.on_file_close_ready(RightSurface::File(id), &event_panel_key, cx)
                     }
-                    // Footer rows exist on the explorer only; an editor
-                    // surface never emits them.
-                    FilesEvent::OpenSubagent { .. }
-                    | FilesEvent::OpenChildChat(_)
-                    | FilesEvent::ChildChatContextMenu { .. }
-                    | FilesEvent::NewChildChat
-                    | FilesEvent::ForkChat => {}
                     FilesEvent::CloseCancelled => {
                         this.cancel_file_close(RightSurface::File(id), cx)
                     }
@@ -4515,6 +4553,7 @@ impl Shell {
             || self.section_menu.is_some()
             || self.add_space.is_some()
             || self.composer.read(cx).pickers().read(cx).is_open()
+            || self.chat_activity.read(cx).is_open()
     }
 
     /// Track held modifiers for sidebar jump hints and the queue's submit hint.
@@ -7849,6 +7888,10 @@ impl Shell {
     /// Resolve shell-owned Escape surfaces in capture phase, before focused
     /// descendants such as an integrated terminal can consume the key.
     fn capture_escape_surface(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.chat_menu.is_open() && self.chat_activity.read(cx).is_open() {
+            self.close_chat_menu(cx);
+            return true;
+        }
         // Modals and context menus sit above the rest of the shell. Preserve
         // their existing behavior: only surfaces that already have a Cancel
         // path close here; the others remain explicit blockers.
@@ -7988,6 +8031,12 @@ impl Shell {
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).for_popup();
         let mut overlays: Vec<AnyElement> = Vec::new();
+        let child_overlay_open = self.chat_menu.get().is_some()
+            || self.rename_dialog.is_some()
+            || self.delete_confirm.is_some();
+        self.chat_activity.update(cx, |activity, cx| {
+            activity.set_child_overlay_open(child_overlay_open, cx);
+        });
 
         if let Some(menu_state) = self.chat_menu.get().cloned() {
             let chat_id = menu_state.chat_id;
@@ -8018,6 +8067,7 @@ impl Shell {
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
                             .id("chat-menu-rename")
+                            .debug_selector(|| "chat-menu-rename".into())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.open_rename_chat(rename_id.clone(), cx)
                             }))
@@ -8074,6 +8124,7 @@ impl Shell {
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-delete-{chat_id}"))
                             .id("chat-menu-delete")
+                            .debug_selector(|| "chat-menu-delete".into())
                             .text_color(theme.danger)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.close_chat_menu(cx);
@@ -8210,11 +8261,16 @@ impl Shell {
                 }
             }
             let menu = menu.into_any_element();
-            overlays.push(popover::menu_at(
+            overlays.push(popover::menu_at_with_priority(
                 "chat-context-menu",
                 position,
                 menu,
                 chat_menu_closing,
+                if self.chat_activity.read(cx).is_open() {
+                    2
+                } else {
+                    1
+                },
             ));
         }
 
@@ -8247,6 +8303,7 @@ impl Shell {
                         .child(
                             popover::btn_ghost(&theme, "Cancel", "rename-chat-cancel")
                                 .id("rename-chat-cancel")
+                                .debug_selector(|| "rename-chat-cancel".into())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.rename_dialog = None;
                                     cx.notify();
@@ -8303,6 +8360,7 @@ impl Shell {
                         .child(
                             popover::btn_ghost(&theme, "Cancel", "delete-chat-cancel")
                                 .id("delete-chat-cancel")
+                                .debug_selector(|| "delete-chat-cancel".into())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.delete_confirm = None;
                                     cx.notify();
