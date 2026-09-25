@@ -3373,7 +3373,12 @@ fn part_snapshot_events(
                 });
             let mut events = Vec::new();
             let has_input = input.as_object().is_some_and(|o| !o.is_empty());
-            if !entry.tool_started && (has_input || matches!(status, "completed" | "error")) {
+            // `running` means the input is final — including a tool that takes
+            // no arguments, which must count as open so a steer never aborts
+            // it (preemption waits for open tools).
+            if !entry.tool_started
+                && (has_input || matches!(status, "running" | "completed" | "error"))
+            {
                 entry.tool_started = true;
                 events.push(AgentEvent::ToolCall {
                     id: call_id.clone(),

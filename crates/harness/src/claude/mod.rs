@@ -748,6 +748,9 @@ async fn run_session(session: Session) {
 
     let mut norm = Normalizer::new();
     let mut pending_steers = std::collections::VecDeque::new();
+    // Top-level tool calls in flight: a steer must not abort them (see
+    // `wire::steer_message_line`).
+    let mut open_tools = std::collections::HashSet::new();
     let mut steering_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;
@@ -793,6 +796,16 @@ async fn run_session(session: Session) {
                         }
                     }
                     for ev in norm.normalize(frame, interrupted) {
+                        match &ev {
+                            AgentEvent::ToolCall { id, .. } => {
+                                open_tools.insert(id.clone());
+                            }
+                            AgentEvent::ToolResult { id, .. } => {
+                                open_tools.remove(id);
+                            }
+                            AgentEvent::Done { .. } => open_tools.clear(),
+                            _ => {}
+                        }
                         let is_done = matches!(ev, AgentEvent::Done { .. });
                         // A `now` steer ends the turn it interrupts with a
                         // result frame; the steer continues the run, so that
@@ -822,7 +835,11 @@ async fn run_session(session: Session) {
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
                     let id = uuid::Uuid::new_v4().to_string();
-                    let line = wire::steer_message_line(&apply_ultrathink(reasoning, &msg.prompt), &id);
+                    let line = wire::steer_message_line(
+                        &apply_ultrathink(reasoning, &msg.prompt),
+                        &id,
+                        open_tools.is_empty(),
+                    );
                     pending_steers.push_back(id);
                     if stdin_tx.send(StdinMsg::Line(line)).is_err() { break 'main; }
                 }

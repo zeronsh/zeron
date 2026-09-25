@@ -1032,6 +1032,29 @@ fn tool_parts_open_and_resolve_once() {
     ));
 }
 
+/// A running tool that takes no arguments is open too: steering preempts
+/// only when no tool is open, so an unseen one would be aborted.
+#[test]
+fn a_running_tool_without_arguments_opens_before_it_completes() {
+    let mut feed = feed_with_assistant("msg_a");
+    let pending = json!({
+        "id": "prt_w", "messageID": "msg_a", "sessionID": "ses_1",
+        "type": "tool", "tool": "slow_slow_wait", "callID": "call-w",
+        "state": {"status": "pending", "input": {}},
+    });
+    assert!(part_snapshot_events(&mut feed, &pending, true, None).is_empty());
+    let running = json!({
+        "id": "prt_w", "messageID": "msg_a", "sessionID": "ses_1",
+        "type": "tool", "tool": "slow_slow_wait", "callID": "call-w",
+        "state": {"status": "running", "input": {}},
+    });
+    let events = part_snapshot_events(&mut feed, &running, true, None);
+    assert!(
+        matches!(events.as_slice(), [AgentEvent::ToolCall { id, .. }] if id == "call-w"),
+        "{events:?}"
+    );
+}
+
 #[test]
 fn task_spawn_registers_child_by_metadata_and_completion_settles() {
     for name in ["task", "subagent"] {
