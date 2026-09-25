@@ -199,7 +199,11 @@ fn parse_variant(family: &str, label: &str) -> (String, Option<ReasoningLevel>, 
     {
         let (base, effort, fast) = split_effort(primary);
         let (sidekick, _, sidekick_fast) = split_effort_keep_level(sidekick);
-        return (format!("({base} + {sidekick})"), effort, fast || sidekick_fast);
+        return (
+            format!("({base} + {sidekick})"),
+            effort,
+            fast || sidekick_fast,
+        );
     }
     if rest.starts_with('(') || rest.contains('+') {
         return (rest.to_owned(), None, false);
