@@ -947,6 +947,189 @@ fn file_mention_links(text: &str) -> Vec<FileMentionLink> {
         .collect()
 }
 
+fn parse_element_details(inner: &str) -> (String, String) {
+    let path = format!("[Element: {}]", inner.trim());
+    let mut desc = inner.trim();
+    if let Some(quote_pos) = desc.find('"') {
+        desc = desc[..quote_pos].trim();
+    }
+    let last_segment = desc.rsplit('>').next().unwrap_or(desc).trim();
+
+    let basename = if let Some(hash_pos) = last_segment.find('#') {
+        let tag = &last_segment[..hash_pos];
+        let after_hash = &last_segment[hash_pos + 1..];
+        let id_end = after_hash
+            .find(|c: char| c == '.' || c == '[' || c == ':' || c.is_whitespace())
+            .unwrap_or(after_hash.len());
+        let id = &after_hash[..id_end];
+        if tag.is_empty() {
+            format!("#{id}")
+        } else {
+            format!("{tag}#{id}")
+        }
+    } else if let Some(dot_pos) = last_segment.find('.') {
+        let tag = &last_segment[..dot_pos];
+        let after_dot = &last_segment[dot_pos + 1..];
+        let class_end = after_dot
+            .find(|c: char| c == '.' || c == '[' || c == ':' || c.is_whitespace())
+            .unwrap_or(after_dot.len());
+        let first_class = &after_dot[..class_end];
+        if first_class.is_empty() {
+            if tag.is_empty() {
+                "element".to_string()
+            } else {
+                tag.to_string()
+            }
+        } else if tag.is_empty() {
+            format!(".{first_class}")
+        } else {
+            format!("{tag}.{first_class}")
+        }
+    } else {
+        let tag_end = last_segment
+            .find(|c: char| c == ':' || c == '[' || c.is_whitespace())
+            .unwrap_or(last_segment.len());
+        let tag = &last_segment[..tag_end];
+        if tag.is_empty() {
+            "element".to_string()
+        } else {
+            tag.to_string()
+        }
+    };
+
+    let basename = if basename.chars().count() > 32 {
+        let truncated: String = basename.chars().take(31).collect();
+        format!("{truncated}…")
+    } else {
+        basename
+    };
+
+    (basename, path)
+}
+
+fn element_mention_links(text: &str) -> Vec<FileMentionLink> {
+    if !text.contains("[Element: ") && !text.contains("```browser_element") {
+        return Vec::new();
+    }
+    let mut links = Vec::new();
+
+    if text.contains("```browser_element") {
+        let marker = "```browser_element";
+        let mut search_from = 0;
+        while let Some(rel_start) = text[search_from..].find(marker) {
+            let marker_start = search_from + rel_start;
+            let mut start = marker_start;
+            let before = text[..marker_start].trim_end();
+            if let Some(at_idx) = before.rfind('@') {
+                if text[at_idx + 1..marker_start].chars().all(|c| c.is_whitespace()) {
+                    start = at_idx;
+                }
+            }
+            let content_start = marker_start + marker.len();
+            if let Some(close_rel) = text[content_start..].find("```") {
+                let close_idx = content_start + close_rel;
+                let mut end = close_idx + 3;
+                let mut trail = 0;
+                while text[end + trail..].starts_with(' ') || text[end + trail..].starts_with('\t') {
+                    trail += 1;
+                }
+                if text[end + trail..].starts_with("\r\n") {
+                    end += trail + 2;
+                } else if text[end + trail..].starts_with('\n') {
+                    end += trail + 1;
+                }
+                let block_content = &text[content_start..close_idx];
+                let mut tag = String::new();
+                for line in block_content.lines() {
+                    let trimmed = line.trim();
+                    if let Some(rest) = trimmed.strip_prefix("tag:") {
+                        tag = rest.trim().to_string();
+                        break;
+                    }
+                }
+                if tag.is_empty() {
+                    if let Some(tag_idx) = block_content.find("tag:") {
+                        let after = block_content[tag_idx + 4..].trim_start();
+                        let tag_str = after.split_whitespace().next().unwrap_or("");
+                        if !tag_str.is_empty() {
+                            tag = tag_str.to_string();
+                        }
+                    }
+                }
+                let basename = if tag.is_empty() {
+                    "element".to_string()
+                } else {
+                    tag
+                };
+                links.push(FileMentionLink {
+                    range: start..end,
+                    basename,
+                    path: text[start..close_idx + 3].trim().to_string(),
+                    is_dir: false,
+                    prefix: '◈',
+                });
+                search_from = end;
+            } else {
+                search_from = content_start;
+            }
+        }
+    }
+
+    if text.contains("[Element: ") {
+        let marker = "[Element: ";
+        let mut search_from = 0;
+        while let Some(rel_start) = text[search_from..].find(marker) {
+            let start = search_from + rel_start;
+            let content_start = start + marker.len();
+            let mut depth = 1usize;
+            let mut in_quotes = false;
+            let mut escaped = false;
+            let mut end = None;
+            for (i, ch) in text[content_start..].char_indices() {
+                if in_quotes {
+                    if escaped {
+                        escaped = false;
+                    } else if ch == '\\' {
+                        escaped = true;
+                    } else if ch == '"' {
+                        in_quotes = false;
+                    }
+                } else {
+                    match ch {
+                        '"' => in_quotes = true,
+                        '[' => depth += 1,
+                        ']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = Some(content_start + i + 1);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let Some(end_idx) = end else {
+                search_from = content_start;
+                continue;
+            };
+            let inner = &text[content_start..end_idx - 1];
+            let (basename, path) = parse_element_details(inner);
+            links.push(FileMentionLink {
+                range: start..end_idx,
+                basename,
+                path,
+                is_dir: false,
+                prefix: '◈',
+            });
+            search_from = end_idx;
+        }
+    }
+
+    links.sort_by_key(|link| link.range.start);
+    links
+}
+
 #[derive(Debug, Clone, Default)]
 struct TextProjection {
     display: String,
@@ -1192,6 +1375,7 @@ impl TextProjection {
                     prefix: invocation.prefix(),
                 }),
         );
+        links.extend(element_mention_links(raw));
         links.sort_by_key(|link| link.range.start);
         let labels = mention_display_labels(&links);
         let labels = if compact {
@@ -1206,10 +1390,11 @@ impl TextProjection {
             .map(|(link, label)| {
                 let label = label.replace(' ', "\u{00A0}");
                 let marker = link.prefix;
+                let sep = if marker == '◈' { "\u{00A0}" } else { "" };
                 let pad = MENTION_SIDE_PAD;
                 (
                     link.range.clone(),
-                    format!("{pad}{marker}{label}{pad}"),
+                    format!("{pad}{marker}{sep}{label}{pad}"),
                     Some(link),
                 )
             })
@@ -1340,6 +1525,9 @@ fn mention_display_labels(links: &[FileMentionLink]) -> Vec<String> {
             labels
                 .entry((link.prefix, &link.basename, &link.path))
                 .or_insert_with(|| {
+                    if link.prefix == '◈' {
+                        return link.basename.clone();
+                    }
                     let duplicates: Vec<_> = groups[&(link.prefix, link.basename.as_str())]
                         .iter()
                         .filter(|other| other.path != link.path)
@@ -1396,6 +1584,8 @@ pub struct SentMentionSpan {
 pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)> {
     if !raw.contains(FILE_MENTION_SCHEME)
         && !raw.contains(zeron_proto::invocation::INVOCATION_SCHEME)
+        && !raw.contains("[Element: ")
+        && !raw.contains("```browser_element")
     {
         return None;
     }
@@ -4642,6 +4832,7 @@ pub enum ComposerEvent {
         chat_id: String,
         message_id: String,
     },
+    ClearBrowserSelection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5378,6 +5569,8 @@ pub struct Composer {
     /// Set on every session/route change: flips committed before this instant
     /// SNAP instead of morphing (see [`ROUTE_SNAP_MS`]).
     route_snap_until: Option<Instant>,
+    /// Number of element mentions in the active composer text.
+    last_element_mention_count: usize,
     _observe: Subscription,
     _pickers_observe: Subscription,
     /// The footer's rings: plan usage of the session harness's live
@@ -5592,6 +5785,7 @@ impl Composer {
             height_morph: None,
             morph_clock: Instant::now(),
             route_snap_until: None,
+            last_element_mention_count: 0,
             _observe: observe,
             _pickers_observe: pickers_observe,
             account_usage,
@@ -5754,7 +5948,15 @@ impl Composer {
         cx.notify();
     }
 
-    fn add_staged(&mut self, staged: Vec<StagedAttachment>, cx: &mut Context<Self>) {
+    pub(crate) fn add_staged_attachment(
+        &mut self,
+        attachment: StagedAttachment,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_staged(vec![attachment], cx);
+    }
+
+    pub(crate) fn add_staged(&mut self, staged: Vec<StagedAttachment>, cx: &mut Context<Self>) {
         if self.queue_edit_finishing {
             return;
         }
@@ -5812,15 +6014,48 @@ impl Composer {
         }
     }
 
-    fn remove_attachment(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn remove_attachment(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.queue_edit_finishing {
             return;
         }
+        let mut was_inspection = false;
         if let Some(list) = self.attachments.get_mut(&self.current_key) {
+            if let Some(att) = list.iter().find(|a| a.id == id) {
+                if att.name.ends_with("-inspection.png") {
+                    was_inspection = true;
+                }
+            }
             list.retain(|a| a.id != id);
             if list.is_empty() {
                 self.attachments.remove(&self.current_key);
             }
+        }
+        if was_inspection {
+            let has_other_inspection = self
+                .attachments
+                .get(&self.current_key)
+                .map_or(false, |list| list.iter().any(|a| a.name.ends_with("-inspection.png")));
+            if !has_other_inspection {
+                self.input.update(cx, |input, cx| {
+                    let cur_text = input.text().to_string();
+                    let links = element_mention_links(&cur_text);
+                    if !links.is_empty() {
+                        let mut new_text = String::new();
+                        let mut at = 0;
+                        for link in &links {
+                            new_text.push_str(&cur_text[at..link.range.start]);
+                            at = link.range.end;
+                            if cur_text[at..].starts_with(' ') {
+                                at += 1;
+                            }
+                        }
+                        new_text.push_str(&cur_text[at..]);
+                        input.set_text(new_text.trim_start().to_string(), cx);
+                    }
+                });
+                self.last_element_mention_count = 0;
+            }
+            cx.emit(ComposerEvent::ClearBrowserSelection);
         }
         cx.notify();
     }
@@ -6492,6 +6727,21 @@ impl Composer {
     }
 
     fn on_input_edited(&mut self, cx: &mut Context<Self>) {
+        let input_text = self.input.read(cx).text().to_string();
+        let current_element_count = element_mention_links(&input_text).len();
+        if current_element_count < self.last_element_mention_count {
+            if current_element_count == 0 {
+                if let Some(list) = self.attachments.get_mut(&self.current_key) {
+                    list.retain(|a| !a.name.ends_with("-inspection.png"));
+                    if list.is_empty() {
+                        self.attachments.remove(&self.current_key);
+                    }
+                }
+            }
+            cx.emit(ComposerEvent::ClearBrowserSelection);
+        }
+        self.last_element_mention_count = current_element_count;
+
         if self.wizard.is_some() {
             if self.mention.token.is_some() || self.mention_task.is_some() {
                 self.reset_mention(None, cx);
@@ -7322,6 +7572,7 @@ impl Composer {
                 self.last_rendered_height = 0.0;
                 self.route_snap_until = Some(Instant::now() + Duration::from_millis(ROUTE_SNAP_MS));
             }
+            self.last_element_mention_count = element_mention_links(&draft).len();
             self.input.update(cx, |input, cx| input.set_text(draft, cx));
         }
 
@@ -7461,7 +7712,7 @@ impl Composer {
         cx.notify();
     }
 
-    fn on_submit(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn on_submit(&mut self, cx: &mut Context<Self>) {
         if self.commit_queue_edit(cx) {
             return;
         }
@@ -12633,6 +12884,97 @@ mod tests {
         assert_eq!(spans[1].path.as_ref(), "src/components/");
     }
 
+    #[test]
+    fn element_mention_projection_and_parsing() {
+        let raw = r#"[Element: h1.font-heading.text-[40px].leading-[1].tracking-[-0.025em].text-white.md:text-[72px].md:leading-[72px].md:tracking-[-1.8px] "Powering Networks, Enabling Growth."] change color"#;
+        let projection = TextProjection::new(raw);
+        assert_eq!(projection.mentions.len(), 1);
+        let (link, chip) = &projection.mentions[0];
+        assert_eq!(link.prefix, '◈');
+        assert_eq!(link.basename, "h1.font-heading");
+        assert_eq!(&projection.display[chip.clone()], "\u{00A0}◈\u{00A0}h1.font-heading\u{00A0}");
+        assert_eq!(&projection.display, "\u{00A0}◈\u{00A0}h1.font-heading\u{00A0} change color");
+
+        let (display, spans) = sent_mention_display(raw).expect("element mention projects");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(&display[spans[0].range.clone()], "\u{00A0}◈\u{00A0}h1.font-heading\u{00A0}");
+
+        let long_raw = r#"[Element: div.very-long-custom-class-name-that-exceeds-the-maximum-badge-limit] test"#;
+        let proj_long = TextProjection::new(long_raw);
+        assert_eq!(proj_long.mentions.len(), 1);
+        assert!(proj_long.mentions[0].0.basename.ends_with('…'));
+        assert_eq!(proj_long.mentions[0].0.basename.chars().count(), 32);
+    }
+
+    #[test]
+    fn element_mention_multiple_inline_projection() {
+        let raw = r#"[Element: h1.font-heading "Title"] change this, [Element: p.mt-6 "text"], and [Element: a.btn "link"] to red"#;
+        let projection = TextProjection::new(raw);
+        assert_eq!(projection.mentions.len(), 3);
+        assert_eq!(projection.mentions[0].0.basename, "h1.font-heading");
+        assert_eq!(projection.mentions[1].0.basename, "p.mt-6");
+        assert_eq!(projection.mentions[2].0.basename, "a.btn");
+        assert_eq!(
+            &projection.display,
+            "\u{00A0}◈\u{00A0}h1.font-heading\u{00A0} change this, \u{00A0}◈\u{00A0}p.mt-6\u{00A0}, and \u{00A0}◈\u{00A0}a.btn\u{00A0} to red"
+        );
+
+        let (display, spans) = sent_mention_display(raw).expect("element mentions project");
+        assert_eq!(spans.len(), 3);
+        assert_eq!(&display[spans[0].range.clone()], "\u{00A0}◈\u{00A0}h1.font-heading\u{00A0}");
+        assert_eq!(&display[spans[1].range.clone()], "\u{00A0}◈\u{00A0}p.mt-6\u{00A0}");
+        assert_eq!(&display[spans[2].range.clone()], "\u{00A0}◈\u{00A0}a.btn\u{00A0}");
+    }
+
+    #[test]
+    fn element_mention_popup_flow_with_tailwind_brackets() {
+        let raw = r#"[Element: h1.font-heading.text-[40px] "Powering Networks, Enabling Growth."] cek title ini dan [Element: p.mt-6.max-w-[500px].text-lg.leading-7.text-white/80.md:text-xl "Delivering reliable infrastructure, and integrated digital solutions for homes, enterprises, and public services across Indonesia."] pakai font apa"#;
+        let projection = TextProjection::new(raw);
+        assert_eq!(projection.mentions.len(), 2);
+        assert_eq!(projection.mentions[0].0.basename, "h1.font-heading");
+        assert_eq!(projection.mentions[1].0.basename, "p.mt-6");
+        assert_eq!(
+            &projection.display,
+            "\u{00A0}◈\u{00A0}h1.font-heading\u{00A0} cek title ini dan \u{00A0}◈\u{00A0}p.mt-6\u{00A0} pakai font apa"
+        );
+    }
+
+    #[test]
+    fn element_mention_cursor_browser_element_format() {
+        let raw = "@\n```browser_element\nThe user selected this node in the browser preview (blue outline in the screenshot).\n\ntag: h1\ndom_path: main > div.bg-canvas > section.relative.flex.min-h-[520px].flex-col.md:min-h-[593px] > div.relative.z-10.flex.w-full.flex-1.flex-col.justify-end.px-6.pb-16.md:px-[69px] > h1.font-heading.text-[40px].leading-none.tracking-[-0.025em].text-white.md:text-[72px].md:leading-[72px].md:tracking-[-1.8px].mb-6\nclass: font-heading text-[40px] leading-none tracking-[-0.025em] text-white md:text-[72px] md:leading-[72px] md:tracking-[-1.8px] mb-6\nvisible_text: Coverage Area\nbounds_css_px: top=387 left=69 width=1376 height=72\nattributes:\n  class=font-heading text-[40px] leading-none tracking-[-0.025em] text-white md:text-[72px] md:leading-[72px] md:tracking-[-1...\n```\n ubah title ini dan title @\n```browser_element\nThe user selected this node in the browser preview (blue outline in the screenshot).\n\ntag: h2\ndom_path: main > div.bg-canvas > section.px-6.py-16.md:px-[69px][0] > h2.font-heading.text-4xl.leading-none.text-ink.md:text-[48px]\nclass: font-heading text-4xl leading-none text-ink md:text-[48px]\nvisible_text: Is your area within IDEANET coverage?\nbounds_css_px: top=657 left=69 width=1376 height=48\nattributes:\n  class=font-heading text-4xl leading-none text-ink md:text-[48px]\n```\n untuk pakai font heading";
+
+        let projection = TextProjection::new(raw);
+        assert_eq!(projection.mentions.len(), 2);
+        assert_eq!(projection.mentions[0].0.basename, "h1");
+        assert_eq!(projection.mentions[1].0.basename, "h2");
+        assert_eq!(
+            &projection.display,
+            "\u{00A0}◈\u{00A0}h1\u{00A0} ubah title ini dan title \u{00A0}◈\u{00A0}h2\u{00A0} untuk pakai font heading"
+        );
+
+        let (display, spans) = sent_mention_display(raw).expect("browser_element mentions project");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(&display[spans[0].range.clone()], "\u{00A0}◈\u{00A0}h1\u{00A0}");
+        assert_eq!(&display[spans[1].range.clone()], "\u{00A0}◈\u{00A0}h2\u{00A0}");
+        assert_eq!(
+            display,
+            "\u{00A0}◈\u{00A0}h1\u{00A0} ubah title ini dan title \u{00A0}◈\u{00A0}h2\u{00A0} untuk pakai font heading"
+        );
+    }
+
+    #[test]
+    fn element_mention_cursor_browser_element_tag_fallback() {
+        let raw = "@\n```browser_element\ntag: a\n```\n cek button ini dan button @\n```browser_element The user selected this node. tag: a dom_path: a.btn```\n pakai warna apa";
+        let projection = TextProjection::new(raw);
+        assert_eq!(projection.mentions.len(), 2);
+        assert_eq!(projection.mentions[0].0.basename, "a");
+        assert_eq!(projection.mentions[1].0.basename, "a");
+        assert_eq!(
+            &projection.display,
+            "\u{00A0}◈\u{00A0}a\u{00A0} cek button ini dan button \u{00A0}◈\u{00A0}a\u{00A0} pakai warna apa"
+        );
+    }
+
     /// Ordinary prompts must stay on the zero-cost path, including ones that
     /// merely *talk about* the scheme without containing a valid mention.
     #[test]
@@ -13705,6 +14047,60 @@ mod appshot_rebase_tests {
             assert_eq!(composer.staged_appshots().len(), 2);
             assert_eq!(composer.input.read(cx).text(), "original\n\nedited");
         });
+    }
+
+    #[gpui::test]
+    fn removing_element_mention_or_attachment_clears_browser_selection(cx: &mut TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = events.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
+                captured.borrow_mut().push(event.clone());
+            })
+        });
+
+        // 1. Add element mention and inspection attachment
+        composer.update(cx, |composer, cx| {
+            composer.input.update(cx, |input, cx| {
+                input.set_text(r#"[Element: button#submit "Submit"] some text"#, cx);
+            });
+            let staged = attachments::stage_png_bytes("button-inspection.png".into(), vec![0u8; 8]);
+            composer.add_staged_attachment(staged, cx);
+        });
+        events.borrow_mut().clear();
+
+        // 2. Remove the element mention from text -> should emit ClearBrowserSelection and remove attachment
+        composer.update(cx, |composer, cx| {
+            composer.input.update(cx, |input, cx| {
+                input.set_text("some text", cx);
+            });
+        });
+        assert!(events.borrow().iter().any(|e| matches!(e, ComposerEvent::ClearBrowserSelection)));
+        composer.update(cx, |composer, _| {
+            assert!(composer.attachments.get(&composer.current_key).is_none());
+        });
+
+        // 3. Reverse: add both, and remove the attachment -> should clear mention & selection
+        events.borrow_mut().clear();
+        let att_id = composer.update(cx, |composer, cx| {
+            composer.input.update(cx, |input, cx| {
+                input.set_text(r#"[Element: h1 "Title"] more text"#, cx);
+            });
+            let staged = attachments::stage_png_bytes("h1-inspection.png".into(), vec![0u8; 8]);
+            let id = staged.id.clone();
+            composer.add_staged_attachment(staged, cx);
+            id
+        });
+        events.borrow_mut().clear();
+
+        composer.update(cx, |composer, cx| {
+            composer.remove_attachment(&att_id, cx);
+            assert!(composer.attachments.get(&composer.current_key).is_none());
+            assert!(!composer.input.read(cx).text().contains("[Element:"));
+        });
+        assert!(events.borrow().iter().any(|e| matches!(e, ComposerEvent::ClearBrowserSelection)));
     }
 }
 

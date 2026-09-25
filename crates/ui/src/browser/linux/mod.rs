@@ -22,6 +22,8 @@ pub enum NativeEvent {
     NewTab(String),
     Clipboard(String),
     Menu(Value),
+    InspectElement(super::model::InspectedElement),
+    ConsoleLog(super::model::ConsoleLogEntry),
 }
 
 #[derive(Clone, Default)]
@@ -288,6 +290,26 @@ impl NativePage {
     pub fn command(&self, value: Value) {
         let _ = self.worker.send(self.id, value);
     }
+    pub fn set_design_mode(&self, enabled: bool, _theme: &crate::theme::Theme) {
+        self.command(json!({"cmd":"design-mode","enabled":enabled}));
+    }
+    pub fn sync_design_mode_theme(&self, _theme: &crate::theme::Theme) {}
+    pub fn is_focused(&self) -> bool {
+        false
+    }
+    pub fn clear_selection(&self) {
+        self.command(json!({"cmd":"clear-design-selection"}));
+    }
+    pub fn evaluate_with_result(
+        &self,
+        _script: &str,
+        cb: impl FnOnce(Result<Value, String>) + 'static,
+    ) {
+        cb(Err("evaluate not implemented on linux".into()));
+    }
+    pub fn snapshot(&self, _clip: Option<[f64; 4]>, cb: impl FnOnce(Option<Vec<u8>>) + 'static) {
+        cb(None);
+    }
     #[cfg(feature = "browser-fixture")]
     pub fn evaluate(&self, script: &str) {
         *self.route.evaluation.lock().unwrap() = None;
@@ -361,7 +383,19 @@ impl super::BrowserSurface {
                 if page != self.page {
                     self.page = page;
                     cx.emit(super::BrowserEvent::Changed);
+                    if self.design_mode && !self.page.loading {
+                        native.set_design_mode(true, crate::theme::Theme::of(cx));
+                    }
                 }
+            }
+            NativeEvent::InspectElement(element) => {
+                cx.emit(super::BrowserEvent::InspectElement(element));
+            }
+            NativeEvent::ConsoleLog(entry) => {
+                if self.console_logs.len() >= 500 {
+                    self.console_logs.remove(0);
+                }
+                self.console_logs.push(entry);
             }
         }
         cx.notify();

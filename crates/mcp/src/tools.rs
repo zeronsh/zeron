@@ -185,10 +185,143 @@ fn catalog() -> Vec<ToolDef> {
                 "archived": { "type": "boolean", "default": true }
             })),
         },
+        ToolDef {
+            name: "browser_get_view",
+            description: "Inspect the current sidebar browser view: active URL, page title, loading status, and recent console errors/warnings.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: "browser_navigate",
+            description: "Navigate the sidebar browser to a URL, or perform navigation actions ('reload', 'back', 'forward'). If the browser is not open, opens it in the sidebar.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "URL to navigate to (e.g. http://localhost:3000)" },
+                    "action": { "type": "string", "enum": ["navigate", "reload", "back", "forward"], "default": "navigate" }
+                },
+                "required": ["url"]
+            }),
+        },
+        ToolDef {
+            name: "browser_console_logs",
+            description: "Retrieve captured JavaScript console logs, errors, and warnings from the sidebar browser page.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "level": { "type": "string", "enum": ["all", "error", "warn", "info", "log"], "default": "all" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
+                    "clear": { "type": "boolean", "description": "Clear accumulated logs after retrieval", "default": false }
+                }
+            }),
+        },
+        ToolDef {
+            name: "browser_click",
+            description: "Click an element in the sidebar browser matching a CSS selector (e.g. 'button#submit', '.btn-primary').",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "CSS selector of the element to click" }
+                },
+                "required": ["selector"]
+            }),
+        },
+        ToolDef {
+            name: "browser_type",
+            description: "Type text into an input or textarea element in the sidebar browser matching a CSS selector.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "CSS selector of the input/textarea" },
+                    "text": { "type": "string", "description": "Text to fill into the input" },
+                    "submit": { "type": "boolean", "default": false, "description": "Whether to press Enter after typing" }
+                },
+                "required": ["selector", "text"]
+            }),
+        },
+        ToolDef {
+            name: "browser_scroll",
+            description: "Scroll the sidebar browser page by direction ('up', 'down', 'top', 'bottom') or to a specific CSS selector.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "direction": { "type": "string", "enum": ["up", "down", "top", "bottom"], "default": "down" },
+                    "selector": { "type": "string", "description": "Optional CSS selector to scroll into view" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "browser_evaluate",
+            description: "Evaluate a JavaScript expression in the sidebar browser page and return the result.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "script": { "type": "string", "description": "JavaScript code to execute" }
+                },
+                "required": ["script"]
+            }),
+        },
+        ToolDef {
+            name: "browser_screenshot",
+            description: "Capture a screenshot of the sidebar browser page or a specific element matching a CSS selector.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "Optional CSS selector to screenshot only this element. If omitted, captures the whole view." }
+                }
+            }),
+        },
     ]
 }
 
 // ---- argument shapes ---------------------------------------------------------
+
+#[derive(Deserialize)]
+struct BrowserNavigateArgs {
+    url: String,
+    #[serde(default = "default_nav_action")]
+    action: String,
+}
+
+fn default_nav_action() -> String {
+    "navigate".into()
+}
+
+#[derive(Deserialize)]
+struct BrowserConsoleLogsArgs {
+    level: Option<String>,
+    limit: Option<usize>,
+    #[serde(default)]
+    clear: bool,
+}
+
+#[derive(Deserialize)]
+struct BrowserClickArgs {
+    selector: String,
+}
+
+#[derive(Deserialize)]
+struct BrowserTypeArgs {
+    selector: String,
+    text: String,
+    #[serde(default)]
+    submit: bool,
+}
+
+#[derive(Deserialize)]
+struct BrowserScrollArgs {
+    direction: Option<String>,
+    selector: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct BrowserEvaluateArgs {
+    script: String,
+}
+
+#[derive(Deserialize)]
+struct BrowserScreenshotArgs {
+    selector: Option<String>,
+}
 
 #[derive(Deserialize)]
 struct ChatArgs {
@@ -384,6 +517,14 @@ impl Tools {
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
+            "browser_get_view" | "browser_state" => self.browser_get_view().await,
+            "browser_navigate" => self.browser_navigate(parse(args)?).await,
+            "browser_console_logs" => self.browser_console_logs(parse(args)?).await,
+            "browser_click" => self.browser_click(parse(args)?).await,
+            "browser_type" => self.browser_type(parse(args)?).await,
+            "browser_scroll" => self.browser_scroll(parse(args)?).await,
+            "browser_evaluate" => self.browser_evaluate(parse(args)?).await,
+            "browser_screenshot" => self.browser_screenshot(parse(args)?).await,
             other => return Err(format!("unknown tool: {other}")),
         };
         result.map_err(|e| e.to_string())
@@ -996,6 +1137,89 @@ impl Tools {
             "replies": replies,
         }))
     }
+
+    async fn browser_get_view(&self) -> anyhow::Result<Value> {
+        self.zeron
+            .call(zeron_rpc::methods::BROWSER_COMMAND, json!({ "action": "get_view" }))
+            .await
+    }
+
+    async fn browser_navigate(&self, args: BrowserNavigateArgs) -> anyhow::Result<Value> {
+        self.zeron
+            .call(
+                zeron_rpc::methods::BROWSER_COMMAND,
+                json!({ "action": args.action, "url": args.url }),
+            )
+            .await
+    }
+
+    async fn browser_console_logs(&self, args: BrowserConsoleLogsArgs) -> anyhow::Result<Value> {
+        self.zeron
+            .call(
+                zeron_rpc::methods::BROWSER_COMMAND,
+                json!({
+                    "action": "console_logs",
+                    "level": args.level.unwrap_or_else(|| "all".into()),
+                    "limit": args.limit.unwrap_or(50),
+                    "clear": args.clear,
+                }),
+            )
+            .await
+    }
+
+    async fn browser_click(&self, args: BrowserClickArgs) -> anyhow::Result<Value> {
+        self.zeron
+            .call(
+                zeron_rpc::methods::BROWSER_COMMAND,
+                json!({ "action": "click", "selector": args.selector }),
+            )
+            .await
+    }
+
+    async fn browser_type(&self, args: BrowserTypeArgs) -> anyhow::Result<Value> {
+        self.zeron
+            .call(
+                zeron_rpc::methods::BROWSER_COMMAND,
+                json!({
+                    "action": "type",
+                    "selector": args.selector,
+                    "text": args.text,
+                    "submit": args.submit,
+                }),
+            )
+            .await
+    }
+
+    async fn browser_scroll(&self, args: BrowserScrollArgs) -> anyhow::Result<Value> {
+        self.zeron
+            .call(
+                zeron_rpc::methods::BROWSER_COMMAND,
+                json!({
+                    "action": "scroll",
+                    "direction": args.direction.unwrap_or_else(|| "down".into()),
+                    "selector": args.selector,
+                }),
+            )
+            .await
+    }
+
+    async fn browser_evaluate(&self, args: BrowserEvaluateArgs) -> anyhow::Result<Value> {
+        self.zeron
+            .call(
+                zeron_rpc::methods::BROWSER_COMMAND,
+                json!({ "action": "evaluate", "script": args.script }),
+            )
+            .await
+    }
+
+    async fn browser_screenshot(&self, args: BrowserScreenshotArgs) -> anyhow::Result<Value> {
+        self.zeron
+            .call(
+                zeron_rpc::methods::BROWSER_COMMAND,
+                json!({ "action": "screenshot", "selector": args.selector }),
+            )
+            .await
+    }
 }
 
 /// claude-code when it is offered here, else the first available harness.
@@ -1089,6 +1313,13 @@ mod tests {
                         .unwrap()
                         .push((method.to_owned(), params));
                     RpcReply::Value(json!({ "commandId": "cmd-1", "id": "q-1" }))
+                }
+                methods::BROWSER_COMMAND => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params.clone()));
+                    RpcReply::Value(json!({ "success": true, "action": params["action"] }))
                 }
                 other => return Err(RpcError::UnknownMethod(other.into())),
             })
@@ -1324,6 +1555,129 @@ mod tests {
         assert_eq!(
             whoami["result"]["structuredContent"]["localDeviceId"],
             "dev-local"
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_tools_invoke_browser_command() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+
+        let nav = tools
+            .call("browser_navigate", json!({ "url": "https://example.com" }))
+            .await
+            .unwrap();
+        assert!(nav.is_object());
+
+        let logs = tools
+            .call("browser_console_logs", json!({ "clear": true }))
+            .await
+            .unwrap();
+        assert!(logs.is_object());
+
+        let click = tools
+            .call("browser_click", json!({ "selector": "#submit" }))
+            .await
+            .unwrap();
+        assert!(click.is_object());
+
+        let typed = tools
+            .call(
+                "browser_type",
+                json!({ "selector": "input#query", "text": "hello", "submit": true }),
+            )
+            .await
+            .unwrap();
+        assert!(typed.is_object());
+
+        let scroll = tools
+            .call(
+                "browser_scroll",
+                json!({ "direction": "down", "selector": "#content" }),
+            )
+            .await
+            .unwrap();
+        assert!(scroll.is_object());
+
+        let eval = tools
+            .call(
+                "browser_evaluate",
+                json!({ "script": "document.title" }),
+            )
+            .await
+            .unwrap();
+        assert!(eval.is_object());
+
+        let shot = tools
+            .call(
+                "browser_screenshot",
+                json!({ "selector": "#preview" }),
+            )
+            .await
+            .unwrap();
+        assert!(shot.is_object());
+
+        let state = tools
+            .call("browser_state", json!({}))
+            .await
+            .unwrap();
+        assert!(state.is_object());
+
+        let writes = world.writes.lock().unwrap();
+        assert_eq!(writes.len(), 8);
+        assert_eq!(writes[0].0, methods::BROWSER_COMMAND);
+        assert_eq!(writes[0].1["action"], "navigate");
+        assert_eq!(writes[0].1["url"], "https://example.com");
+        assert_eq!(writes[1].1["action"], "console_logs");
+        assert_eq!(writes[1].1["clear"], true);
+        assert_eq!(writes[2].1["action"], "click");
+        assert_eq!(writes[2].1["selector"], "#submit");
+        assert_eq!(writes[3].1["action"], "type");
+        assert_eq!(writes[3].1["selector"], "input#query");
+        assert_eq!(writes[3].1["text"], "hello");
+        assert_eq!(writes[3].1["submit"], true);
+        assert_eq!(writes[4].1["action"], "scroll");
+        assert_eq!(writes[4].1["direction"], "down");
+        assert_eq!(writes[4].1["selector"], "#content");
+        assert_eq!(writes[5].1["action"], "evaluate");
+        assert_eq!(writes[5].1["script"], "document.title");
+        assert_eq!(writes[6].1["action"], "screenshot");
+        assert_eq!(writes[6].1["selector"], "#preview");
+        assert_eq!(writes[7].1["action"], "get_view");
+    }
+
+    #[tokio::test]
+    async fn browser_tools_validate_required_arguments() {
+        let world = Arc::new(World::default());
+        let tools = tools(world, Origin::default());
+
+        assert!(
+            tools
+                .call("browser_navigate", json!({}))
+                .await
+                .unwrap_err()
+                .contains("missing field `url`")
+        );
+        assert!(
+            tools
+                .call("browser_click", json!({}))
+                .await
+                .unwrap_err()
+                .contains("missing field `selector`")
+        );
+        assert!(
+            tools
+                .call("browser_type", json!({ "selector": "#input" }))
+                .await
+                .unwrap_err()
+                .contains("missing field `text`")
+        );
+        assert!(
+            tools
+                .call("browser_evaluate", json!({}))
+                .await
+                .unwrap_err()
+                .contains("missing field `script`")
         );
     }
 }

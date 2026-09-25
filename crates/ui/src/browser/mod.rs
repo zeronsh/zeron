@@ -17,7 +17,7 @@ use gpui::{
 use model::{PageState, Presentation};
 gpui::actions!(
     browser,
-    [Reload, FocusAddress, NewTab, CloseTab, Back, Forward]
+    [Reload, FocusAddress, NewTab, CloseTab, Back, Forward, ToggleDesignMode]
 );
 
 pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
@@ -48,6 +48,7 @@ pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
     bind!("mod-w", CloseTab);
     bind!("mod-[", Back);
     bind!("mod-]", Forward);
+    bind!("mod-shift-d", ToggleDesignMode);
     let reload = keymap.get(ShortcutId::BrowserReload);
     if available(reload, Some(ShortcutId::BrowserReload))
         && gpui::Keystroke::parse(&platform_combo(reload)).is_ok()
@@ -65,6 +66,7 @@ pub enum BrowserEvent {
     Changed,
     NewTab(Option<String>),
     Close,
+    InspectElement(model::InspectedElement),
 }
 
 /// A window/profile's ephemeral website data, allocated on first navigation.
@@ -81,6 +83,11 @@ pub struct BrowserSurface {
     focus: FocusHandle,
     pub page: PageState,
     pub favicon: Option<std::sync::Arc<gpui::Image>>,
+    pub design_mode: bool,
+    pub design_mode_epoch: usize,
+    pub design_mode_animating: bool,
+    pub design_mode_theme_key: Option<(crate::theme::Appearance, zeron_theme::SurfaceTreatment)>,
+    pub console_logs: Vec<model::ConsoleLogEntry>,
     address_edited: bool,
     validation: Option<String>,
     remote: bool,
@@ -159,6 +166,11 @@ impl BrowserSurface {
             focus: cx.focus_handle(),
             page: PageState::default(),
             favicon: None,
+            design_mode: false,
+            design_mode_epoch: 0,
+            design_mode_animating: false,
+            design_mode_theme_key: None,
+            console_logs: Vec::new(),
             address_edited: false,
             validation: None,
             remote,
@@ -244,6 +256,63 @@ impl BrowserSurface {
             native.present(presentation);
         }
         cx.notify();
+    }
+
+    pub fn is_focused(&self, window: &Window) -> bool {
+        if self.focus.is_focused(window) {
+            return true;
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if self.native.as_ref().map_or(false, |n| n.is_focused()) {
+            return true;
+        }
+        false
+    }
+
+    pub fn toggle_design_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_focused(window) {
+            return;
+        }
+        self.toggle_design_mode_force(cx);
+    }
+
+    pub fn toggle_design_mode_force(&mut self, cx: &mut Context<Self>) {
+        self.design_mode = !self.design_mode;
+        self.design_mode_epoch = self.design_mode_epoch.wrapping_add(1);
+        self.design_mode_animating = true;
+        let epoch = self.design_mode_epoch;
+        let duration = crate::motion::RESIZE
+            .total()
+            .mul_f32(crate::motion::speed_scale());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(duration).await;
+            this.update(cx, |this, cx| {
+                if this.design_mode_epoch == epoch {
+                    this.design_mode_animating = false;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if let Some(native) = &self.native {
+            let theme = crate::theme::Theme::of(cx);
+            self.design_mode_theme_key = Some((theme.appearance, theme.surface_treatment));
+            native.set_design_mode(self.design_mode, theme);
+        }
+        if !self.design_mode {
+            self.clear_selection();
+        }
+        cx.notify();
+    }
+
+    pub fn clear_selection(&mut self) {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if let Some(native) = &self.native {
+            native.clear_selection();
+        }
     }
 
     #[cfg(feature = "browser-fixture")]
@@ -368,7 +437,7 @@ impl BrowserSurface {
         self.navigate(&url, window, cx);
     }
 
-    fn reload(&mut self, cx: &mut Context<Self>) {
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(native) = &self.native {
             if self.page.error.is_some() {
@@ -396,13 +465,209 @@ impl BrowserSurface {
         }
     }
 
-    fn history(&mut self, forward: bool) {
+    pub fn history(&mut self, forward: bool) {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(native) = &self.native {
             native.history(forward);
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let _ = forward;
+    }
+
+    pub fn execute_command(
+        &mut self,
+        action: &str,
+        args: &serde_json::Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        cb: impl FnOnce(Result<serde_json::Value, String>) + 'static,
+    ) {
+        fn parse_eval_result(res: Result<String, String>) -> Result<serde_json::Value, String> {
+            match res {
+                Ok(raw) => {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
+                            Err(err.to_string())
+                        } else {
+                            Ok(val)
+                        }
+                    } else {
+                        Ok(serde_json::json!({ "result": raw }))
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        }
+        match action {
+            "get_view" => {
+                let val = serde_json::json!({
+                    "url": self.page.url,
+                    "title": self.page.title,
+                    "loading": self.page.loading,
+                    "canBack": self.page.can_back,
+                    "canForward": self.page.can_forward,
+                    "consoleLogCount": self.console_logs.len(),
+                });
+                cb(Ok(val));
+            }
+            "navigate" => {
+                let url = args.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+                if url.is_empty() {
+                    cb(Err("Missing url".into()));
+                    return;
+                }
+                self.navigate(url, window, cx);
+                cb(Ok(serde_json::json!({ "navigating": url })));
+            }
+            "reload" => {
+                self.reload(cx);
+                cb(Ok(serde_json::json!({ "reloaded": true })));
+            }
+            "back" => {
+                self.history(false);
+                cb(Ok(serde_json::json!({ "back": true })));
+            }
+            "forward" => {
+                self.history(true);
+                cb(Ok(serde_json::json!({ "forward": true })));
+            }
+            "console_logs" => {
+                let level = args.get("level").and_then(|v| v.as_str()).unwrap_or("all");
+                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+                let filtered: Vec<_> = self
+                    .console_logs
+                    .iter()
+                    .rev()
+                    .filter(|l| level == "all" || l.level.eq_ignore_ascii_case(level))
+                    .take(limit)
+                    .cloned()
+                    .collect();
+                if args.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    self.console_logs.clear();
+                }
+                cb(Ok(serde_json::json!({ "logs": filtered })));
+            }
+            "click" => {
+                let selector = args.get("selector").and_then(|v| v.as_str()).unwrap_or_default();
+                let script = format!(
+                    r#"(() => {{
+                        const el = document.querySelector({selector:?});
+                        if (!el) return JSON.stringify({{ error: "Element not found: " + {selector:?} }});
+                        el.click();
+                        return JSON.stringify({{ ok: true, message: "Clicked element" }});
+                    }})()"#
+                );
+                #[cfg(target_os = "macos")]
+                if let Some(native) = &self.native {
+                    native.evaluate_with_result(&script, move |res| {
+                        cb(parse_eval_result(res));
+                    });
+                } else {
+                    cb(Err("Native browser not active".into()));
+                }
+                #[cfg(not(target_os = "macos"))]
+                cb(Err("Not supported on this platform".into()));
+            }
+            "type" => {
+                let selector = args.get("selector").and_then(|v| v.as_str()).unwrap_or_default();
+                let text = args.get("text").and_then(|v| v.as_str()).unwrap_or_default();
+                let submit = args.get("submit").and_then(|v| v.as_bool()).unwrap_or(false);
+                let script = format!(
+                    r#"(() => {{
+                        const el = document.querySelector({selector:?});
+                        if (!el) return JSON.stringify({{ error: "Element not found: " + {selector:?} }});
+                        el.focus();
+                        el.value = {text:?};
+                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        if ({submit}) {{
+                            el.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }}));
+                            if (el.form) el.form.submit();
+                        }}
+                        return JSON.stringify({{ ok: true, message: "Typed into element" }});
+                    }})()"#
+                );
+                #[cfg(target_os = "macos")]
+                if let Some(native) = &self.native {
+                    native.evaluate_with_result(&script, move |res| {
+                        cb(parse_eval_result(res));
+                    });
+                } else {
+                    cb(Err("Native browser not active".into()));
+                }
+                #[cfg(not(target_os = "macos"))]
+                cb(Err("Not supported on this platform".into()));
+            }
+            "scroll" => {
+                let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("down");
+                let selector = args.get("selector").and_then(|v| v.as_str());
+                let script = if let Some(sel) = selector {
+                    format!(
+                        r#"(() => {{
+                            const el = document.querySelector({sel:?});
+                            if (!el) return JSON.stringify({{ error: "Element not found: " + {sel:?} }});
+                            el.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                            return JSON.stringify({{ ok: true, message: "Scrolled to element" }});
+                        }})()"#
+                    )
+                } else {
+                    let js_code = match direction {
+                        "top" => "window.scrollTo({ top: 0, behavior: 'smooth' });",
+                        "bottom" => "window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });",
+                        "up" => "window.scrollBy({ top: -500, behavior: 'smooth' });",
+                        _ => "window.scrollBy({ top: 500, behavior: 'smooth' });",
+                    };
+                    format!(
+                        r#"(() => {{
+                            {js_code}
+                            return JSON.stringify({{ ok: true, message: "Scrolled" }});
+                        }})()"#
+                    )
+                };
+                #[cfg(target_os = "macos")]
+                if let Some(native) = &self.native {
+                    native.evaluate_with_result(&script, move |res| {
+                        cb(parse_eval_result(res));
+                    });
+                } else {
+                    cb(Err("Native browser not active".into()));
+                }
+                #[cfg(not(target_os = "macos"))]
+                cb(Err("Not supported on this platform".into()));
+            }
+            "evaluate" => {
+                let script = args.get("script").and_then(|v| v.as_str()).unwrap_or_default();
+                #[cfg(target_os = "macos")]
+                if let Some(native) = &self.native {
+                    native.evaluate_with_result(script, move |res| {
+                        cb(res.map(|result| serde_json::json!({ "result": result })));
+                    });
+                } else {
+                    cb(Err("Native browser not active".into()));
+                }
+                #[cfg(not(target_os = "macos"))]
+                cb(Err("Not supported on this platform".into()));
+            }
+            "screenshot" => {
+                #[cfg(target_os = "macos")]
+                if let Some(native) = &self.native {
+                    use base64::Engine;
+                    native.snapshot(None, move |bytes| {
+                        if let Some(b) = bytes {
+                            let encoded = base64::engine::general_purpose::STANDARD.encode(&b);
+                            cb(Ok(serde_json::json!({ "image": encoded, "format": "png" })));
+                        } else {
+                            cb(Err("Failed to take screenshot".into()));
+                        }
+                    });
+                } else {
+                    cb(Err("Native browser not active".into()));
+                }
+                #[cfg(not(target_os = "macos"))]
+                cb(Err("Not supported on this platform".into()));
+            }
+            other => cb(Err(format!("Unknown browser action: {other}"))),
+        }
     }
 
     /// Explicitly close even if an async callback temporarily retains an entity.
@@ -475,6 +740,10 @@ impl BrowserSurface {
                 native.present(self.presentation);
                 if finished && let Some(url) = &page.url {
                     native.discover_favicon(url.clone());
+                    if self.design_mode {
+                        let theme = crate::theme::Theme::of(cx);
+                        native.set_design_mode(true, theme);
+                    }
                 }
                 if page != self.page {
                     self.page = page;
@@ -553,6 +822,16 @@ impl BrowserSurface {
                         }
                     });
                 }));
+            }
+            native::NativeEvent::InspectElement(element) => {
+                cx.emit(BrowserEvent::InspectElement(element));
+            }
+            native::NativeEvent::ConsoleLog(entry) => {
+                self.console_logs.push(entry);
+                if self.console_logs.len() > 200 {
+                    self.console_logs.remove(0);
+                }
+                cx.notify();
             }
         }
     }
@@ -733,5 +1012,105 @@ mod tests {
                 1
             );
         });
+    }
+
+    #[gpui::test]
+    fn execute_command_handles_view_logs_and_errors(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            crate::composer::init(cx, Default::default());
+            cx.set_global(crate::theme::Theme::default());
+        });
+        let window = cx.add_window(|window, cx| {
+            BrowserSurface::new(BrowserContext::default(), false, window, cx)
+        });
+        window
+            .update(cx, |browser, window, cx| {
+                browser.page.url = Some("https://example.com/app".into());
+                browser.page.title = "App Dashboard".into();
+                browser.page.loading = false;
+                browser.console_logs.push(model::ConsoleLogEntry {
+                    level: "error".into(),
+                    text: "Uncaught ReferenceError: foo is not defined".into(),
+                    timestamp: 1000,
+                });
+                browser.console_logs.push(model::ConsoleLogEntry {
+                    level: "info".into(),
+                    text: "App initialized".into(),
+                    timestamp: 1001,
+                });
+
+                // Test get_view
+                let (tx, rx) = std::sync::mpsc::channel();
+                browser.execute_command("get_view", &serde_json::json!({}), window, cx, move |res| {
+                    let _ = tx.send(res);
+                });
+                let val = rx.recv().expect("get_view responded").expect("get_view ok");
+                assert_eq!(val["url"], "https://example.com/app");
+                assert_eq!(val["title"], "App Dashboard");
+                assert_eq!(val["consoleLogCount"], 2);
+
+                // Test console_logs filtering by error level
+                let (tx, rx) = std::sync::mpsc::channel();
+                browser.execute_command(
+                    "console_logs",
+                    &serde_json::json!({ "level": "error" }),
+                    window,
+                    cx,
+                    move |res| { let _ = tx.send(res); },
+                );
+                let val = rx.recv().expect("console_logs responded").expect("ok");
+                let logs = val["logs"].as_array().expect("logs array");
+                assert_eq!(logs.len(), 1);
+                assert_eq!(logs[0]["level"], "error");
+
+                // Test console_logs clear
+                let (tx, rx) = std::sync::mpsc::channel();
+                browser.execute_command(
+                    "console_logs",
+                    &serde_json::json!({ "clear": true }),
+                    window,
+                    cx,
+                    move |res| { let _ = tx.send(res); },
+                );
+                assert!(rx.recv().is_ok());
+                assert!(browser.console_logs.is_empty());
+
+                // Test navigate missing url error
+                let (tx, rx) = std::sync::mpsc::channel();
+                browser.execute_command(
+                    "navigate",
+                    &serde_json::json!({}),
+                    window,
+                    cx,
+                    move |res| { let _ = tx.send(res); },
+                );
+                assert_eq!(rx.recv().unwrap().unwrap_err(), "Missing url");
+
+                // Test unknown action error
+                let (tx, rx) = std::sync::mpsc::channel();
+                browser.execute_command(
+                    "custom_unknown",
+                    &serde_json::json!({}),
+                    window,
+                    cx,
+                    move |res| { let _ = tx.send(res); },
+                );
+                assert!(rx.recv().unwrap().unwrap_err().contains("Unknown browser action"));
+
+                // Test design mode toggle and selection clearing
+                assert!(!browser.design_mode);
+                browser.toggle_design_mode_force(cx);
+                assert!(browser.design_mode);
+                assert_eq!(browser.design_mode_epoch, 1);
+                assert!(browser.design_mode_animating);
+
+                browser.toggle_design_mode_force(cx);
+                assert!(!browser.design_mode);
+                assert_eq!(browser.design_mode_epoch, 2);
+
+                browser.clear_selection();
+            })
+            .unwrap();
     }
 }

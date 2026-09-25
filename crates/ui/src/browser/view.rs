@@ -1,8 +1,8 @@
 use super::{BrowserEvent, BrowserSurface};
 use crate::{icons, surface_chrome, theme::Theme};
 use gpui::{
-    AnyElement, Context, Focusable, IntoElement, KeyDownEvent, MouseButton, Render, Window, div,
-    prelude::*, px,
+    AnimationExt, AnyElement, Context, Focusable, IntoElement, KeyDownEvent, MouseButton, Render,
+    Window, div, prelude::*, px,
 };
 
 fn button(
@@ -22,6 +22,176 @@ fn button(
                 .size(px(surface_chrome::ICON_SIZE))
                 .text_color(theme.text_muted),
         )
+}
+
+struct DesignModeTooltip {
+    label: &'static str,
+    shortcut: String,
+}
+
+impl Render for DesignModeTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        let card = div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(9.0))
+            .py(px(6.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(crate::popover::surface_bg(theme))
+            .font_family(theme.font_sans.clone())
+            .text_size(px(10.5))
+            .child(
+                div()
+                    .text_color(theme.text)
+                    .child(self.label),
+            )
+            .child(
+                div()
+                    .text_color(theme.text_muted)
+                    .child(self.shortcut.clone()),
+            );
+        crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
+    }
+}
+
+fn design_mode_button(
+    active: bool,
+    animating: bool,
+    epoch: usize,
+    enabled: bool,
+    theme: &Theme,
+    cx: &mut Context<BrowserSurface>,
+) -> gpui::AnyElement {
+    let label = if active {
+        "Exit Design Mode"
+    } else {
+        "Design Mode"
+    };
+    let shortcut = crate::settings::badge_combo("mod-shift-d");
+    let aria_label = format!("{label} ({shortcut})");
+    let icon_el = icons::icon(icons::PEN)
+        .size(px(surface_chrome::ICON_SIZE))
+        .text_color(if active { theme.accent } else { theme.text_muted })
+        .flex_none();
+
+    let text_content = div()
+        .text_size(crate::typography::ui_rems(11.5))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.accent)
+        .child("Design");
+
+    let hover_bg = if active {
+        theme.accent.opacity(0.26)
+    } else {
+        crate::theme::wash(0.14)
+    };
+
+    let button = div()
+        .id("browser-design-mode")
+        .w_full()
+        .h_full()
+        .flex_none()
+        .rounded(px(surface_chrome::CONTROL_RADIUS))
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label(aria_label)
+        .occlude()
+        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+            window.prevent_default()
+        })
+        .hover(move |style| style.bg(hover_bg))
+        .overflow_hidden()
+        .tooltip(move |_, cx| {
+            cx.new(|_| DesignModeTooltip {
+                label,
+                shortcut: crate::settings::badge_combo("mod-shift-d"),
+            })
+            .into()
+        })
+        .tooltip_show_delay(std::time::Duration::from_millis(350))
+        .when(active || animating, |el| {
+            el.justify_start()
+                .pl(px(6.0))
+                .pr(px(8.0))
+                .gap(px(4.0))
+        })
+        .when(!active && !animating, |el| el.justify_center())
+        .when(active, |el| {
+            el.bg(theme.accent.opacity(0.18))
+                .border_1()
+                .border_color(theme.accent)
+        })
+        .when(!enabled, |el| el.cursor_default().opacity(0.35))
+        .when(enabled, |el| {
+            el.on_click(cx.listener(|this, _, _, cx| this.toggle_design_mode_force(cx)))
+        })
+        .child(icon_el)
+        .child(if animating {
+            div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(text_content)
+                .with_animation(
+                    gpui::SharedString::from(format!(
+                        "browser-design-text-{epoch}-{}",
+                        if active { "in" } else { "out" }
+                    )),
+                    crate::motion::RESIZE.animation(),
+                    move |el, progress| {
+                        let amount = if active { progress } else { 1.0 - progress };
+                        el.w(px(crate::motion::lerp(0.0, 38.0, amount)))
+                            .opacity(amount)
+                    },
+                )
+                .into_any_element()
+        } else if active {
+            div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .w(px(38.0))
+                .child(text_content)
+                .into_any_element()
+        } else {
+            div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .w(px(0.0))
+                .child(text_content)
+                .into_any_element()
+        });
+
+    if animating {
+        div()
+            .h(px(surface_chrome::CONTROL_SIZE))
+            .flex_none()
+            .child(button)
+            .with_animation(
+                gpui::SharedString::from(format!(
+                    "browser-design-wrap-{epoch}-{}",
+                    if active { "in" } else { "out" }
+                )),
+                crate::motion::RESIZE.animation(),
+                move |el, progress| {
+                    let amount = if active { progress } else { 1.0 - progress };
+                    let w = crate::motion::lerp(24.0, 72.0, amount);
+                    el.w(px(w))
+                },
+            )
+            .into_any_element()
+    } else {
+        div()
+            .h(px(surface_chrome::CONTROL_SIZE))
+            .flex_none()
+            .w(px(if active { 72.0 } else { 24.0 }))
+            .child(button)
+            .into_any_element()
+    }
 }
 
 impl BrowserSurface {
@@ -438,6 +608,25 @@ impl Render for BrowserSurface {
         .when(has_page, |el| {
             el.on_click(cx.listener(|this, _, _, cx| this.reload(cx)))
         });
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if self.design_mode {
+            let key = (theme.appearance, theme.surface_treatment);
+            if self.design_mode_theme_key != Some(key) {
+                self.design_mode_theme_key = Some(key);
+                if let Some(native) = &self.native {
+                    native.sync_design_mode_theme(&theme);
+                }
+            }
+        }
+        let design_active = self.design_mode;
+        let design = design_mode_button(
+            design_active,
+            self.design_mode_animating,
+            self.design_mode_epoch,
+            has_page,
+            &theme,
+            cx,
+        );
         let address = surface_chrome::input()
             .id("browser-address")
             .when(self.validation.is_some(), |el| {
@@ -505,6 +694,7 @@ impl Render for BrowserSurface {
         let toolbar = surface_chrome::toolbar(&theme)
             .when(!external, |el| el.child(back).child(forward).child(reload))
             .child(address)
+            .when(!external, |el| el.child(design))
             .child(open);
 
         let body = div()
@@ -602,6 +792,10 @@ impl Render for BrowserSurface {
                 .on_mouse_up(MouseButton::Middle,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {this.linux_pointer("up",event.position,Some(event.button),event.modifiers);cx.stop_propagation();}))
                 .on_mouse_move(cx.listener(|this,event: &gpui::MouseMoveEvent,_,cx| {if !cx.has_active_drag(){this.linux_pointer("move",event.position,event.pressed_button,event.modifiers);}}))
                 .on_scroll_wheel(cx.listener(|this,event: &gpui::ScrollWheelEvent,_,cx| {
+                    if this.design_mode {
+                        cx.stop_propagation();
+                        return;
+                    }
                     if let Some(native)=&this.native {
                         let delta=event.delta.pixel_delta(px(16.));let p=event.position-native.bounds.origin;
                         native.command(serde_json::json!({"cmd":"scroll","x":f32::from(p.x),"y":f32::from(p.y),"dx":-f32::from(delta.x)/40.,"dy":-f32::from(delta.y)/40.,"mods":super::linux::modifiers_mask(event.modifiers)}));
@@ -644,6 +838,7 @@ impl Render for BrowserSurface {
             .on_action(cx.listener(|_, _: &super::CloseTab, _, cx| cx.emit(BrowserEvent::Close)))
             .on_action(cx.listener(|this, _: &super::Back, _, _| this.history(false)))
             .on_action(cx.listener(|this, _: &super::Forward, _, _| this.history(true)))
+            .on_action(cx.listener(|this, _: &super::ToggleDesignMode, w, cx| this.toggle_design_mode(w, cx)))
             .child(toolbar)
             .when_some(self.validation.clone(), |el, message| el.child(div().px(px(12.0)).py(px(8.0)).text_size(crate::typography::ui_rems(11.0)).text_color(theme.danger).child(message)))
             .when(remote_loopback, |el| el.child(div().px(px(12.0)).py(px(8.0)).border_b_1().border_color(theme.border)

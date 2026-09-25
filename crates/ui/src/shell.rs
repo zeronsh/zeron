@@ -1854,6 +1854,7 @@ pub struct Shell {
     runtime_change_error: Option<SharedString>,
     /// The one-time local→synced import stream (switch wizard progress step).
     import_task: Option<Task<()>>,
+    browser_command_task: Option<Task<()>>,
     /// Title of the chat the import stream is copying right now.
     import_current: Option<SharedString>,
     /// Kept for the failed-gate "Retry" action.
@@ -2007,6 +2008,9 @@ impl Shell {
                     transcript.update(cx, |t, cx| {
                         t.on_own_send(chat_id.clone(), message_id.clone(), cx)
                     });
+                    for browser in this.browsers.values() {
+                        browser.update(cx, |b, _| b.clear_selection());
+                    }
                 }
                 ComposerEvent::WorktreeSetup {
                     chat_id,
@@ -2027,6 +2031,14 @@ impl Shell {
                     transcript.update(cx, |t, cx| {
                         t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
                     });
+                    for browser in this.browsers.values() {
+                        browser.update(cx, |b, _| b.clear_selection());
+                    }
+                }
+                ComposerEvent::ClearBrowserSelection => {
+                    for browser in this.browsers.values() {
+                        browser.update(cx, |b, _| b.clear_selection());
+                    }
                 }
             }
         });
@@ -2252,6 +2264,7 @@ impl Shell {
             runtime_change_task: None,
             runtime_change_error: None,
             import_task: None,
+            browser_command_task: None,
             import_current: None,
             boot,
             data_dir,
@@ -3210,6 +3223,46 @@ impl Shell {
                 crate::browser::BrowserEvent::Close => {
                     this.close_right_surface(RightSurface::Browser(id), window, cx)
                 }
+                crate::browser::BrowserEvent::InspectElement(element) => {
+                    let screenshot = element.screenshot.clone();
+                    let tag = if element.tag.is_empty() { "element" } else { &element.tag };
+                    let filename = format!("{tag}-inspection.png");
+                    let user_prompt = element.user_prompt.clone().unwrap_or_default();
+                    let prompt = if !user_prompt.trim().is_empty() {
+                        user_prompt.trim().to_string()
+                    } else {
+                        element.to_prompt_context()
+                    };
+                    this.composer.update(cx, |composer, cx| {
+                        let cur_text = composer.input.read(cx).text().to_string();
+                        let new_text = if cur_text.is_empty() {
+                            prompt
+                        } else if cur_text.ends_with(' ') {
+                            format!("{}{}", cur_text, prompt)
+                        } else {
+                            format!("{} {}", cur_text, prompt)
+                        };
+                        composer.input.update(cx, |input, cx| {
+                            input.set_text(new_text, cx);
+                        });
+                        if let Some(bytes) = screenshot {
+                            let staged = crate::attachments::stage_png_bytes(filename, bytes);
+                            composer.add_staged_attachment(staged, cx);
+                        }
+                        composer.on_submit(cx);
+                    });
+                    if let Some(browser) = this.browsers.get(&id) {
+                        browser.update(cx, |b, cx| {
+                            if b.design_mode {
+                                b.toggle_design_mode_force(cx);
+                            } else {
+                                b.clear_selection();
+                            }
+                        });
+                    }
+                    let focus = this.composer.focus_handle(cx);
+                    window.focus(&focus, cx);
+                }
             }
         });
         self.browsers.insert(id, browser.clone());
@@ -3225,6 +3278,126 @@ impl Shell {
             } else {
                 browser.focus_address(window, cx);
             }
+        });
+    }
+
+    fn start_browser_command_listener(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.browser_command_task.is_some() {
+            return;
+        }
+        self.browser_command_task = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                let engine = {
+                    let Ok(engine) = this.read_with(cx, |shell, cx| shell.state.read(cx).engine().cloned()) else {
+                        return;
+                    };
+                    let Some(engine) = engine else {
+                        cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                        continue;
+                    };
+                    engine
+                };
+                let Ok(mut updates) = engine
+                    .client()
+                    .subscribe(zeron_rpc::methods::WATCH_BROWSER_COMMANDS, serde_json::json!({}))
+                    .await
+                else {
+                    cx.background_executor().timer(std::time::Duration::from_millis(1000)).await;
+                    continue;
+                };
+                while let Some(command) = updates.recv().await {
+                    let cmd = command.clone();
+                    let eng = engine.clone();
+                    let res = this.update_in(cx, |shell, window, cx| {
+                        shell.handle_browser_command(cmd, eng, window, cx);
+                    });
+                    if res.is_err() {
+                        return;
+                    }
+                }
+                cx.background_executor().timer(std::time::Duration::from_millis(1000)).await;
+            }
+        }));
+    }
+
+    fn active_browser_surface(&self, cx: &App) -> Option<Entity<crate::browser::BrowserSurface>> {
+        if let RightSurface::Browser(id) = self.resolved_right_active(cx) {
+            if let Some(b) = self.browsers.get(&id) {
+                return Some(b.clone());
+            }
+        }
+        self.browsers.values().next().cloned()
+    }
+
+    fn handle_browser_command(
+        &mut self,
+        cmd: serde_json::Value,
+        engine: crate::state::EngineHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cmd_id = cmd.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let args = cmd.clone();
+
+        let browser_entity = match self.active_browser_surface(cx) {
+            Some(b) => Some(b),
+            None => {
+                if action == "navigate" || action == "get_view" {
+                    if self.active_chat.is_empty() {
+                        if let Some(first_chat) = self.state.read(cx).chats.first() {
+                            self.open_chat(first_chat.id.clone(), cx);
+                        } else {
+                            self.open_new_session(cx);
+                        }
+                    }
+                    self.set_surfaces_open(true, cx);
+                    let url = args.get("url").and_then(|v| v.as_str()).map(str::to_owned);
+                    self.add_browser_surface(url, window, cx);
+                    self.browsers.get(&self.browser_seq).cloned()
+                } else {
+                    None
+                }
+            }
+        };
+
+        let Some(browser) = browser_entity else {
+            let engine = engine.clone();
+            cx.spawn(async move |_, _| {
+                let _ = engine
+                    .client()
+                    .call(
+                        zeron_rpc::methods::REPORT_BROWSER_STATE,
+                        serde_json::json!({
+                            "replyTo": cmd_id,
+                            "error": "No browser is currently open in the sidebar. Use browser_navigate to open a URL.",
+                        }),
+                    )
+                    .await;
+            })
+            .detach();
+            return;
+        };
+
+        browser.update(cx, |b, cx| {
+            b.execute_command(&action, &args, window, cx, move |result| {
+                let reply_payload = match result {
+                    Ok(val) => serde_json::json!({
+                        "replyTo": cmd_id,
+                        "result": val,
+                    }),
+                    Err(err) => serde_json::json!({
+                        "replyTo": cmd_id,
+                        "error": err,
+                    }),
+                };
+                tokio::spawn(async move {
+                    let _ = engine
+                        .client()
+                        .call(zeron_rpc::methods::REPORT_BROWSER_STATE, reply_payload)
+                        .await;
+                });
+            });
         });
     }
 
@@ -11223,6 +11396,9 @@ impl Render for Shell {
         }
 
         self.render_time = Some(std::time::Instant::now());
+        if self.browser_command_task.is_none() {
+            self.start_browser_command_listener(window, cx);
+        }
         if self.all_file_edits_flushed(cx)
             && let Some(action) = self.pending_exit.take()
         {

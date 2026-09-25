@@ -17,6 +17,8 @@ use zeron_sync::DocsStore;
 
 pub mod agent_accounts;
 pub mod auth;
+pub mod browser;
+pub use browser::BrowserService;
 pub mod change_requests;
 pub mod chat2_host;
 mod chat_persistence;
@@ -134,6 +136,7 @@ pub struct EngineCore {
     pub terminals: Terminals,
     pub project_actions: ProjectActionsStore,
     pub previews: zeron_preview::PreviewService,
+    pub browser: BrowserService,
     pub change_requests: CheckoutChangeRequests,
     pub diff_sync: CheckoutDiffSync,
     pub spaces_sync: SpacesSync,
@@ -323,6 +326,7 @@ impl EngineCore {
             terminals,
             project_actions,
             previews,
+            browser: BrowserService::new(),
             change_requests,
             diff_sync,
             spaces_sync,
@@ -461,7 +465,8 @@ impl EngineCore {
             self.workspace_scope,
         )
         .with_auth(self.auth())
-        .with_previews(self.previews.clone());
+        .with_previews(self.previews.clone())
+        .with_browser(self.browser.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }

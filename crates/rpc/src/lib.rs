@@ -107,6 +107,12 @@ pub mod methods {
     pub const WATCH_SESSIONS: &str = "WatchSessions";
     /// Spaces registry (device+folder pairs) from the workspace doc.
     pub const WATCH_SPACES: &str = "WatchSpaces";
+    /// Execute or query browser actions from an agent (e.g. navigate, click, type, console logs).
+    pub const BROWSER_COMMAND: &str = "BrowserCommand";
+    /// Stream browser command requests to the headed UI subscriber.
+    pub const WATCH_BROWSER_COMMANDS: &str = "WatchBrowserCommands";
+    /// Report active browser state / command result to engine.
+    pub const REPORT_BROWSER_STATE: &str = "ReportBrowserState";
     /// Entity mutations against the workspace doc (feature-inventory §2 DataRpc).
     /// Params are tagged `{op: createChat|createSpace|renameSpace|deleteSpace|
     /// renameChat|setChatArchived|deleteChat|renameDevice|markChatSeen, …}`.

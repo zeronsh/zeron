@@ -494,8 +494,8 @@ fn path_is_same_or_descendant(path: &str, ancestor: &str) -> bool {
     path == ancestor || path.starts_with(&format!("{ancestor}/"))
 }
 
-pub(super) struct FileEditorTooltip {
-    pub(super) text: SharedString,
+pub(crate) struct FileEditorTooltip {
+    pub(crate) text: SharedString,
 }
 
 impl Render for FileEditorTooltip {

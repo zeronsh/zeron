@@ -595,6 +595,7 @@ pub struct EngineRpc {
     terminals: Terminals,
     project_actions: ProjectActionsStore,
     previews: Option<zeron_preview::PreviewService>,
+    browser: crate::BrowserService,
     change_requests: CheckoutChangeRequests,
     diff_sync: CheckoutDiffSync,
     uploads: Uploads,
@@ -639,6 +640,7 @@ impl EngineRpc {
             terminals,
             project_actions,
             previews: None,
+            browser: crate::BrowserService::default(),
             change_requests,
             diff_sync,
             uploads,
@@ -653,6 +655,11 @@ impl EngineRpc {
 
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
         self.previews = Some(previews);
+        self
+    }
+
+    pub fn with_browser(mut self, browser: crate::BrowserService) -> Self {
+        self.browser = browser;
         self
     }
 
@@ -3140,6 +3147,27 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "text": text }))
+            }
+            methods::BROWSER_COMMAND => {
+                let result = self.browser.execute_command(params).await.map_err(RpcError::Failed)?;
+                RpcReply::value(&result)
+            }
+            methods::REPORT_BROWSER_STATE => {
+                self.browser.update_state(params).await;
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::WATCH_BROWSER_COMMANDS => {
+                let rx = self.browser.subscribe_commands();
+                let stream = futures::stream::unfold(rx, |mut rx| async move {
+                    loop {
+                        match rx.recv().await {
+                            Ok(cmd) => return Some((cmd, rx)),
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                        }
+                    }
+                });
+                Ok(RpcReply::Stream(Box::pin(stream)))
             }
             other => Err(RpcError::UnknownMethod(other.to_string())),
         }
