@@ -62,6 +62,14 @@ impl ChatPersistence {
         this
     }
 
+    pub(crate) fn cursor(&self) -> u64 {
+        self.cursor.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_clean(&self) -> bool {
+        self.saved.load(Ordering::Acquire) == self.generation.load(Ordering::Acquire)
+    }
+
     pub(crate) fn snapshot_bytes(&self) -> usize {
         self.snapshot_bytes.load(Ordering::Relaxed)
     }

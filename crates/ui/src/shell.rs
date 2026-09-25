@@ -70,6 +70,20 @@ mod tabs;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 
+/// `connected` already includes the engine's degradation grace. A brief
+/// focus-triggered dial needs no sidebar status; queued changes or a sustained
+/// outage still deserve one.
+fn chat_sync_pill_caption(chat: &zeron_proto::ChatConnectivity) -> Option<&'static str> {
+    use zeron_proto::ChatSyncState as S;
+    let sustained_or_queued = !chat.connected || chat.pending_pushes > 0;
+    match chat.sync_state {
+        S::Waiting if sustained_or_queued => Some("Sync queued — changes are saved"),
+        S::Connecting if sustained_or_queued => Some("Syncing…"),
+        S::Offline if !chat.connected => Some("Offline — changes are saved"),
+        _ => None,
+    }
+}
+
 actions!(
     shell,
     [
@@ -1745,6 +1759,8 @@ pub struct Shell {
     /// The add-space palette (device tabs + folder search), `Some`
     /// while open.
     add_space: Option<AddSpaceFlow>,
+    /// The New project palette's collapsed-breadcrumbs (`…`) menu.
+    project_crumb_menu: popover::Popup<()>,
     command_palette: Option<command_palette::CommandPalette>,
     pending_workspace_command: Option<crate::composer::WorkspaceCommand>,
     /// The sidebar's space-filter dropdown.
@@ -2159,6 +2175,7 @@ impl Shell {
             section_menu_active: None,
             delete_space_confirm: None,
             add_space: None,
+            project_crumb_menu: popover::Popup::default(),
             command_palette: None,
             pending_workspace_command: None,
             spaces_menu: popover::Popup::default(),
@@ -2559,7 +2576,9 @@ impl Shell {
             self.cancel_pinned_session_drag(cx);
         }
         // Chat switch: restore THAT chat's panel state (per-session open flags;
-        // snap, no tween — the panels belong to the destination chat).
+        // snap, no tween — the panels belong to the destination chat). The
+        // new-chat canvas is the exception: it always lands with the terminal
+        // hidden.
         let selected = state.read(cx).selected_chat.clone().unwrap_or_default();
         if !selected.is_empty() {
             self.last_appshot_chat = Some(selected.clone());
@@ -2585,7 +2604,19 @@ impl Shell {
             self.right_takeover_content_tween = None;
             self.main_takeover_tween = None;
             self.terminal_tween = None;
-            let panels = self.panels.get(&self.panel_key(cx));
+            let key = self.panel_key(cx);
+            // Entering the new-chat canvas always lands with the terminal
+            // hidden (user request) — a previously opened canvas drawer must
+            // not pop open on a fresh canvas. The source chat's flag stays in
+            // the map, so returning restores it.
+            let panels = if self.active_chat.is_empty() {
+                self.panels.update(&key, |panels| {
+                    panels.terminal_open = false;
+                });
+                self.panels.get(&key)
+            } else {
+                self.panels.get(&key)
+            };
             if let Some(panel) = self.terminal.clone() {
                 panel.update(cx, |panel, cx| panel.set_open(panels.terminal_open, cx));
             }
@@ -2642,13 +2673,7 @@ impl Shell {
     /// (user report).
     fn panel_key(&self, cx: &App) -> String {
         if self.active_chat.is_empty() {
-            let space = self
-                .state
-                .read(cx)
-                .selected_space
-                .clone()
-                .unwrap_or_default();
-            format!("space-canvas:{space}")
+            crate::state::canvas_panel_key(self.state.read(cx).selected_space.as_deref())
         } else {
             self.active_chat.clone()
         }
@@ -2920,6 +2945,13 @@ impl Shell {
     }
 
     fn set_right_active(&mut self, surface: RightSurface, cx: &mut Context<Self>) {
+        if let RightSurface::Subagent(id) = surface
+            && let Some(tab) = self.subagent_tabs.get(&id)
+        {
+            let doc_id = tab.doc_id.clone();
+            self.state
+                .update(cx, |state, cx| state.focus_subagent_sync(&doc_id, cx));
+        }
         if self.resolved_right_active(cx) != surface {
             self.suspend_file_images(cx);
         }
@@ -3157,9 +3189,9 @@ impl Shell {
     /// The picker's Diffs card / the `+` menu's Diff row: every click opens a
     /// FRESH diff tab with its own scope/base selection (multiple diff
     /// panels, user request).
-    fn add_diff_surface(&mut self, cx: &mut Context<Self>) {
+    fn add_diff_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let changes = cx.new(|cx| Changes::new(self.state.clone(), cx));
-        self.register_diff_surface(changes, cx);
+        self.register_diff_surface(changes, window, cx);
     }
 
     /// Open or focus a session-owned editor tab. The explorer is independent.
@@ -3304,9 +3336,9 @@ impl Shell {
 
     /// The dedicated History surface. Keeping it as its own tab preserves its
     /// graph/search state while Diff tabs retain their ordinary scope picker.
-    fn add_history_surface(&mut self, cx: &mut Context<Self>) {
+    fn add_history_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let history = cx.new(|cx| Changes::for_history(self.state.clone(), cx));
-        self.register_diff_surface(history, cx);
+        self.register_diff_surface(history, window, cx);
     }
 
     /// A History row click: the commit opens as its own pinned diff tab
@@ -3314,20 +3346,34 @@ impl Shell {
     fn add_commit_diff_surface(
         &mut self,
         commit: zeron_proto::GitHistoryCommit,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let changes = cx.new(|cx| Changes::for_commit(self.state.clone(), commit, cx));
-        self.register_diff_surface(changes, cx);
+        self.register_diff_surface(changes, window, cx);
     }
 
-    fn register_diff_surface(&mut self, changes: Entity<Changes>, cx: &mut Context<Self>) {
+    fn register_diff_surface(
+        &mut self,
+        changes: Entity<Changes>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.diff_seq += 1;
         let id = self.diff_seq;
-        let sub = cx.subscribe(&changes, |this: &mut Self, _, event, cx| match event {
-            ChangesEvent::OpenCommit(commit) => {
-                this.add_commit_diff_surface(commit.clone(), cx);
-            }
-        });
+        let sub =
+            cx.subscribe_in(
+                &changes,
+                window,
+                |this: &mut Self, _, event, window, cx| match event {
+                    ChangesEvent::OpenCommit(commit) => {
+                        this.add_commit_diff_surface(commit.clone(), window, cx);
+                    }
+                    ChangesEvent::OpenFile(path) => {
+                        this.add_file_surface(path.clone(), window, cx);
+                    }
+                },
+            );
         self.diffs.insert(id, changes);
         self.diff_subs.insert(id, sub);
         let key = self.panel_key(cx);
@@ -6928,17 +6974,35 @@ impl Shell {
     /// Chat-mode sidebar (spaces overhaul): window-control strip, the Spaces
     /// section (folder + device rows, add-space), the global Active sessions
     /// list, the notice strip, and the UserMenu (§1.6).
-    /// The global connection line. `None` while healthy (`Connected`) or on
-    /// local profiles (`Disabled`) — and the engine's degrade grace means it
-    /// only exists during REAL outages, never join/wake blips. No surface,
+    /// Global connection health, with selected-chat queue and storage status.
+    /// Persistence failures take precedence even when the network is offline.
+    /// No surface,
     /// no border (v0.2.12 feedback): a bare spinner + faint caption while
     /// reconnecting; an amber dot only when the OS says offline. The
     /// transport error belongs in logs, not the sidebar.
     fn render_connection_pill(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         use zeron_proto::ConnectivityState as S;
         let conn = self.state.read(cx).connectivity.clone();
+        let selected = self.state.read(cx).selected_chat.as_deref();
+        let chat = conn.chats.iter()
+            .find(|c| Some(c.chat_id.as_str()) == selected);
+        let chat_state = chat.map(|c| c.sync_state);
         let (label, glyph): (SharedString, AnyElement) = match conn.state {
-            S::Disabled | S::Connected => return None,
+            _ if chat_state == Some(zeron_proto::ChatSyncState::StorageError) => (
+                "Changes could not be saved".into(),
+                div().size(px(5.0)).rounded_full().bg(theme.warning).into_any_element(),
+            ),
+            S::Disabled => return None,
+            S::Connected => {
+                let caption = chat_sync_pill_caption(chat?)?;
+                (
+                    caption.into(),
+                    loaders::mini_mono_spinner(
+                        "chat-sync-spinner", 2.0, theme.text_muted,
+                        self.sidebar_pane.entity_id(), cx,
+                    ).into_any_element(),
+                )
+            }
             S::Offline => (
                 "Offline — sends are saved".into(),
                 div()
@@ -7406,10 +7470,12 @@ impl Shell {
     }
 
     /// Update strip: shown above the user menu whenever the engine's
-    /// UpdateStatus stream reports a newer release. On a macOS bundle install
-    /// it drives the whole flow — click to download, then click to restart into
-    /// the staged bundle. Elsewhere (managed/source installs) it is advisory
-    /// (`zeron update`); click dismisses it for that version.
+    /// UpdateStatus stream reports a newer release. On desktop-update installs
+    /// (macOS bundles, Windows portable packages) it drives the whole flow —
+    /// click to download, then click to restart into the staged replacement.
+    /// Managed installs are advisory (`zeron update`); unmanaged installs link
+    /// to the GitHub releases page. Clicking an advisory dismisses it for that
+    /// version.
     fn render_update_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let status = self.state.read(cx).update.clone()?;
         if !status.update_available {
@@ -7419,21 +7485,8 @@ impl Shell {
         if self.update_dismissed.as_deref() == Some(latest.as_str()) {
             return None;
         }
-        let desktop_update = self.install.supports_desktop_update();
-
-        let (label, clickable): (SharedString, bool) = if desktop_update {
-            match &self.update_flow {
-                UpdateFlow::Idle => (format!("Update available — v{latest}").into(), true),
-                UpdateFlow::Downloading => (format!("Downloading v{latest}…").into(), false),
-                UpdateFlow::Ready(_) => ("Update ready — restart to apply".into(), true),
-                UpdateFlow::Failed(message) => (format!("Update failed: {message}").into(), true),
-            }
-        } else {
-            (
-                format!("Update available — v{latest} · run `zeron update`").into(),
-                true,
-            )
-        };
+        let (label, clickable) =
+            Self::update_strip_label(&self.install, &self.update_flow, &latest);
         let failed = matches!(self.update_flow, UpdateFlow::Failed(_));
         let tone = if failed { theme.danger } else { theme.accent };
         // Follow the selected spectrum with a low-emphasis glass tint rather
@@ -7469,10 +7522,44 @@ impl Shell {
         Some(strip.into_any_element())
     }
 
+    /// The update strip's label and click affordance per install kind. Desktop
+    /// update installs (macOS bundles, Windows portable packages) drive their
+    /// flow from the strip; managed installs get the `zeron update` hint;
+    /// unmanaged installs (source builds, hand-copied binaries) are pointed at
+    /// the GitHub releases page.
+    fn update_strip_label(
+        install: &zeron_update::InstallKind,
+        flow: &UpdateFlow,
+        latest: &str,
+    ) -> (SharedString, bool) {
+        if install.supports_desktop_update() {
+            match flow {
+                UpdateFlow::Idle => (format!("Update available — v{latest}").into(), true),
+                UpdateFlow::Downloading => (format!("Downloading v{latest}…").into(), false),
+                UpdateFlow::Ready(_) => ("Update ready — restart to apply".into(), true),
+                UpdateFlow::Failed(message) => (format!("Update failed: {message}").into(), true),
+            }
+        } else if matches!(install, zeron_update::InstallKind::Managed { .. }) {
+            (
+                format!("Update available — v{latest} · run `zeron update`").into(),
+                true,
+            )
+        } else {
+            (
+                format!("Update available — v{latest} · download from GitHub").into(),
+                true,
+            )
+        }
+    }
+
     /// Idle → download; Ready → swap + relaunch; Failed → retry; advisory
-    /// installs → dismiss for this version.
+    /// installs (managed: `zeron update`, unmanaged: the GitHub releases page)
+    /// → open the destination if there is one, then dismiss for this version.
     fn on_update_strip_click(&mut self, cx: &mut Context<Self>) {
         if !self.install.supports_desktop_update() {
+            if matches!(self.install, zeron_update::InstallKind::Unmanaged) {
+                cx.open_url(zeron_update::RELEASES_PAGE);
+            }
             self.update_dismissed = self
                 .state
                 .read(cx)
@@ -8211,6 +8298,11 @@ impl Shell {
         if self.rename_space_dialog.is_some() {
             self.rename_space_dialog = None;
             cx.notify();
+            return true;
+        }
+        // The folded-breadcrumbs menu floats over the palette; it closes first.
+        if self.add_space.is_some() && self.project_crumb_menu.is_open() {
+            self.close_project_crumb_menu(cx);
             return true;
         }
         if self.add_space.is_some() {
@@ -9553,14 +9645,14 @@ impl Shell {
                     // no longer gates on it (terminals work anywhere).
                     .when(self.space_git_detected(cx), |el| {
                         el.child(row("surface-card-diffs", icons::LIST, "Diffs").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.add_diff_surface(cx);
+                            cx.listener(|this, _, window, cx| {
+                                this.add_diff_surface(window, cx);
                             }),
                         ))
                         .child(
                             row("surface-card-history", icons::GIT_BRANCH, "History").on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.add_history_surface(cx);
+                                cx.listener(|this, _, window, cx| {
+                                    this.add_history_surface(window, cx);
                                 }),
                             ),
                         )
@@ -9847,21 +9939,43 @@ impl Shell {
                         this.close_right_surface(surface, window, cx);
                     }),
                 )
-                .when(crate::click_activation_drag_enabled(), |el| {
-                    el.on_drag(
-                        RightTabDrag {
-                            panel_key: self.panel_key(cx),
-                            from: ix,
-                            title: ghost_title,
-                            workspace_path,
-                        },
-                        |payload, _point, _, cx| {
-                            let title = payload.title.clone();
-                            cx.stop_propagation();
-                            cx.new(|_| SurfaceTabGhost { title })
-                        },
-                    )
-                })
+                .on_drag(
+                    RightTabDrag {
+                        panel_key: self.panel_key(cx),
+                        from: ix,
+                        title: ghost_title,
+                        workspace_path,
+                    },
+                    |payload, _point, _, cx| {
+                        let title = payload.title.clone();
+                        cx.stop_propagation();
+                        cx.new(|_| SurfaceTabGhost { title })
+                    },
+                )
+                // The chip's BlockMouse hitbox (the titlebar/scroll carve-out
+                // below) cuts the strip out of the hover stack, so the
+                // strip's own on_drop can never fire while the pointer is
+                // over a chip — tabs tile the strip. Receiving the drop on
+                // the chip itself keeps drag-reorder working without giving
+                // up the carve-out. The bubble dispatch reaches the chip
+                // before the strip, and the handler consumes the drag, so
+                // the two never double-apply.
+                .on_drop::<RightTabDrag>(cx.listener(
+                    move |this, payload: &RightTabDrag, _, cx| {
+                        if payload.panel_key != this.panel_key(cx) {
+                            this.right_tab_drag = None;
+                            cx.notify();
+                            return;
+                        }
+                        let to = this
+                            .right_tab_drag
+                            .as_ref()
+                            .map(|d| d.over)
+                            .unwrap_or(payload.from);
+                        this.right_tab_drag = None;
+                        this.reorder_right_tabs(payload.from, to, cx);
+                    },
+                ))
                 .child(
                     // Leading slot: icon normally, ✕ on tab hover — two
                     // stacked layers opacity-swapped by the group hover.
@@ -10071,8 +10185,8 @@ impl Shell {
                             menu.child(
                                 popover::menu_row(&theme, false, "right-plus-diff")
                                     .id("right-plus-diff-row")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.add_diff_surface(cx);
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.add_diff_surface(window, cx);
                                         this.close_right_plus(cx);
                                     }))
                                     .child(
@@ -10085,8 +10199,8 @@ impl Shell {
                             .child(
                                 popover::menu_row(&theme, false, "right-plus-history")
                                     .id("right-plus-history-row")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.add_history_surface(cx);
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.add_history_surface(window, cx);
                                         this.close_right_plus(cx);
                                     }))
                                     .child(
@@ -10859,7 +10973,9 @@ impl Render for Shell {
                 WorkspaceCommand::New => self.open_new_session(cx),
                 WorkspaceCommand::Resume => self.toggle_command_palette(window, cx),
                 WorkspaceCommand::Settings => self.open_last_settings(cx),
-                WorkspaceCommand::Diff if !self.active_chat.is_empty() => self.add_diff_surface(cx),
+                WorkspaceCommand::Diff if !self.active_chat.is_empty() => {
+                    self.add_diff_surface(window, cx)
+                }
                 WorkspaceCommand::Files if !self.active_chat.is_empty() => {
                     self.add_files_surface(window, cx)
                 }
@@ -11578,6 +11694,93 @@ impl Render for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidebar_sync_status_waits_for_grace_or_queued_changes() {
+        use zeron_proto::{ChatConnectivity, ChatSyncState as S};
+
+        let mut chat = ChatConnectivity {
+            chat_id: "remote".into(),
+            sync_state: S::Local,
+            connected: false,
+            delivery_live: false,
+            pending_pushes: 0,
+        };
+        assert_eq!(chat_sync_pill_caption(&chat), None);
+
+        for state in [S::Waiting, S::Connecting, S::Offline] {
+            chat.sync_state = state;
+            chat.connected = true;
+            assert_eq!(chat_sync_pill_caption(&chat), None, "transient {state:?}");
+        }
+
+        chat.sync_state = S::Waiting;
+        chat.connected = false;
+        assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
+        chat.sync_state = S::Connecting;
+        assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
+        chat.sync_state = S::Offline;
+        assert_eq!(chat_sync_pill_caption(&chat), Some("Offline — changes are saved"));
+
+        // Real pending pushes remain visible even with a live room.
+        chat.connected = true;
+        chat.pending_pushes = 1;
+        chat.sync_state = S::Waiting;
+        assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
+        chat.sync_state = S::Connecting;
+        assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
+    }
+
+    #[test]
+    fn update_strip_labels_cover_every_install_kind() {
+        // Managed (curl|sh daemon layout): the CLI hint.
+        let managed = zeron_update::InstallKind::Managed {
+            app_root: PathBuf::from("/home/u/.zeron/app"),
+        };
+        assert_eq!(
+            Shell::update_strip_label(&managed, &UpdateFlow::Idle, "0.2.86").0,
+            SharedString::from("Update available — v0.2.86 · run `zeron update`")
+        );
+        // Unmanaged (source builds, hand-copied binaries — bare Windows
+        // release exes): the GitHub releases page, clickable to open it.
+        let unmanaged = Shell::update_strip_label(
+            &zeron_update::InstallKind::Unmanaged,
+            &UpdateFlow::Idle,
+            "0.2.86",
+        );
+        assert_eq!(
+            unmanaged.0,
+            SharedString::from("Update available — v0.2.86 · download from GitHub")
+        );
+        assert!(unmanaged.1);
+        // Downloading is not clickable (desktop flow) and the flow labels stay
+        // untouched for the installs that own them.
+        let mac_app = zeron_update::InstallKind::MacApp {
+            bundle: PathBuf::from("/Applications/Zeron.app"),
+        };
+        assert_eq!(
+            Shell::update_strip_label(&mac_app, &UpdateFlow::Downloading, "0.2.86").0,
+            SharedString::from("Downloading v0.2.86…")
+        );
+        assert!(!Shell::update_strip_label(&mac_app, &UpdateFlow::Downloading, "0.2.86").1);
+        assert_eq!(
+            Shell::update_strip_label(&mac_app, &UpdateFlow::Idle, "0.2.86").0,
+            SharedString::from("Update available — v0.2.86")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_portable_strip_drives_the_desktop_flow() {
+        let portable = zeron_update::InstallKind::WindowsPortable {
+            directory: PathBuf::from(r"C:\Users\u\AppData\Local\Programs\Zeron"),
+        };
+        assert_eq!(
+            Shell::update_strip_label(&portable, &UpdateFlow::Idle, "0.2.86").0,
+            SharedString::from("Update available — v0.2.86")
+        );
+        assert!(Shell::update_strip_label(&portable, &UpdateFlow::Idle, "0.2.86").1);
+    }
 
     #[test]
     fn sidebar_drag_nudges_each_edge_once_until_rearmed() {
@@ -13973,11 +14176,7 @@ mod right_tab_mouse_regressions {
             gpui::Modifiers::default(),
         );
         cx.update(|_, cx| {
-            assert_eq!(
-                cx.has_active_drag(),
-                crate::click_activation_drag_enabled(),
-                "tab drag policy does not match the current platform"
-            )
+            assert!(cx.has_active_drag(), "tab drag did not start")
         });
         cx.simulate_mouse_up(start, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_down(start, MouseButton::Middle, gpui::Modifiers::default());
@@ -13993,7 +14192,10 @@ mod right_tab_mouse_regressions {
     fn subagent_tab_click_jitter_selects_without_starting_a_drag(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
         let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
-        let end = start + gpui::point(px(8.), px(0.));
+        // Sub-threshold pointer jitter (the Windows drag rectangle is 4px,
+        // matching the system SM_CXDRAG default): a jittery click must stay
+        // a click — no drag ghost, tab still activates on release.
+        let end = start + gpui::point(px(3.), px(0.));
 
         cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_move(end, Some(MouseButton::Left), gpui::Modifiers::default());
@@ -14007,6 +14209,40 @@ mod right_tab_mouse_regressions {
 
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(1));
+        });
+    }
+
+    /// The user-visible contract: dragging a surface tab onto another slot
+    /// reorders the strip. On Windows the chip's `on_drag` used to be gated
+    /// off entirely (`click_activation_drag_enabled`), so the drag could
+    /// never start; on every platform the drop could not land on a chip
+    /// (BlockMouse carve-out). This test is the regression lock for both.
+    #[gpui::test]
+    fn surface_tab_drag_reorders_the_strip(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        let from = cx.debug_bounds("right-surface-tab-0").unwrap().center();
+        let to = cx.debug_bounds("right-surface-tab-1").unwrap().center();
+
+        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
+        // First move crosses the threshold and promotes the press into a
+        // drag (bubble phase). The DragMoveEvent dispatch that computes the
+        // drop slot only fires on the NEXT move (capture phase, after the
+        // drag is already active) — a real pointer always produces both.
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.update(|_, cx| {
+            assert!(cx.has_active_drag(), "surface tab drag never started");
+        });
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
+
+        shell.read_with(cx, |shell, cx| {
+            let key = shell.panel_key(cx);
+            let tabs = shell.right_tabs.get(&key).expect("panel has surface tabs");
+            assert_eq!(
+                tabs,
+                &vec![RightSurface::Subagent(2), RightSurface::Subagent(1)],
+                "tab drag did not reorder the strip"
+            );
         });
     }
 }

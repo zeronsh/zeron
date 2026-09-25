@@ -18,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
 use base64::Engine as _;
@@ -68,11 +68,24 @@ const RESIDENT_BYTES_PER_SNAPSHOT_BYTE: usize = 6;
 /// Floor per open doc (room socket buffers, tasks) regardless of content size.
 const DOC_RESIDENT_FLOOR_BYTES: usize = 512 * 1024;
 
-/// Docs touched this recently are never evicted. Closes the open→attach race:
-/// `open()` returns a handle, and until the caller's `watch_messages` lands
-/// the doc is unwatched and unpinned — a concurrent eviction would orphan the
-/// watcher on a roomless doc that renders once and never updates again.
-const EVICT_MIN_IDLE_MS: i64 = 30_000;
+/// Connection reuse grace is independent of document eviction. Caller-owned
+/// handles and explicit writers protect the open-to-subscribe handoff.
+const SYNC_IDLE_MS: i64 = 10_000;
+const SYNC_QUANTUM_MS: i64 = 30_000;
+const ACTIVE_SYNC_CAP: usize = 28;
+const SYNC_ADMISSION_BATCH: usize = 4;
+const SYNC_CATCH_UP_QUANTUM_MS: i64 = 300_000;
+
+// All live-transport scenarios share the process budget, including tests in
+// sibling modules. Hold through shutdown so one fixture cannot rotate another.
+#[cfg(test)]
+static SYNC_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncAdmission {
+    Join,
+    Seed,
+}
 
 /// Queued-attachment transfer pacing: chunk pushes are bounded per call (a
 /// stalled-but-open relay link never fails on its own) and a timeout marks
@@ -234,6 +247,8 @@ struct DocHostInner {
     /// Tracks every spawned worker so `shutdown_workers` can await them.
     tasks: TaskTracker,
     handles: Mutex<HashMap<String, Arc<ChatDocHandle>>>,
+    document_loads: AtomicU64,
+    focus_clock: AtomicU64,
     /// Serialize cold opens without blocking access to already-live handles.
     opening: Mutex<()>,
     /// chat2 seeds in flight (one per chat — reopen storms must not race
@@ -372,6 +387,36 @@ impl DegradeGrace {
     /// Drop timers for chats that no longer have open docs.
     fn retain_chats(&mut self, keep: impl Fn(&str) -> bool) {
         self.chats.retain(|id, _| keep(id));
+    }
+}
+
+/// One read of an open chat's admission flags and client. Connectivity and
+/// sync-state reporting share it so a tick does not re-fetch each handle.
+struct ChatConnectionSnapshot {
+    sync_started: bool,
+    sync_requested: bool,
+    stats: Option<zeron_sync::ChatStatsSnapshot>,
+    delivery_live: bool,
+}
+
+impl ChatConnectionSnapshot {
+    fn read(handle: &ChatDocHandle) -> Self {
+        let sync_started = handle.sync_started.load(Ordering::Acquire);
+        let sync_requested = handle.sync_requested.load(Ordering::Acquire);
+        let client = lock(&handle.chat2);
+        Self {
+            sync_started,
+            sync_requested,
+            stats: client.as_ref().map(|client| client.stats()),
+            delivery_live: sync_started
+                && client
+                    .as_ref()
+                    .is_some_and(|client| client.delivery_live()),
+        }
+    }
+
+    fn sync_expected(&self) -> bool {
+        self.sync_started || self.sync_requested
     }
 }
 
@@ -521,6 +566,9 @@ pub struct ChatDocHandle {
     mirror_dirty: AtomicBool,
     /// Epoch ms of the last open/watch touch — the LRU eviction key.
     last_access: AtomicI64,
+    /// User navigation only. Opens, watches, writes and reconnects never bump it.
+    last_focus: AtomicU64,
+    sync_focus_served: AtomicU64,
     /// Last known snapshot blob size — the eviction budget estimate's input.
     snapshot_bytes: AtomicUsize,
     /// The sync generation this handle was BUILT for (1 = legacy s2,
@@ -544,6 +592,17 @@ pub struct ChatDocHandle {
     /// chat2 relay client (docs/chat2-sync.md C3) — populated once the
     /// registry names roomGen 2 for this chat and the join resolves.
     chat2: Mutex<Option<zeron_sync::ChatClient>>,
+    sync_started: AtomicBool,
+    sync_requested: AtomicBool,
+    sync_background: AtomicBool,
+    sync_last_started: AtomicI64,
+    sync_wait_since: AtomicI64,
+    /// A fairness admission gets a full turn, even under repeated navigation.
+    sync_service_until: AtomicI64,
+    sync_wake_version: AtomicI64,
+    sync_wake_ticket: AtomicU64,
+    sync_cancel: Mutex<CancellationToken>,
+    writers: Arc<AtomicUsize>,
     pub(crate) persistence: Option<Arc<crate::chat_persistence::ChatPersistence>>,
     /// Local commits made before the relay connects (the dial can take up
     /// to a minute; offline, forever): buffered here by the subscription
@@ -557,13 +616,59 @@ pub struct ChatDocHandle {
     _sub: loro::Subscription,
 }
 
+/// A running agent explicitly owns a writer lease until its final cleanup.
+/// Reference counting remains a conservative compatibility guard for read APIs.
+struct ResetFlag(Arc<AtomicBool>);
+impl Drop for ResetFlag {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+pub struct DocWriter {
+    doc: Arc<SessionDoc>,
+    writers: Arc<AtomicUsize>,
+}
+impl std::ops::Deref for DocWriter {
+    type Target = SessionDoc;
+    fn deref(&self) -> &Self::Target {
+        &self.doc
+    }
+}
+impl Drop for DocWriter {
+    fn drop(&mut self) {
+        self.writers.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+impl Drop for ChatDocHandle {
+    fn drop(&mut self) {
+        lock(&self.sync_cancel).cancel();
+    }
+}
+
 impl ChatDocHandle {
+    /// Live views and agents retain their documents and resist idle retirement.
+    /// At capacity their transports can yield without dropping these leases.
+    fn sync_protected(&self) -> bool {
+        self.messages_tx.receiver_count() > 0
+            || self.queue_tx.receiver_count() > 0
+            || self.writers.load(Ordering::Acquire) > 0
+    }
+
     pub fn chat_id(&self) -> &str {
         &self.chat_id
     }
 
     pub fn doc(&self) -> &SessionDoc {
         &self.doc
+    }
+
+    pub fn writer(&self) -> DocWriter {
+        self.writers.fetch_add(1, Ordering::AcqRel);
+        DocWriter {
+            doc: self.doc.clone(),
+            writers: self.writers.clone(),
+        }
     }
 
     pub fn doc_arc(&self) -> Arc<SessionDoc> {
@@ -750,7 +855,7 @@ impl ChatDocHandle {
 
 impl DocHost {
     pub fn new(store: Arc<DocsStore>, config: DocHostConfig) -> Self {
-        Self {
+        let host = Self {
             inner: Arc::new(DocHostInner {
                 store,
                 config,
@@ -762,6 +867,8 @@ impl DocHost {
                 edge_disconnected: AtomicBool::new(false),
                 tasks: TaskTracker::new(),
                 handles: Mutex::new(HashMap::new()),
+                document_loads: AtomicU64::new(0),
+                focus_clock: AtomicU64::new(0),
                 opening: Mutex::new(()),
                 seeding: Mutex::new(HashSet::new()),
                 seed_waiting: Mutex::new(HashSet::new()),
@@ -774,13 +881,19 @@ impl DocHost {
                 executing: Mutex::new(HashSet::new()),
                 links: OnceLock::new(),
                 http: reqwest::Client::builder()
+                    .pool_max_idle_per_host(2)
+                    .pool_idle_timeout(std::time::Duration::from_secs(10))
                     .connect_timeout(std::time::Duration::from_secs(15))
                     .read_timeout(std::time::Duration::from_secs(30))
                     .timeout(std::time::Duration::from_secs(30))
                     .build()
                     .unwrap_or_else(|_| reqwest::Client::new()),
             }),
+        };
+        if tokio::runtime::Handle::try_current().is_ok() {
+            host.spawn_sync_scheduler();
         }
+        host
     }
 
     /// Every background task rides the tracker, raced against the shutdown
@@ -1114,8 +1227,26 @@ impl DocHost {
     }
 
     /// Open (or return) the chat's doc handle: load the local snapshot (or init fresh),
-    /// start the change-driven task, and join the edge room when configured.
+    /// start the change-driven task, and request budgeted sync when configured.
     pub fn open(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
+        let handle = self.open_local(chat_id)?;
+        self.activate_sync(&handle);
+        Ok(handle)
+    }
+
+    /// Explicit viewport navigation; automatic watch retries and MCP reads use
+    /// `open` instead. The sequence also orders focuses in the same millisecond.
+    pub fn focus_chat(&self, chat_id: &str) -> Result<(), EngineError> {
+        let handle = self.open_local(chat_id)?;
+        let focus = self.inner.focus_clock.fetch_add(1, Ordering::AcqRel) + 1;
+        handle.last_focus.fetch_max(focus, Ordering::AcqRel);
+        self.activate_sync(&handle);
+        Ok(())
+    }
+
+    /// Materialize one authoritative local document without acquiring a network
+    /// connection. Durable publication is installed before exposing any writer.
+    pub fn open_local(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
         // The registry names the sync room generation (docs/chat2-sync.md
         // M2): absent row / absent field = legacy s2. Read it BEFORE the
         // cached-handle check — a cached s2-mode handle for a chat another
@@ -1171,6 +1302,7 @@ impl DocHost {
         // room's fat doc would merge into the unrelated thin lineage and
         // duplicate every message. Local epoch >= 2 forces the chat2 branch
         // and best-effort completes the flip.
+        self.inner.document_loads.fetch_add(1, Ordering::Relaxed);
         let stored = self.inner.store.load_snapshot_with_cursor(chat_id)?;
         let stored_epoch = stored.as_ref().map(|(_, _, e)| *e).unwrap_or(0);
         let room_gen = if stored_epoch >= crate::chat2_host::CHAT2_DOC_EPOCH {
@@ -1348,11 +1480,23 @@ impl DocHost {
             queue_paused: AtomicBool::new(recovered_queue_pending),
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
+            last_focus: AtomicU64::new(0),
+            sync_focus_served: AtomicU64::new(0),
             snapshot_bytes: AtomicUsize::new(snapshot_len),
             room_gen,
             retired: AtomicBool::new(false),
             checkpointing: Arc::new(AtomicBool::new(false)),
             chat2: Mutex::new(None),
+            sync_started: AtomicBool::new(false),
+            sync_requested: AtomicBool::new(false),
+            sync_background: AtomicBool::new(false),
+            sync_last_started: AtomicI64::new(0),
+            sync_wait_since: AtomicI64::new(0),
+            sync_service_until: AtomicI64::new(0),
+            sync_wake_version: AtomicI64::new(0),
+            sync_wake_ticket: AtomicU64::new(0),
+            sync_cancel: Mutex::new(CancellationToken::new()),
+            writers: Arc::new(AtomicUsize::new(0)),
             persistence,
             chat2_pending_local: Mutex::new(Vec::new()),
             publication_failed: AtomicBool::new(false),
@@ -1374,7 +1518,7 @@ impl DocHost {
         // retried: the exact "transcript frozen until restart" report.
         // Retry on the workspace host's capped, jittered backoff; a system
         // wake redials immediately; eviction/purge ends the loop via `weak`.
-        if let Some(edge) = &self.inner.config.edge {
+        if self.inner.config.edge.is_some() {
             if room_gen >= 2 {
                 // Subscription BEFORE the dial (review B3): every local
                 // commit lands in the client when connected, else in the
@@ -1399,14 +1543,14 @@ impl DocHost {
                             // check and the push let the join's store+drain
                             // slip between, orphaning the update forever).
                             let batch_id = uuid::Uuid::new_v4().to_string();
+                            let client_guard = lock(&handle.chat2);
                             if let Err(err) = publication_store.enqueue_chat_update(&publication_chat, &batch_id, bytes) {
                                 handle.publication_failed.store(true, Ordering::Release);
+                                lock(&handle.chat2_pending_local).push((batch_id.clone(), bytes.clone()));
                                 tracing::error!(chat = %publication_chat, %err, "chat2: durable outbox write failed");
                             }
-                            let client_guard = lock(&handle.chat2);
-                            match &*client_guard {
-                                Some(client) => client.enqueue_batch(batch_id, bytes.clone()),
-                                None => lock(&handle.chat2_pending_local).push((batch_id, bytes.clone())),
+                            if let Some(client) = &*client_guard {
+                                client.enqueue_batch(batch_id, bytes.clone());
                             }
                         }
                         true
@@ -1422,23 +1566,6 @@ impl DocHost {
                 for command in &requeue_commands {
                     let _ = doc.queue_command(command);
                 }
-                if !self.inner.edge_disconnected.load(Ordering::Acquire) {
-                    self.spawn_chat2_join(edge.clone(), &handle, chat2_cursor);
-                }
-            } else {
-                // Straggler gen-1 chat (the s2 client is gone — post-cutover,
-                // no device reads or writes an s2 room). The local fat doc
-                // serves reads as-is; if we host the chat, seed it onto chat2
-                // in the background and the flip converges every device.
-                let is_host = chat_row
-                    .as_ref()
-                    .is_some_and(|c| c.device_id == self.inner.config.device_id);
-                if is_host && chat_row.is_some() {
-                    // Quiescent-only (review B1): a seed under a live run or
-                    // watched transcript would strand everything written
-                    // after the rebuild instant in a retired fat lineage.
-                    self.spawn_chat2_seed_when_quiet(edge.clone(), chat_id, &handle);
-                }
             }
         }
         // Publish only after the durable subscription and bootstrap are installed.
@@ -1449,11 +1576,515 @@ impl DocHost {
         Ok(handle)
     }
 
-    /// chat2 relay join (docs/chat2-sync.md C3): deadline on every dial,
-    /// capped jittered backoff, wake redial — and the client resolves only
-    /// after full catch-up (checkpoint + rows), so "joined" here means
-    /// "transcript converged".
+    /// Connection lifetime is independent of the document and its outbox.
+    /// Concurrent callers activate at most one supervisor for this handle.
+    /// Called on the device control link. Acceptance never cold-opens a chat.
+    pub fn enqueue_wakeup(&self, chat_id: &str) -> Result<(), EngineError> {
+        self.inner
+            .store
+            .schedule_sync_job(chat_id, if chat_id == "*" { "reconcile" } else { "wake" })?;
+        Ok(())
+    }
+
+    pub fn activate_sync(&self, handle: &Arc<ChatDocHandle>) {
+        handle.sync_background.store(false, Ordering::Release);
+        if !handle.sync_started.load(Ordering::Acquire) {
+            let _ = handle.sync_wait_since.compare_exchange(
+                0,
+                now_ms(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+        if self.inner.config.edge.is_some() && !self.inner.edge_disconnected.load(Ordering::Acquire)
+        {
+            handle.sync_requested.store(true, Ordering::Release);
+        }
+    }
+
+    /// Resolve an actual operation before reserving a client slot. Generation
+    /// comes from the opened handle, including the local epoch override; an
+    /// absent registry row is still the legitimate born-chat2 race.
+    fn prepare_sync_admission(
+        &self,
+        handle: &ChatDocHandle,
+        wake_version: Option<i64>,
+    ) -> Result<Option<SyncAdmission>, EngineError> {
+        if handle.room_gen >= 2 {
+            return Ok(Some(SyncAdmission::Join));
+        }
+        let row = match self.workspace() {
+            Some(workspace) => workspace.chat(&handle.chat_id)?,
+            None => None,
+        };
+        match row {
+            None => Ok(Some(SyncAdmission::Seed)),
+            Some(row) if row.device_id == self.inner.config.device_id => {
+                Ok(Some(SyncAdmission::Seed))
+            }
+            Some(row) if row.room_gen.unwrap_or(1) < 2 => {
+                // Only retire the receipt examined before this decision. A
+                // newer wake must survive, and outgoing updates are untouched.
+                if let Some(version) = wake_version {
+                    self.inner
+                        .store
+                        .complete_sync_job(&handle.chat_id, "wake", version)?;
+                }
+                handle.sync_requested.store(false, Ordering::Release);
+                Ok(None)
+            }
+            // Registry cutover overtook a pinned legacy handle. Let the
+            // cutover watcher replace it; do not lose its pending work.
+            Some(_) => Ok(None),
+        }
+    }
+
+    /// Cold candidates stay metadata-only until a connection can be admitted.
+    /// Local epoch wins over an older registry row, exactly as in `open_local`.
+    fn prepare_stored_sync_admission(
+        &self,
+        chat_id: &str,
+        wake_version: Option<i64>,
+    ) -> Result<Option<SyncAdmission>, EngineError> {
+        if self.inner.store.snapshot_epoch(chat_id)? >= crate::chat2_host::CHAT2_DOC_EPOCH {
+            return Ok(Some(SyncAdmission::Join));
+        }
+        let row = match self.workspace() {
+            Some(ws) => ws.chat(chat_id)?,
+            None => None,
+        };
+        match row {
+            None => Ok(Some(SyncAdmission::Join)),
+            Some(row) if row.room_gen.unwrap_or(1) >= 2 => Ok(Some(SyncAdmission::Join)),
+            Some(row) if row.device_id == self.inner.config.device_id => {
+                Ok(Some(SyncAdmission::Seed))
+            }
+            Some(_) => {
+                if let Some(version) = wake_version {
+                    self.inner
+                        .store
+                        .complete_sync_job(chat_id, "wake", version)?;
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    /// One dispatcher per host; waiting chats are flags on existing handles,
+    /// never a spawned task per connection request. Oldest service wins within
+    /// each class, with one background admission every four selections.
+    fn spawn_sync_scheduler(&self) {
+        let weak = Arc::downgrade(&self.inner);
+        self.spawn_worker(async move {
+            use futures::{StreamExt, stream::FuturesUnordered};
+            let mut turn = 0u64;
+            let mut disk_cursor = String::new();
+            // (winner, fairness turn). Reserve a released slot until teardown
+            // ends; a disk-page change must not steal it from the winner.
+            let mut handoff: Option<(String, bool)> = None;
+            let mut contention_since = None;
+            // Closing clients keep their admission slots until teardown ends,
+            // but no individual close can suspend unrelated admissions/work.
+            // Track teardown independently of this cancellable dispatcher:
+            // host shutdown must join these actors before its final snapshot.
+            let mut stopping = FuturesUnordered::<tokio::task::JoinHandle<String>>::new();
+            let mut stopping_ids = HashSet::new();
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                    Some(result) = stopping.next(), if !stopping.is_empty() => {
+                        match result {
+                            Ok(id) => { stopping_ids.remove(&id); }
+                            Err(error) => tracing::error!(%error, "chat sync teardown failed"),
+                        }
+                        continue;
+                    }
+                }
+                let Some(inner) = weak.upgrade() else { return };
+                let host = Self { inner };
+                host.evict_over_budget();
+                if host.inner.edge_disconnected.load(Ordering::Acquire) {
+                    continue;
+                }
+                let Some(edge) = host.inner.config.edge.clone() else {
+                    continue;
+                };
+                // Overflow reconciliation is metadata-only and resumable. Wait
+                // for registry truth before deciding the hosted set is complete.
+                if let Some(ws) = host.workspace() {
+                    if ws.sync_status().is_some_and(|s| s.synced) {
+                        if let Ok(Some((version, cursor))) =
+                            host.inner.store.reconciliation_progress()
+                        {
+                            let mut ids: Vec<_> = ws
+                                .watch_chats()
+                                .borrow()
+                                .iter()
+                                .filter(|c| {
+                                    c.device_id == host.inner.config.device_id && c.id > cursor
+                                })
+                                .map(|c| c.id.clone())
+                                .collect();
+                            ids.sort();
+                            ids.truncate(32);
+                            let _ = host.inner.store.reconcile_page(version, &ids);
+                        }
+                    }
+                }
+                let handles: Vec<_> = lock(&host.inner.handles).values().cloned().collect();
+                for handle in &handles {
+                    if !handle.publication_failed.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    let _client = lock(&handle.chat2);
+                    let mut failed = lock(&handle.chat2_pending_local);
+                    failed.retain(|(id, bytes)| {
+                        host.inner
+                            .store
+                            .enqueue_chat_update(&handle.chat_id, id, bytes)
+                            .is_err()
+                    });
+                    if failed.is_empty() {
+                        handle.publication_failed.store(false, Ordering::Release);
+                    }
+                }
+
+                let durable = host
+                    .inner
+                    .store
+                    .pending_sync_docs(&disk_cursor, 4)
+                    .unwrap_or_default();
+                if durable.is_empty() {
+                    disk_cursor.clear();
+                }
+                // Discover actual contenders before deciding whether to retire
+                // a client. A connected chat's outbox is not slot contention.
+                let disk_healthy = !handles.iter()
+                    .any(|h| h.publication_failed.load(Ordering::Acquire));
+                // A None handle is a cold, metadata-only candidate. Discovery
+                // advances at capacity without loading and evicting its history.
+                let mut candidates: Vec<_> = handles.iter()
+                    .filter(|h| h.sync_requested.load(Ordering::Acquire)
+                        && !h.sync_started.load(Ordering::Acquire)
+                        && !stopping_ids.contains(&h.chat_id))
+                    .map(|h| (h.chat_id.clone(), Some(h.clone()))).collect();
+                if disk_healthy {
+                    for id in durable {
+                        disk_cursor = id.clone();
+                        if candidates.iter().any(|(chat, _)| chat == &id)
+                            || stopping_ids.contains(&id)
+                            || handles.iter().any(|h| h.chat_id == id && h.sync_started.load(Ordering::Acquire))
+                        {
+                            continue;
+                        }
+                        candidates.push((id, None));
+                    }
+                }
+                if let Some((id, _)) = &handoff {
+                    if !candidates.iter().any(|(chat, _)| chat == id) {
+                        candidates.push((id.clone(), handles.iter().find(|h| &h.chat_id == id).cloned()));
+                    }
+                }
+                let mut waiting = Vec::new();
+                for (id, handle) in candidates {
+                    let wake_version = match host.inner.store.sync_job_version(&id, "wake") {
+                        Ok(version) => version,
+                        Err(error) => {
+                            tracing::warn!(chat = %id, %error, "sync admission deferred: wake read failed");
+                            continue;
+                        }
+                    };
+                    let admission = match &handle {
+                        Some(h) => host.prepare_sync_admission(h, wake_version),
+                        None => host.prepare_stored_sync_admission(&id, wake_version),
+                    };
+                    match admission {
+                        Ok(Some(_)) => waiting.push((id, handle, wake_version)),
+                        Ok(None) => {},
+                        Err(error) => tracing::warn!(chat = %id, %error, "sync admission eligibility deferred"),
+                    }
+                }
+                // Ownership/cutover changes can invalidate a reserved winner.
+                if handoff.as_ref().is_some_and(|(id, _)| !waiting.iter().any(|(chat, _, _)| chat == id)) {
+                    handoff = None;
+                }
+                for handle in &handles {
+                    if !handle.sync_started.load(Ordering::Acquire)
+                        || stopping_ids.contains(&handle.chat_id)
+                    {
+                        continue;
+                    }
+                    // A focus during teardown remains unserved and can
+                    // reclaim a slot. Only resident, non-closing clients
+                    // acknowledge focus here.
+                    handle.sync_focus_served.fetch_max(handle.last_focus.load(Ordering::Acquire), Ordering::AcqRel);
+                    let mut captured = handle.sync_wake_version.load(Ordering::Acquire);
+                    let pending_wake = host
+                        .inner
+                        .store
+                        .sync_job_version(&handle.chat_id, "wake")
+                        .ok()
+                        .flatten();
+                    if let Some(version) = pending_wake.filter(|v| *v != captured) {
+                        // Keep the healthy transport. Retirement of this wake
+                        // requires a read started after its version was seen.
+                        if let Some(client) = lock(&handle.chat2).as_ref() {
+                            let ticket = client.request_catch_up();
+                            handle.sync_wake_ticket.store(ticket, Ordering::Release);
+                            handle.sync_wake_version.store(version, Ordering::Release);
+                            captured = version;
+                        }
+                    }
+                    let wake_read_complete = captured != 0
+                        && lock(&handle.chat2).as_ref().is_some_and(|c|
+                            c.catch_up_completed(handle.sync_wake_ticket.load(Ordering::Acquire)));
+                    if wake_read_complete && host.wakeup_is_durable(handle)
+                    {
+                        let _ =
+                            host.inner
+                                .store
+                                .complete_sync_job(&handle.chat_id, "wake", captured);
+                    }
+                    let caught_up = lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up());
+                    // A quiet document can still be receiving its checkpoint
+                    // or commands. Incomplete catch-up only yields via rotate's
+                    // explicit service deadline, never the short reuse grace.
+                    let idle = caught_up
+                        && !handle.sync_protected()
+                        && (now_ms() - handle.last_access.load(Ordering::Relaxed) >= SYNC_IDLE_MS
+                            || (handle.sync_background.load(Ordering::Acquire) && caught_up))
+                        && !host
+                            .inner
+                            .store
+                            .has_pending_chat_updates(&handle.chat_id)
+                            .unwrap_or(true);
+                    if idle {
+                        handle.sync_requested.store(false, Ordering::Release);
+                        stopping_ids.insert(handle.chat_id.clone());
+                        stopping.push(host.inner.tasks.spawn(host.stop_sync_owned(handle.clone())));
+                    }
+                }
+                // Closing clients still own capacity until teardown is joined.
+                let running = handles.iter().filter(|h|
+                    h.sync_started.load(Ordering::Acquire) || stopping_ids.contains(&h.chat_id)
+                ).count();
+                let available = ACTIVE_SYNC_CAP.saturating_sub(running);
+                let now = now_ms();
+                let contended = available == 0 && !waiting.is_empty();
+                let budget = zeron_sync::budget::shared().stats();
+                let global_contended = !budget.resource_paused && budget.sockets >= budget.socket_limit && budget.socket_waiting > 0;
+                // A teardown gap or the end of a paged disk scan is not the
+                // end of contention. Resetting there starves cold jobs under
+                // continuous navigation or a full set of active writers.
+                if available > 0 && waiting.is_empty() {
+                    contention_since = None;
+                }
+                let since = if !waiting.is_empty() { *contention_since.get_or_insert(now) } else { now };
+                for (_, h, _) in &waiting {
+                    if let Some(h) = h {
+                        let _ = h.sync_wait_since.compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
+                    }
+                }
+                let newest_focus = waiting.iter().filter_map(|(id, h, _)| {
+                    let h = h.as_ref()?;
+                    let focus = h.last_focus.load(Ordering::Acquire);
+                    (focus > h.sync_focus_served.load(Ordering::Acquire)).then(|| (focus, id.clone()))
+                }).max();
+                let oldest_waiter = waiting.iter().filter(|(_, h, _)| {
+                    now - h.as_ref().map_or(since, |h| h.sync_wait_since.load(Ordering::Acquire)) >= SYNC_QUANTUM_MS
+                }).min_by_key(|(id, h, _)| (
+                    h.as_ref().map_or(0, |h| h.sync_last_started.load(Ordering::Acquire)), id.clone(),
+                ));
+                // Three focus turns, then one overdue service turn. A served
+                // focus cannot immediately take its slot back after rotation.
+                let fair = oldest_waiter.is_some() && (newest_focus.is_none() || (turn + 1) % 4 == 0);
+                let winner = if fair {
+                    oldest_waiter.map(|(id, _, _)| id.clone())
+                } else {
+                    newest_focus.as_ref().map(|(_, id)| id.clone())
+                };
+                let latest_focus = handles.iter().map(|h| h.last_focus.load(Ordering::Acquire)).max().unwrap_or(0);
+                if disk_healthy && (contended || global_contended) && handoff.is_none() && stopping_ids.is_empty() {
+                    let mut victims = Vec::new();
+                    for h in &handles {
+                        if !h.sync_started.load(Ordering::Acquire)
+                            || h.sync_service_until.load(Ordering::Acquire) > now {
+                            continue;
+                        }
+                        let protected = h.sync_protected();
+                        let focus = h.last_focus.load(Ordering::Acquire);
+                        let caught_up = lock(&h.chat2).as_ref().is_some_and(|c| c.caught_up());
+                        if !contended && !caught_up { continue; }
+                        let pending = host.inner.store.has_pending_chat_updates(&h.chat_id).unwrap_or(true);
+                        let age = now - h.sync_last_started.load(Ordering::Acquire);
+                        let service_complete = (caught_up && age >= SYNC_QUANTUM_MS) || age >= SYNC_CATCH_UP_QUANTUM_MS;
+                        let eligible = if !protected {
+                            (caught_up && !pending) || service_complete
+                        } else if fair || !contended {
+                            // Keep the most recently focused thread live while
+                            // the other slots provide bounded service turns.
+                            service_complete && (focus == 0 || focus != latest_focus || running == 1)
+                        } else {
+                            newest_focus.as_ref().is_some_and(|(newest, _)| *newest > focus)
+                        };
+                        if eligible {
+                            victims.push((protected, h.writers.load(Ordering::Acquire) > 0, focus,
+                                h.sync_last_started.load(Ordering::Acquire), h.clone(), caught_up, pending));
+                        }
+                    }
+                    // Reclaim idle work first, then viewed-only docs, then
+                    // writers in least-recent-user-focus order. One handoff
+                    // retires one transport, never a whole batch of agents.
+                    victims.sort_by_key(|(protected, writer, focus, started, h, _, _)|
+                        (*protected, *writer, *focus, *started, h.chat_id.clone()));
+                    if let Some((protected, _, _, _, handle, caught_up, pending)) = victims.into_iter().next() {
+                        let unfinished = protected || !caught_up || pending
+                            || host.inner.store.sync_job_version(&handle.chat_id, "wake").map_or(true, |v| v.is_some());
+                        handle.sync_requested.store(unfinished, Ordering::Release);
+                        handle.sync_wait_since.store(now, Ordering::Release);
+                        handoff = winner.map(|id| (id, fair));
+                        stopping_ids.insert(handle.chat_id.clone());
+                        stopping.push(host.inner.tasks.spawn(host.stop_sync_owned(handle)));
+                    }
+                }
+                let admission_limit = if disk_healthy {
+                    available.min(SYNC_ADMISSION_BATCH)
+                } else {
+                    0
+                };
+                let mut admitted = 0;
+                while admitted < admission_limit && !waiting.is_empty() {
+                    turn += 1;
+                    waiting.sort_by_key(|(id, h, _)| {
+                        let protected = h.as_ref().is_some_and(|h| h.sync_protected());
+                        let focus = h.as_ref().map_or(0, |h| {
+                            let focus = h.last_focus.load(Ordering::Acquire);
+                            if focus > h.sync_focus_served.load(Ordering::Acquire) { focus } else { 0 }
+                        });
+                        (
+                            handoff.as_ref().map(|(chat, _)| chat) != Some(id),
+                            if turn % 4 == 0 { protected } else { !protected },
+                            std::cmp::Reverse(if turn % 4 == 0 { 0 } else { focus }),
+                            h.as_ref().map_or(0, |h| h.sync_last_started.load(Ordering::Acquire)),
+                            id.clone(),
+                        )
+                    });
+                    let (id, cached, wake_version) = waiting.remove(0);
+                    let handle = match cached {
+                        Some(h) => h,
+                        None => match host.open_local(&id) {
+                            Ok(h) => {
+                                h.sync_background.store(true, Ordering::Release);
+                                h.sync_requested.store(true, Ordering::Release);
+                                h
+                            }
+                            Err(error) => {
+                                tracing::warn!(chat = %id, %error, "durable sync work deferred");
+                                continue;
+                            }
+                        },
+                    };
+                    // Opening may observe a newer registry/lineage. Recheck
+                    // ownership before admission, retaining the captured wake.
+                    let action = match host.prepare_sync_admission(&handle, wake_version) {
+                        Ok(Some(action)) => action,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            tracing::warn!(chat = %id, %error, "sync admission recheck failed");
+                            continue;
+                        }
+                    };
+                    if handle.sync_started.swap(true, Ordering::AcqRel) {
+                        continue;
+                    }
+                    admitted += 1;
+                    let fair_turn = handoff.as_ref().is_some_and(|(chat, fair)| chat == &id && *fair);
+                    if handoff.as_ref().is_some_and(|(chat, _)| chat == &id) {
+                        handoff = None;
+                    }
+                    handle.sync_wait_since.store(0, Ordering::Release);
+                    handle.sync_service_until.store(if fair_turn { now_ms() + SYNC_QUANTUM_MS } else { 0 }, Ordering::Release);
+                    handle.sync_focus_served.fetch_max(handle.last_focus.load(Ordering::Acquire), Ordering::AcqRel);
+                    handle.sync_last_started.store(now_ms(), Ordering::Release);
+                    handle.sync_wake_version.store(wake_version.unwrap_or(0), Ordering::Release);
+                    handle.sync_wake_ticket.store(0, Ordering::Release);
+                    match action {
+                        SyncAdmission::Join => {
+                            let cursor = handle.persistence.as_ref().map_or(0, |p| p.cursor());
+                            host.spawn_chat2_join(edge.clone(), &handle, cursor);
+                        }
+                        SyncAdmission::Seed => {
+                            host.spawn_chat2_seed_when_quiet(edge.clone(), &handle.chat_id, &handle);
+                        }
+                    }
+                }
+                drop(waiting);
+                host.evict_over_budget();
+            }
+        });
+    }
+
+    fn stop_sync_owned(
+        &self,
+        handle: Arc<ChatDocHandle>,
+    ) -> impl std::future::Future<Output = String> + Send + 'static {
+        let host = self.clone();
+        async move {
+            host.stop_sync(&handle).await;
+            handle.chat_id.clone()
+        }
+    }
+
+    async fn stop_sync(&self, handle: &ChatDocHandle) {
+        lock(&handle.sync_cancel).cancel();
+        let client = lock(&handle.chat2).take();
+        if let Some(client) = client {
+            client.shutdown().await;
+        }
+        handle.sync_started.store(false, Ordering::Release);
+    }
+
+    /// Catch-up alone is not a durable handoff: a crash before the snapshot
+    /// debounce/command drain would otherwise lose the only discovery receipt.
+    fn wakeup_is_durable(&self, handle: &ChatDocHandle) -> bool {
+        if handle.publication_failed.load(Ordering::Acquire) {
+            return false;
+        }
+        if self.is_host(&handle.chat_id) {
+            let Ok(commands) = handle.doc.read_commands() else {
+                return false;
+            };
+            if commands.iter().any(|c| {
+                c.status == SessionCommandStatus::Pending
+                    && !self.inner.store.is_processed(&c.id).unwrap_or(false)
+            }) {
+                return false;
+            }
+        }
+        self.save_snapshot(handle);
+        handle.persistence.as_ref().is_some_and(|p| p.is_clean())
+    }
+
+    fn spawn_sync_worker(
+        &self,
+        cancel: CancellationToken,
+        fut: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        self.spawn_worker(async move {
+            tokio::select! { _ = cancel.cancelled() => {}, _ = fut => {} }
+        });
+    }
+
+    /// Install a supervised chat2 client. Construction is local-first; only
+    /// caught_up() proves the checkpoint and row replay actually completed.
     fn spawn_chat2_join(&self, edge: EdgeConfig, handle: &Arc<ChatDocHandle>, cursor: u64) {
+        let cancel = CancellationToken::new();
+        *lock(&handle.sync_cancel) = cancel.clone();
+        let priority = if handle.sync_background.load(Ordering::Acquire) {
+            zeron_sync::budget::Priority::Background
+        } else {
+            zeron_sync::budget::Priority::Interactive
+        };
         let chat = handle.chat_id.clone();
         let doc = handle.doc.clone();
         let store = self.inner.store.clone();
@@ -1462,7 +2093,7 @@ impl DocHost {
         let weak = Arc::downgrade(handle);
         let host = self.clone();
         let mut token_changes = edge.token_changes();
-        self.spawn_worker(async move {
+        self.spawn_sync_worker(cancel.clone(), async move {
             let sink = Arc::new(crate::chat2_host::EngineChatSink::new(&doc, store, chat.clone())
                 .with_handle(weak.clone()));
             // The sink holds only a Weak doc ref (a strong one made every
@@ -1473,7 +2104,7 @@ impl DocHost {
                 http,
                 edge.clone(),
                 chat.clone(),
-            ));
+            ).with_priority(priority));
             let url = edge.room_url(format!("/chat2/{chat}/ws"));
             let mut wake = zeron_sync::wake::subscribe();
             // Sibling-dial successes end a backoff wait immediately, exactly
@@ -1499,7 +2130,7 @@ impl DocHost {
                     edge.clone(),
                     chat.clone(),
                     device.clone(),
-                ));
+                ).with_priority(priority));
                 let dial = tokio::time::timeout(
                     std::time::Duration::from_secs(60),
                     zeron_sync::ChatClient::connect_via_transport(
@@ -1529,21 +2160,27 @@ impl DocHost {
                             // is either drained here or enqueued directly
                             // after — never dropped between (verify pass).
                             let mut client_slot = lock(&handle.chat2);
-                            if host.inner.edge_disconnected.load(Ordering::Acquire) { return; }
+                            if host.inner.edge_disconnected.load(Ordering::Acquire) || cancel.is_cancelled() { return; }
+                            // Include commits made after the sink's initial
+                            // load but before installation. The same lock is
+                            // held by the local-update subscription.
+                            for (id, bytes) in host.inner.store.pending_chat_updates(&chat).unwrap_or_default() {
+                                client.enqueue_batch(id, bytes);
+                            }
                             let pending: Vec<(String, Vec<u8>)> =
-                                std::mem::take(&mut *lock(&handle.chat2_pending_local));
+                                lock(&handle.chat2_pending_local).clone();
                             for (batch_id, update) in pending {
                                 client.enqueue_batch(batch_id, update);
                             }
                             *client_slot = Some(client);
                         }
-                        tracing::info!(chat = %chat, "chat2 room joined (converged)");
+                        tracing::info!(chat = %chat, "chat2 client admitted (catch-up pending)");
                         // A missed event, failed POST or actor restart must not
                         // forget rejected operations. Any author can checkpoint
                         // its own durable history, including a non-host desktop.
                         let checkpoint_host = host.clone();
                         let checkpoint_weak = weak.clone();
-                        host.spawn_worker(async move {
+                        host.spawn_sync_worker(cancel.clone(), async move {
                             loop {
                                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                                 let Some(handle) = checkpoint_weak.upgrade() else { return };
@@ -1568,7 +2205,7 @@ impl DocHost {
                         if host.is_host(&chat) {
                             let host = host.clone();
                             let weak = weak.clone();
-                            host.clone().spawn_worker(async move {
+                            host.clone().spawn_sync_worker(cancel.clone(), async move {
                                 // With the pull-first transport the client
                                 // constructs before any state answer — wait
                                 // until the server's view is KNOWN (bounded)
@@ -1609,7 +2246,7 @@ impl DocHost {
                             let host = host.clone();
                             let weak = weak.clone();
                             let chat = chat.clone();
-                            host.clone().spawn_worker(async move {
+                            host.clone().spawn_sync_worker(cancel.clone(), async move {
                                 use zeron_sync::chat_client::ChatEvent;
                                 loop {
                                     match events.recv().await {
@@ -1801,6 +2438,10 @@ impl DocHost {
             edge.url.trim_end_matches('/'),
             chat_id
         );
+        let _permit = zeron_sync::budget::shared()
+            .http(zeron_sync::budget::Priority::Background)
+            .await
+            .map_err(|e| e.to_string())?;
         let res = self
             .inner
             .http
@@ -1920,14 +2561,105 @@ impl DocHost {
                     continue; // never ran here — an empty doc is just new
                 }
                 if let Err(err) = host.salvage_chat_transcript(&chat.id).await {
+                    let _ = host.inner.store.schedule_sync_job(&chat.id, "recovery");
                     tracing::warn!(chat = %chat.id, error = %err, "transcript salvage failed");
+                }
+            }
+            let mut after = String::new();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let jobs = host
+                    .inner
+                    .store
+                    .pending_sync_jobs("recovery", &after, 1)
+                    .unwrap_or_default();
+                let Some(chat) = jobs.into_iter().next() else {
+                    after.clear();
+                    continue;
+                };
+                after = chat.clone();
+                let version = host
+                    .inner
+                    .store
+                    .sync_job_version(&chat, "recovery")
+                    .ok()
+                    .flatten();
+                if host.salvage_chat_transcript(&chat).await.is_ok() {
+                    if let Some(version) = version {
+                        let _ = host
+                            .inner
+                            .store
+                            .complete_sync_job(&chat, "recovery", version);
+                    }
                 }
             }
         });
     }
 
     async fn salvage_chat_transcript(&self, chat_id: &str) -> Result<(), String> {
+        // Inspection must not register a handle or start sync. A healthy
+        // history used to open one room per journal during every boot.
+        let stored = self
+            .inner
+            .store
+            .load_snapshot_with_cursor(chat_id)
+            .map_err(|e| e.to_string())?;
+        if let Some((bytes, _, epoch)) = &stored {
+            // A pre-chat2 snapshot may be discarded by open() during adoption;
+            // its entries are a recovery SOURCE, not proof the new doc is healthy.
+            if *epoch >= crate::chat2_host::CHAT2_DOC_EPOCH || self.inner.config.edge.is_none() {
+                let raw = loro::LoroDoc::new();
+                raw.import(bytes).map_err(|e| e.to_string())?;
+                for (_, update) in self
+                    .inner
+                    .store
+                    .pending_chat_updates(chat_id)
+                    .map_err(|e| e.to_string())?
+                {
+                    raw.import(&update).map_err(|e| e.to_string())?;
+                }
+                if !SessionDoc::from_doc(raw)
+                    .read_entries()
+                    .map_err(|e| e.to_string())?
+                    .is_empty()
+                {
+                    return Ok(());
+                }
+            }
+        }
+        let rollback_id = format!("{chat_id}.pre-chat2");
+        let source = self
+            .inner
+            .store
+            .load_snapshot(&rollback_id)
+            .map_err(|e| e.to_string())?
+            .or_else(|| {
+                stored
+                    .filter(|(_, _, epoch)| *epoch < crate::chat2_host::CHAT2_DOC_EPOCH)
+                    .map(|(bytes, _, _)| bytes)
+            });
+        let Some(bytes) = source else { return Ok(()) };
+        let raw = loro::LoroDoc::new();
+        raw.import(&bytes).map_err(|e| e.to_string())?;
+        let fat = SessionDoc::from_doc(raw);
+        let rebuilt = zeron_doc::rebuild::rebuild_thin_doc(&fat).map_err(|e| e.to_string())?;
+        let entries = rebuilt.doc.read_entries().map_err(|e| e.to_string())?;
+        if entries.is_empty() {
+            return Ok(());
+        }
         let handle = self.open(chat_id).map_err(|e| e.to_string())?;
+        if self.inner.config.edge.is_some() {
+            tokio::time::timeout(std::time::Duration::from_secs(90), async {
+                loop {
+                    if lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up()) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .map_err(|_| "recovery deferred: remote history has not converged".to_string())?;
+        }
         if !handle
             .doc()
             .read_entries()
@@ -1940,32 +2672,22 @@ impl DocHost {
         // source — the legacy s2 room — went away with the s2 client; any
         // transcript that existed only there was salvaged by earlier
         // releases or is reachable in the room's storage server-side.)
-        let rollback_id = format!("{chat_id}.pre-chat2");
-        let fat_bytes = self.inner.store.load_snapshot(&rollback_id).ok().flatten();
-        let Some(bytes) = fat_bytes else {
-            return Ok(()); // no fat lineage anywhere — genuinely empty chat
-        };
-        let raw = loro::LoroDoc::new();
-        raw.import(&bytes).map_err(|e| e.to_string())?;
-        let fat = SessionDoc::from_doc(raw);
         // Thin before appending (docs/chat2-sync.md A2): full outputs are
         // parked, exactly like a seed — they survive in the rollback copy
         // saved below and the run journal.
-        let rebuilt = zeron_doc::rebuild::rebuild_thin_doc(&fat).map_err(|e| e.to_string())?;
-        let entries = rebuilt.doc.read_entries().map_err(|e| e.to_string())?;
-        if entries.is_empty() {
-            return Ok(());
-        }
         if matches!(self.inner.store.load_snapshot(&rollback_id), Ok(None)) {
             let _ = self.inner.store.save_snapshot(&rollback_id, &bytes);
         }
         // Re-check emptiness at the last instant: a run that started during
         // the room fetch must not get history interleaved under it.
-        if !handle
-            .doc()
-            .read_entries()
-            .map_err(|e| e.to_string())?
-            .is_empty()
+        let _drain = handle.drain_lock.lock().await;
+        let _import = lock(&handle.transcript_import);
+        if Arc::strong_count(&handle.doc) > 1
+            || !handle
+                .doc()
+                .read_entries()
+                .map_err(|e| e.to_string())?
+                .is_empty()
         {
             return Err("doc gained entries mid-salvage; aborted".into());
         }
@@ -2022,6 +2744,12 @@ impl DocHost {
                     edge_tail.url.trim_end_matches('/'),
                     chat
                 );
+                let Ok(_permit) = zeron_sync::budget::shared()
+                    .http(zeron_sync::budget::Priority::Background)
+                    .await
+                else {
+                    return;
+                };
                 let _ = http
                     .put(&url)
                     .bearer_auth(&bearer)
@@ -2070,7 +2798,9 @@ impl DocHost {
         let seq_covered = stats.cursor;
         let http = self.inner.http.clone();
         let weak_note = Arc::downgrade(handle);
+        let reset = ResetFlag(in_flight);
         self.spawn_worker(async move {
+            let _reset = reset;
             let store = publication_store.clone();
             let chat = chat_id.clone();
             let prepared = tokio::task::spawn_blocking(move || {
@@ -2085,12 +2815,10 @@ impl DocHost {
                 Some((snapshot, frontier, covered_rejections))
             }).await;
             let Ok(Some((snapshot, frontier, covered_rejections))) = prepared else {
-                in_flight.store(false, Ordering::Release);
                 return;
             };
 
             let Ok(bearer) = edge.bearer().await else {
-                in_flight.store(false, Ordering::Release);
                 return;
             };
             let url = format!(
@@ -2099,6 +2827,9 @@ impl DocHost {
                 chat_id,
                 seq_covered
             );
+            let Ok(_permit) = zeron_sync::budget::shared().http(zeron_sync::budget::Priority::Background).await else {
+                return;
+            };
             let size = snapshot.len() as u64;
             match http
                 .post(&url)
@@ -2135,7 +2866,6 @@ impl DocHost {
                     tracing::warn!(chat = %chat_id, error = %err, "chat2 checkpoint POST failed");
                 }
             }
-            in_flight.store(false, Ordering::Release);
         });
     }
 
@@ -2150,6 +2880,8 @@ impl DocHost {
     /// Eviction flushes a final snapshot, so reopen loses nothing; missed
     /// remote updates re-arrive through the room join's VV backfill.
     fn evict_over_budget(&self) {
+        // Do not let a cold reopen race the retiring handle's final flush.
+        let _opening = lock(&self.inner.opening);
         let mut by_age: Vec<(i64, String)> = {
             let handles = lock(&self.inner.handles);
             handles
@@ -2158,11 +2890,7 @@ impl DocHost {
                 .collect()
         };
         by_age.sort_unstable();
-        for (last_access, chat_id) in by_age {
-            if now_ms() - last_access < EVICT_MIN_IDLE_MS {
-                // Sorted oldest-first: everything after this is younger.
-                return;
-            }
+        for (_, chat_id) in by_age {
             let (count, estimate) = {
                 let handles = lock(&self.inner.handles);
                 (
@@ -2179,7 +2907,9 @@ impl DocHost {
             let evicted = {
                 let mut handles = lock(&self.inner.handles);
                 match handles.get(&chat_id) {
-                    Some(handle) if !self.pinned(handle) => handles.remove(&chat_id),
+                    Some(handle) if !self.pinned(handle) && Arc::strong_count(handle) == 1 => {
+                        handles.remove(&chat_id)
+                    }
                     _ => None,
                 }
             };
@@ -2218,12 +2948,15 @@ impl DocHost {
     }
 
     fn pinned(&self, handle: &Arc<ChatDocHandle>) -> bool {
+        if handle.sync_started.load(Ordering::Acquire) {
+            return true;
+        }
         // Durable batches may outlive this handle. Only failed disk writes
         // require retaining the in-memory copy until persistence recovers.
         if handle.publication_failed.load(Ordering::Acquire) {
             return true;
         }
-        if handle.messages_tx.receiver_count() > 0 {
+        if handle.messages_tx.receiver_count() > 0 || handle.queue_tx.receiver_count() > 0 {
             return true;
         }
         // The handle itself holds one doc ref; more means a live writer.
@@ -2375,17 +3108,28 @@ impl DocHost {
             return Connectivity::default();
         }
         let now = std::time::Instant::now();
+        let mut handles: Vec<Arc<ChatDocHandle>> =
+            lock(&self.inner.handles).values().cloned().collect();
+        handles.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
         let mut grace = lock(&self.inner.connectivity_grace);
-        let statuses = self.sync_statuses();
-        grace.retain_chats(|id| statuses.iter().any(|(chat_id, _)| chat_id == id));
-        let chats = statuses
+        grace.retain_chats(|id| handles.iter().any(|handle| handle.chat_id == id));
+        let chats = handles
             .into_iter()
-            .map(|(chat_id, stats)| {
-                let stats = stats.unwrap_or_default();
-                let connected = !grace.degraded(GraceKey::Chat(&chat_id), !stats.connected, now);
+            .map(|handle| {
+                let snapshot = ChatConnectionSnapshot::read(&handle);
+                let stats = snapshot.stats.unwrap_or_default();
+                // An idle chat deliberately has no room. Clear any previous
+                // timer so selecting it starts a fresh grace window.
+                let connected = !grace.degraded(
+                    GraceKey::Chat(&handle.chat_id),
+                    snapshot.sync_expected() && !stats.connected,
+                    now,
+                );
                 ChatConnectivity {
-                    chat_id,
+                    sync_state: self.chat_sync_state_for_handle(&handle, &snapshot),
+                    chat_id: handle.chat_id.clone(),
                     connected,
+                    delivery_live: snapshot.delivery_live,
                     pending_pushes: stats.pending_pushes,
                 }
             })
@@ -2420,6 +3164,90 @@ impl DocHost {
             last_failure,
             chats,
         }
+    }
+
+    pub fn chat_sync_state(&self, chat_id: &str) -> zeron_proto::ChatSyncState {
+        use zeron_proto::ChatSyncState as S;
+        let handle = lock(&self.inner.handles).get(chat_id).cloned();
+        let Some(handle) = handle else {
+            return S::Local;
+        };
+        let snapshot = ChatConnectionSnapshot::read(&handle);
+        self.chat_sync_state_for_handle(&handle, &snapshot)
+    }
+
+    fn chat_sync_state_for_handle(
+        &self,
+        handle: &ChatDocHandle,
+        snapshot: &ChatConnectionSnapshot,
+    ) -> zeron_proto::ChatSyncState {
+        use zeron_proto::ChatSyncState as S;
+        if handle.publication_failed.load(Ordering::Acquire) {
+            return S::StorageError;
+        }
+        if self.inner.config.edge.is_none() {
+            return S::Local;
+        }
+        if !snapshot.sync_started {
+            return if snapshot.sync_requested {
+                S::Waiting
+            } else {
+                S::Local
+            };
+        }
+        match snapshot.stats {
+            Some(stats) if snapshot.delivery_live && stats.pending_pushes == 0 => S::Synced,
+            Some(_) if !snapshot.delivery_live && zeron_sync::wake::path_is_offline() => S::Offline,
+            _ => S::Connecting,
+        }
+    }
+
+    pub fn sync_resources(&self) -> serde_json::Value {
+        let handles = lock(&self.inner.handles);
+        let mut reasons =
+            serde_json::json!({"views":0,"writers":0,"storageFailures":0,"connections":0});
+        let mut waiting = 0usize;
+        let mut oldest = 0i64;
+        for h in handles.values() {
+            if h.messages_tx.receiver_count() > 0 || h.queue_tx.receiver_count() > 0 {
+                reasons["views"] = (reasons["views"].as_u64().unwrap() + 1).into();
+            }
+            if h.writers.load(Ordering::Acquire) > 0 {
+                reasons["writers"] = (reasons["writers"].as_u64().unwrap() + 1).into();
+            }
+            if h.publication_failed.load(Ordering::Acquire) {
+                reasons["storageFailures"] =
+                    (reasons["storageFailures"].as_u64().unwrap() + 1).into();
+            }
+            if h.sync_started.load(Ordering::Acquire) {
+                reasons["connections"] = (reasons["connections"].as_u64().unwrap() + 1).into();
+            } else if h.sync_requested.load(Ordering::Acquire) {
+                waiting += 1;
+                oldest = oldest.max(now_ms() - h.last_access.load(Ordering::Relaxed));
+            }
+        }
+        #[cfg(target_os = "linux")]
+        let open_fds = std::fs::read_dir("/proc/self/fd")
+            .ok()
+            .map(|fds| fds.count());
+        #[cfg(not(target_os = "linux"))]
+        let open_fds: Option<usize> = None;
+        #[cfg(unix)]
+        let fd_limit = unsafe {
+            let mut limit: libc::rlimit = std::mem::zeroed();
+            (libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0).then_some(limit.rlim_cur as u64)
+        };
+        #[cfg(not(unix))]
+        let fd_limit: Option<u64> = None;
+        serde_json::json!({
+            "budget": zeron_sync::budget::shared().stats(),
+            "activeClientLimit": ACTIVE_SYNC_CAP,
+            "openDocuments": handles.len(), "waitingDocuments": waiting,
+            "documentLoads": self.inner.document_loads.load(Ordering::Relaxed),
+            "oldestWaitingAccessAgeMs": oldest, "retainedBy": reasons,
+            "openFileDescriptors": open_fds, "fileDescriptorLimit": fd_limit,
+            "durable": self.inner.store.sync_work_counts().ok().map(|(batches, jobs)| serde_json::json!({"pendingBatches": batches, "pendingJobs": jobs})),
+        })
     }
 
     /// Per-open-chat room introspection for SyncStatus / `zeron sync`.
@@ -5020,6 +5848,60 @@ mod degrade_grace_tests {
         // OsPath kept its own timer through the retain.
         assert!(g.degraded(GraceKey::OsPath, true, t0 + DEGRADE_GRACE));
     }
+
+    #[tokio::test]
+    async fn dormant_chat_clears_old_degradation_before_reconnection() {
+        use super::{DocHost, DocHostConfig, EdgeConfig, lock};
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        use zeron_proto::{ChatSyncState, HarnessId};
+
+        let dir = tempfile::tempdir().unwrap();
+        let host = DocHost::new(
+            Arc::new(zeron_sync::DocsStore::open(dir.path()).unwrap()),
+            DocHostConfig {
+                device_id: "local".into(),
+                default_harness: HarnessId::Mock,
+                edge: Some(EdgeConfig::with_static_token("http://127.0.0.1:1", "test")),
+            },
+        );
+        let handle = host.open_local("dormant").unwrap();
+        lock(&host.inner.connectivity_grace)
+            .chats
+            .insert("dormant".into(), Instant::now() - DEGRADE_GRACE * 2);
+
+        let dormant = host.compute_connectivity();
+        assert_eq!(dormant.chats[0].sync_state, ChatSyncState::Local);
+        assert!(dormant.chats[0].connected);
+        assert!(!dormant.chats[0].delivery_live);
+        assert!(
+            !lock(&host.inner.connectivity_grace)
+                .chats
+                .contains_key("dormant")
+        );
+
+        // Focus requests a connection. Its first down sample gets a new grace
+        // period even though the doc was dormant longer than DEGRADE_GRACE.
+        handle.sync_requested.store(true, Ordering::Release);
+        let waking = host.compute_connectivity();
+        assert_eq!(waking.chats[0].sync_state, ChatSyncState::Waiting);
+        assert!(waking.chats[0].connected);
+        assert!(!waking.chats[0].delivery_live);
+
+        lock(&host.inner.connectivity_grace)
+            .chats
+            .insert("dormant".into(), Instant::now() - DEGRADE_GRACE);
+        assert!(!host.compute_connectivity().chats[0].connected);
+
+        // An active chat with the same sustained outage also reports down.
+        handle.sync_started.store(true, Ordering::Release);
+        handle.sync_requested.store(false, Ordering::Release);
+        let active = host.compute_connectivity();
+        assert_eq!(active.chats[0].sync_state, ChatSyncState::Connecting);
+        assert!(!active.chats[0].connected);
+        assert!(!active.chats[0].delivery_live);
+        host.shutdown_workers().await;
+    }
 }
 
 #[cfg(test)]
@@ -5118,8 +6000,224 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
 mod publication_eviction_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn wakeup_handoff_waits_for_snapshot_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store,
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let handle = host.open_local("receipt").unwrap();
+        let db = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER no_snapshot BEFORE INSERT ON snapshots BEGIN SELECT RAISE(FAIL,'disk unavailable'); END;").unwrap();
+        handle
+            .doc
+            .doc()
+            .get_text("body")
+            .insert(0, "received before crash")
+            .unwrap();
+        handle.doc.doc().commit();
+        assert!(
+            !host.wakeup_is_durable(&handle),
+            "cannot retire receipt while snapshot is only in memory"
+        );
+        db.execute_batch("DROP TRIGGER no_snapshot;").unwrap();
+        assert!(host.wakeup_is_durable(&handle));
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_disk_writes_pin_edits_and_resume_admission_after_recovery() {
+        let _budget_guard = SYNC_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store.clone(),
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: Some(EdgeConfig::with_static_token("http://127.0.0.1:1", "test")),
+            },
+        );
+        let handle = host.open_local("failed").unwrap();
+        let db = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER injected_disk_failure BEFORE INSERT ON chat_outbox WHEN NEW.doc_id='failed' BEGIN SELECT RAISE(FAIL,'injected disk failure'); END;").unwrap();
+        handle
+            .doc
+            .doc()
+            .get_text("body")
+            .insert(0, "must survive a failed write")
+            .unwrap();
+        handle.doc.doc().commit();
+        let other = host.open("waiting-for-storage").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert_eq!(
+            host.chat_sync_state("failed"),
+            zeron_proto::ChatSyncState::StorageError
+        );
+        assert!(!other.sync_started.load(Ordering::Acquire));
+        assert!(host.pinned(&handle));
+        db.execute_batch("DROP TRIGGER injected_disk_failure;")
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while handle.publication_failed.load(Ordering::Acquire)
+                || !other.sync_started.load(Ordering::Acquire)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(lock(&handle.chat2_pending_local).is_empty());
+        host.shutdown_workers().await;
+        let reopened = DocHost::new(
+            store,
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        assert_eq!(
+            reopened
+                .open_local("failed")
+                .unwrap()
+                .doc
+                .doc()
+                .get_text("body")
+                .to_string(),
+            "must survive a failed write"
+        );
+        reopened.shutdown_workers().await;
+    }
+
+    #[tokio::test]
+    async fn caller_and_watch_protect_the_open_to_attach_handoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = DocHost::new(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let held = host.open_local("held").unwrap();
+        for i in 0..30 {
+            host.open_local(&format!("other-{i}")).unwrap();
+        }
+        assert!(lock(&host.inner.handles).contains_key("held"));
+        let watch = held.watch_messages();
+        drop(held);
+        for i in 30..60 {
+            host.open_local(&format!("other-{i}")).unwrap();
+        }
+        assert!(lock(&host.inner.handles).contains_key("held"));
+        drop(watch);
+        host.open_local("overflow").unwrap();
+        assert!(!lock(&host.inner.handles).contains_key("held"));
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn opening_many_chats_bounds_active_clients() {
+        let _budget_guard = SYNC_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store,
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: Some(EdgeConfig::with_static_token("http://127.0.0.1:1", "test")),
+            },
+        );
+        for i in 0..300 {
+            host.open(&format!("chat-{i}")).unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let running = lock(&host.inner.handles)
+            .values()
+            .filter(|h| h.sync_started.load(Ordering::Acquire))
+            .count();
+        assert!(
+            running > 0 && running <= ACTIVE_SYNC_CAP,
+            "active clients: {running}"
+        );
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test]
+    async fn local_open_journals_without_starting_sync_and_reuses_the_document() {
+        let _budget_guard = SYNC_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store.clone(),
+            DocHostConfig {
+                device_id: "writer".into(),
+                default_harness: HarnessId::Mock,
+                edge: Some(EdgeConfig::with_static_token("http://127.0.0.1:1", "test")),
+            },
+        );
+        let handle = host.open_local("local").unwrap();
+        handle
+            .doc
+            .doc()
+            .get_text("body")
+            .insert(0, "offline update")
+            .unwrap();
+        handle.doc.doc().commit();
+        assert!(!handle.sync_started.load(Ordering::Acquire));
+        assert!(lock(&handle.chat2).is_none());
+        assert!(!store.pending_chat_updates("local").unwrap().is_empty());
+        assert!(lock(&handle.chat2_pending_local).is_empty());
+        let same = host.open("local").unwrap();
+        assert!(Arc::ptr_eq(&handle, &same));
+        assert!(handle.sync_requested.load(Ordering::Acquire));
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test]
+    async fn salvage_inspection_does_not_open_healthy_or_unrecoverable_chats() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store.clone(),
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: Some(EdgeConfig::with_static_token("http://127.0.0.1:1", "test")),
+            },
+        );
+        for n in 0..300 {
+            let id = format!("healthy-{n}");
+            let doc = SessionDoc::init(&id).unwrap();
+            let entry: SessionMessageEntry = serde_json::from_value(serde_json::json!({
+                "id": "message", "role": "user", "parts": [], "createdAt": 1, "deviceId": "host"
+            }))
+            .unwrap();
+            doc.push_message(&entry).unwrap();
+            store
+                .save_snapshot_with_cursor(&id, &doc.export_snapshot().unwrap(), 0, 2)
+                .unwrap();
+            host.salvage_chat_transcript(&id).await.unwrap();
+        }
+        host.salvage_chat_transcript("no-recovery-source")
+            .await
+            .unwrap();
+        assert!(lock(&host.inner.handles).is_empty());
+        host.shutdown_workers().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn lru_eviction_replays_unacknowledged_updates_after_reopen() {
+        let _budget_guard = SYNC_TEST_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(DocsStore::open(dir.path()).unwrap());
         let host = DocHost::new(
@@ -5149,16 +6247,16 @@ mod publication_eviction_tests {
         for i in 0..WARM_DOC_CAP {
             host.open(&format!("other-{i}")).unwrap();
         }
-        handle
-            .last_access
-            .store(now_ms() - 2 * EVICT_MIN_IDLE_MS, Ordering::Relaxed);
+
+        host.stop_sync(&handle).await;
         assert!(
             !host.pinned(&handle),
             "durably queued ops need not retain the whole doc in memory"
         );
+        drop(handle);
+        host.open("overflow").unwrap();
         host.evict_over_budget();
         assert!(!lock(&host.inner.handles).contains_key("evicted"));
-        drop(handle);
         let before = store.pending_chat_updates("evicted").unwrap();
         let reopened = host.open("evicted").unwrap();
         assert_eq!(
@@ -5170,3 +6268,7 @@ mod publication_eviction_tests {
         host.shutdown_workers().await;
     }
 }
+
+#[cfg(test)]
+#[path = "doc_host_sync_tests.rs"]
+mod sync_lifecycle_tests;

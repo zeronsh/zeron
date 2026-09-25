@@ -7641,8 +7641,9 @@ fn user_bubble_text(
     )
     .absolute()
     .size_full();
-    div()
-        .relative()
+    // Same wrapper as the assistant markdown: user-bubble text is
+    // selectable (paint_text_selection above), so it gets the I-beam too.
+    render::selectable_text_wrap()
         .child(underlay)
         .child(styled)
         .into_any_element()

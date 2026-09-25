@@ -14,6 +14,7 @@
  * snapshot for instant new-chat pickers §8.1; capability metadata) so pickers
  * render last-known state while the live RPC happens at confirm time.
  */
+import { ensureNudges, enqueueNudge, pendingNudges, acknowledgeNudge, NUDGE_PAGE } from "./device-nudges";
 import { BytesReader, BytesWriter } from "loro-protocol";
 import { createBlobStore, getJsonBlob, putJsonBlob, type BlobStore } from "./blobs";
 import { AUTH_USER_HEADER, type Env } from "./env";
@@ -51,6 +52,8 @@ interface SocketState {
   connId: string;
   /** Accept time — the liveness floor until the socket's first auto-pong. */
   joinedAt?: number;
+  nudgeAck?: boolean;
+  nudgeInflight?: string[];
 }
 
 const HOST_TAG = "host";
@@ -84,7 +87,7 @@ const RELAY_KIND = " relay";
  * queued in the DO while the host is offline, replayed on its next join, so a
  * command sent to a chat the host hasn't warm-opened is never stranded. */
 export const NUDGE_KIND = "nudge";
-const NUDGE_MAX_PENDING = 256;
+const NUDGE_ACK_KIND = "nudgeAck";
 const CHAT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 export class DeviceRoom implements DurableObject {
@@ -97,9 +100,7 @@ export class DeviceRoom implements DurableObject {
     ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     );
-    ctx.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS pending_nudges (chat_id TEXT PRIMARY KEY, queued_at INTEGER NOT NULL)"
-    );
+    ensureNudges(ctx.storage.sql);
     this.blobs = createBlobStore(ctx.storage.sql);
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
   }
@@ -169,12 +170,13 @@ export class DeviceRoom implements DurableObject {
           }
         }
         this.ctx.acceptWebSocket(pair[1], [HOST_TAG]);
-        this.replayNudges(pair[1]);
+
       } else {
         this.ctx.acceptWebSocket(pair[1], [clientTag(connId)]);
       }
-      const state: SocketState = { userId, role, connId, joinedAt: Date.now() };
+      const state: SocketState = { userId, role, connId, joinedAt: Date.now(), nudgeAck: url.searchParams.get("nudgeAck") === "1", nudgeInflight: [] };
       pair[1].serializeAttachment(state);
+      if (role === "host") this.replayNudges(pair[1]);
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
 
@@ -212,42 +214,42 @@ export class DeviceRoom implements DurableObject {
       const body = (await request.json().catch(() => null)) as { chatId?: string } | null;
       const chatId = body?.chatId;
       if (!chatId || !CHAT_ID_RE.test(chatId)) return json({ error: "bad_chat_id" }, 400);
+      const queued = enqueueNudge(this.ctx.storage.sql, chatId);
       const host = this.liveHost();
-      if (host) {
-        this.deliver(host, { s: chatId, k: NUDGE_KIND }, new TextEncoder().encode(JSON.stringify({ chatId })));
-        return json({ delivered: true });
-      }
-      // Host offline: queue durably (dedup by chat — one open covers any
-      // number of pending commands), bounded so a runaway sender can't grow
-      // the DO forever. Overflow drops the OLDEST: recency wins.
-      this.ctx.storage.sql.exec(
-        "INSERT INTO pending_nudges (chat_id, queued_at) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET queued_at = excluded.queued_at",
-        chatId,
-        Date.now()
-      );
-      this.ctx.storage.sql.exec(
-        "DELETE FROM pending_nudges WHERE chat_id NOT IN (SELECT chat_id FROM pending_nudges ORDER BY queued_at DESC LIMIT ?)",
-        NUDGE_MAX_PENDING
-      );
-      return json({ delivered: false, queued: true });
+      if (host) this.replayNudges(host);
+      if (!queued) return json({ error: "nudge_queue_full", retryable: true }, 503);
+      return json({ delivered: !!host, queued: true });
     }
 
     return new Response("not found", { status: 404 });
   }
 
   private replayNudges(host: WebSocket): void {
-    const rows = [
-      ...this.ctx.storage.sql.exec("SELECT chat_id FROM pending_nudges ORDER BY queued_at ASC")
-    ] as Array<{ chat_id: string }>;
-    if (rows.length === 0) return;
-    for (const row of rows) {
-      this.deliver(
-        host,
-        { s: row.chat_id, k: NUDGE_KIND },
-        new TextEncoder().encode(JSON.stringify({ chatId: row.chat_id }))
-      );
+    const state = host.deserializeAttachment() as SocketState;
+    const inflight = new Set(state.nudgeInflight ?? []);
+    let sent = 0;
+    for (const row of pendingNudges(this.ctx.storage.sql)) {
+      if (state.nudgeAck && inflight.has(row.token)) continue;
+      if (state.nudgeAck ? inflight.size >= NUDGE_PAGE : sent >= NUDGE_PAGE) break;
+      if (row.chat_id === "*" && !state.nudgeAck) continue;
+      this.deliver(host, { s: row.chat_id, k: NUDGE_KIND },
+        new TextEncoder().encode(JSON.stringify({ chatId: row.chat_id, token: row.token })));
+      if (state.nudgeAck) inflight.add(row.token);
+      else acknowledgeNudge(this.ctx.storage.sql, row.chat_id, row.token);
+      sent++;
     }
-    this.ctx.storage.sql.exec("DELETE FROM pending_nudges");
+    state.nudgeInflight = [...inflight];
+    host.serializeAttachment(state);
+    if (sent || inflight.size) this.ctx.waitUntil(this.ctx.storage.setAlarm(Date.now() + 5000));
+  }
+
+  async alarm(): Promise<void> {
+    const host = this.liveHost();
+    if (!host) return; // Next join replays durable receipts.
+    const state = host.deserializeAttachment() as SocketState;
+    state.nudgeInflight = [];
+    host.serializeAttachment(state);
+    this.replayNudges(host);
   }
 
   webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): void {
@@ -269,6 +271,18 @@ export class DeviceRoom implements DurableObject {
         return;
       }
       this.deliver(host, { s: frame.header.s, k: frame.header.k, from: state.connId }, frame.payload);
+      return;
+    }
+    if (frame.header.k === NUDGE_ACK_KIND && state.nudgeAck) {
+      try {
+        const ack = JSON.parse(new TextDecoder().decode(frame.payload)) as { chatId?: string; token?: string };
+        if (typeof ack.chatId === "string" && typeof ack.token === "string") {
+          acknowledgeNudge(this.ctx.storage.sql, ack.chatId, ack.token);
+          state.nudgeInflight = (state.nudgeInflight ?? []).filter((t) => t !== ack.token);
+          ws.serializeAttachment(state);
+          this.replayNudges(ws);
+        }
+      } catch { /* malformed ACK cannot retire work */ }
       return;
     }
     // Host frame: route by `to`.

@@ -1975,3 +1975,473 @@ async fn shutdown_cancels_dial_and_joins_http_fallback() {
         "fallback must be dropped before final snapshot"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_construction_closes_the_actor_pipe() {
+    let (pipe, mut server) = pipe_pair();
+    let connecting = tokio::spawn(ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        Arc::new(RecordingSink::default()),
+        Arc::new(PendingFetcher),
+        "cancelled",
+        0,
+        ChatTuning::default(),
+    ));
+    expect_kind(&mut server, frame_type::HELLO).await;
+    connecting.abort();
+    let _ = connecting.await;
+    tokio::time::timeout(Duration::from_secs(1), server.tx.closed())
+        .await
+        .expect("cancelled constructor left a detached actor alive");
+}
+
+/// Keep HTTP from completing catch-up while the websocket deliberately stalls.
+struct PendingTransport;
+impl ChatTransport for PendingTransport {
+    fn fetch_rows(&self, _: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        Box::pin(std::future::pending())
+    }
+    fn push(&self, _: String, _: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+        Box::pin(std::future::pending())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_interrupts_hello_and_backfill_without_peer_disconnect() {
+    for backfill in [false, true] {
+        let (pipe, mut server) = pipe_pair();
+        let client = ChatClient::connect_with_transport(
+            connector(vec![pipe]),
+            Arc::new(RecordingSink::default()),
+            Arc::new(PendingFetcher),
+            "shutdown",
+            0,
+            ChatTuning::default(),
+            Some(Arc::new(PendingTransport)),
+        )
+        .await
+        .unwrap();
+        expect_kind(&mut server, frame_type::HELLO).await;
+        if backfill {
+            send(&server, frame_type::STATE, empty_state_json(), &[]).await;
+            expect_kind(&mut server, frame_type::ROWS_REQ).await;
+        }
+        tokio::time::timeout(Duration::from_millis(200), client.shutdown())
+            .await
+            .expect("shutdown waited for the peer or a protocol deadline");
+        assert!(server.tx.is_closed(), "actor still owns its receive pipe");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_shutdown_still_aborts_the_owned_actor() {
+    let (pipe, mut server) = pipe_pair();
+    let mut client = ChatClient::connect_with_transport(
+        connector(vec![pipe]),
+        Arc::new(RecordingSink::default()),
+        Arc::new(PendingFetcher),
+        "cancel-close",
+        0,
+        ChatTuning::default(),
+        Some(Arc::new(PendingTransport)),
+    )
+    .await
+    .unwrap();
+    expect_kind(&mut server, frame_type::HELLO).await;
+    // Model an actor whose graceful shutdown cannot finish. Dropping the
+    // shutdown future must retain the same abort ownership as dropping client.
+    let actor = client.task.take().unwrap();
+    actor.abort();
+    actor.await.unwrap_err();
+    client.task = Some(tokio::spawn(std::future::pending()));
+    let abort = client.task.as_ref().unwrap().abort_handle();
+    let mut closing = Box::pin(client.shutdown());
+    assert!(futures::poll!(&mut closing).is_pending());
+    drop(closing);
+    tokio::task::yield_now().await;
+    assert!(abort.is_finished(), "cancelled shutdown detached its actor");
+}
+
+async fn expect_refresh(end: &mut ServerEnd) -> wire::WireFrame {
+    loop {
+        let bytes = end.rx.recv().await.expect("client hung up during wake");
+        let frame = decode(&bytes).unwrap();
+        if frame.kind == frame_type::PROBE {
+            send(
+                end,
+                frame_type::PROBE_OK,
+                serde_json::json!({"headSeq":0}),
+                &[],
+            )
+            .await;
+        } else {
+            assert_eq!(
+                frame.kind,
+                frame_type::ROWS_REQ,
+                "wake must reuse the socket"
+            );
+            return frame;
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn renewed_wakes_require_fresh_reads_without_reconnecting() {
+    let (pipe, mut end) = pipe_pair();
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+    let server = tokio::spawn(async move {
+        serve_join(
+            &mut end,
+            serde_json::json!({"headSeq":0,"seqFloor":0,
+            "checkpointSeq":0,"checkpointSize":0,"rowCount":0,"rowBytes":0}),
+            &[],
+            vec![],
+            false,
+        )
+        .await;
+        end
+    });
+    let client = ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        sink.clone(),
+        fetch,
+        "dev-a",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+    let mut end = server.await.unwrap();
+    let first = client.request_catch_up();
+    assert_eq!(expect_refresh(&mut end).await.header["after"], 0);
+    assert!(!client.catch_up_completed(first));
+    let second = client.request_catch_up();
+    send(
+        &end,
+        frame_type::ROW,
+        serde_json::json!({"seq":1,"device":"dev-b","batchId":"wake-row"}),
+        b"remote edit",
+    )
+    .await;
+    send(
+        &end,
+        frame_type::ROWS_DONE,
+        serde_json::json!({"headSeq":1}),
+        &[],
+    )
+    .await;
+    assert_eq!(expect_refresh(&mut end).await.header["after"], 1);
+    assert!(client.catch_up_completed(first));
+    assert!(
+        !client.catch_up_completed(second),
+        "older read acknowledged newer wake"
+    );
+    let third = client.request_catch_up();
+    send(
+        &end,
+        frame_type::ROWS_DONE,
+        serde_json::json!({"headSeq":1}),
+        &[],
+    )
+    .await;
+    expect_refresh(&mut end).await;
+    assert!(client.catch_up_completed(second));
+    assert!(!client.catch_up_completed(third));
+    send(
+        &end,
+        frame_type::ROWS_DONE,
+        serde_json::json!({"headSeq":1}),
+        &[],
+    )
+    .await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert!(client.catch_up_completed(third));
+    assert_eq!(client.stats().disconnects, 0);
+    assert_eq!(*lock(&sink.rows), vec![(b"remote edit".to_vec(), 1)]);
+    assert!(
+        lock(&sink.replay_rows).is_empty(),
+        "wake reads classified live edits as history"
+    );
+    client.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn wake_does_not_accept_an_older_gap_repair_as_its_confirmation() {
+    let (pipe, mut end) = pipe_pair();
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+    let server = tokio::spawn(async move {
+        serve_join(
+            &mut end,
+            serde_json::json!({"headSeq":0,"seqFloor":0,
+            "checkpointSeq":0,"checkpointSize":0,"rowCount":0,"rowBytes":0}),
+            &[],
+            vec![],
+            false,
+        )
+        .await;
+        end
+    });
+    let client = ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        sink,
+        fetch,
+        "dev-a",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+    let mut end = server.await.unwrap();
+    send(
+        &end,
+        frame_type::ROW,
+        serde_json::json!({"seq":2,"device":"dev-b","batchId":"b2"}),
+        b"two",
+    )
+    .await;
+    expect_refresh(&mut end).await; // gap repair predates the wake
+    let ticket = client.request_catch_up();
+    for seq in 1..=2 {
+        send(
+            &end,
+            frame_type::ROW,
+            serde_json::json!({"seq":seq,"device":"dev-b","batchId":format!("b{seq}")}),
+            b"row",
+        )
+        .await;
+    }
+    send(
+        &end,
+        frame_type::ROWS_DONE,
+        serde_json::json!({"headSeq":2}),
+        &[],
+    )
+    .await;
+    assert_eq!(expect_refresh(&mut end).await.header["after"], 2);
+    assert!(!client.catch_up_completed(ticket));
+    send(
+        &end,
+        frame_type::ROWS_DONE,
+        serde_json::json!({"headSeq":2}),
+        &[],
+    )
+    .await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert!(client.catch_up_completed(ticket));
+    assert_eq!(client.stats().disconnects, 0);
+    client.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn http_wake_confirmation_ignores_a_pull_started_before_the_wake() {
+    struct GatedHttp(mpsc::UnboundedSender<oneshot::Sender<Vec<u8>>>);
+    impl ChatTransport for GatedHttp {
+        fn fetch_rows(&self, _: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+            let (tx, rx) = oneshot::channel();
+            self.0.send(tx).unwrap();
+            Box::pin(async move { rx.await.map_err(|_| SyncError::Closed) })
+        }
+        fn push(&self, _: String, _: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+            Box::pin(async { panic!("no outgoing updates") })
+        }
+    }
+    let mut body = Vec::new();
+    for frame in [
+        encode(
+            frame_type::STATE,
+            &serde_json::json!({"headSeq":0,"seqFloor":0,
+            "checkpointSeq":0,"checkpointSize":0,"rowCount":0,"rowBytes":0}),
+            &[],
+        ),
+        encode(
+            frame_type::ROWS_DONE,
+            &serde_json::json!({"headSeq":0}),
+            &[],
+        ),
+    ] {
+        body.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+        body.extend_from_slice(&frame);
+    }
+    let (requests, mut pulls) = mpsc::unbounded_channel();
+    let (fetch, _) = fetcher(b"");
+    let client = ChatClient::connect_with_transport(
+        connector(vec![]),
+        Arc::new(RecordingSink::default()),
+        fetch,
+        "dev-a",
+        0,
+        ChatTuning::default(),
+        Some(Arc::new(GatedHttp(requests))),
+    )
+    .await
+    .unwrap();
+    let old_pull = pulls.recv().await.unwrap();
+    let ticket = client.request_catch_up();
+    old_pull.send(body.clone()).unwrap();
+    let fresh_pull = pulls.recv().await.unwrap();
+    assert!(
+        !client.catch_up_completed(ticket),
+        "stale HTTP pull retired the wake"
+    );
+    fresh_pull.send(body).unwrap();
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert!(client.catch_up_completed(ticket));
+    client.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stalled_wake_or_older_gap_read_retains_its_ticket_and_recovers() {
+    for older_gap in [false, true] {
+        let (pipe, mut end) = pipe_pair();
+        let (fetch, _) = fetcher(b"");
+        let server = tokio::spawn(async move {
+            serve_join(
+                &mut end,
+                serde_json::json!({"headSeq":0,"seqFloor":0,
+                "checkpointSeq":0,"checkpointSize":0,"rowCount":0,"rowBytes":0}),
+                &[],
+                vec![],
+                false,
+            )
+            .await;
+            end
+        });
+        let client = ChatClient::connect_with_tuned(
+            connector(vec![pipe]),
+            Arc::new(RecordingSink::default()),
+            fetch,
+            "dev-a",
+            0,
+            ChatTuning::default(),
+        )
+        .await
+        .unwrap();
+        let mut end = server.await.unwrap();
+        if older_gap {
+            send(
+                &end,
+                frame_type::ROW,
+                serde_json::json!({"seq":2,"device":"dev-b","batchId":"gap"}),
+                b"row",
+            )
+            .await;
+            expect_refresh(&mut end).await;
+        }
+        let ticket = client.request_catch_up();
+        if older_gap {
+            expect_kind(&mut end, frame_type::PROBE).await;
+            send(
+                &end,
+                frame_type::PROBE_OK,
+                serde_json::json!({"headSeq":2}),
+                &[],
+            )
+            .await;
+        } else {
+            expect_refresh(&mut end).await;
+        }
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(BACKFILL_DEADLINE + Duration::from_secs(1)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!client.catch_up_completed(ticket));
+        assert!(
+            client.stats().disconnects >= 1,
+            "stalled read prevented transport recovery"
+        );
+        client.shutdown().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn http_repairs_socket_gap_without_clearing_a_newer_gap() {
+    struct GatedHttp(mpsc::UnboundedSender<oneshot::Sender<Vec<u8>>>);
+    impl ChatTransport for GatedHttp {
+        fn fetch_rows(&self, _: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+            let (tx, rx) = oneshot::channel();
+            self.0.send(tx).unwrap();
+            Box::pin(async move { rx.await.map_err(|_| SyncError::Closed) })
+        }
+        fn push(&self, _: String, _: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+            Box::pin(async { panic!("no outgoing updates") })
+        }
+    }
+    fn response(head: u64) -> Vec<u8> {
+        let mut frames = vec![encode(
+            frame_type::STATE,
+            &serde_json::json!({
+                "headSeq":head,"seqFloor":0,"checkpointSeq":0,"checkpointSize":0,
+                "rowCount":head,"rowBytes":0
+            }),
+            &[],
+        )];
+        for seq in 1..=head {
+            frames.push(encode(
+                frame_type::ROW,
+                &serde_json::json!({
+                    "seq":seq,"device":"peer","batchId":format!("b{seq}")
+                }),
+                b"edit",
+            ));
+        }
+        frames.push(encode(
+            frame_type::ROWS_DONE,
+            &serde_json::json!({"headSeq":head}),
+            &[],
+        ));
+        let mut body = Vec::new();
+        for f in frames {
+            body.extend_from_slice(&(f.len() as u32).to_le_bytes());
+            body.extend(f);
+        }
+        body
+    }
+    let (requests, mut pulls) = mpsc::unbounded_channel();
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+    let client = ChatClient::connect_with_transport(
+        connector(vec![]),
+        sink.clone(),
+        fetch,
+        "dev-a",
+        0,
+        ChatTuning::default(),
+        Some(Arc::new(GatedHttp(requests))),
+    )
+    .await
+    .unwrap();
+    let initial = pulls.recv().await.unwrap();
+    apply_remote_row(&client.shared, sink.as_ref(), b"edit", 2, false);
+    let ticket = client.request_catch_up();
+    initial.send(response(0)).unwrap();
+    let fresh = pulls.recv().await.unwrap();
+    assert!(!client.catch_up_completed(ticket));
+    // A socket row proves another hole while this HTTP response is in flight.
+    apply_remote_row(&client.shared, sink.as_ref(), b"edit", 4, false);
+    fresh.send(response(2)).unwrap();
+    let repair = pulls.recv().await.unwrap();
+    assert!(
+        !client.catch_up_completed(ticket),
+        "HTTP cleared a newer row gap"
+    );
+    assert!(!client.delivery_live());
+    repair.send(response(4)).unwrap();
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert!(client.catch_up_completed(ticket));
+    assert!(client.delivery_live(), "HTTP alone must restore delivery");
+    assert_eq!(client.stats().cursor, 4);
+    client.shutdown().await;
+}

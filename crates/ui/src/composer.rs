@@ -5380,6 +5380,9 @@ pub struct Composer {
     route_snap_until: Option<Instant>,
     _observe: Subscription,
     _pickers_observe: Subscription,
+    /// The footer's rings: plan usage of the session harness's live
+    /// account, and context occupancy — each opening a popover.
+    account_usage: Entity<crate::account_usage::AccountUsage>,
     _picker_focus: Subscription,
     _input_events: Subscription,
 }
@@ -5451,6 +5454,7 @@ impl Composer {
             input
         });
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        let account_usage = cx.new(|cx| crate::account_usage::AccountUsage::new(state.clone(), cx));
         // The footer toolbar (checkout kind + ref picker) is rendered INLINE
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
@@ -5590,6 +5594,7 @@ impl Composer {
             route_snap_until: None,
             _observe: observe,
             _pickers_observe: pickers_observe,
+            account_usage,
             _picker_focus: picker_focus,
             _input_events: input_events,
         };
@@ -9559,7 +9564,18 @@ impl Render for Composer {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
-            let usage = self.state.read(cx).context_usage;
+            if session_chrome_opacity > 0.0 {
+                let harness = self.pickers.read(cx).resolved(cx).harness;
+                let target = {
+                    let state = self.state.read(cx);
+                    state
+                        .selected_chat_row()
+                        .map(|chat| chat.device_id.clone())
+                        .filter(|device| state.local_device_id.as_ref() != Some(device))
+                };
+                self.account_usage
+                    .update(cx, |usage, cx| usage.track(harness, target, cx));
+            }
             container.child(
                 div()
                     .w_full()
@@ -9590,15 +9606,16 @@ impl Render for Composer {
                                 .items_center()
                                 .opacity(session_chrome_opacity)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
-                                .children(crate::context_usage::has_window(usage).then(|| {
-                                    div().flex_none().pr(px(10.0)).child(
-                                        crate::context_usage::render(
-                                            usage,
-                                            self.state.clone(),
-                                            &theme,
-                                        ),
-                                    )
-                                })),
+                                .child(
+                                    // The footer row's own 4px gap: the PR badge
+                                    // ends flush with the row, so the rings keep
+                                    // their distance here.
+                                    div()
+                                        .flex_none()
+                                        .pl(px(4.0))
+                                        .pr(px(10.0))
+                                        .child(self.account_usage.clone()),
+                                ),
                         )
                     }),
             )

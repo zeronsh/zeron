@@ -1152,11 +1152,33 @@ pub enum ConnectivityState {
     Connected,
 }
 
+/// Additive per-chat admission status; legacy peers omit it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChatSyncState {
+    Local,
+    Waiting,
+    Connecting,
+    Synced,
+    Offline,
+    StorageError,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatConnectivity {
     pub chat_id: String,
+    #[serde(default)]
+    pub sync_state: ChatSyncState,
+    /// Grace-filtered per-chat health; true does not prove live delivery.
     pub connected: bool,
+    /// This chat can currently deliver over its room or HTTP fallback.
+    /// Older engines omit it, so consumers conservatively assume false.
+    #[serde(default)]
+    pub delivery_live: bool,
     /// Local update batches not yet acked by the chat's edge room.
     #[serde(default)]
     pub pending_pushes: u64,
@@ -1166,6 +1188,20 @@ pub struct ChatConnectivity {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn legacy_chat_connectivity_has_no_live_delivery_proof() {
+        let chat: ChatConnectivity = serde_json::from_value(serde_json::json!({
+            "chatId": "remote",
+            "connected": true,
+            "syncState": "synced"
+        }))
+        .unwrap();
+        assert!(!chat.delivery_live);
+        let mut live = chat;
+        live.delivery_live = true;
+        assert_eq!(serde_json::to_value(live).unwrap()["deliveryLive"], true);
+    }
 
     #[test]
     fn checkout_change_request_status_round_trips_all_states_as_camel_case() {

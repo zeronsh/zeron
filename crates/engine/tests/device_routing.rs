@@ -526,7 +526,7 @@ async fn unsupported_remote_change_request_watch_keeps_the_shared_device_link() 
             Arc::new(StaticToken("test-user".into())),
         ),
         legacy.clone(),
-        Arc::new(|_| {}),
+        Arc::new(|_| true),
     );
 
     let core = assemble(&dirs.path().join("new"), "new-device");
@@ -798,7 +798,7 @@ async fn target_device_id_routes_over_the_relay() {
 
     // Streaming proxy: WatchDocMessages against B's doc from A's IPC surface.
     let mut stream = client
-        .subscribe(
+        .subscribe_scoped(
             methods::WATCH_DOC_MESSAGES,
             serde_json::json!({ "chatId": "chat-remote", "targetDeviceId": "device-b" }),
         )
@@ -816,6 +816,19 @@ async fn target_device_id_routes_over_the_relay() {
             break;
         }
     }
+
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while core_b.doc_host.sync_resources()["retainedBy"]["views"]
+            .as_u64()
+            .unwrap()
+            != 0
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("quiet remote transcript released its view");
 
     // Unary forward with side effects: QueueCommand lands (and executes) on B.
     let command = serde_json::to_value(SessionCommandPayload::Run {

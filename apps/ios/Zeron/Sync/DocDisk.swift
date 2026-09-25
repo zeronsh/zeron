@@ -342,6 +342,22 @@ enum DocDisk {
     }
 }
 
+@MainActor
+protocol DocSaverScheduling {
+    func schedule(after nanoseconds: UInt64, action: @escaping @MainActor () async -> Void)
+}
+
+struct TaskDocSaverScheduler: DocSaverScheduling {
+    nonisolated init() {}
+
+    func schedule(after nanoseconds: UInt64, action: @escaping @MainActor () async -> Void) {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            await action()
+        }
+    }
+}
+
 /// Debounced snapshot persistence shared by the doc stores: poke on every
 /// change; `save` runs after a quiet debounce, and `flush` forces it
 /// (backgrounding, store teardown). The closure captures whatever must be
@@ -352,6 +368,7 @@ final class DocSaver {
     private let quietDebounceNs: UInt64
     private let maxDeferralNs: UInt64
     private let staleRetryNs: UInt64
+    private let scheduler: any DocSaverScheduling
     private var generation = 0
     private var deadlineGeneration = 0
     private var syncCommits = 0
@@ -363,11 +380,13 @@ final class DocSaver {
     init(save: @escaping () -> Bool,
          quietDebounceNs: UInt64 = 5_000_000_000,
          maxDeferralNs: UInt64 = 300_000_000_000,
-         staleRetryNs: UInt64 = 30_000_000_000) {
+         staleRetryNs: UInt64 = 30_000_000_000,
+         scheduler: any DocSaverScheduling = TaskDocSaverScheduler()) {
         self.save = save
         self.quietDebounceNs = quietDebounceNs
         self.maxDeferralNs = maxDeferralNs
         self.staleRetryNs = staleRetryNs
+        self.scheduler = scheduler
     }
 
     func retireTimers() {
@@ -394,8 +413,7 @@ final class DocSaver {
     private func armDeadline(after delay: UInt64) {
         deadlineGeneration += 1
         let expectedDeadline = deadlineGeneration
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: delay)
+        scheduler.schedule(after: delay) { [weak self] in
             guard let self, self.deadlineGeneration == expectedDeadline,
                   self.dirty else { return }
             await self.flushFromTimer()
@@ -410,8 +428,7 @@ final class DocSaver {
         if !wasDirty {
             armDeadline(after: maxDeferralNs)
         }
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: self?.quietDebounceNs ?? 0)
+        scheduler.schedule(after: quietDebounceNs) { [weak self] in
             guard let self, self.generation == expected else { return }
             await self.flushFromTimer()
         }
@@ -466,8 +483,7 @@ final class DocSaver {
     private func scheduleRetry() {
         generation += 1
         let expected = generation
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        scheduler.schedule(after: 2_000_000_000) { [weak self] in
             guard let self, self.generation == expected else { return }
             await self.flushFromTimer()
         }

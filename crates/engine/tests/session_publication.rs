@@ -623,3 +623,50 @@ async fn rejected_update_retries_failed_checkpoint_and_retires_only_after_succes
     host.shutdown_workers().await;
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_outbox_is_published_after_restart_without_opening_the_chat() {
+    use zeron_engine::{DocHost, DocHostConfig};
+    let dir = tempfile::tempdir().unwrap();
+    let doc = SessionDoc::init(CHAT).unwrap();
+    let before = doc.doc().oplog_vv();
+    let initial = doc.export_snapshot().unwrap();
+    doc.doc()
+        .get_text("body")
+        .insert(0, "durable cold work")
+        .unwrap();
+    doc.doc().commit();
+    {
+        let store = DocsStore::open(dir.path()).unwrap();
+        store
+            .save_snapshot_with_cursor(CHAT, &initial, 42, 2)
+            .unwrap();
+        store.initialize_chat_outbox(CHAT, &[]).unwrap();
+        store
+            .enqueue_chat_update(
+                CHAT,
+                "cold-batch",
+                &doc.doc().export(ExportMode::updates(&before)).unwrap(),
+            )
+            .unwrap();
+    }
+    let (url, room, acks, server) = relay(initial).await;
+    acks.store(true, Ordering::SeqCst);
+    let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+    let host = DocHost::new(
+        store.clone(),
+        DocHostConfig {
+            device_id: "writer".into(),
+            default_harness: HarnessId::Mock,
+            edge: Some(EdgeConfig::with_static_token(
+                url.replacen("ws", "http", 1),
+                "test",
+            )),
+        },
+    );
+    wait(|| room.lock().unwrap().ids.contains_key("cold-batch")).await;
+    wait(|| !store.has_pending_chat_updates(CHAT).unwrap()).await;
+    assert_eq!(room.lock().unwrap().ids.len(), 1);
+    host.shutdown_workers().await;
+    server.abort();
+}

@@ -1983,6 +1983,48 @@ async fn rpc_dispatch_for_m5_methods() {
     let terminal_id = session["id"].as_str().expect("terminal id").to_string();
     assert_eq!(session["cwd"], repo_path);
 
+    // New-chat canvas: no chat row. The space id in chatId is enough even
+    // when the UI still sends `~` (spaces watch not landed) or omits cwd.
+    let canvas = client
+        .call(
+            methods::OPEN_TERMINAL,
+            serde_json::json!({
+                "chatId": "space-canvas:space-term",
+                "cols": 80,
+                "rows": 24,
+                "cwd": "~",
+            }),
+        )
+        .await
+        .expect("OpenTerminal on canvas");
+    assert_eq!(canvas["cwd"], repo_path);
+    client
+        .call(
+            methods::CLOSE_TERMINAL,
+            serde_json::json!({ "terminalId": canvas["id"] }),
+        )
+        .await
+        .expect("CloseTerminal canvas");
+    let inferred = client
+        .call(
+            methods::OPEN_TERMINAL,
+            serde_json::json!({
+                "chatId": "space-canvas:space-term",
+                "cols": 80,
+                "rows": 24,
+            }),
+        )
+        .await
+        .expect("OpenTerminal on canvas without cwd");
+    assert_eq!(inferred["cwd"], repo_path);
+    client
+        .call(
+            methods::CLOSE_TERMINAL,
+            serde_json::json!({ "terminalId": inferred["id"] }),
+        )
+        .await
+        .expect("CloseTerminal inferred canvas");
+
     let mut stream = client
         .subscribe(
             methods::SUBSCRIBE_TERMINAL,

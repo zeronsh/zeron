@@ -50,7 +50,8 @@
 //!    Activate splices those live shared fields onto the target login so a
 //!    switch does not force every MCP server to re-auth.
 //! 3. **Add** (`start_login`…): drive an OAuth flow for a NEW account without
-//!    touching the live one — the way each CLI signs in itself: the browser
+//!    touching the live one (unless it re-signs the live account in, or there
+//!    is no live login) — the way each CLI signs in itself: the browser
 //!    redirects to a loopback callback that finishes the login unattended.
 //!    Claude runs the CLI's PKCE flow against our own `localhost:<port>/callback`
 //!    (pasting the code is only the fallback when no port can be bound);
@@ -713,6 +714,11 @@ struct Inner {
     config: AgentAccountsConfig,
     http: reqwest::Client,
     endpoints: ProbeEndpoints,
+    /// Serializes operations that inspect and then mutate live credential
+    /// stores and slots. Without this, a concurrent list can snapshot stale
+    /// credentials over a freshly signed-in slot, or a switch can race a
+    /// removal and cause the wrong live account to be signed out.
+    ops: tokio::sync::Mutex<()>,
     flows: Mutex<HashMap<String, LoginFlow>>,
     /// `"{harness}:{accountKey}"` → usage state; mirrored to disk.
     usage: Mutex<HashMap<String, UsageEntry>>,
@@ -814,6 +820,7 @@ impl AgentAccounts {
                 config,
                 http,
                 endpoints,
+                ops: tokio::sync::Mutex::new(()),
                 flows: Mutex::new(HashMap::new()),
                 usage: Mutex::new(usage),
                 inflight_probes: Mutex::new(std::collections::HashSet::new()),
@@ -858,6 +865,12 @@ impl AgentAccounts {
     /// accounts concurrently — skipping any still inside a Retry-After /
     /// backoff window or probed in the last [`FORCED_MIN_INTERVAL`].
     pub async fn list(&self, force_usage: bool) -> Result<AgentAccountsSnapshot, EngineError> {
+        let _ops = self.inner.ops.lock().await;
+        self.list_locked(force_usage).await
+    }
+
+    /// Caller holds [`Inner::ops`].
+    async fn list_locked(&self, force_usage: bool) -> Result<AgentAccountsSnapshot, EngineError> {
         let mut warnings: Vec<AgentAccountWarning> = Vec::new();
         // Per agent, the live logins' account keys — one for single-login
         // agents, one per model provider for OpenCode / Pi.
@@ -888,6 +901,7 @@ impl AgentAccounts {
                 unreadable.push((HarnessId::ClaudeCode, detected));
             }
         }
+        self.migrate_codex_slot_keys()?;
         if let Some(detected) = self.detect_codex() {
             live(HarnessId::Codex, &detected);
             self.snapshot_detected(HarnessId::Codex, &detected)?;
@@ -1067,10 +1081,11 @@ impl AgentAccounts {
                     .into(),
             ));
         }
+        let _ops = self.inner.ops.lock().await;
         // The pre-swap snapshot must hold the CURRENT tokens (the CLI may have
         // rotated its refresh token seconds ago) — never a cached read.
         *lock(&self.inner.claude_credentials) = None;
-        self.list(false).await?;
+        self.list_locked(false).await?;
         let slot = self
             .read_slots(harness)
             .into_iter()
@@ -1101,7 +1116,7 @@ impl AgentAccounts {
             }
         }
         *lock(&self.inner.claude_credentials) = None;
-        self.list(false).await
+        self.list_locked(false).await
     }
 
     async fn activate_claude(&self, slot: &Slot) -> Result<(), EngineError> {
@@ -1166,6 +1181,97 @@ impl AgentAccounts {
         write_file_atomic(&self.inner.config.codex_auth_file(), json.as_bytes(), true)
     }
 
+    /// The live login's account key, from the identity alone (no secret read).
+    fn live_account_key(&self, harness: HarnessId) -> Option<String> {
+        match harness {
+            HarnessId::ClaudeCode => {
+                let cfg = read_json(&self.inner.config.claude_config_file)?;
+                let oauth = cfg.get("oauthAccount")?;
+                str_field(oauth, "accountUuid").or_else(|| str_field(oauth, "emailAddress"))
+            }
+            HarnessId::Codex => self.detect_codex().map(|d| d.account_key),
+            HarnessId::Cursor => self.detect_cursor().map(|d| d.account_key),
+            _ => None,
+        }
+    }
+
+    /// A fresh sign-in replaces the live login when it IS the live account
+    /// (a re-login — otherwise the next list would snapshot the old, possibly
+    /// revoked, live tokens straight back over the fresh slot) or when there
+    /// is no live login at all (nothing to strand; "add" must mean "works").
+    /// Any other live login stays untouched — switching remains explicit.
+    async fn adopt_if_live(&self, slot: &Slot) -> Result<(), EngineError> {
+        let live = self.live_account_key(slot.harness);
+        let usable = match slot.harness {
+            HarnessId::Cursor => self.cursor_live_usable(),
+            _ => live.is_some(),
+        };
+        if usable && live.as_deref() != Some(slot.account_key.as_str()) {
+            return Ok(());
+        }
+        match slot.harness {
+            HarnessId::ClaudeCode => self.activate_claude(slot).await?,
+            HarnessId::Codex => self.activate_codex(slot)?,
+            HarnessId::Cursor => self.write_cursor_auth(&slot.credentials)?,
+            _ => {}
+        }
+        *lock(&self.inner.claude_credentials) = None;
+        Ok(())
+    }
+
+    /// Sign the CLI's live login out, so removing its slot sticks.
+    async fn sign_out(
+        &self,
+        harness: HarnessId,
+        expected_account_key: &str,
+    ) -> Result<(), EngineError> {
+        if self.live_account_key(harness).as_deref() != Some(expected_account_key) {
+            return Err(EngineError::Other(
+                "The live login changed while it was being removed — refresh and try again."
+                    .into(),
+            ));
+        }
+        match harness {
+            HarnessId::ClaudeCode => {
+                let (live, warning) = self.read_claude_credentials().await;
+                if self.live_account_key(harness).as_deref() != Some(expected_account_key) {
+                    return Err(EngineError::Other(
+                        "The live login changed while it was being removed — refresh and try again."
+                            .into(),
+                    ));
+                }
+                if let Some(mut credentials) = live {
+                    // Only the account login goes — machine-shared MCP/plugin
+                    // OAuth in the same blob stays.
+                    if let Some(map) = credentials.as_object_mut() {
+                        map.remove("claudeAiOauth");
+                    }
+                    self.write_claude_credentials(&credentials).await?;
+                } else if let Some(warning) = warning {
+                    return Err(EngineError::Other(format!(
+                        "Couldn't sign Claude out: {warning}"
+                    )));
+                }
+                let file = &self.inner.config.claude_config_file;
+                if let Some(mut cfg) = read_json(file)
+                    && let Some(map) = cfg.as_object_mut()
+                    && map.remove("oauthAccount").is_some()
+                {
+                    write_file_atomic(file, cfg.to_string().as_bytes(), false)?;
+                }
+                *lock(&self.inner.claude_credentials) = None;
+            }
+            HarnessId::Codex => remove_if_exists(&self.inner.config.codex_auth_file())?,
+            HarnessId::Cursor => remove_if_exists(&self.inner.config.cursor_sdk_auth_file)?,
+            _ => {
+                return Err(EngineError::Other(
+                    "That's the live login — it can't be removed here.".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     // ── forget ──────────────────────────────────────────────────────────────
 
     pub async fn forget(
@@ -1191,23 +1297,35 @@ impl AgentAccounts {
                     .into(),
             ));
         }
-        let snapshot = self.list(false).await?;
+        let _ops = self.inner.ops.lock().await;
+        let snapshot = self.list_locked(false).await?;
         let active = snapshot
             .accounts
             .iter()
             .any(|a| a.harness == harness && a.id == account_id && a.active);
         if active {
-            return Err(EngineError::Other(
-                "That's the live login — switch to another account first (it would just be \
-                 re-detected)."
-                    .into(),
-            ));
+            // Removing the live login signs the CLI out — dropping only the
+            // slot would re-detect (and re-snapshot) it on the next list, and
+            // the only account must stay removable.
+            let expected = self.live_account_key(harness).ok_or_else(|| {
+                EngineError::Other(
+                    "The live login changed while it was being removed — refresh and try again."
+                        .into(),
+                )
+            })?;
+            if slot_id_for(harness, &expected) != account_id {
+                return Err(EngineError::Other(
+                    "The live login changed while it was being removed — refresh and try again."
+                        .into(),
+                ));
+            }
+            self.sign_out(harness, &expected).await?;
         }
         let file = self.slots_dir(harness)?.join(format!("{account_id}.json"));
         if file.exists() {
             std::fs::remove_file(&file)?;
         }
-        self.list(false).await
+        self.list_locked(false).await
     }
 
     // ── add-account OAuth flows ─────────────────────────────────────────────
@@ -1683,8 +1801,8 @@ impl AgentAccounts {
         .await
     }
 
-    /// Exchange the pasted `code#state` for tokens and save the account as a slot
-    /// (the live login is untouched — switching is an explicit, separate act).
+    /// Exchange the pasted `code#state` for tokens and save the account as a
+    /// slot (see [`Self::adopt_if_live`] for when it also becomes live).
     pub async fn complete_login(
         &self,
         login_id: &str,
@@ -1728,8 +1846,8 @@ impl AgentAccounts {
     }
 
     /// Redeem a Claude authorization code at `token_url` and save the account
-    /// as a slot (the live login is untouched — switching is an explicit,
-    /// separate act). `redirect` must be the one the authorize url named.
+    /// as a slot (see [`Self::adopt_if_live`] for when it also becomes live).
+    /// `redirect` must be the one the authorize url named.
     async fn redeem_claude_code(
         &self,
         token_url: &str,
@@ -1856,7 +1974,7 @@ impl AgentAccounts {
             }
         }
 
-        self.write_slot(&Slot {
+        let slot = Slot {
             id: slot_id_for(HarnessId::ClaudeCode, &account_uuid),
             harness: HarnessId::ClaudeCode,
             account_key: account_uuid.clone(),
@@ -1872,7 +1990,10 @@ impl AgentAccounts {
             saved_at: now_ms(),
             created_at: None,
             store_key: None,
-        })
+        };
+        let _ops = self.inner.ops.lock().await;
+        self.write_slot(&slot)?;
+        self.adopt_if_live(&slot).await
     }
 
     pub async fn poll_login(&self, login_id: &str) -> Result<AgentLoginPoll, EngineError> {
@@ -1928,21 +2049,13 @@ impl AgentAccounts {
             SpawnedCompletion::ExitSuccess => None,
         };
         if let Some(detected) = detected {
+            let _ops = self.inner.ops.lock().await;
             self.snapshot_detected(harness, &detected)?;
-            // "Connect" semantics: with no (usable) live login, the fresh one
-            // becomes the live one immediately — the page's CTA is "connect
-            // so runs work", not "add a spare". A live login stays untouched
-            // (switching remains explicit, codex parity).
-            if let Some(credentials) = &detected.credentials {
-                match harness {
-                    HarnessId::Cursor if !self.cursor_live_usable() => {
-                        self.write_cursor_auth(credentials)?;
-                    }
-                    HarnessId::Grok if self.detect_grok().is_none() => {
-                        self.write_grok_entry(detected.store_key.as_deref(), credentials)?;
-                    }
-                    _ => {}
-                }
+            // "Connect" semantics: with no (usable) live login, or a re-login
+            // of the live account, the fresh login becomes the live one.
+            let id = slot_id_for(harness, &detected.account_key);
+            if let Some(slot) = self.read_slots(harness).into_iter().find(|s| s.id == id) {
+                self.adopt_if_live(&slot).await?;
             }
             self.cancel_login(login_id);
             return Ok(AgentLoginPoll {
@@ -2158,6 +2271,34 @@ impl AgentAccounts {
 
     fn detect_codex(&self) -> Option<Detected> {
         read_json(&self.inner.config.codex_auth_file()).and_then(parse_codex_auth)
+    }
+
+    /// Codex slots used to be keyed only by `chatgpt_account_id`. Every seat
+    /// in a Team workspace shares that id, so move legacy slots to the
+    /// user-plus-workspace key returned by [`parse_codex_auth`]. Caller holds
+    /// [`Inner::ops`].
+    fn migrate_codex_slot_keys(&self) -> Result<(), EngineError> {
+        for slot in self.read_slots(HarnessId::Codex) {
+            let Some(detected) = parse_codex_auth(slot.credentials.clone()) else {
+                continue;
+            };
+            if detected.account_key == slot.account_key {
+                continue;
+            }
+            let dir = self.slots_dir(HarnessId::Codex)?;
+            let id = slot_id_for(HarnessId::Codex, &detected.account_key);
+            // If both forms exist, the new-key slot was written after the
+            // upgrade and is the authoritative copy.
+            if !dir.join(format!("{id}.json")).exists() {
+                let mut moved = slot.clone();
+                moved.id = id;
+                moved.account_key = detected.account_key;
+                moved.created_at = Some(slot.created_at.unwrap_or(slot.saved_at));
+                self.write_slot(&moved)?;
+            }
+            remove_if_exists(&dir.join(format!("{}.json", slot.id)))?;
+        }
+        Ok(())
     }
 
     fn detect_cursor(&self) -> Option<Detected> {
@@ -3071,8 +3212,17 @@ fn parse_codex_auth(auth: serde_json::Value) -> Option<Detected> {
             .cloned()
             .unwrap_or_default();
         let email = str_field(&claims, "email")?;
+        // Team seats share a workspace id. Include the user id so one
+        // teammate's login cannot collide with, or be mistaken for, another's.
+        let workspace = str_field(&oa, "chatgpt_account_id");
+        let user = str_field(&oa, "chatgpt_user_id").or_else(|| str_field(&oa, "user_id"));
+        let account_key = match (user, workspace) {
+            (Some(user), Some(workspace)) => format!("{user}::{workspace}"),
+            (None, Some(workspace)) => workspace,
+            _ => email.clone(),
+        };
         return Some(Detected {
-            account_key: str_field(&oa, "chatgpt_account_id").unwrap_or_else(|| email.clone()),
+            account_key,
             profile: SlotProfile {
                 email,
                 display_name: str_field(&claims, "name"),
@@ -3881,6 +4031,13 @@ fn urlencode(input: &str) -> String {
         }
     }
     out
+}
+
+fn remove_if_exists(file: &Path) -> Result<(), EngineError> {
+    match std::fs::remove_file(file) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
 }
 
 /// Atomic write via a same-dir temp file + rename; `secret` = 0600 from birth.
@@ -4720,6 +4877,7 @@ mod login_tests {
         assert!(response.contains(CLAUDE_LOOPBACK_SUCCESS_URL));
         let poll = poll_until_settled(&accounts, &start.login_id).await;
         assert_eq!(poll.status, AgentLoginStatus::Done, "{:?}", poll.message);
+        // No live login to strand: the new account goes live at once.
         let snapshot = accounts.list(false).await.unwrap();
         assert!(
             snapshot
@@ -4727,7 +4885,109 @@ mod login_tests {
                 .iter()
                 .any(|a| a.harness == HarnessId::ClaudeCode
                     && a.email.as_deref() == Some("new@example.com")
-                    && !a.active)
+                    && a.active)
+        );
+    }
+
+    fn write_live_claude(root: &Path, uuid: &str, email: &str, token: &str) {
+        let config = config(root);
+        write(
+            &config.claude_config_file,
+            &serde_json::json!({
+                "oauthAccount": { "accountUuid": uuid, "emailAddress": email },
+                "projects": { "/keep/me": {} },
+            })
+            .to_string(),
+        );
+        write(
+            &config.claude_creds_file(),
+            &serde_json::json!({
+                "claudeAiOauth": { "accessToken": token, "refreshToken": "rt", "expiresAt": 1 },
+                "mcpOAuth": { "server": "keep" },
+            })
+            .to_string(),
+        );
+    }
+
+    async fn sign_in_new_account(accounts: &AgentAccounts) {
+        let start = accounts.start_login(HarnessId::ClaudeCode).await.unwrap();
+        let port = start.callback_port.unwrap();
+        let state = reqwest::Url::parse(&start.url)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        browser_get(port, &format!("/callback?code=good-code&state={state}")).await;
+        let poll = poll_until_settled(accounts, &start.login_id).await;
+        assert_eq!(poll.status, AgentLoginStatus::Done, "{:?}", poll.message);
+    }
+
+    fn loopback_accounts(root: &Path, token_url: String) -> AgentAccounts {
+        let endpoints = ProbeEndpoints {
+            claude_loopback_token: token_url,
+            claude_profile: "http://127.0.0.1:9/profile".into(),
+            ..Default::default()
+        };
+        AgentAccounts::with_endpoints(config(root), endpoints, Default::default())
+    }
+
+    #[tokio::test]
+    async fn re_signing_in_the_live_account_replaces_its_dead_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_url, _server) = token_server().await;
+        let accounts = loopback_accounts(tmp.path(), token_url);
+        write_live_claude(tmp.path(), "acct-new", "new@example.com", "dead");
+        accounts.list(false).await.unwrap();
+
+        sign_in_new_account(&accounts).await;
+
+        // The fresh tokens are live (not clobbered by a re-snapshot of the
+        // dead ones), shared MCP OAuth survives, and so does the slot.
+        let creds = read_json(&config(tmp.path()).claude_creds_file()).unwrap();
+        assert_eq!(creds["claudeAiOauth"]["accessToken"], "access");
+        assert_eq!(creds["mcpOAuth"]["server"], "keep");
+        let snapshot = accounts.list(false).await.unwrap();
+        let rows: Vec<_> = snapshot
+            .accounts
+            .iter()
+            .filter(|a| a.harness == HarnessId::ClaudeCode)
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].active);
+        let slot = accounts
+            .read_slots(HarnessId::ClaudeCode)
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(slot.credentials["claudeAiOauth"]["accessToken"], "access");
+    }
+
+    #[tokio::test]
+    async fn signing_in_another_account_leaves_the_live_login_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_url, _server) = token_server().await;
+        let accounts = loopback_accounts(tmp.path(), token_url);
+        write_live_claude(tmp.path(), "acct-bob", "bob@example.com", "bob-token");
+        accounts.list(false).await.unwrap();
+
+        sign_in_new_account(&accounts).await;
+
+        let creds = read_json(&config(tmp.path()).claude_creds_file()).unwrap();
+        assert_eq!(creds["claudeAiOauth"]["accessToken"], "bob-token");
+        let snapshot = accounts.list(false).await.unwrap();
+        assert!(
+            snapshot
+                .accounts
+                .iter()
+                .any(|a| a.email.as_deref() == Some("new@example.com") && !a.active)
+        );
+        assert!(
+            snapshot
+                .accounts
+                .iter()
+                .any(|a| a.email.as_deref() == Some("bob@example.com") && a.active)
         );
     }
 

@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.86"
+version = "0.2.90"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -68,15 +68,15 @@ loro-protocol = "0.3"
 # Linux — the Metal path's snapshot/blur/composite, ported).
 # Paint-time rounded image masks (#9), bounded Windows backdrop blur and
 # translucent compositing, plus blur-aware scene batching (#10).
-gpui = { git = "https://github.com/zeronsh/zui", rev = "1561532176f54262e360acbb8bc00c6fcf183975" }
-gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "1561532176f54262e360acbb8bc00c6fcf183975", features = [
+gpui = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda" }
+gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "1561532176f54262e360acbb8bc00c6fcf183975" }
-gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "5086ff4fb162ae97ca9d806876e7c6694ac3a81f" }
+gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda" }
+gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "103f13da91ff2c7c52941bdc2b1910f29716dc19" }
 
 # diffs
 similar = "2"
