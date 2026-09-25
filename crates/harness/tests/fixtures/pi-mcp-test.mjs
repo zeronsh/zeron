@@ -32,6 +32,11 @@ if (process.argv[2] === 'server') {
       controller.abort();
       await assert.rejects(waiting,/cancelled/);
       await assert.rejects(tool.execute('call',{mode:'crash'}),/exited/);
+      const notices = [];
+      const ctx = {ui:{notify:(message,level)=>notices.push([message,level])}};
+      handlers.message_end({message:{role:'assistant',stopReason:'stop',content:[]}}, ctx);
+      handlers.message_end({message:{role:'assistant',stopReason:'error',errorMessage:'Codex error: unsupported model'}}, ctx);
+      assert.deepEqual(notices,[['Codex error: unsupported model','error']]);
       // Restarting the session must not let an old child's exit fail new RPCs.
       await handlers.session_start();
       assert.equal((await tools.zeron_whoami.execute('call',{})).content[0].text,chat);
