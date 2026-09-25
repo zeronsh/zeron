@@ -351,7 +351,9 @@ impl Harness for OpencodeHarness {
     /// Steers queue and deliver as the next prompt when the live turn goes
     /// idle — opencode has no mid-turn injection on this wire.
     fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::TurnBoundary
+        // Steers preempt the generation (never a running tool) and continue
+        // the turn immediately; see `maybe_preempt!`.
+        SteeringMode::StepBoundary
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         REASONING_LEVELS
@@ -1392,6 +1394,11 @@ struct TurnState {
     aborted_for_retry: bool,
     /// Deadline for the first session-scoped event after the prompt.
     stall_deadline: Option<tokio::time::Instant>,
+    /// Main-session tool calls started and not yet finished.
+    open_tools: std::collections::HashSet<String>,
+    /// Aborted to deliver a steer immediately: its idle/interrupted frame is
+    /// a steer boundary, not the end of the run.
+    preempted: bool,
 }
 
 /// A detached native-command HTTP request failed. `generation` binds the
@@ -1443,6 +1450,8 @@ impl TurnState {
             retry_reported: false,
             aborted_for_retry: false,
             stall_deadline: stall.map(|d| tokio::time::Instant::now() + d),
+            open_tools: Default::default(),
+            preempted: false,
         }
     }
 
@@ -1746,15 +1755,32 @@ async fn run_session(session: Session) {
                 done_sent = true;
                 break $label;
             }
-            if let Some((steer, native_command_selected)) = queued_steers.pop_front() {
+            if let Some((first, native_command_selected)) = queued_steers.pop_front() {
                 turn_generation = turn_generation.wrapping_add(1);
-                let (prev, next) = rotate(&mut assistant_message_id);
-                if !send(&event_tx, AgentEvent::Steered {
-                    assistant_message_id: Some(prev),
-                    next_assistant_message_id: Some(next),
-                }).await {
+                // Plain-text steers waiting together go out as one prompt,
+                // each confirmed by its own Steered boundary; a native
+                // command always travels alone.
+                let mut texts = vec![first];
+                while !native_command_selected
+                    && queued_steers.front().is_some_and(|(_, native)| !native)
+                {
+                    texts.push(queued_steers.pop_front().expect("front checked").0);
+                }
+                let mut consumer_gone = false;
+                for _ in &texts {
+                    let (prev, next) = rotate(&mut assistant_message_id);
+                    if !send(&event_tx, AgentEvent::Steered {
+                        assistant_message_id: Some(prev),
+                        next_assistant_message_id: Some(next),
+                    }).await {
+                        consumer_gone = true;
+                        break;
+                    }
+                }
+                if consumer_gone {
                     break $label;
                 }
+                let steer = texts.join("\n\n");
                 match post_prompt(
                     &server,
                     &bus_tx,
@@ -1813,6 +1839,35 @@ async fn run_session(session: Session) {
             // Closing here races the engine's next queued dispatch: it may
             // accept a prompt into a dying mailbox and replay it out of order.
             continue $label;
+        }};
+    }
+
+    // Immediate steering: a queued steer aborts the current generation as
+    // soon as no tool is running (a running tool is never killed), and the
+    // abort's idle promotes the steer — the way Codex `turn/steer` behaves.
+    macro_rules! maybe_preempt {
+        () => {{
+            if turn.active
+                && !turn.preempted
+                && !interrupt_requested
+                && !queued_steers.is_empty()
+                && turn.open_tools.is_empty()
+            {
+                turn.preempted = true;
+                turn.idle_ready = true;
+                let abort = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    server.abort_session(&session_id, dir),
+                )
+                .await;
+                if !matches!(abort, Ok(Ok(_))) {
+                    // Deliver at the natural turn end instead.
+                    tracing::warn!(
+                        target: "zeron_harness::opencode",
+                        "steer preempt abort failed; delivering at turn end"
+                    );
+                }
+            }
         }};
     }
 
@@ -1919,6 +1974,7 @@ async fn run_session(session: Session) {
                         );
                         if turn.active {
                             queued_steers.push_back((prompt, native_command_selected));
+                            maybe_preempt!();
                         } else {
                             turn_generation = turn_generation.wrapping_add(1);
                             // Between turns (shouldn't happen — the engine
@@ -2102,9 +2158,15 @@ async fn run_session(session: Session) {
                             context_windows: &context_windows,
                         }).await;
                         match outcome {
-                            BusOutcome::Continue => {}
+                            BusOutcome::Continue => maybe_preempt!(),
                             BusOutcome::ConsumerGone => break 'main,
                             BusOutcome::TurnIdle => settle_idle!('main),
+                            // Our own steer preempt: a steer boundary.
+                            BusOutcome::TurnInterrupted
+                                if turn.preempted && !interrupt_requested =>
+                            {
+                                settle_idle!('main)
+                            }
                             BusOutcome::TurnInterrupted => {
                                 interrupt_requested = true;
                                 settle_idle!('main);
@@ -3079,6 +3141,17 @@ async fn forward(
 }
 
 fn mark_content(turn: &mut TurnState, events: &[AgentEvent]) {
+    for ev in events {
+        match ev {
+            AgentEvent::ToolCall { id, .. } => {
+                turn.open_tools.insert(id.clone());
+            }
+            AgentEvent::ToolResult { id, .. } => {
+                turn.open_tools.remove(id);
+            }
+            _ => {}
+        }
+    }
     if turn.active
         && events.iter().any(|ev| {
             matches!(

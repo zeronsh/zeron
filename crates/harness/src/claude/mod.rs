@@ -794,6 +794,12 @@ async fn run_session(session: Session) {
                     }
                     for ev in norm.normalize(frame, interrupted) {
                         let is_done = matches!(ev, AgentEvent::Done { .. });
+                        // A `now` steer ends the turn it interrupts with a
+                        // result frame; the steer continues the run, so that
+                        // result is a steer boundary, not the end of the turn.
+                        if is_done && !interrupted && !pending_steers.is_empty() {
+                            continue;
+                        }
                         if event_tx.send(Ok(ev)).await.is_err() {
                             break 'main; // consumer gone — reap below
                         }

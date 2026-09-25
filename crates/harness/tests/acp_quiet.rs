@@ -121,6 +121,18 @@ async fn delayed_turn(scenario: &str) {
     assert!(harness.authoritative_prompt_end());
     let (controls, steer, token) = controls();
     let mut stream = harness.run(request(scenario), controls).await.unwrap();
+    let mut early = Vec::new();
+    if scenario == "open-tool" {
+        // Steer only once the tool is visibly running.
+        while let Some(event) = stream.next().await {
+            let event = event.expect("stream event");
+            let open = matches!(&event, AgentEvent::ToolCall { id, .. } if id == "3");
+            early.push(event);
+            if open {
+                break;
+            }
+        }
+    }
     // Queue multiple follow-ups while the first prompt remains outstanding.
     steer
         .send(SteerMessage {
@@ -136,23 +148,39 @@ async fn delayed_turn(scenario: &str) {
         })
         .await
         .unwrap();
-    let first = collect_until_done(&mut stream).await;
+    let mut first = early;
+    first.extend(collect_until_done(&mut stream).await);
     assert_done(&first, DoneStatus::Completed);
-    assert!(
-        first
+    let finished = |events: &[AgentEvent]| {
+        events
             .iter()
-            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == "finished")),
-        "premature Done: {first:?}"
-    );
-    for expected in ["second", "third"] {
-        let events = collect_until_done(&mut stream).await;
-        assert_done(&events, DoneStatus::Completed);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == expected)),
-            "{events:?}"
-        );
+            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == "finished"))
+    };
+    let steered = |events: &[AgentEvent]| {
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Steered { .. }))
+            .count()
+    };
+    let together = |events: &[AgentEvent]| {
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == "second\n\nthird"))
+    };
+    if scenario == "open-tool" {
+        // A running tool is never preempted: the prompt keeps its outcome,
+        // then both steers continue together as the next prompt.
+        assert!(finished(&first), "premature Done: {first:?}");
+        let next = collect_until_done(&mut stream).await;
+        assert_done(&next, DoneStatus::Completed);
+        assert_eq!(steered(&next), 2, "{next:?}");
+        assert!(together(&next), "{next:?}");
+    } else {
+        // Silence is not completion, but steers preempt the generation
+        // immediately and continue the same run together — one Done.
+        assert!(!finished(&first), "steers must preempt: {first:?}");
+        assert_eq!(steered(&first), 2, "{first:?}");
+        assert!(together(&first), "{first:?}");
     }
     // A fresh user message after completion also reuses the same session.
     steer

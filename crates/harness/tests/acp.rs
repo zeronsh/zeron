@@ -502,7 +502,7 @@ fn descriptor_surface_matches_registry_expectations() {
     assert_eq!(harness.id(), HarnessId::Grok);
     assert_eq!(harness.display_name(), "Grok");
     assert!(harness.supports_steering());
-    assert_eq!(harness.steering_mode(), SteeringMode::TurnBoundary);
+    assert_eq!(harness.steering_mode(), SteeringMode::StepBoundary);
     assert_eq!(
         harness.reasoning_levels(),
         &[
@@ -619,7 +619,7 @@ fn hermes_and_pi_descriptor_surfaces_match_registry_expectations() {
     assert_eq!(devin.id(), HarnessId::Devin);
     assert_eq!(devin.display_name(), "Devin");
     assert!(devin.supports_steering());
-    assert_eq!(devin.steering_mode(), SteeringMode::TurnBoundary);
+    assert_eq!(devin.steering_mode(), SteeringMode::StepBoundary);
     assert!(devin.reasoning_levels().is_empty());
 
     let hermes = AcpHarness::hermes();
@@ -633,7 +633,7 @@ fn hermes_and_pi_descriptor_surfaces_match_registry_expectations() {
     assert_eq!(pi.id(), HarnessId::Pi);
     assert_eq!(pi.display_name(), "Pi");
     assert!(pi.supports_steering());
-    assert_eq!(pi.steering_mode(), SteeringMode::TurnBoundary);
+    assert_eq!(pi.steering_mode(), SteeringMode::StepBoundary);
     assert_eq!(
         pi.reasoning_levels(),
         &[
@@ -1817,7 +1817,6 @@ async fn pi_boundary_steer(scenario: &str, trigger_on_done: bool) {
     })
     .await
     .unwrap();
-    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None); 2]);
     assert_eq!(
         events
             .iter()
@@ -1825,15 +1824,28 @@ async fn pi_boundary_steer(scenario: &str, trigger_on_done: bool) {
             .count(),
         1
     );
-    let first_done = events
-        .iter()
-        .position(|e| matches!(e, AgentEvent::Done { .. }))
-        .unwrap();
     let second_text = events
         .iter()
         .position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "second"))
         .unwrap();
-    assert!(first_done < second_text);
+    if trigger_on_done {
+        // Idle between turns: the steer is simply the next turn.
+        assert_eq!(dones(&events), vec![(DoneStatus::Completed, None); 2]);
+        let first_done = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::Done { .. }))
+            .unwrap();
+        assert!(first_done < second_text);
+    } else {
+        // Mid-turn: the steer preempts (here the turn ended first anyway) and
+        // continues the run behind a Steered boundary — one run, one Done.
+        assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+        let steered = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::Steered { .. }))
+            .expect("steer boundary");
+        assert!(steered < second_text);
+    }
 }
 
 #[tokio::test]

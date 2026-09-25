@@ -135,10 +135,39 @@ impl SessionFixture {
         tokio::process::ChildStdin,
         tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
     ) {
+        self.spawn(prompt, resume, mcp, false).await
+    }
+    /// The SDK's native steering path alone, without text preemption.
+    async fn start_native(
+        &self,
+        prompt: &str,
+    ) -> (
+        tokio::process::Child,
+        tokio::process::ChildStdin,
+        tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    ) {
+        self.spawn(prompt, false, serde_json::Value::Null, true)
+            .await
+    }
+    async fn spawn(
+        &self,
+        prompt: &str,
+        resume: bool,
+        mcp: serde_json::Value,
+        native_only: bool,
+    ) -> (
+        tokio::process::Child,
+        tokio::process::ChildStdin,
+        tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    ) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
         let mut child = tokio::process::Command::new("node")
             .arg(self.dir.path().join("shim.mjs"))
             .env("ZERON_CURSOR_STATE_DIR", self.dir.path().join("state"))
+            .env(
+                "ZERON_CURSOR_NATIVE_STEER_ONLY",
+                if native_only { "1" } else { "0" },
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -526,7 +555,7 @@ async fn mcp_injection_reaches_sdk_on_create_and_resume_with_fresh_identity() {
 async fn rapid_steers_are_acknowledged_inside_the_active_sdk_run() {
     use tokio::io::AsyncWriteExt;
     let fixture = SessionFixture::new();
-    let (mut child, mut stdin, mut lines) = fixture.start("native-steer", false).await;
+    let (mut child, mut stdin, mut lines) = fixture.start_native("native-steer").await;
     while frame(&mut lines).await["ev"] != "text" {}
     for i in 0..3 {
         stdin
@@ -563,7 +592,7 @@ async fn rapid_steers_are_acknowledged_inside_the_active_sdk_run() {
 async fn acknowledged_native_steer_survives_a_crash_before_checkpoint() {
     use tokio::io::AsyncWriteExt;
     let fixture = SessionFixture::new();
-    let (mut child, mut stdin, mut lines) = fixture.start("native-steer", false).await;
+    let (mut child, mut stdin, mut lines) = fixture.start_native("native-steer").await;
     while frame(&mut lines).await["ev"] != "text" {}
     stdin
         .write_all(b"{\"op\":\"steer\",\"prompt\":\"uncheckpointed-steer-important\"}\n")
@@ -591,7 +620,7 @@ async fn acknowledged_native_steer_survives_a_crash_before_checkpoint() {
 async fn turn_end_race_coalesces_all_reverted_inputs_and_announces_boundary_before_text() {
     use tokio::io::AsyncWriteExt;
     let fixture = SessionFixture::new();
-    let (mut child, mut stdin, mut lines) = fixture.start("native-revert", false).await;
+    let (mut child, mut stdin, mut lines) = fixture.start_native("native-revert").await;
     while frame(&mut lines).await["ev"] != "text" {}
     let batch = (0..3)
         .map(|i| format!("{{\"op\":\"steer\",\"prompt\":\"raced-{i}\"}}\n"))
@@ -645,7 +674,7 @@ async fn native_steering_waits_for_tool_completion_but_not_turn_completion() {
 async fn newer_steers_submit_while_earlier_delivery_is_unacknowledged() {
     use tokio::io::AsyncWriteExt;
     let fixture = SessionFixture::new();
-    let (mut child, mut stdin, mut lines) = fixture.start("native-concurrent", false).await;
+    let (mut child, mut stdin, mut lines) = fixture.start_native("native-concurrent").await;
     while frame(&mut lines).await["ev"] != "text" {}
     // Wait for each submission before sending the next. This is not a single
     // stdin burst: none of the delivery promises resolves until all three arrive.
@@ -678,7 +707,7 @@ async fn newer_steers_submit_while_earlier_delivery_is_unacknowledged() {
 async fn concurrent_boundary_race_retries_only_undelivered_input() {
     use tokio::io::AsyncWriteExt;
     let fixture = SessionFixture::new();
-    let (mut child, mut stdin, mut lines) = fixture.start("native-mixed", false).await;
+    let (mut child, mut stdin, mut lines) = fixture.start_native("native-mixed").await;
     while frame(&mut lines).await["ev"] != "text" {}
     for i in 0..3 {
         stdin
@@ -705,4 +734,32 @@ async fn concurrent_boundary_race_retries_only_undelivered_input() {
         std::fs::read_to_string(std::path::Path::new(store.trim()).join("prompts.ndjson")).unwrap();
     assert_eq!(prompts.lines().count(), 4);
     assert_eq!(prompts.lines().last().unwrap(), r#""mixed-0""#);
+}
+
+/// Cursor's native steer lands only at a step boundary, so a plain text
+/// answer would finish first. With no tool running, a steer cancels the
+/// streaming run and continues as the next turn in the same process: the
+/// cancelled run reports no turn end and its late output never leaks.
+#[tokio::test]
+async fn steer_during_text_preempts_the_run_and_continues_immediately() {
+    use tokio::io::AsyncWriteExt;
+    let fixture = SessionFixture::new();
+    let (mut child, mut stdin, mut lines) = fixture.start("hang", false).await;
+    while frame(&mut lines).await["ev"] != "text" {}
+    stdin
+        .write_all(b"{\"op\":\"steer\",\"prompt\":\"preempt-me\"}\n")
+        .await
+        .unwrap();
+    assert_eq!(frame(&mut lines).await["ev"], "steered");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    let end = frame(&mut lines).await;
+    assert_eq!(end["ev"], "turn");
+    assert_eq!(end["status"], "finished");
+    finish(&mut child, stdin).await;
+    let store =
+        std::fs::read_to_string(fixture.dir.path().join("state/by-agent/agent-fixture")).unwrap();
+    let prompts =
+        std::fs::read_to_string(std::path::Path::new(store.trim()).join("prompts.ndjson")).unwrap();
+    assert_eq!(prompts.lines().count(), 2, "{prompts}");
+    assert!(prompts.lines().last().unwrap().contains("preempt-me"));
 }

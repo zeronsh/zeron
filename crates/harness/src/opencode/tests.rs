@@ -305,6 +305,26 @@ impl TurnWire {
         }
     }
 
+    /// Requests whose relative order the fixture's concurrent HTTP handlers
+    /// do not preserve.
+    async fn requests_any_order(&mut self, suffixes: &[&str]) {
+        let mut seen = Vec::new();
+        for _ in suffixes {
+            seen.push(
+                tokio::time::timeout(Duration::from_secs(5), self.requests.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        for suffix in suffixes {
+            assert!(
+                seen.iter().any(|path| path.ends_with(suffix)),
+                "missing {suffix}: {seen:?}"
+            );
+        }
+    }
+
     async fn request(&mut self, suffix: &str) {
         let path = tokio::time::timeout(Duration::from_secs(5), self.requests.recv())
             .await
@@ -391,7 +411,8 @@ async fn completed_turn_keeps_mailbox_alive_for_the_next_queued_request() {
 async fn queued_turn_ignores_previous_turn_duplicate_idle() {
     for status_first in [true, false] {
         let mut wire = TurnWire::start(true).await;
-        wire.request("/prompt_async").await;
+        // The queued steer preempts the generation at once.
+        wire.requests_any_order(&["/prompt_async", "/abort"]).await;
         wire.status("busy");
         // Both completion encodings belong to the first turn. The first frame
         // submits the queued prompt; the second must not finish that new turn.
@@ -461,7 +482,8 @@ async fn native_command_http_failures_settle_the_current_turn() {
 #[tokio::test]
 async fn late_native_command_failure_does_not_poison_the_queued_turn() {
     let mut wire = TurnWire::start_native_command(true, NativeCommandReply::DelayedHttp404).await;
-    wire.request("/command").await;
+    // The queued steer preempts the generation at once.
+    wire.requests_any_order(&["/command", "/abort"]).await;
     wire.status("busy");
     wire.status("idle");
     wire.request("/prompt_async").await;
