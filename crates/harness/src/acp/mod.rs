@@ -1916,9 +1916,31 @@ impl Harness for AcpHarness {
         let devin_selection = match request.model.as_deref() {
             Some(model) if self.spec.id == HarnessId::Devin => {
                 let (exe, _) = self.resolve_program(false).await?;
-                self.devin_models
-                    .selection(&exe, self.model_discovery_timeout, model)
-                    .await
+                let selection = self
+                    .devin_models
+                    .selection(
+                        &exe,
+                        self.model_discovery_timeout,
+                        model,
+                        &request.model_options,
+                    )
+                    .await;
+                if selection.is_none() && model == devin_models::FUSION {
+                    let chosen = |key: &str| {
+                        request
+                            .model_options
+                            .get(key)
+                            .and_then(Value::as_str)
+                            .unwrap_or("default")
+                            .to_owned()
+                    };
+                    return Err(HarnessError::Protocol(format!(
+                        "Devin Fusion does not offer lead {} with sidekick {}; pick another sidekick",
+                        chosen("lead"),
+                        chosen("sidekick")
+                    )));
+                }
+                selection
             }
             _ => None,
         };
