@@ -301,6 +301,29 @@ impl SessionsEngine {
         lock(&self.inner.statuses).values().any(is_active)
     }
 
+    /// A text prompt for `chat_id` would land in the mailbox of a live
+    /// turn-boundary agent mid-turn. The agent reads it only after the turn,
+    /// but a mailbox delivery writes the user message now — above the reply
+    /// still streaming for the message before it. Such prompts belong in the
+    /// visible queue. `request` = a Run that may differ from the live config
+    /// (a different config restarts the runtime instead, which is no hold).
+    pub fn defers_to_turn_end(
+        &self,
+        chat_id: &str,
+        request: Option<(HarnessId, &RunRequest)>,
+    ) -> bool {
+        if !self.turn_in_flight(chat_id) {
+            return false;
+        }
+        let live = lock(&self.inner.runs).get(chat_id).map(|h| {
+            (
+                h.runtime_config.harness_id,
+                h.steerable && request.is_none_or(|(id, r)| h.runtime_config.can_route(id, r)),
+            )
+        });
+        live.is_some_and(|(harness, routable)| routable && !self.steers_mid_turn(harness))
+    }
+
     /// The last request dispatched for a chat (steer→new-turn fallback).
     pub fn last_request(&self, chat_id: &str) -> Option<RunRequest> {
         lock(&self.inner.last_requests).get(chat_id).cloned()

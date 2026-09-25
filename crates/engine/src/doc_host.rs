@@ -514,6 +514,9 @@ pub struct ChatDocHandle {
     drain_lock: tokio::sync::Mutex<()>,
     /// Serialize prompt commands while still allowing interrupt/input controls.
     command_drain_lock: tokio::sync::Mutex<()>,
+    /// Queue rows held as explicit steers for a turn-boundary agent. They
+    /// lead ordinary queued rows, in the order they were steered.
+    steered_rows: Mutex<Vec<String>>,
     /// An explicit user interrupt freezes automatic queue delivery. The next
     /// explicit prompt or queue send resumes it; incidental doc/status changes
     /// must not turn Cancel into "send the next row".
@@ -610,6 +613,20 @@ impl ChatDocHandle {
         let rx = self.queue_tx.subscribe();
         self.publish_queue();
         rx
+    }
+
+    /// Where a newly steered row goes: after the rows already steered, ahead
+    /// of every ordinary row. Records `id` as steered.
+    fn steer_slot(&self, id: &str) -> Result<usize, DocError> {
+        let mut steered = lock(&self.steered_rows);
+        let queue = self.doc.read_queue()?;
+        steered.retain(|row| queue.iter().any(|q| &q.id == row));
+        let slot = queue
+            .iter()
+            .take_while(|row| steered.contains(&row.id))
+            .count();
+        steered.push(id.to_string());
+        Ok(slot)
     }
 
     fn publish_queue(&self) {
@@ -1348,6 +1365,7 @@ impl DocHost {
             queue_tx,
             drain_lock: tokio::sync::Mutex::new(()),
             command_drain_lock: tokio::sync::Mutex::new(()),
+            steered_rows: Mutex::new(Vec::new()),
             queue_paused: AtomicBool::new(recovered_queue_pending),
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
@@ -3052,6 +3070,22 @@ impl DocHost {
                 "queued message is blocked for editing or review".into(),
             ));
         }
+        if self
+            .sessions()
+            .is_some_and(|sessions| sessions.defers_to_turn_end(chat_id, None))
+        {
+            // Send next: lead the ordinary rows; the drain delivers it the
+            // moment the current turn ends.
+            let Some(item) = handle.doc.take_queued(id)? else {
+                return Ok(false);
+            };
+            handle
+                .doc
+                .insert_queued(handle.steer_slot(&item.id)?, &item)?;
+            handle.queue_paused.store(false, Ordering::Release);
+            handle.publish_queue();
+            return Ok(true);
+        }
         let Some(item) = handle.doc.take_queued(id)? else {
             return Ok(false);
         };
@@ -3139,6 +3173,7 @@ impl DocHost {
             let Ok(Some(item)) = handle.doc.take_queued(&head.id) else {
                 return;
             };
+            lock(&handle.steered_rows).retain(|row| row != &item.id);
             handle.publish_queue();
             if let Err(err) = self.dispatch_queued(handle, &item, send).await {
                 tracing::warn!(chat = %handle.chat_id, error = %err, "queued send failed");
@@ -4288,6 +4323,19 @@ impl DocHost {
                         tracing::warn!(chat = %chat_id, error = %err, "run-config backfill failed");
                     }
                 }
+                if sessions.defers_to_turn_end(chat_id, Some((harness, &request))) {
+                    self.hold_until_turn_end(
+                        handle,
+                        message_id,
+                        &request.prompt,
+                        entry.issued_at,
+                        false,
+                    )?;
+                    return Ok((
+                        SessionCommandStatus::Applied,
+                        Some("held until the turn ends".into()),
+                    ));
+                }
                 // Timestamp canonicalization: the user message lands in
                 // history at the moment the user SENT it (the entry's
                 // issued_at, clamped against clock skew) — not whenever this
@@ -4399,6 +4447,43 @@ impl DocHost {
         }
     }
 
+    /// Park a prompt for a turn-boundary agent in the visible queue instead
+    /// of its mailbox, keeping the message id so the transcript entry written
+    /// at delivery is the same message. Steers lead ordinary rows.
+    fn hold_until_turn_end(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        message_id: &str,
+        prompt: &str,
+        issued_at: i64,
+        steer: bool,
+    ) -> Result<(), EngineError> {
+        let item = QueuedMessage {
+            id: message_id.to_string(),
+            text: prompt.to_string(),
+            attachments: Vec::new(),
+            hold_for_turn_end: false,
+            issued_by: self.inner.config.device_id.clone(),
+            issued_at: issued_at.min(now_ms()),
+            edited_at: None,
+            delivery_gate: None,
+        };
+        if handle.doc.read_queue()?.iter().any(|row| row.id == item.id) {
+            return Ok(()); // a redelivered command: already held
+        }
+        if steer {
+            handle
+                .doc
+                .insert_queued(handle.steer_slot(&item.id)?, &item)?;
+        } else {
+            handle.doc.push_queued(&item)?;
+        }
+        // Sending is the deliberate action that thaws a queue frozen by Cancel.
+        handle.queue_paused.store(false, Ordering::Release);
+        handle.publish_queue();
+        Ok(())
+    }
+
     /// Put a typed prompt in front of a live agent: steer it in, or — with no
     /// live steerable run — deliver the durable command as the next turn.
     /// After an engine restart `last_request` is empty too, so rebuild the run
@@ -4416,10 +4501,20 @@ impl DocHost {
         issued_at: i64,
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
-        // Explicit steering always uses the persistent run mailbox. Drivers
-        // consume at their supported boundary; ordinary sends still use the
-        // editable pending-message queue. Never interrupt to hurry steering.
+        // Explicit steering uses the run mailbox when the agent reads it
+        // mid-turn. A turn-boundary agent would read it only after the turn,
+        // so it waits in the queue, ahead of ordinary rows, and reaches the
+        // transcript when it is actually delivered. Never interrupt to hurry
+        // steering.
         let prompt = self.resolve_prompt_attachments(prompt);
+        if !prompt.trim().is_empty() && sessions.defers_to_turn_end(chat_id, None) {
+            let id = message_id.unwrap_or_else(new_id);
+            self.hold_until_turn_end(handle, &id, &prompt, issued_at, true)?;
+            return Ok((
+                SessionCommandStatus::Applied,
+                Some("held until the turn ends".into()),
+            ));
+        }
         if let Some(message_id) = message_id.as_deref()
             && let Err(err) =
                 handle.write_user_message(message_id, &prompt, issued_at.min(now_ms()))

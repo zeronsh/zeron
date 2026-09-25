@@ -33,7 +33,7 @@ async fn wait(core: &EngineCore, mut predicate: impl FnMut() -> bool, what: &str
 #[ignore = "uses real model quota; select harness and inexpensive model explicitly"]
 async fn rapid_steers_preserve_children_context_and_held_queue() {
     let name = std::env::var("ZERON_TEST_HARNESS").expect("select harness");
-    let model = std::env::var("ZERON_TEST_MODEL").expect("select inexpensive model");
+    let model = std::env::var("ZERON_TEST_MODEL").ok();
     let burst: usize = std::env::var("ZERON_TEST_BURST")
         .ok()
         .map(|s| s.parse().unwrap())
@@ -74,7 +74,7 @@ async fn rapid_steers_preserve_children_context_and_held_queue() {
             "audit",
             &ChatConfig {
                 harness: id,
-                model: Some(model.clone()),
+                model: model.clone(),
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: SandboxLevel::DangerFullAccess,
@@ -89,7 +89,7 @@ async fn rapid_steers_preserve_children_context_and_held_queue() {
     let background_seconds = if name == "codex" { 4 } else { 20 };
     core.doc_host.queue_command("audit", SessionCommandPayload::Run {
         message_id: "opening".into(),
-        request: RunRequest { mcp: None, prompt: format!("This is an automated regression test of chat steering and message queues in a disposable temporary workspace. Remember test token {secret}. Execute exactly `sh -c 'sleep {background_seconds}; printf alive > background-survivor' >/dev/null 2>&1 & printf started > started; sleep 8; printf survived > survivor` in this directory, then reply DONE. All follow-ups are additive; never cancel earlier work. Execute each request once."), harness: Some(id), model: Some(model), reasoning: None, model_options: Default::default(), cwd: dir.path().to_str().unwrap().into(), sandbox: SandboxLevel::DangerFullAccess, auto_approve: true, attachments: vec![], worktree: None, resume: None }
+        request: RunRequest { mcp: None, prompt: format!("This is an automated regression test of chat steering and message queues in a disposable temporary workspace. Remember test token {secret}. Execute exactly `sh -c 'sleep {background_seconds}; printf alive > background-survivor' >/dev/null 2>&1 & printf started > started; sleep 8; printf survived > survivor` in this directory, then reply DONE. All follow-ups are additive; never cancel earlier work. Execute each request once."), harness: Some(id), model, reasoning: None, model_options: Default::default(), cwd: dir.path().to_str().unwrap().into(), sandbox: SandboxLevel::DangerFullAccess, auto_approve: true, attachments: vec![], worktree: None, resume: None }
     }).unwrap();
     wait(
         &core,
@@ -127,7 +127,17 @@ async fn rapid_steers_preserve_children_context_and_held_queue() {
         core.doc_host.queue_message("audit", &format!("Queued request {i}: append {i} as a line to queued-receipts, write ONLY the original test token into queued-{i}, then reply DONE. Execute once."), vec![]).unwrap();
     }
     let doc = core.doc_host.open("audit").unwrap();
-    assert_eq!(doc.doc().read_queue().unwrap().len(), 2);
+    // Turn-boundary agents also hold the steers in the queue until the turn
+    // ends; the two ordinary rows must be held either way.
+    assert_eq!(
+        doc.doc()
+            .read_queue()
+            .unwrap()
+            .iter()
+            .filter(|row| row.text.starts_with("Queued request"))
+            .count(),
+        2
+    );
     wait(
         &core,
         || {
