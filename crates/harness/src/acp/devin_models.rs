@@ -182,48 +182,78 @@ struct Variant {
 
 /// Split a variant label into (qualifier, effort, fast) relative to its
 /// family label: "GPT-6 Sol No Thinking Fast" → ("", Minimal, true),
-/// "GLM-5.2 Max 1M" → ("1M", Max, false). Composite labels such as Fusion's
-/// "(A Medium + B Medium)" are qualifiers as a whole.
+/// "GLM-5.2 Max 1M" → ("1M", Max, false). A Fusion pair
+/// "(Claude Opus 5.5 High Fast + SWE-2 Medium)" → ("(Claude Opus 5.5 + SWE-2
+/// Medium)", High, true): the ACP session selects one id per primary model
+/// and sidekick, and the effort it exposes is the primary's.
 fn parse_variant(family: &str, label: &str) -> (String, Option<ReasoningLevel>, bool) {
     let rest = label
         .strip_prefix(family)
         .filter(|r| r.is_empty() || r.starts_with(' '))
         .unwrap_or(label)
         .trim();
+    if let Some((primary, sidekick)) = rest
+        .strip_prefix('(')
+        .and_then(|r| r.strip_suffix(')'))
+        .and_then(|r| r.split_once(" + "))
+    {
+        let (base, effort, fast) = split_effort(primary);
+        let (sidekick, _, sidekick_fast) = split_effort_keep_level(sidekick);
+        return (format!("({base} + {sidekick})"), effort, fast || sidekick_fast);
+    }
     if rest.starts_with('(') || rest.contains('+') {
         return (rest.to_owned(), None, false);
     }
+    split_effort(rest)
+}
+
+fn effort_word(word: &str, next: Option<&&str>) -> Option<(ReasoningLevel, bool)> {
+    Some(match word {
+        // "No Thinking" is Devin's `none`; Zeron's lowest level stands in.
+        "No" if next == Some(&"Thinking") => (ReasoningLevel::Minimal, true),
+        "None" | "Minimal" => (ReasoningLevel::Minimal, false),
+        "Low" => (ReasoningLevel::Low, false),
+        "Medium" => (ReasoningLevel::Medium, false),
+        "High" => (ReasoningLevel::High, false),
+        "XHigh" | "X-High" => (ReasoningLevel::XHigh, false),
+        "Max" => (ReasoningLevel::Max, false),
+        _ => return None,
+    })
+}
+
+/// "High Thinking Fast 1M" → ("1M", High, true): the words that are not
+/// effort or speed, joined.
+fn split_effort(text: &str) -> (String, Option<ReasoningLevel>, bool) {
     let mut effort = None;
     let mut fast = false;
-    let mut qualifier = Vec::new();
-    let mut words = rest.split_whitespace().peekable();
+    let mut rest = Vec::new();
+    let mut words = text.split_whitespace().peekable();
     while let Some(word) = words.next() {
-        let level = match word {
-            // "No Thinking" is Devin's `none`; Zeron's lowest level stands in.
-            "No" if words.peek() == Some(&"Thinking") => {
-                words.next();
-                Some(ReasoningLevel::Minimal)
-            }
-            "None" | "Minimal" => Some(ReasoningLevel::Minimal),
-            "Low" => Some(ReasoningLevel::Low),
-            "Medium" => Some(ReasoningLevel::Medium),
-            "High" => Some(ReasoningLevel::High),
-            "XHigh" | "X-High" => Some(ReasoningLevel::XHigh),
-            "Max" => Some(ReasoningLevel::Max),
-            _ => None,
-        };
-        match level {
-            Some(level) if effort.is_none() => {
+        match effort_word(word, words.peek()) {
+            Some((level, consumes_next)) if effort.is_none() => {
                 effort = Some(level);
-                if words.peek() == Some(&"Thinking") {
+                if consumes_next || words.peek() == Some(&"Thinking") {
                     words.next();
                 }
             }
             _ if word == "Fast" => fast = true,
-            _ => qualifier.push(word),
+            _ => rest.push(word),
         }
     }
-    (qualifier.join(" "), effort, fast)
+    (rest.join(" "), effort, fast)
+}
+
+/// A Fusion sidekick's effort is part of its identity ("SWE-2 Medium" and
+/// "SWE-2 High" are different ids); only its speed is dropped.
+fn split_effort_keep_level(text: &str) -> (String, Option<ReasoningLevel>, bool) {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let fast = words.last() == Some(&"Fast");
+    let kept = if fast {
+        &words[..words.len() - 1]
+    } else {
+        &words[..]
+    };
+    (kept.join(" "), None, fast)
 }
 
 fn parse_catalog(bytes: &[u8]) -> Result<(Vec<Model>, Vec<Vec<Member>>), HarnessError> {
@@ -256,11 +286,15 @@ fn parse_catalog(bytes: &[u8]) -> Result<(Vec<Model>, Vec<Vec<Member>>), Harness
             };
             // A variant with neither effort nor speed is a model of its own;
             // so is one whose effort/speed pair its group already has.
+            // A Fusion pair is one model whatever its variants' speeds (the
+            // sidekick's is not in the key); elsewhere a repeated
+            // effort/speed pair means a genuinely different model.
+            let pair = qualifier.contains(" + ");
             let group = family_groups.iter_mut().find(|g| {
                 g.0 == qualifier
                     && (effort.is_some() || fast)
                     && g.3.iter().any(|m| m.effort.is_some() || m.fast)
-                    && !g.3.iter().any(|m| m.effort == effort && m.fast == fast)
+                    && (pair || !g.3.iter().any(|m| m.effort == effort && m.fast == fast))
             });
             match group {
                 Some(group) => group.3.push(member),
@@ -285,7 +319,9 @@ fn parse_catalog(bytes: &[u8]) -> Result<(Vec<Model>, Vec<Vec<Member>>), Harness
                 members.iter().filter_map(|m| m.effort).collect();
             reasoning_levels.sort();
             reasoning_levels.dedup();
-            let options = if members.iter().any(|m| m.fast) {
+            // A Fusion session exposes no `speed` option (verified against
+            // 3000.11.3), so its Fast variants cannot be offered.
+            let options = if members.iter().any(|m| m.fast) && !label.contains(" + ") {
                 vec![ModelOption {
                     id: "speed".into(),
                     label: "Speed".into(),
@@ -305,7 +341,12 @@ fn parse_catalog(bytes: &[u8]) -> Result<(Vec<Model>, Vec<Vec<Member>>), Harness
                 Vec::new()
             };
             models.push(Model {
-                id: members[0].id.clone(),
+                id: members
+                    .iter()
+                    .find(|m| !m.fast)
+                    .unwrap_or(&members[0])
+                    .id
+                    .clone(),
                 label,
                 description,
                 reasoning_levels,
@@ -345,8 +386,12 @@ mod tests {
             {"model_uid":"claude-opus-4-6","label":"Claude Opus 4.6"},
             {"model_uid":"claude-opus-4-6-thinking","label":"Claude Opus 4.6 Thinking"}]},
         {"family_uid":"fusion","family_label":"Fusion","variants":[
-            {"model_uid":"fusion-a-medium-sidekick-b-medium","label":"Fusion (A Medium + B Medium)"},
-            {"model_uid":"fusion-a-high-sidekick-b-medium","label":"Fusion (A High + B Medium)"}]},
+            {"model_uid":"fusion-claude-opus-5-5-high-sidekick-swe-2-medium","label":"Fusion (Claude Opus 5.5 High + SWE-2 Medium)"},
+            {"model_uid":"fusion-claude-opus-5-5-max-fast-sidekick-swe-2-medium","label":"Fusion (Claude Opus 5.5 Max Fast + SWE-2 Medium)"},
+            {"model_uid":"fusion-claude-opus-5-5-low-sidekick-swe-2-medium","label":"Fusion (Claude Opus 5.5 Low + SWE-2 Medium)"},
+            {"model_uid":"fusion-claude-opus-5-5-high-sidekick-swe-2-high","label":"Fusion (Claude Opus 5.5 High + SWE-2 High)"},
+            {"model_uid":"fusion-gpt-6-sol-high-sidekick-gpt-6-luna-high-priority","label":"Fusion (GPT-6 Sol High Thinking + GPT-6 Luna High Thinking Fast)"},
+            {"model_uid":"fusion-gpt-6-sol-high-sidekick-gpt-6-luna-high","label":"Fusion (GPT-6 Sol High Thinking + GPT-6 Luna High Thinking)"}]},
         {"family_uid":"adaptive","family_label":"Adaptive","variants":[
             {"model_uid":"adaptive","label":"Adaptive"}]}
     ]}"#;
@@ -385,16 +430,24 @@ mod tests {
                     vec![],
                     0
                 ),
+                // One per primary model + sidekick; the primary's effort is the
+                // effort; Fusion sessions expose no speed option.
                 (
-                    "fusion-a-medium-sidekick-b-medium",
-                    "Fusion (A Medium + B Medium)",
-                    vec![],
+                    "fusion-claude-opus-5-5-high-sidekick-swe-2-medium",
+                    "Fusion (Claude Opus 5.5 + SWE-2 Medium)",
+                    vec![Low, High, Max],
                     0
                 ),
                 (
-                    "fusion-a-high-sidekick-b-medium",
-                    "Fusion (A High + B Medium)",
-                    vec![],
+                    "fusion-claude-opus-5-5-high-sidekick-swe-2-high",
+                    "Fusion (Claude Opus 5.5 + SWE-2 High)",
+                    vec![High],
+                    0
+                ),
+                (
+                    "fusion-gpt-6-sol-high-sidekick-gpt-6-luna-high",
+                    "Fusion (GPT-6 Sol + GPT-6 Luna High Thinking)",
+                    vec![High],
                     0
                 ),
                 ("adaptive", "Adaptive", vec![], 0),
