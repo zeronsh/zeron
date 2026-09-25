@@ -1,5 +1,5 @@
-//! zeron — headed by default; `zeron headless` runs the engine alone. Both start
-//! local-only without credentials. `zeron login` and `zeron logout` select the
+//! Glitch Flow — headed by default; `glitch-flow headless` runs the engine alone. Both start
+//! local-only without credentials. `glitch-flow login` and `glitch-flow logout` select the
 //! profile used by the next engine start without mutating a live runtime.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
@@ -13,14 +13,14 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "zeron",
+    name = "glitch-flow",
     version,
     about = "Multi-device controller for coding agents"
 )]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
-    /// Open a Zeron conversation URL.
+    /// Open a Glitch Flow conversation URL.
     #[arg(value_name = "URL")]
     open_url: Option<String>,
     #[cfg(windows)]
@@ -44,11 +44,11 @@ enum Command {
     #[cfg(target_os = "linux")]
     /// Trigger an Appshot in the running headed instance (desktop shortcut fallback).
     Appshot,
-    /// Serve the Zeron MCP (Model Context Protocol) server on stdin/stdout,
+    /// Serve the Glitch Flow MCP (Model Context Protocol) server on stdin/stdout,
     /// proxying to the running engine's IPC. Agents use it to create, read,
     /// and message chats. Logs go to stderr; stdout is the protocol.
     Mcp,
-    /// Manage `zeron headless` as a background service (launchd / systemd --user).
+    /// Manage `glitch-flow headless` as a background service (launchd / systemd --user).
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
@@ -77,33 +77,73 @@ enum DaemonCommand {
     Status,
 }
 
-/// Production edge (Cloudflare Worker + Durable Objects on the zeron.sh zone).
-/// `ZERON_EDGE_URL` overrides (local dev / self-hosting).
-const DEFAULT_EDGE_URL: &str = "https://edge.zeron.sh";
-
-/// Production WorkOS AuthKit client id — public knowledge (it appears in every
-/// authorize URL), so baking it in is safe. Overridden by `ZERON_WORKOS_CLIENT_ID`;
-/// set it to the empty string — or set a dev bearer via `ZERON_EDGE_TOKEN` — to
-/// force dev-mode auth instead.
-const DEFAULT_WORKOS_CLIENT_ID: &str = "client_01KWD0EAKZKD50YCQJNYSRE4BY";
-
 fn edge_url_from_env() -> String {
-    std::env::var("ZERON_EDGE_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_EDGE_URL.into())
+    configured_edge_url(
+        std::env::var("ZERON_EDGE_URL").ok(),
+        option_env!("GLITCH_FLOW_EDGE_URL"),
+    )
 }
 
-/// WorkOS client id resolution: explicit env wins (empty string = dev mode);
-/// otherwise a `ZERON_EDGE_TOKEN` dev bearer keeps dev mode (smoke tests,
-/// local wrangler); otherwise the baked production client id makes optional
-/// sync available while a bare start remains local-only.
-fn workos_client_id_from_env(edge_token: &Option<String>) -> Option<String> {
-    match std::env::var("ZERON_WORKOS_CLIENT_ID") {
-        Ok(v) if v.trim().is_empty() => None,
-        Ok(v) => Some(v),
-        Err(_) if edge_token.is_some() => None,
-        Err(_) => Some(DEFAULT_WORKOS_CLIENT_ID.into()),
+fn configured_edge_url(runtime: Option<String>, bundled: Option<&str>) -> String {
+    runtime
+        .or_else(|| bundled.map(str::to_owned))
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_default()
+}
+
+/// Release builds can bundle the public WorkOS client id; the API key remains
+/// only on the edge Worker. A runtime value overrides the bundled value.
+fn workos_client_id_from_env() -> Option<String> {
+    configured_workos_client_id(
+        std::env::var("ZERON_WORKOS_CLIENT_ID").ok(),
+        option_env!("GLITCH_FLOW_WORKOS_CLIENT_ID"),
+    )
+}
+
+fn configured_workos_client_id(runtime: Option<String>, bundled: Option<&str>) -> Option<String> {
+    runtime
+        .or_else(|| bundled.map(str::to_owned))
+        .filter(|s| !s.trim().is_empty())
+}
+
+#[cfg(test)]
+mod cloud_configuration_tests {
+    use super::{configured_edge_url, configured_workos_client_id};
+
+    #[test]
+    fn cloud_endpoints_are_disabled_without_explicit_configuration() {
+        assert_eq!(configured_edge_url(None, None), "");
+        assert_eq!(configured_edge_url(Some("  ".into()), None), "");
+        assert_eq!(configured_workos_client_id(None, None), None);
+        assert_eq!(configured_workos_client_id(Some("  ".into()), None), None);
+    }
+
+    #[test]
+    fn cloud_endpoints_use_bundled_configuration_with_runtime_overrides() {
+        assert_eq!(
+            configured_edge_url(None, Some("https://glitch-flow.example.test")),
+            "https://glitch-flow.example.test"
+        );
+        assert_eq!(
+            configured_edge_url(
+                Some("https://override.example.test".into()),
+                Some("https://glitch-flow.example.test")
+            ),
+            "https://override.example.test"
+        );
+        assert_eq!(
+            configured_workos_client_id(None, Some("client_test")).as_deref(),
+            Some("client_test")
+        );
+        assert_eq!(
+            configured_workos_client_id(Some("client_override".into()), Some("client_test"))
+                .as_deref(),
+            Some("client_override")
+        );
+        assert_eq!(
+            configured_workos_client_id(Some("".into()), Some("client_test")),
+            None
+        );
     }
 }
 
@@ -118,6 +158,7 @@ fn workos_client_id_from_env(edge_token: &Option<String>) -> Option<String> {
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> anyhow::Result<()> {
+    adopt_branded_environment();
     #[cfg(windows)]
     attach_parent_console();
     let cli = Cli::parse();
@@ -157,7 +198,7 @@ fn main() -> anyhow::Result<()> {
     {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
-        // `zeron mcp` owns stdout for the protocol: a single log line on it
+        // `glitch-flow mcp` owns stdout for the protocol: a single log line on it
         // would corrupt the JSON-RPC stream, so its diagnostics go to stderr.
         if matches!(&cli.command, Some(Command::Mcp)) {
             tracing_subscriber::registry()
@@ -253,7 +294,7 @@ fn main() -> anyhow::Result<()> {
                     .and_then(|p| p.parse().ok())
                     .unwrap_or(27654),
                 edge_url: edge_url_from_env(),
-                workos_client_id: workos_client_id_from_env(&edge_token),
+                workos_client_id: workos_client_id_from_env(),
                 edge_token,
                 org_id: std::env::var("ZERON_ORG_ID").ok(),
                 default_harness: zeron_ui::HarnessId::ClaudeCode,
@@ -261,6 +302,33 @@ fn main() -> anyhow::Result<()> {
             });
             Ok(())
         }
+    }
+}
+
+/// The shared engine still reads its original environment keys. Accept the
+/// Glitch Flow names at the process boundary, before any worker threads start.
+fn adopt_branded_environment() {
+    let legacy: Vec<_> = std::env::vars_os()
+        .filter_map(|(name, value)| {
+            let suffix = name.to_str()?.strip_prefix("ZERON_")?;
+            Some((format!("GLITCH_FLOW_{suffix}"), value))
+        })
+        .collect();
+    for (name, value) in legacy {
+        if std::env::var_os(&name).is_none() {
+            // SAFETY: this runs at the start of main, before the runtime creates threads.
+            unsafe { std::env::set_var(name, value) };
+        }
+    }
+    let aliases: Vec<_> = std::env::vars_os()
+        .filter_map(|(name, value)| {
+            let suffix = name.to_str()?.strip_prefix("GLITCH_FLOW_")?;
+            Some((format!("ZERON_{suffix}"), value))
+        })
+        .collect();
+    for (name, value) in aliases {
+        // SAFETY: this runs at the start of main, before the runtime creates threads.
+        unsafe { std::env::set_var(name, value) };
     }
 }
 
@@ -306,9 +374,8 @@ fn engine_config_from_env() -> zeron_engine::EngineConfig {
         // WorkOS mode: the signed-in session's org wins; ZERON_ORG_ID (dev
         // default "dev-org") scopes the workspace room otherwise.
         org_id: std::env::var("ZERON_ORG_ID").ok(),
-        // Real auth against production by default; see
-        // `workos_client_id_from_env` for the dev-mode escape hatches.
-        workos_client_id: workos_client_id_from_env(&edge_token),
+        // Auth is opt-in through explicit deployment configuration.
+        workos_client_id: workos_client_id_from_env(),
         edge_token,
     }
 }
@@ -329,14 +396,14 @@ fn harness_from_env() -> zeron_engine::HarnessId {
     }
 }
 
-/// `zeron sync`: dial the running engine's IPC and print per-room sync state.
+/// `glitch-flow sync`: dial the running engine's IPC and print per-room sync state.
 /// The introspection surface every 2026-08 incident was missing — "is this
 /// device's workspace room actually receiving?" as a one-liner.
 async fn sync_cli(ipc_port: u16) -> anyhow::Result<()> {
     let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
         .await
         .map_err(|e| {
-            anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e}) — is zeron running?")
+            anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e}) — is Glitch Flow running?")
         })?;
     let status = client
         .call(zeron_rpc::methods::SYNC_STATUS, serde_json::json!({}))
@@ -452,7 +519,7 @@ async fn sync_cli(ipc_port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `{data_dir}/logs/zeron-{mode}.log`, previous launch preserved as `.old`.
+/// `{data_dir}/logs/glitch-flow-{mode}.log`, previous launch preserved as `.old`.
 /// Headed and headless are separate files so an embedded-engine app and a
 /// daemon on the same machine never interleave writes.
 ///
@@ -463,7 +530,7 @@ async fn sync_cli(ipc_port: u16) -> anyhow::Result<()> {
 /// second unlinked it entirely, and the daemon spent the rest of the incident
 /// logging to an orphaned inode (an entire day of sync diagnostics gone at
 /// the exact moment they were needed). A launch that finds the canonical file
-/// locked logs to `zeron-{mode}.{pid}.log` instead; the next lock-holding
+/// locked logs to `glitch-flow-{mode}.{pid}.log` instead; the next lock-holding
 /// launch sweeps pid-suffixed files older than a week.
 fn open_log_file(mode: &str) -> Option<std::fs::File> {
     let dir = paths::data_dir().join("logs");
@@ -473,7 +540,7 @@ fn open_log_file(mode: &str) -> Option<std::fs::File> {
 /// Dir-parameterized body of [`open_log_file`] (unit-testable without env).
 fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<std::fs::File> {
     std::fs::create_dir_all(dir).ok()?;
-    let path = dir.join(format!("zeron-{mode}.log"));
+    let path = dir.join(format!("glitch-flow-{mode}.log"));
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
@@ -490,7 +557,7 @@ fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<std::fs::File> 
         if rc != 0 {
             // A live process owns the canonical log — leave it alone.
             return std::fs::File::create(
-                dir.join(format!("zeron-{mode}.{}.log", std::process::id())),
+                dir.join(format!("glitch-flow-{mode}.{}.log", std::process::id())),
             )
             .ok();
         }
@@ -499,7 +566,7 @@ fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<std::fs::File> 
         // to rotate — the probe itself created the empty file.)
         drop(existing);
         if preexisting {
-            let _ = std::fs::rename(&path, dir.join(format!("zeron-{mode}.log.old")));
+            let _ = std::fs::rename(&path, dir.join(format!("glitch-flow-{mode}.log.old")));
         }
         let file = std::fs::File::create(&path).ok()?;
         unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -508,7 +575,7 @@ fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<std::fs::File> 
     }
     #[cfg(not(unix))]
     {
-        let _ = std::fs::rename(&path, dir.join(format!("zeron-{mode}.log.old")));
+        let _ = std::fs::rename(&path, dir.join(format!("glitch-flow-{mode}.log.old")));
         std::fs::File::create(&path).ok()
     }
 }
@@ -523,14 +590,14 @@ mod log_file_tests {
         let dir = dir.path();
         // First launch owns the canonical file and keeps writing.
         let first = open_log_file_in(dir, "headed").expect("first log");
-        assert!(dir.join("zeron-headed.log").is_file());
+        assert!(dir.join("glitch-flow-headed.log").is_file());
         // Second launch while the first is alive: canonical file untouched,
         // pid-suffixed overflow file instead (the 2026-08-04 clobber).
         let second = open_log_file_in(dir, "headed").expect("second log");
-        let pid_path = dir.join(format!("zeron-headed.{}.log", std::process::id()));
+        let pid_path = dir.join(format!("glitch-flow-headed.{}.log", std::process::id()));
         assert!(pid_path.is_file(), "expected pid-suffixed overflow log");
         assert!(
-            !dir.join("zeron-headed.log.old").exists(),
+            !dir.join("glitch-flow-headed.log.old").exists(),
             "live canonical log must not be rotated away"
         );
         drop(second);
@@ -538,21 +605,21 @@ mod log_file_tests {
         drop(first);
         let third = open_log_file_in(dir, "headed").expect("third log");
         assert!(
-            dir.join("zeron-headed.log.old").is_file(),
+            dir.join("glitch-flow-headed.log.old").is_file(),
             "rotation resumes"
         );
         drop(third);
     }
 }
 
-/// Delete `zeron-{mode}.{pid}.log` overflow files older than a week — they
+/// Delete `glitch-flow-{mode}.{pid}.log` overflow files older than a week — they
 /// only exist when a second instance raced a live one for the canonical log.
 #[cfg(unix)]
 fn sweep_stale_pid_logs(dir: &std::path::Path, mode: &str) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let prefix = format!("zeron-{mode}.");
+    let prefix = format!("glitch-flow-{mode}.");
     let week = std::time::Duration::from_secs(7 * 24 * 60 * 60);
     for entry in entries.flatten() {
         let name = entry.file_name();

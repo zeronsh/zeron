@@ -1,7 +1,7 @@
 //! Host-side worktree materialization: a Run command carrying a
 //! `WorktreeSpec` creates the isolated worktree on the HOST at drain time
 //! (the durable replacement for the composer's old blocking CreateWorktree
-//! relay RPC), runs there, and stamps the chat row's cwd + `zeron/<name>`
+//! relay RPC), runs there, and stamps the chat row's cwd + `glitch-flow/<name>`
 //! branch. A second spec-carrying Run for the same chat REUSES the checkout
 //! instead of minting another.
 
@@ -142,6 +142,23 @@ fn git(cwd: &std::path::Path, args: &[&str]) {
     );
 }
 
+#[cfg(windows)]
+fn normalize_test_path(path: PathBuf) -> PathBuf {
+    let value = path.to_string_lossy();
+    if let Some(unc_path) = value.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{unc_path}"))
+    } else if let Some(drive_path) = value.strip_prefix(r"\\?\") {
+        PathBuf::from(drive_path)
+    } else {
+        path
+    }
+}
+
+#[cfg(not(windows))]
+fn normalize_test_path(path: PathBuf) -> PathBuf {
+    path
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn run_with_worktree_spec_materializes_on_host_and_reuses() {
     check_worktree_setup_and_reuse(false).await;
@@ -154,7 +171,7 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
     // Canonicalize: git records canonical paths in worktree gitdir links, and
     // macOS tempdirs live behind the /var → /private/var symlink.
     let tmp_path = tmp.path().canonicalize().unwrap();
-    let worktrees_root = tmp_path.join("worktrees");
+    let worktrees_root = normalize_test_path(tmp_path.join("worktrees"));
     unsafe { std::env::set_var("ZERON_WORKTREES_DIR", &worktrees_root) };
 
     let repo_dir = tmp_path.join("repo");
@@ -204,6 +221,11 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
     // Save through the same RPC as the editor: the Space may use an alias
     // while the queued WorktreeSpec carries the canonical repository path.
     let client = zeron_rpc::memory_client(core.rpc_service());
+    let setup_command = if cfg!(windows) {
+        "powershell.exe -NoProfile -Command \"[IO.File]::WriteAllText('setup-project-root', [Environment]::GetEnvironmentVariable('ZERON_PROJECT_ROOT')); [IO.File]::WriteAllText('setup-worktree-path', [Environment]::GetEnvironmentVariable('ZERON_WORKTREE_PATH')); [IO.File]::WriteAllText('setup-marker', 'setup')\""
+    } else {
+        "printf '%s' \"$ZERON_PROJECT_ROOT\" > setup-project-root; printf '%s' \"$ZERON_WORKTREE_PATH\" > setup-worktree-path; printf setup > setup-marker"
+    };
     client
         .call(
             zeron_rpc::methods::UPSERT_PROJECT_ACTION,
@@ -211,7 +233,7 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
                 "spaceId": "space-worktree-run",
                 "action": ProjectActionDraft {
                     name: "Setup".into(),
-                    command: "printf '%s' \"$ZERON_PROJECT_ROOT\" > setup-project-root; printf '%s' \"$ZERON_WORKTREE_PATH\" > setup-worktree-path; printf setup > setup-marker".into(),
+                    command: setup_command.into(),
                     icon: ProjectActionIcon::Configure,
                     run_on_worktree_create: true,
                 }
@@ -245,7 +267,20 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
             run_payload("msg-wt-1", &repo_path, Some("space-worktree-run")),
         )
         .expect("queue run command");
-    wait_for(|| complete_assistant_count(&core) == 1, "first turn").await;
+    let first_turn_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while complete_assistant_count(&core) != 1 {
+        if tokio::time::Instant::now() >= first_turn_deadline {
+            let commands = core
+                .doc_host
+                .open(CHAT)
+                .unwrap()
+                .doc()
+                .read_commands()
+                .unwrap();
+            panic!("timed out waiting for first turn; command ledger: {commands:#?}");
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
 
     let first_cwd = cwds.lock().unwrap().first().cloned().expect("run recorded");
     assert_ne!(
@@ -284,7 +319,7 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
     std::fs::remove_file(first.join("setup-marker")).unwrap();
 
     // The chat row follows: cwd repointed at the worktree, branch stamped
-    // with the actual zeron/<name> (the composer only knew the base).
+    // with the actual glitch-flow/<name> (the composer only knew the base).
     let chat = core
         .workspace
         .chat(CHAT)
@@ -293,7 +328,7 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
     assert_eq!(chat.cwd.as_deref(), Some(first_cwd.as_str()));
     let branch = chat.branch.expect("branch stamped");
     assert!(
-        branch.starts_with("zeron/"),
+        branch.starts_with("glitch-flow/"),
         "stamped branch is the worktree's own: {branch}"
     );
 

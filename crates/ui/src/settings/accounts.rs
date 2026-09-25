@@ -2,7 +2,7 @@
 //! (Claude Code, Codex, Cursor) with account rows — email, plan badge, Active, usage
 //! meters (indigo → amber ≥80% → red ≥95%, reset time), Switch / Forget — plus
 //! the add-account dialogs (paste-code and browser-poll flows) and
-//! account-shaped loading skeletons. Zeron retargets devices from the settings
+//! account-shaped loading skeletons. Glitch Flow retargets devices from the settings
 //! sidebar (`targetDeviceId` passthrough kept plumbed, unused single-device).
 //!
 //! The accounts RPC surface is being implemented engine-side in parallel —
@@ -1475,7 +1475,7 @@ impl Render for AccountsPage {
                             )
                             .child(widgets::page_subtitle(
                                 &theme,
-                                "The Claude Code, Codex, and Cursor logins on this device. Zeron \
+                                "The Claude Code, Codex, and Cursor logins on this device. Glitch Flow \
                                  detects the live session, keeps each account backed up, and can \
                                  swap between them.",
                             ))

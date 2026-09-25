@@ -6,7 +6,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
-      - 'apps/zeron/**'
+      - 'apps/glitch-flow/**'
       - 'dist/windows/**'
       - 'crates/**'
       - 'scripts/test-windows-*.ps1'
@@ -18,7 +18,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
-      - 'apps/zeron/**'
+      - 'apps/glitch-flow/**'
       - 'dist/windows/**'
       - 'crates/**'
       - 'scripts/test-windows-*.ps1'
@@ -74,13 +74,13 @@ jobs:
           $headlessResult = $LASTEXITCODE
           if ($nativeResult -ne 0 -or $headlessResult -ne 0) { exit 1 }
       - name: Build application
-        run: cargo build --release --locked -p zeron
+        run: cargo build --release --locked -p glitch-flow
       - name: Verify portable packaging
         run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
       - name: Shader layout tests
         run: cargo test --release --locked -p gpui_windows --lib layout
       - name: Application and updater tests
-        run: cargo test --release --locked -p zeron -p zeron-update
+        run: cargo test --release --locked -p glitch-flow -p zeron-update
       - name: Engine unit tests
         run: cargo test --release --locked -p zeron-engine --lib
       - name: Harness catalog and login tests
@@ -97,10 +97,10 @@ jobs:
           $env:ZERON_DATA_DIR = $null
           $env:ZERON_EDGE_TOKEN = $null
           $env:ZERON_IPC_PORT = '0'
-          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "zeron smoke O'Brien 日本語"
-          $expected = Join-Path $env:LOCALAPPDATA 'Zeron'
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "glitch-flow smoke O'Brien 日本語"
+          $expected = Join-Path $env:LOCALAPPDATA 'Glitch Flow'
           $probe = [Diagnostics.ProcessStartInfo]::new()
-          $probe.FileName = (Resolve-Path -LiteralPath './target/release/zeron.exe').Path
+          $probe.FileName = (Resolve-Path -LiteralPath './target/release/glitch-flow.exe').Path
           $probe.Arguments = 'status'
           $probe.UseShellExecute = $false
           $probe.CreateNoWindow = $true
@@ -119,7 +119,7 @@ jobs:
           } finally { $process.Dispose() }
           $output
           if (-not ($output -contains "Data dir: $expected")) {
-            throw 'Windows startup did not select LOCALAPPDATA/Zeron'
+            throw 'Windows startup did not select LOCALAPPDATA/Glitch Flow'
           }
           if (-not ($output -match '^Mode:\s+local only$')) {
             throw 'An isolated Windows startup must select local-only mode'
@@ -133,7 +133,7 @@ jobs:
         with:
           name: windows-gui-binaries
           path: |
-            target/release/zeron.exe
+            target/release/glitch-flow.exe
             target/release/examples/windows-render-fixture.exe
           if-no-files-found: error
           retention-days: 1

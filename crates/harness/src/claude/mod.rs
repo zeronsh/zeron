@@ -53,7 +53,9 @@ use zeron_proto::{
 };
 
 use crate::process::{Child, ChildStdin, Command, Stdio};
-use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
+use crate::{
+    Harness, HarnessError, NativeMcpContext, RunControls, Signal, send_signal, shutdown_child,
+};
 use catalog::{apply_ultrathink, to_effort};
 use normalize::Normalizer;
 use wire::{ControlRequestFrame, Frame, allow_response, control_response_line};
@@ -149,7 +151,12 @@ impl ClaudeHarness {
         })
     }
 
-    fn build_command(&self, exe: &PathBuf, request: &RunRequest) -> Command {
+    fn build_command(
+        &self,
+        exe: &PathBuf,
+        request: &RunRequest,
+        mcp: Option<&NativeMcpContext>,
+    ) -> Result<Command, HarnessError> {
         let mut cmd = Command::new(exe);
         crate::compose_child_path(&mut cmd, exe);
         cmd.args([
@@ -216,6 +223,20 @@ impl ClaudeHarness {
             cmd.arg("--settings");
             cmd.arg(Value::Object(settings).to_string());
         }
+        if let Some(mcp) = mcp {
+            // --mcp-config merges this per-run server with the user's normal
+            // MCP settings. `--strict-mcp-config` is reserved for title runs.
+            let config = serde_json::json!({
+                "mcpServers": {
+                    "glitch_flow_native": {
+                        "command": mcp.server_command()?,
+                        "args": ["mcp"],
+                        "env": mcp.server_env().into_iter().collect::<std::collections::BTreeMap<_, _>>()
+                    }
+                }
+            });
+            cmd.arg("--mcp-config").arg(config.to_string());
+        }
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }
@@ -223,7 +244,7 @@ impl ClaudeHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        cmd
+        Ok(cmd)
     }
 
     /// Share the complete initialize response between model and command discovery.
@@ -480,7 +501,17 @@ impl Harness for ClaudeHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false).await
+        self.run_with_mode(request, controls, false, None).await
+    }
+
+    async fn run_with_context(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        mcp: Option<NativeMcpContext>,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_with_mode(request, controls, false, mcp.as_ref())
+            .await
     }
 
     async fn run_title(
@@ -493,7 +524,7 @@ impl Harness for ClaudeHarness {
         request.attachments.clear();
         request.model_options.clear();
         request.auto_approve = false;
-        self.run_with_mode(request, controls, true).await
+        self.run_with_mode(request, controls, true, None).await
     }
 }
 
@@ -503,9 +534,10 @@ impl ClaudeHarness {
         request: RunRequest,
         controls: RunControls,
         title_only: bool,
+        mcp: Option<&NativeMcpContext>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let exe = self.resolve_executable()?;
-        let mut cmd = self.build_command(&exe, &request);
+        let mut cmd = self.build_command(&exe, &request, mcp)?;
         if title_only {
             cmd.args([
                 "--system-prompt",
@@ -980,6 +1012,55 @@ fn updated_input_with_answers(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn native_mcp_cli_config_preserves_regular_settings() {
+        let executable = std::env::current_exe().unwrap();
+        let request = RunRequest {
+            prompt: "hello".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            cwd: String::new(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            resume: None,
+            attachments: Vec::new(),
+            worktree: None,
+        };
+        let mcp = NativeMcpContext {
+            chat_id: "chat-a".into(),
+            device_id: "device-b".into(),
+            ipc_port: 31001,
+        };
+        let mut command = ClaudeHarness::new()
+            .build_command(&executable, &request, Some(&mcp))
+            .unwrap();
+        let args: Vec<String> = command
+            .as_std_mut()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let index = args.iter().position(|arg| arg == "--mcp-config").unwrap();
+        let config: Value = serde_json::from_str(&args[index + 1]).unwrap();
+        let server = &config["mcpServers"]["glitch_flow_native"];
+        assert_eq!(server["args"], json!(["mcp"]));
+        assert_eq!(server["env"]["ZERON_CHAT_ID"], "chat-a");
+        assert_eq!(server["env"]["ZERON_DEVICE_ID"], "device-b");
+        assert_eq!(server["env"]["ZERON_IPC_PORT"], "31001");
+        assert!(!args.iter().any(|arg| arg == "--strict-mcp-config"));
+
+        let mut ordinary = ClaudeHarness::new()
+            .build_command(&executable, &request, None)
+            .unwrap();
+        assert!(
+            !ordinary
+                .as_std_mut()
+                .get_args()
+                .any(|arg| arg == "--mcp-config")
+        );
+    }
 
     #[test]
     fn parses_questions_tolerantly() {

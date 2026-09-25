@@ -146,7 +146,7 @@ pub fn request_running_appshot(data_dir: &Path) -> Result<(), CaptureError> {
         .map(|_| ())
         .map_err(|error| {
             CaptureError::CaptureFailed(format!(
-                "Could not reach a running Zeron instance for Appshot capture: {error}"
+                "Could not reach a running Glitch Flow instance for Appshot capture: {error}"
             ))
         })
 }

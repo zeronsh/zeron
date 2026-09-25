@@ -4967,27 +4967,27 @@ impl WorkspaceCommand {
             (
                 Self::Model,
                 "model",
-                "Zeron: choose agent, model, and reasoning",
+                "Glitch Flow: choose agent, model, and reasoning",
                 false,
             ),
-            (Self::New, "new", "Zeron: start a new conversation", false),
+            (Self::New, "new", "Glitch Flow: start a new conversation", false),
             (
                 Self::Resume,
                 "resume",
-                "Zeron: search and open conversations",
+                "Glitch Flow: search and open conversations",
                 false,
             ),
-            (Self::Settings, "settings", "Zeron: open settings", false),
-            (Self::Diff, "diff", "Zeron: open changes", true),
-            (Self::Files, "files", "Zeron: open project files", true),
-            (Self::Terminal, "terminal", "Zeron: open a terminal", true),
+            (Self::Settings, "settings", "Glitch Flow: open settings", false),
+            (Self::Diff, "diff", "Glitch Flow: open changes", true),
+            (Self::Files, "files", "Glitch Flow: open project files", true),
+            (Self::Terminal, "terminal", "Glitch Flow: open a terminal", true),
             (
                 Self::Rename,
                 "rename",
-                "Zeron: rename this conversation",
+                "Glitch Flow: rename this conversation",
                 true,
             ),
-            (Self::Stop, "stop", "Zeron: stop the active run", true),
+            (Self::Stop, "stop", "Glitch Flow: stop the active run", true),
         ]
     }
 }
@@ -5001,11 +5001,11 @@ fn with_workspace_commands(
         if needs_chat && !in_chat {
             continue;
         }
-        // Keep provider commands intact. Explicit Zeron names remain available
+        // Keep provider commands intact. Explicit Glitch Flow names remain available
         // when a provider owns the unqualified name.
         let mut name = name.to_string();
         while rows.iter().any(|row| row.name == name) {
-            name = format!("zeron:{name}");
+            name = format!("glitch-flow:{name}");
         }
         rows.push(InvocationCandidate {
             invocation: zeron_proto::invocation::Invocation::Command { name: name.clone() },
@@ -5116,7 +5116,7 @@ fn mention_response_is_current(state: &FileMentionState, request: u64) -> bool {
 fn mention_error_message(err: &RpcError) -> SharedString {
     match err {
         RpcError::UnknownMethod(_) => {
-            "The session's device runs an older zeron — update it to search its files".into()
+            "The session's device runs an older version of Glitch Flow — update it to search its files".into()
         }
         RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
         RpcError::BadParams(_) | RpcError::Failed(_) => "File search failed".into(),
@@ -5218,9 +5218,9 @@ fn slash_error_message(err: &RpcError, skill: bool) -> SharedString {
     match err {
         RpcError::UnknownMethod(_) => {
             if skill {
-                "Skills require an updated engine on the selected device. Restart that device’s Zeron after updating.".into()
+                "Skills require an updated engine on the selected device. Restart Glitch Flow on that device after updating.".into()
             } else {
-                "Commands require an updated engine on the selected device. Restart that device’s Zeron after updating.".into()
+                "Commands require an updated engine on the selected device. Restart Glitch Flow on that device after updating.".into()
             }
         }
         RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
@@ -5431,6 +5431,16 @@ impl Composer {
             // pass can consume the completed measurement without emitting an
             // event from inside Taffy's multi-pass measurement callback.
             cx.notify();
+        }
+    }
+
+    /// Text shown by an inactive split pane before its chat becomes the
+    /// selected composer. Drafts remain owned by the one live editor.
+    pub(crate) fn split_draft_preview(&self, chat_id: &str, cx: &App) -> String {
+        if self.current_key == chat_id {
+            self.input.read(cx).text().to_string()
+        } else {
+            self.drafts.get(chat_id).cloned().unwrap_or_default()
         }
     }
 
@@ -7399,7 +7409,7 @@ impl Composer {
     /// Check before consuming drafts, attachments, or an edited queue row.
     pub(crate) fn check_reference_delivery(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
         if references_require_update(text, self.reference_delivery_supported(cx)) {
-            self.failure = Some("Update the selected device’s Zeron to send file, command, or skill references. Your draft is preserved.".into());
+            self.failure = Some("Update Glitch Flow on the selected device to send file, command, or skill references. Your draft is preserved.".into());
             self.failure_key = Some(self.current_key.clone());
             cx.notify();
             return false;
@@ -7539,6 +7549,22 @@ impl Composer {
             Some(id) => (id, false),
             None => (uuid::Uuid::new_v4().to_string(), true),
         };
+        let pending_child = is_new
+            .then(|| self.state.read(cx).pending_child_chat.clone())
+            .flatten();
+        if let Some(child) = pending_child.as_ref()
+            && !self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .any(|chat| chat.id == child.parent_chat_id && !chat.archived)
+        {
+            self.failure = Some("The parent session is no longer available".into());
+            self.failure_key = Some(self.current_key.clone());
+            cx.notify();
+            return;
+        }
         // Where the new session runs (Current checkout / reuse an existing
         // worktree / fresh worktree off the picked base) — resolved NOW so
         // the async block needs no picker access.
@@ -7761,7 +7787,7 @@ impl Composer {
         // its echo, and it gets a real bubble when the host sends it.
         self.state.update(cx, |s, cx| {
             if is_new {
-                s.select_chat(Some(chat_id.clone()), cx);
+                s.begin_child_send(chat_id.clone(), cx);
             }
             if should_publish_optimistic_echo(queue) {
                 s.push_echo(&chat_id, echo);
@@ -7941,7 +7967,11 @@ impl Composer {
                 let mut cwd = if is_new {
                     // Project-less sessions run from the host's home dir —
                     // "~" is expanded on the host when the run spawns.
-                    space_path.clone().or_else(|| Some("~".to_string()))
+                    pending_child
+                        .as_ref()
+                        .and_then(|child| child.cwd.clone())
+                        .or_else(|| space_path.clone())
+                        .or_else(|| Some("~".to_string()))
                 } else {
                     existing_cwd
                 }
@@ -7957,7 +7987,12 @@ impl Composer {
                 // it from the first frame (it read "Select ref" until the
                 // host's diff reconciler got around to stamping the branch).
                 let mut chat_branch: Option<String> = None;
-                if is_new && space_path.is_some() {
+                if let Some(child) = pending_child.as_ref() {
+                    // Continue in the parent's checkout, including an
+                    // isolated worktree, without creating another one.
+                    worktree_cwd = child.cwd.clone();
+                    chat_branch = child.branch.clone();
+                } else if is_new && space_path.is_some() {
                     match &plan {
                         crate::pickers::CheckoutPlan::CurrentCheckout { branch } => {
                             chat_branch = branch.clone();
@@ -7969,7 +8004,7 @@ impl Composer {
                         }
                         crate::pickers::CheckoutPlan::NewWorktree { base } => {
                             // Footer shows the base until the host stamps the
-                            // actual zeron/<name> branch post-creation. cwd
+                            // actual glitch-flow/<name> branch post-creation. cwd
                             // stays the repo folder — an old host that doesn't
                             // know the spec degrades to the main checkout
                             // instead of failing the run.
@@ -7995,17 +8030,23 @@ impl Composer {
                     }
                 }
 
-                // Best-effort Mutate createChat with the picked config: the
+                // Mutate createChat with the picked config: the
                 // engine resolves device + cwd from the PROJECT row when one
                 // is picked; project-less chats name the host device outright
-                // (idempotent; the doc host would materialize the chat on
-                // first command anyway, so failures are non-fatal).
+                // (idempotent). Root chats may be materialized on first command;
+                // child chats require this write to keep the parent relation.
                 if is_new {
                     let mut mutate = serde_json::json!({
                         "op": "createChat",
                         "chatId": chat_id,
                     });
                     if let Some(object) = mutate.as_object_mut() {
+                        if let Some(child) = pending_child.as_ref() {
+                            object.insert(
+                                "parentChatId".into(),
+                                serde_json::Value::String(child.parent_chat_id.clone()),
+                            );
+                        }
                         match &space_id {
                             Some(space_id) => {
                                 object.insert(
@@ -8034,11 +8075,25 @@ impl Composer {
                                 serde_json::Value::String(branch.clone()),
                             );
                         }
-                        if let Some(config) = resolved.chat_config()
-                            && let Ok(config) = serde_json::to_value(&config)
-                        {
-                            object.insert("config".into(), config);
+                        if let Some(mut config) = resolved.chat_config() {
+                            if let Some(parent_config) = pending_child
+                                .as_ref()
+                                .and_then(|child| child.config.as_ref())
+                            {
+                                config.sandbox = parent_config.sandbox;
+                            }
+                            if let Ok(config) = serde_json::to_value(&config) {
+                                object.insert("config".into(), config);
+                            }
                         }
+                    }
+                    if let (Some(target), Some(object)) =
+                        (host_device_id.as_deref(), mutate.as_object_mut())
+                    {
+                        object.insert(
+                            "targetDeviceId".into(),
+                            serde_json::Value::String(target.to_string()),
+                        );
                     }
                     if let Err(err) = attachments::call_with_timeout(
                         &engine,
@@ -8049,7 +8104,12 @@ impl Composer {
                     )
                     .await
                     {
-                        tracing::warn!(error = %err, "CreateChat mutate unavailable; doc host will materialize the chat");
+                        if pending_child.is_some() {
+                            // QueueCommand can create a missing chat without
+                            // its parent link, so child creation must succeed.
+                            return Err(format!("Child session could not be created: {err}"));
+                        }
+                        tracing::warn!(error = %err, target_device = ?host_device_id, "CreateChat mutate unavailable; doc host will materialize the chat on the selected host");
                     }
                 }
 
@@ -8109,6 +8169,14 @@ impl Composer {
                 let command = serde_json::to_value(&command)
                     .map_err(|e| format!("Send failed: {e}"))?;
                 let mut params = serde_json::json!({ "chatId": chat_id, "command": command });
+                if let (Some(target), Some(object)) =
+                    (host_device_id.as_deref(), params.as_object_mut())
+                {
+                    object.insert(
+                        "targetDeviceId".into(),
+                        serde_json::Value::String(target.to_string()),
+                    );
+                }
                 if !transfers.is_empty() {
                     params["transfers"] = serde_json::Value::Array(transfers);
                 }
@@ -8208,7 +8276,11 @@ impl Composer {
                     &engine,
                     cx.background_executor(),
                     methods::MUTATE,
-                    serde_json::json!({ "op": "deleteChat", "chatId": err_chat_id }),
+                    serde_json::json!({
+                        "op": "deleteChat",
+                        "chatId": err_chat_id,
+                        "targetDeviceId": host_device_id,
+                    }),
                     std::time::Duration::from_secs(5),
                 )
                 .await;
@@ -8218,6 +8290,11 @@ impl Composer {
                 composer
                     .state
                     .update(cx, |s, _| s.end_upload_progress());
+                if result.is_ok() && is_new {
+                    composer
+                        .state
+                        .update(cx, |s, cx| s.finish_child_send(&err_chat_id, false, cx));
+                }
                 if let Ok(Some(message_id)) = &result {
                     cx.emit(ComposerEvent::Queued {
                         chat_id: err_chat_id.clone(),
@@ -8240,6 +8317,7 @@ impl Composer {
                     composer.state.update(cx, |s, cx| {
                         s.remove_echo(&err_chat_id, &err_message_id);
                         s.end_pending_send(&err_chat_id, &err_message_id);
+                        s.finish_child_send(&err_chat_id, true, cx);
                         if is_new && s.selected_chat.as_deref() == Some(err_chat_id.as_str()) {
                             // Back to the canvas; the navigation draft-swap
                             // loads the restored draft below.
@@ -9488,6 +9566,27 @@ impl Render for Composer {
                 })
             })
             .flatten();
+        // The selected project's device is the actual execution host. Cloud
+        // profile sync does not provision compute, so name the host directly
+        // instead of presenting a generic "cloud" target.
+        let new_thread_host_label = if self.state.read(cx).selected_chat.is_none() {
+            let state = self.state.read(cx);
+            state.effective_device_id().map(|device_id| {
+                if state.local_device_id.as_deref() == Some(device_id.as_str()) {
+                    SharedString::from("Runs on this device")
+                } else {
+                    let name = state
+                        .devices
+                        .iter()
+                        .find(|device| device.id == device_id)
+                        .map(|device| device.name.as_str())
+                        .unwrap_or("remote device");
+                    SharedString::from(format!("Runs on {name}"))
+                }
+            })
+        } else {
+            None
+        };
         let has_new_thread_git_selectors = self
             .state
             .read(cx)
@@ -9503,6 +9602,7 @@ impl Render for Composer {
         let pill_surface = div()
             .relative()
             .id("composer-surface")
+            .debug_selector(|| "composer-surface".into())
             .child(crate::frost::frosted(surface_radius, 16.0, body))
             .child({
                 let measured = self.surface_bounds.clone();
@@ -9534,9 +9634,19 @@ impl Render for Composer {
                     .h(px(NEW_THREAD_SELECTOR_ROW_HEIGHT))
                     .flex()
                     .items_start()
-                    .justify_end()
+                    .gap(px(8.0))
                     .opacity(new_thread_chrome_opacity)
-                    .children(new_thread_target_selectors),
+                    .children(new_thread_host_label.clone().map(|label| {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .pt(px(5.0))
+                            .text_size(px(11.0))
+                            .text_color(theme.text_faint)
+                            .truncate()
+                            .child(label)
+                    }))
+                    .child(div().flex_none().children(new_thread_target_selectors)),
             )
         } else if new_thread_chrome > 0.0 {
             container.child(
@@ -9547,9 +9657,19 @@ impl Render for Composer {
                     .px(px(10.0))
                     .flex()
                     .items_start()
-                    .justify_end()
+                    .gap(px(8.0))
                     .opacity(new_thread_chrome_opacity)
-                    .children(new_thread_target_selectors),
+                    .children(new_thread_host_label.map(|label| {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .pt(px(5.0))
+                            .text_size(px(11.0))
+                            .text_color(theme.text_faint)
+                            .truncate()
+                            .child(label)
+                    }))
+                    .child(div().flex_none().children(new_thread_target_selectors)),
             )
         } else {
             container
@@ -10231,7 +10351,7 @@ mod tests {
                     input_hint: Some("model id".into()),
                 },
                 SlashCommand {
-                    name: "zeron:model".into(),
+                    name: "glitch-flow:model".into(),
                     description: "Plugin command".into(),
                     input_hint: None,
                 },
@@ -10243,9 +10363,9 @@ mod tests {
         assert!(rows[0].workspace_command.is_none());
         assert_eq!(rows[0].input_hint.as_deref(), Some("model id"));
         assert_eq!(workspace_command_for_text("/model", &rows), None);
-        assert_eq!(workspace_command_for_text("/zeron:model", &rows), None);
+        assert_eq!(workspace_command_for_text("/glitch-flow:model", &rows), None);
         assert_eq!(
-            workspace_command_for_text("/zeron:zeron:model", &rows),
+            workspace_command_for_text("/glitch-flow:glitch-flow:model", &rows),
             Some(WorkspaceCommand::Model)
         );
         assert_eq!(with_workspace_commands(rows, true).len(), 11);

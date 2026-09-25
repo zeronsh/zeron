@@ -277,7 +277,7 @@ impl Terminals {
             cmd.cwd(cwd);
             cmd.env("TERM", "xterm-256color");
             cmd.env("COLORTERM", "truecolor");
-            cmd.env("TERM_PROGRAM", "Zeron");
+            cmd.env("TERM_PROGRAM", "Glitch Flow");
             for (name, value) in environment {
                 cmd.env(name, value);
             }

@@ -1,7 +1,7 @@
 # Native GUI regression: close the real window, require a clean process exit,
 # then reopen the same isolated profile. No real account/provider data is used.
 param(
-    [string]$Exe = (Join-Path $PSScriptRoot '../target/release/zeron.exe'),
+    [string]$Exe = (Join-Path $PSScriptRoot '../target/release/glitch-flow.exe'),
     [int]$Runs = 2
 )
 $ErrorActionPreference = 'Stop'
@@ -12,12 +12,12 @@ $root = Join-Path $PSScriptRoot ('../target/windows-lifecycle-' + [guid]::NewGui
 $root = [IO.Path]::GetFullPath($root)
 New-Item -ItemType Directory -Path $root | Out-Null
 
-if (-not ('ZeronWindowProbe' -as [type])) {
+if (-not ('GlitchFlowWindowProbe' -as [type])) {
 Add-Type @'
 using System;
 using System.Text;
 using System.Runtime.InteropServices;
-public static class ZeronWindowProbe {
+public static class GlitchFlowWindowProbe {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int GetClassName(IntPtr hwnd, StringBuilder name, int count);
     [DllImport("user32.dll")]
@@ -30,7 +30,7 @@ $overrides = @{
     HOME = $root; USERPROFILE = $root
     LOCALAPPDATA = (Join-Path $root 'AppData/Local')
     APPDATA = (Join-Path $root 'AppData/Roaming')
-    ZERON_DATA_DIR = (Join-Path $root 'Zeron')
+    GLITCH_FLOW_DATA_DIR = (Join-Path $root 'Glitch Flow')
     ZERON_EDGE_TOKEN = $null; ZERON_IPC_PORT = '0'
     ZERON_EDGE_URL = 'http://127.0.0.1:1'; ZERON_ORG_ID = $null
     ZERON_HARNESS = 'mock'; RUST_BACKTRACE = '1'
@@ -60,9 +60,9 @@ try {
             if ($p.MainWindowHandle -eq 0) { throw "Run $run did not open a window within 25s" }
             $hwnd = $p.MainWindowHandle
             $class = [Text.StringBuilder]::new(256)
-            [void][ZeronWindowProbe]::GetClassName($hwnd, $class, $class.Capacity)
+            [void][GlitchFlowWindowProbe]::GetClassName($hwnd, $class, $class.Capacity)
             [uint32]$owner = 0
-            [void][ZeronWindowProbe]::GetWindowThreadProcessId($hwnd, [ref]$owner)
+            [void][GlitchFlowWindowProbe]::GetWindowThreadProcessId($hwnd, [ref]$owner)
             if ($owner -ne $p.Id -or $class.ToString() -eq 'ConsoleWindowClass') {
                 throw "Probe selected a non-application window (class=$class owner=$owner)"
             }
@@ -77,7 +77,7 @@ try {
             if (-not ((Get-Content -LiteralPath $stdout -Raw) -match 'engine core assembled')) {
                 throw "Run $run did not assemble its local engine within 25s"
             }
-            $device = (Get-Content -LiteralPath (Join-Path $root 'Zeron/device-id') -Raw).Trim()
+            $device = (Get-Content -LiteralPath (Join-Path $root 'Glitch Flow/device-id') -Raw).Trim()
             if ([string]::IsNullOrWhiteSpace($device)) { throw 'Engine did not persist its device identity' }
             if ($null -eq $firstDevice) { $firstDevice = $device }
             elseif ($device -ne $firstDevice) { throw 'Reopening changed the persisted device identity' }

@@ -2,18 +2,18 @@
 //! (platform facilities, zero new Rust deps, failures swallowed):
 //!
 //! - macOS: `NSUserNotification` through the already-linked ObjC runtime, so
-//!   the banner is attributed to Zeron with its icon. The API is deprecated
+//!   the banner is attributed to Glitch Flow with its icon. The API is deprecated
 //!   (10.14) but shipping and fits an app that needs no actions/attachments;
 //!   a delegate answers "present" unconditionally, overriding the center's
 //!   own suppress-while-frontmost policy — WHETHER to ping (including the
 //!   background-only setting's focus check) is decided at the call site, so
 //!   every platform path behaves identically. Unbundled dev runs
 //!   (`cargo run`) have no notification
-//!   center — those adopt the installed Zeron app's bundle identity (the
+//!   center — those adopt the installed Glitch Flow app's bundle identity (the
 //!   terminal-notifier technique: override `-[NSBundle bundleIdentifier]` for
-//!   the main bundle), so dev banners still show the Zeron icon; a click may
+//!   the main bundle), so dev banners still show the Glitch Flow icon; a click may
 //!   focus the installed app rather than the dev binary — acceptable for a
-//!   dev-only path. Machines without Zeron installed fall back to
+//!   dev-only path. Machines without Glitch Flow installed fall back to
 //!   `osascript`, attributed to Script Editor (cosmetics only).
 //! - Linux: `notify-send` (libnotify's CLI, present on every mainstream
 //!   desktop).
@@ -74,7 +74,7 @@ fn post_impl(title: &str, body: &str, chat_id: Option<&str>) {
 /// The identity banners are attributed to — the packaged app's bundle id
 /// (`dist/macos/Info.plist`), which the center resolves to its name + icon.
 #[cfg(target_os = "macos")]
-const MACOS_BUNDLE_ID: &std::ffi::CStr = c"sh.zeron.app";
+const MACOS_BUNDLE_ID: &std::ffi::CStr = c"local.glitchflow.app";
 
 /// `userInfo` key carrying the banner's chat id back to the click handler.
 #[cfg(target_os = "macos")]
@@ -207,8 +207,8 @@ mod delegate {
     pub(super) fn always_present() -> *mut Object {
         static DELEGATE: OnceLock<usize> = OnceLock::new();
         *DELEGATE.get_or_init(|| unsafe {
-            let mut decl = ClassDecl::new("ZeronNotifyDelegate", class!(NSObject))
-                .expect("ZeronNotifyDelegate registered twice");
+            let mut decl = ClassDecl::new("GlitchFlowNotifyDelegate", class!(NSObject))
+                .expect("GlitchFlowNotifyDelegate registered twice");
             decl.add_method(
                 sel!(userNotificationCenter:shouldPresentNotification:),
                 should_present as extern "C" fn(&Object, Sel, *mut Object, *mut Object) -> BOOL,
@@ -228,7 +228,7 @@ mod delegate {
 /// terminal-notifier / mac-notification-sys technique. The notification
 /// center refuses processes whose main bundle has no identifier and resolves
 /// each banner's name + icon from the identifier at delivery, so overriding
-/// `-[NSBundle bundleIdentifier]` to answer the installed Zeron app's id for
+/// `-[NSBundle bundleIdentifier]` to answer the installed Glitch Flow app's id for
 /// the MAIN bundle (other bundles keep the original implementation) makes
 /// dev-run banners look exactly like the packaged app's.
 #[cfg(target_os = "macos")]
@@ -318,7 +318,7 @@ fn post_impl(title: &str, body: &str, _chat_id: Option<&str>) {
         // `--` ends option parsing: session titles are model-generated, so a
         // `-`-leading one must land as the summary, not as a flag.
         let result = std::process::Command::new("notify-send")
-            .args(["--app-name=Zeron", "--", &title, &body])
+            .args(["--app-name=Glitch Flow", "--", &title, &body])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();

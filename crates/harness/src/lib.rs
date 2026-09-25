@@ -60,6 +60,34 @@ pub struct RunControls {
     pub interrupt: CancellationToken,
 }
 
+/// Per-run access to the native Glitch Flow MCP server. The engine supplies
+/// this only for a real chat run; discovery and title runs have no origin.
+/// Keeping it out of `RunRequest` avoids serializing a host-local IPC port or
+/// executable path through the device relay and persisted run journal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeMcpContext {
+    pub chat_id: String,
+    pub device_id: String,
+    pub ipc_port: u16,
+}
+
+impl NativeMcpContext {
+    pub fn server_command(&self) -> Result<std::path::PathBuf, HarnessError> {
+        std::env::current_exe().map_err(HarnessError::Io)
+    }
+
+    pub fn server_env(&self) -> [(&'static str, String); 6] {
+        [
+            ("ZERON_CHAT_ID", self.chat_id.clone()),
+            ("ZERON_DEVICE_ID", self.device_id.clone()),
+            ("ZERON_IPC_PORT", self.ipc_port.to_string()),
+            ("GLITCH_FLOW_CHAT_ID", self.chat_id.clone()),
+            ("GLITCH_FLOW_DEVICE_ID", self.device_id.clone()),
+            ("GLITCH_FLOW_IPC_PORT", self.ipc_port.to_string()),
+        ]
+    }
+}
+
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.
 #[derive(Clone, Debug)]
 pub struct ModelCatalog {
@@ -154,6 +182,17 @@ pub trait Harness: Send + Sync {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError>;
+
+    /// Run with app-owned MCP access. Providers without a native MCP injection
+    /// point retain their existing behavior through the default implementation.
+    async fn run_with_context(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        _mcp: Option<NativeMcpContext>,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run(request, controls).await
+    }
 }
 
 pub mod acp;
@@ -457,6 +496,22 @@ pub fn supports_titles(id: HarnessId) -> bool {
 
 #[cfg(test)]
 mod stderr_tests {
+    #[test]
+    fn native_mcp_context_overrides_both_ipc_environment_names() {
+        let context = super::NativeMcpContext {
+            chat_id: "chat-a".into(),
+            device_id: "device-b".into(),
+            ipc_port: 31001,
+        };
+        let env = context.server_env().into_iter().collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(env["GLITCH_FLOW_IPC_PORT"], "31001");
+        assert_eq!(env["ZERON_IPC_PORT"], "31001");
+        assert_eq!(env["GLITCH_FLOW_CHAT_ID"], "chat-a");
+        assert_eq!(env["ZERON_CHAT_ID"], "chat-a");
+        assert_eq!(env["GLITCH_FLOW_DEVICE_ID"], "device-b");
+        assert_eq!(env["ZERON_DEVICE_ID"], "device-b");
+    }
+
     #[test]
     fn stderr_tail_truncates_at_utf8_boundaries() {
         let tail = super::StderrTail::default();

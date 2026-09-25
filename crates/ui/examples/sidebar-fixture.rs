@@ -71,12 +71,29 @@ fn main() -> anyhow::Result<()> {
                 let chat = s.chats[ix].clone();
                 let source = chat.source_context.as_ref().unwrap();
                 s.fixture_sidebar_change_request(zeron_proto::CheckoutChangeRequestStatus {
-                    checkout_id: source.checkout_id.clone(), device_id: chat.device_id.clone(), cwd: source.repo_root.clone(), branch: source.branch.clone(), updated_at: chrono::Utc::now(),
+                    checkout_id: source.checkout_id.clone(), device_id: chat.device_id.clone(), cwd: source.repo_root.clone(), branch: source.branch.clone(), github_connected: Some(true), change_requests: vec![], updated_at: chrono::Utc::now(),
                     change_request: Some(zeron_proto::ChangeRequestSummary { provider: "github".into(), number: 412 + ix as u64, title: chat.title.clone().unwrap(), url: "https://github.com/zeronsh/zeron/pull/412".into(), state: zeron_proto::ChangeRequestState::Open, base_ref: "main".into(), head_ref: source.branch.clone() }),
                 });
             }
             s.chats[4].last_message_at = Some(chrono::Utc::now());
             s.chats[8].archived = true;
+            // Keep this family near the top of the sidebar while retaining the
+            // other projects, pins, pull requests, and archived sample.
+            s.chats[0].last_message_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+            for (id, title, minutes_ago) in [
+                ("child-sidebar", "Design the session tree", 2),
+                ("child-header", "Review child thread navigation", 8),
+            ] {
+                let mut child = s.chats[0].clone();
+                child.id = id.into();
+                child.title = Some(title.into());
+                child.parent_chat_id = Some("browser-fixture".into());
+                child.created_at = chrono::Utc::now() - chrono::Duration::minutes(minutes_ago);
+                child.last_message_at = Some(child.created_at);
+                s.chats.push(child);
+            }
+            s.selected_chat = Some(std::env::var("ZERON_SIDEBAR_SELECTED")
+                .unwrap_or_else(|_| "child-sidebar".into()));
             s
         });
         let boot = EngineBootConfig { data_dir: data, ipc_port: 0, edge_url: String::new(), edge_token: None, org_id: None, workos_client_id: None, default_harness: HarnessId::ClaudeCode };

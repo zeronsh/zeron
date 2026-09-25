@@ -99,6 +99,8 @@ pub mod methods {
     /// the sending thumbnail's percent-ring feed. No params; IPC-only.
     pub const WATCH_TRANSFERS: &str = "WatchTransfers";
     pub const WATCH_CHATS: &str = "WatchChats";
+    /// Profile-wide native ticket boards, issues, relations, and comments.
+    pub const WATCH_TICKETS: &str = "WatchTickets";
     pub const WATCH_SIDEBAR_PREFERENCES: &str = "WatchSidebarPreferences";
     pub const WATCH_DEVICES: &str = "WatchDevices";
     pub const WATCH_SESSIONS: &str = "WatchSessions";
@@ -108,6 +110,8 @@ pub mod methods {
     /// Params are tagged `{op: createChat|createSpace|renameSpace|deleteSpace|
     /// renameChat|setChatArchived|deleteChat|renameDevice|markChatSeen, …}`.
     pub const MUTATE: &str = "Mutate";
+    /// Validated ticket mutation, shared by the native UI and agent tools.
+    pub const MUTATE_TICKET: &str = "MutateTicket";
     /// This engine's identity → `{deviceId}` (IPC-only; never relay-forwarded —
     /// the answer is about whichever engine you are directly connected to).
     pub const LOCAL_DEVICE: &str = "LocalDevice";
@@ -140,6 +144,8 @@ pub mod methods {
     pub const CREATE_REPO: &str = "CreateRepo";
     pub const LIST_BRANCHES: &str = "ListBranches";
     pub const LIST_REFS: &str = "ListRefs";
+    /// Create and check out a named local branch from an optional base ref.
+    pub const CREATE_BRANCH: &str = "CreateBranch";
     pub const LIST_GIT_HISTORY: &str = "ListGitHistory";
     /// Fuzzy commit-subject / SHA search over the complete public history.
     pub const SEARCH_GIT_HISTORY: &str = "SearchGitHistory";

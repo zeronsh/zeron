@@ -648,6 +648,22 @@ pub struct UploadProgress {
     total: u64,
 }
 
+/// Context captured when a human opens a child from an existing chat. It is
+/// kept only on the unsent canvas; the persisted relationship lives on Chat.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingChildChat {
+    pub parent_chat_id: String,
+    pub config: Option<zeron_proto::ChatConfig>,
+    pub cwd: Option<String>,
+    pub branch: Option<String>,
+}
+
+struct InFlightChildChat {
+    chat_id: String,
+    child: PendingChildChat,
+    send_succeeded: bool,
+}
+
 /// Root application state. Reducer methods (`apply_*`, [`Self::session_for`], …)
 /// are plain `&mut self` functions so tests construct the struct directly; gpui
 /// glue ([`Self::bootstrap`], [`Self::select_chat`]) layers subscriptions on top.
@@ -695,6 +711,8 @@ pub struct AppState {
     /// the local device.
     pub selected_device: Option<String>,
     pub selected_chat: Option<String>,
+    pub(crate) pending_child_chat: Option<PendingChildChat>,
+    in_flight_child_chat: Option<InFlightChildChat>,
     /// Boot auto-select happened (or a manual selection superseded it).
     pub auto_selected: bool,
     /// First chats / spaces watch frame has landed — device-local state that
@@ -806,6 +824,8 @@ impl AppState {
             no_project: false,
             selected_device: None,
             selected_chat: None,
+            pending_child_chat: None,
+            in_flight_child_chat: None,
             transcript: Vec::new(),
             queue: Vec::new(),
             context_usage: None,
@@ -952,10 +972,25 @@ impl AppState {
         sort_chats(&mut chats);
         self.chats = chats;
         self.chats_synced = true;
+        // An older workspace frame can arrive while createChat is in flight.
+        // Keep the optimistic child selected until its row is observed (or
+        // the send fails), including after createChat has replied successfully.
+        let creating_child = self
+            .in_flight_child_chat
+            .as_ref()
+            .map(|in_flight| in_flight.chat_id.clone());
+        if self.in_flight_child_chat.as_ref().is_some_and(|in_flight| {
+            in_flight.send_succeeded
+                && self.chats.iter().any(|chat| chat.id == in_flight.chat_id)
+        })
+        {
+            self.in_flight_child_chat = None;
+        }
         self.transcript_cache
             .retain(|cached| self.chats.iter().any(|c| c.id == cached.chat_id));
         if let Some(selected) = &self.selected_chat
             && !self.chats.iter().any(|c| &c.id == selected)
+            && creating_child.as_deref() != Some(selected.as_str())
         {
             // Selected chat vanished (deleted elsewhere): drop selection + transcript.
             self.transcript_baselines.remove(selected);
@@ -1328,6 +1363,13 @@ impl AppState {
             .unwrap_or(&[])
     }
 
+    /// The first watch frame has arrived, including an authoritative empty reset.
+    pub fn sub_transcript_loaded(&self, doc_id: &str) -> bool {
+        self.prepared_transcripts.contains_key(doc_id)
+            || (self.sub_transcripts.contains_key(doc_id)
+                && !self.sub_watch_tasks.contains_key(doc_id))
+    }
+
     /// Watch a SUBAGENT doc (`WatchDocMessages` works for any doc id).
     /// Single-flight per key; a frozen snapshot already in place wins — the
     /// watch would race the (complete) blob with a possibly-purged live doc.
@@ -1549,10 +1591,9 @@ impl AppState {
 
     // ---- queries ----
 
-    /// Non-archived, top-level chats in sidebar order. Chats spawned by
-    /// another chat (`parent_chat_id`, the Zeron MCP's orchestration link)
-    /// are the parent's workers, not sessions the user started: they stay
-    /// reachable by id/deep link but never take a sidebar row or jump slot.
+    /// Non-archived roots for sidebar session trees. Child rows are rendered
+    /// beneath their parent from the full chat list, rather than appearing as
+    /// separate top-level roots.
     pub fn visible_chats(&self) -> impl Iterator<Item = &Chat> {
         self.chats
             .iter()
@@ -1602,6 +1643,8 @@ impl AppState {
     /// a project on another device can't survive the switch — fall back to
     /// the first project on the new device, else "no project".
     pub fn select_device(&mut self, device_id: String, cx: &mut Context<Self>) {
+        self.pending_child_chat = None;
+        self.in_flight_child_chat = None;
         let project_moves = self
             .selected_space_row()
             .is_some_and(|s| s.device_id != device_id);
@@ -1763,6 +1806,15 @@ impl AppState {
             .change_request_for_chat(chat, &self.spaces)
     }
 
+    pub fn change_requests_for_chat(&self, chat: &Chat) -> &[ChangeRequestSummary] {
+        self.change_requests
+            .change_requests_for_chat(chat, &self.spaces)
+    }
+
+    pub fn github_connected_for_chat(&self, chat: &Chat) -> Option<bool> {
+        self.change_requests.github_connected_for_chat(chat)
+    }
+
     pub fn gate(&self) -> GatePhase {
         gate_phase(&self.connection, self.workspace_scope, self.auth.as_ref())
     }
@@ -1800,6 +1852,8 @@ impl AppState {
         self.no_project = false;
         self.selected_device = None;
         self.selected_chat = None;
+        self.pending_child_chat = None;
+        self.in_flight_child_chat = None;
         self.auto_selected = false;
         self.chats_synced = false;
         self.spaces_synced = false;
@@ -1987,7 +2041,7 @@ impl AppState {
     }
 
     pub fn open_deep_link(&mut self, url: &str, cx: &mut Context<Self>) {
-        match crate::links::parse_zeron_conversation_link(url) {
+        match crate::links::parse_glitch_flow_conversation_link(url) {
             Ok(link) => {
                 self.pending_deep_link = Some(link);
                 self.apply_pending_deep_link(cx);
@@ -2032,10 +2086,17 @@ impl AppState {
     /// watch server-side. Selecting a chat also lands in its space and marks it
     /// seen (a global-list click must switch the tab strip too).
     pub fn select_chat(&mut self, chat_id: Option<String>, cx: &mut Context<Self>) {
+        // Every ordinary navigation leaves the child canvas. begin_child_chat
+        // installs its context after clearing the selected chat.
+        let cleared_child = self.pending_child_chat.take().is_some();
+        self.in_flight_child_chat = None;
         if self.selected_chat == chat_id {
             // Re-selecting still clears a fresh "completed" badge.
             if let Some(id) = chat_id {
                 self.mark_chat_seen(&id, cx);
+            }
+            if cleared_child {
+                cx.notify();
             }
             return;
         }
@@ -2158,6 +2219,79 @@ impl AppState {
         cx.notify();
     }
 
+    /// Open an unsent child canvas from the current chat, retaining its host,
+    /// project, checkout, and agent configuration for the first send.
+    pub(crate) fn begin_child_chat(
+        &mut self,
+        parent_chat_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(parent) = self
+            .chats
+            .iter()
+            .find(|chat| chat.id == parent_chat_id && !chat.archived)
+            .cloned()
+        else {
+            return false;
+        };
+        self.select_chat(None, cx);
+        self.selected_space = parent.space_id.clone();
+        self.no_project = parent.space_id.is_none();
+        self.selected_device = Some(parent.device_id.clone());
+        self.pending_child_chat = Some(PendingChildChat {
+            parent_chat_id: parent.id,
+            config: parent.config,
+            cwd: parent.cwd,
+            branch: parent.branch,
+        });
+        cx.notify();
+        true
+    }
+
+    /// Keep the child relation through the optimistic selection while its
+    /// createChat and send are in flight. A workspace watch may temporarily
+    /// clear that selection before createChat replies.
+    pub(crate) fn begin_child_send(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        let child = self.pending_child_chat.clone();
+        self.select_chat(Some(chat_id.clone()), cx);
+        if let Some(child) = child {
+            self.in_flight_child_chat = Some(InFlightChildChat {
+                chat_id,
+                child,
+                send_succeeded: false,
+            });
+        }
+    }
+
+    pub(crate) fn finish_child_send(
+        &mut self,
+        chat_id: &str,
+        failed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .in_flight_child_chat
+            .as_ref()
+            .is_some_and(|in_flight| in_flight.chat_id == chat_id)
+        {
+            return;
+        }
+        if failed {
+            let child = self.in_flight_child_chat.take().unwrap().child;
+            if self.selected_chat.as_deref() == Some(chat_id) {
+                self.select_chat(None, cx);
+            }
+            if self.selected_chat.is_none() {
+                self.pending_child_chat = Some(child);
+                cx.notify();
+            }
+        } else if self.chats.iter().any(|chat| chat.id == chat_id) {
+            self.in_flight_child_chat = None;
+        } else if let Some(in_flight) = self.in_flight_child_chat.as_mut() {
+            in_flight.send_succeeded = true;
+        }
+    }
+
     /// Replace the selected chat's queue subscription without clearing its
     /// current projection. This is used after an optimistic mutation fails:
     /// the authoritative opening frame repairs the local list even though the
@@ -2180,6 +2314,8 @@ impl AppState {
     /// `Some` clears a "Don't work in a project" opt-out and re-aims the
     /// device pick at the project's host; `None` IS that opt-out.
     pub fn select_space(&mut self, space_id: Option<String>, cx: &mut Context<Self>) {
+        self.pending_child_chat = None;
+        self.in_flight_child_chat = None;
         match &space_id {
             Some(id) => {
                 self.no_project = false;
@@ -3287,6 +3423,7 @@ mod tests {
             branch: None,
             checkout_id: None,
             source_context: None,
+            pull_request_urls: Vec::new(),
             config: None,
             last_message_preview: None,
             last_message_at: last_msg_min.map(|m| base + TimeDelta::minutes(m)),
@@ -3541,11 +3678,14 @@ mod tests {
         );
 
         let before_subagent = state.transcript_revision;
+        assert!(!state.sub_transcript_loaded("sub"));
         state.set_subagent_snapshot("sub".into(), vec![user_entry("nested")]);
         assert_ne!(state.transcript_revision, before_subagent);
+        assert!(state.sub_transcript_loaded("sub"));
         let before_close = state.transcript_revision;
         state.unwatch_subagent_doc("sub");
         assert!(state.sub_transcript("sub").is_empty());
+        assert!(!state.sub_transcript_loaded("sub"));
         assert_ne!(state.transcript_revision, before_close);
     }
 
@@ -4124,6 +4264,98 @@ mod tests {
         assert_eq!(rows, ["parent"]);
         // The child row itself is still addressable (deep links, tabs).
         assert!(state.chats.iter().any(|c| c.id == "child"));
+    }
+
+    #[gpui::test]
+    fn child_canvas_inherits_parent_target_and_clears_on_navigation(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.spaces = vec![space("project", "remote", "/repo", 0)];
+            let mut parent = chat("parent", 0, None);
+            parent.space_id = Some("project".into());
+            parent.device_id = "remote".into();
+            parent.cwd = Some("/repo-worktree".into());
+            parent.branch = Some("feature".into());
+            parent.config = Some(zeron_proto::ChatConfig {
+                harness: HarnessId::ClaudeCode,
+                model: Some("model-a".into()),
+                reasoning: Some(zeron_proto::ReasoningLevel::High),
+                model_options: serde_json::Map::new(),
+                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            });
+            state.chats = vec![parent];
+            state.select_chat(Some("parent".into()), cx);
+
+            assert!(state.begin_child_chat("parent", cx));
+            assert!(state.selected_chat.is_none());
+            assert_eq!(state.selected_space.as_deref(), Some("project"));
+            assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
+            let child = state.pending_child_chat.as_ref().unwrap();
+            assert_eq!(child.parent_chat_id, "parent");
+            assert_eq!(child.cwd.as_deref(), Some("/repo-worktree"));
+            assert_eq!(child.branch.as_deref(), Some("feature"));
+            assert_eq!(
+                child.config.as_ref().unwrap().model.as_deref(),
+                Some("model-a")
+            );
+
+            state.select_chat(None, cx);
+            assert!(state.pending_child_chat.is_none());
+            state.select_chat(Some("parent".into()), cx);
+            assert!(state.begin_child_chat("parent", cx));
+            state.begin_child_send("minted-child".into(), cx);
+            assert!(state.pending_child_chat.is_none());
+            let authoritative_chats = state.chats.clone();
+            state.apply_chats(authoritative_chats);
+            assert_eq!(state.selected_chat.as_deref(), Some("minted-child"));
+            assert!(state.in_flight_child_chat.is_some());
+            state.finish_child_send("minted-child", true, cx);
+            assert_eq!(
+                state.pending_child_chat.as_ref().unwrap().parent_chat_id,
+                "parent"
+            );
+
+            state.select_space(None, cx);
+            assert!(state.pending_child_chat.is_none());
+            state.select_chat(Some("parent".into()), cx);
+            assert!(state.begin_child_chat("parent", cx));
+            state.begin_child_send("successful-child".into(), cx);
+            state.apply_chats(state.chats.clone()); // old frame before createChat replies
+            state.finish_child_send("successful-child", false, cx);
+            state.apply_chats(state.chats.clone()); // old frame after the reply
+            assert_eq!(state.selected_chat.as_deref(), Some("successful-child"));
+            assert!(state.in_flight_child_chat.is_some());
+            let mut created = chat("successful-child", 1, None);
+            created.parent_chat_id = Some("parent".into());
+            let mut synced = state.chats.clone();
+            synced.push(created);
+            state.apply_chats(synced);
+            assert_eq!(state.selected_chat.as_deref(), Some("successful-child"));
+            assert!(state.in_flight_child_chat.is_none());
+
+            state.select_chat(Some("parent".into()), cx);
+            assert!(state.begin_child_chat("parent", cx));
+            state.begin_child_send("failed-after-row".into(), cx);
+            let mut created = chat("failed-after-row", 2, None);
+            created.parent_chat_id = Some("parent".into());
+            let mut synced = state.chats.clone();
+            synced.push(created);
+            state.apply_chats(synced); // createChat row before QueueCommand fails
+            assert!(state.in_flight_child_chat.is_some());
+            state.finish_child_send("failed-after-row", true, cx);
+            assert!(state.selected_chat.is_none());
+            assert_eq!(
+                state.pending_child_chat.as_ref().unwrap().parent_chat_id,
+                "parent"
+            );
+
+            state.select_chat(Some("parent".into()), cx);
+            assert!(state.begin_child_chat("parent", cx));
+            state.begin_child_send("another-child".into(), cx);
+            state.select_chat(None, cx); // explicit navigation cancels the retry
+            state.finish_child_send("another-child", true, cx);
+            assert!(state.pending_child_chat.is_none());
+        });
     }
 
     #[test]

@@ -1,13 +1,13 @@
 [Desktop Entry]
 Type=Application
-Name=Zeron
+Name=Glitch Flow
 GenericName=Coding Agent Controller
 Comment=Multi-device controller for coding agents
-Exec=zeron %u
-TryExec=zeron
-Icon=zeron
+Exec=glitch-flow %u
+TryExec=glitch-flow
+Icon=glitch-flow
 Terminal=false
 Categories=Development;Utility;
 Keywords=agent;claude;codex;ai;coding;
-StartupWMClass=zeron
-MimeType=x-scheme-handler/zeron;
+StartupWMClass=glitch-flow
+MimeType=x-scheme-handler/glitch-flow;

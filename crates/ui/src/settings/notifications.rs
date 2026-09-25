@@ -326,7 +326,7 @@ impl Render for NotificationsPage {
                                     div()
                                         .child(SharedString::from(
                                             "Show a system banner on the same events, so pings \
-                                             reach you while Zeron is in the background.",
+                                             reach you while Glitch Flow is in the background.",
                                         ))
                                         .into_any_element(),
                                 ],
@@ -364,7 +364,7 @@ impl Render for NotificationsPage {
                                 vec![
                                     div()
                                         .child(SharedString::from(
-                                            "Skip the banner while a Zeron window is focused.",
+                                            "Skip the banner while a Glitch Flow window is focused.",
                                         ))
                                         .into_any_element(),
                                 ],
@@ -373,7 +373,7 @@ impl Render for NotificationsPage {
                     .child(
                         toggle(
                             "notifications-background-toggle",
-                            "Only notify when Zeron is in the background",
+                            "Only notify when Glitch Flow is in the background",
                             background_only,
                             desktop,
                         )

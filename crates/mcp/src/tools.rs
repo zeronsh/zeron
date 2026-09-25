@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use zeron_doc::SessionCommandPayload;
 use zeron_proto::{
     Chat, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, Session, SessionStatus,
-    Space, UserInputAnswer,
+    Space, TicketMutation, UserInputAnswer,
 };
 
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
@@ -108,13 +108,14 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a chat in a project (or project-less on a device) with a harness and model. The new chat records your chat as its parent (parentChatId). Optionally send a first prompt and wait for the reply. Returns the new chat id.",
+            description: "Create a chat in a project (or project-less on a device) with a harness and model. The new chat records your chat as its parent (parentChatId). With ticket, attach the new chat to a native issue or epic. Optionally send a first prompt and wait for the reply. Returns the new chat id.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "project": { "type": "string", "description": "Project id, path, or name. Required unless device is given." },
                     "device": { "type": "string", "description": "Host device (id or name) for a project-less chat; defaults to this device." },
                     "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
+                    "ticket": { "type": "string", "description": "Attach the new chat to this ticket (id, unique prefix or exact title)." },
                     "harness": { "type": "string", "description": "Harness id (see list_harnesses). Defaults to claude-code when available." },
                     "model": { "type": "string", "description": "Model id from list_models. Omit for the harness default." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
@@ -185,6 +186,68 @@ fn catalog() -> Vec<ToolDef> {
                 "archived": { "type": "boolean", "default": true }
             })),
         },
+        ToolDef {
+            name: "list_ticket_boards",
+            description: "List native ticket boards (logical projects) and their linked device folders. Boards contain epics and issues; they are independent of chats and folders.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "include_archived": { "type": "boolean", "default": false } }
+            }),
+        },
+        ToolDef {
+            name: "list_tickets",
+            description: "Search native epics, issues and subissues. Returns IDs to use with get_ticket or mutate_ticket. A parent issue and its linked agent child chats are separate hierarchies.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "board": { "type": "string", "description": "Board id, unique id prefix, or exact name." },
+                    "kind": { "type": "string", "enum": ["epic", "issue"] },
+                    "status": { "type": "string", "enum": ["backlog", "todo", "inProgress", "inReview", "done", "canceled"] },
+                    "priority": { "type": "string", "enum": ["none", "urgent", "high", "medium", "low"] },
+                    "query": { "type": "string", "description": "Case-insensitive title/description search." },
+                    "include_archived": { "type": "boolean", "default": false },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 }
+                }
+            }),
+        },
+        ToolDef {
+            name: "get_ticket",
+            description: "Read one native epic, issue or subissue with its board, children, comments, directly linked chats and descendant agent chats.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "ticket": { "type": "string", "description": "Ticket id, unique id prefix, or exact title." },
+                    "board": { "type": "string", "description": "Optional board id/name to disambiguate titles." }
+                },
+                "required": ["ticket"]
+            }),
+        },
+        ToolDef {
+            name: "mutate_ticket",
+            description: "Full native ticket control. Operations: createBoard/updateBoard/deleteBoard; linkBoardSpace/unlinkBoardSpace; createTicket/updateTicket/setTicketParent/deleteTicket; linkTicketChat/unlinkTicketChat; createComment/updateComment/deleteComment. Create IDs are generated when omitted. Read list_ticket_boards/list_tickets/get_ticket first for existing IDs. Deletion is permanent.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "op": { "type": "string", "enum": ["createBoard", "updateBoard", "deleteBoard", "linkBoardSpace", "unlinkBoardSpace", "createTicket", "updateTicket", "setTicketParent", "deleteTicket", "linkTicketChat", "unlinkTicketChat", "createComment", "updateComment", "deleteComment"] },
+                    "boardId": { "type": "string" },
+                    "spaceId": { "type": "string" },
+                    "ticketId": { "type": "string" },
+                    "parentTicketId": { "type": ["string", "null"] },
+                    "chatId": { "type": "string" },
+                    "commentId": { "type": "string" },
+                    "kind": { "type": "string", "enum": ["epic", "issue"] },
+                    "name": { "type": "string" },
+                    "title": { "type": "string" },
+                    "description": { "type": "string" },
+                    "body": { "type": "string" },
+                    "author": { "type": "string" },
+                    "status": { "type": "string", "enum": ["backlog", "todo", "inProgress", "inReview", "done", "canceled"] },
+                    "priority": { "type": "string", "enum": ["none", "urgent", "high", "medium", "low"] },
+                    "archived": { "type": "boolean" }
+                },
+                "required": ["op"]
+            }),
+        },
     ]
 }
 
@@ -215,6 +278,7 @@ struct CreateChatArgs {
     project: Option<String>,
     device: Option<String>,
     parent: Option<String>,
+    ticket: Option<String>,
     harness: Option<String>,
     model: Option<String>,
     reasoning: Option<String>,
@@ -273,6 +337,30 @@ struct RespondArgs {
 struct AnswerArg {
     question_id: String,
     labels: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ListTicketBoardsArgs {
+    #[serde(default)]
+    include_archived: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct ListTicketsArgs {
+    board: Option<String>,
+    kind: Option<String>,
+    status: Option<String>,
+    priority: Option<String>,
+    query: Option<String>,
+    #[serde(default)]
+    include_archived: bool,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct GetTicketArgs {
+    ticket: String,
+    board: Option<String>,
 }
 
 fn parse<T: serde::de::DeserializeOwned>(args: Value) -> Result<T, String> {
@@ -347,6 +435,51 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
     })
 }
 
+fn ticket_rows<'a>(snapshot: &'a Value, key: &str) -> anyhow::Result<&'a [Value]> {
+    snapshot
+        .get(key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| anyhow::anyhow!("WatchTickets snapshot missing {key}"))
+}
+
+fn resolve_ticket_row<'a>(
+    rows: &'a [Value],
+    key: &str,
+    label_field: &str,
+    kind: &str,
+) -> anyhow::Result<&'a Value> {
+    let key = key.trim();
+    if key.is_empty() {
+        anyhow::bail!("{kind} is required");
+    }
+    if let Some(row) = rows.iter().find(|row| row["id"].as_str() == Some(key)) {
+        return Ok(row);
+    }
+    let by_prefix: Vec<&Value> = rows
+        .iter()
+        .filter(|row| row["id"].as_str().is_some_and(|id| id.starts_with(key)))
+        .collect();
+    if let [row] = by_prefix.as_slice() {
+        return Ok(row);
+    }
+    let by_label: Vec<&Value> = rows
+        .iter()
+        .filter(|row| {
+            row[label_field]
+                .as_str()
+                .is_some_and(|label| label.eq_ignore_ascii_case(key))
+        })
+        .collect();
+    if let [row] = by_label.as_slice() {
+        return Ok(row);
+    }
+    if by_prefix.len() > 1 || by_label.len() > 1 {
+        anyhow::bail!("multiple {kind}s match {key:?}; use a full id");
+    }
+    anyhow::bail!("no {kind} matches {key:?}; list them first")
+}
+
 fn last_pending_input(messages: &[RenderedMessage]) -> Option<Value> {
     messages.iter().rev().find_map(|m| m.pending_input.clone())
 }
@@ -384,6 +517,10 @@ impl Tools {
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
+            "list_ticket_boards" => self.list_ticket_boards(parse(args)?).await,
+            "list_tickets" => self.list_tickets(parse(args)?).await,
+            "get_ticket" => self.get_ticket(parse(args)?).await,
+            "mutate_ticket" => self.mutate_ticket(args).await,
             other => return Err(format!("unknown tool: {other}")),
         };
         result.map_err(|e| e.to_string())
@@ -528,6 +665,16 @@ impl Tools {
     }
 
     async fn create_chat(&self, args: CreateChatArgs) -> anyhow::Result<Value> {
+        // Resolve before creating the chat so a mistyped ticket never leaves
+        // an unlinked agent thread behind.
+        let ticket_id = if let Some(key) = args.ticket.as_deref() {
+            let snapshot = self.zeron.tickets().await?;
+            let tickets = ticket_rows(&snapshot, "tickets")?;
+            let ticket = resolve_ticket_row(tickets, key, "title", "ticket")?;
+            Some(ticket["id"].as_str().unwrap_or_default().to_string())
+        } else {
+            None
+        };
         let harnesses = self.zeron.harnesses().await?;
         let harness = match args.harness.as_deref() {
             Some(raw) => {
@@ -632,6 +779,16 @@ impl Tools {
                 .mutate(json!({ "op": "renameChat", "chatId": chat_id, "title": title }))
                 .await?;
         }
+        if let Some(ticket_id) = ticket_id.as_deref() {
+            self.zeron
+                .mutate_ticket(json!({
+                    "op": "linkTicketChat", "ticketId": ticket_id, "chatId": chat_id,
+                }))
+                .await
+                .map_err(|error| anyhow::anyhow!(
+                    "chat {chat_id} was created but could not link to ticket {ticket_id}: {error}"
+                ))?;
+        }
 
         let mut result = json!({
             "chatId": chat_id,
@@ -642,6 +799,7 @@ impl Tools {
             "reasoning": reasoning,
             "title": args.title,
             "parentChatId": parent_chat_id,
+            "ticketId": ticket_id,
         });
         if let Some(prompt) = args.prompt.filter(|p| !p.trim().is_empty()) {
             // The row may not have folded into WatchChats yet; build the
@@ -655,6 +813,7 @@ impl Tools {
                 branch: args.branch.clone(),
                 checkout_id: None,
                 source_context: None,
+                pull_request_urls: Vec::new(),
                 config: Some(config),
                 last_message_preview: None,
                 last_message_at: None,
@@ -773,6 +932,253 @@ impl Tools {
             .mutate(json!({ "op": "setChatArchived", "chatId": chat.id, "archived": archived }))
             .await?;
         Ok(json!({ "chatId": chat.id, "title": chat.title, "archived": archived }))
+    }
+
+    async fn list_ticket_boards(&self, args: ListTicketBoardsArgs) -> anyhow::Result<Value> {
+        let (snapshot, spaces) = tokio::try_join!(self.zeron.tickets(), self.zeron.spaces())?;
+        let boards = ticket_rows(&snapshot, "boards")?;
+        let links = ticket_rows(&snapshot, "boardSpaceLinks")?;
+        let tickets = ticket_rows(&snapshot, "tickets")?;
+        let mut result = Vec::new();
+        for board in boards {
+            if !args.include_archived && board["archived"] == true {
+                continue;
+            }
+            let id = board["id"].as_str().unwrap_or_default();
+            let linked_spaces: Vec<Value> = links
+                .iter()
+                .filter(|link| link["boardId"] == id)
+                .filter_map(|link| {
+                    let space_id = link["spaceId"].as_str()?;
+                    let space = spaces.iter().find(|space| space.id == space_id);
+                    Some(json!({
+                        "id": space_id,
+                        "name": space.map(Space::display_name),
+                        "path": space.map(|space| &space.path),
+                        "deviceId": space.map(|space| &space.device_id),
+                        "available": space.is_some(),
+                    }))
+                })
+                .collect();
+            let mut row = board.clone();
+            row["spaces"] = json!(linked_spaces);
+            row["ticketCount"] = json!(
+                tickets
+                    .iter()
+                    .filter(|ticket| ticket["boardId"] == id)
+                    .count()
+            );
+            result.push(row);
+        }
+        result.sort_by(|a, b| {
+            a["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_lowercase()
+                .cmp(&b["name"].as_str().unwrap_or_default().to_lowercase())
+        });
+        Ok(json!({ "total": result.len(), "boards": result }))
+    }
+
+    async fn list_tickets(&self, args: ListTicketsArgs) -> anyhow::Result<Value> {
+        let snapshot = self.zeron.tickets().await?;
+        let boards = ticket_rows(&snapshot, "boards")?;
+        let tickets = ticket_rows(&snapshot, "tickets")?;
+        let board_id = args
+            .board
+            .as_deref()
+            .map(|key| resolve_ticket_row(boards, key, "name", "board"))
+            .transpose()?
+            .and_then(|board| board["id"].as_str());
+        let query = args
+            .query
+            .as_deref()
+            .map(|query| query.trim().to_lowercase());
+        let mut found: Vec<Value> = tickets
+            .iter()
+            .filter(|ticket| {
+                (args.include_archived || ticket["archived"] != true)
+                    && board_id.is_none_or(|id| ticket["boardId"] == id)
+                    && args
+                        .kind
+                        .as_deref()
+                        .is_none_or(|kind| ticket["kind"] == kind)
+                    && args
+                        .status
+                        .as_deref()
+                        .is_none_or(|status| ticket["status"] == status)
+                    && args
+                        .priority
+                        .as_deref()
+                        .is_none_or(|priority| ticket["priority"] == priority)
+                    && query.as_ref().is_none_or(|query| {
+                        ticket["title"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_lowercase()
+                            .contains(query)
+                            || ticket["description"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_lowercase()
+                                .contains(query)
+                    })
+            })
+            .map(|ticket| {
+                let mut row = ticket.clone();
+                let id = ticket["id"].as_str().unwrap_or_default();
+                let board_id = ticket["boardId"].as_str().unwrap_or_default();
+                row["boardName"] = boards
+                    .iter()
+                    .find(|board| board["id"] == board_id)
+                    .map(|board| board["name"].clone())
+                    .unwrap_or(Value::Null);
+                row["childCount"] = json!(
+                    tickets
+                        .iter()
+                        .filter(|child| child["parentTicketId"] == id)
+                        .count()
+                );
+                row
+            })
+            .collect();
+        found.sort_by(|a, b| {
+            b["updatedAt"]
+                .as_str()
+                .unwrap_or_default()
+                .cmp(a["updatedAt"].as_str().unwrap_or_default())
+                .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+        });
+        let total = found.len();
+        found.truncate(args.limit.unwrap_or(100).clamp(1, 500));
+        Ok(json!({ "total": total, "tickets": found }))
+    }
+
+    async fn get_ticket(&self, args: GetTicketArgs) -> anyhow::Result<Value> {
+        let (snapshot, chats, spaces, sessions) = tokio::try_join!(
+            self.zeron.tickets(),
+            self.zeron.chats(),
+            self.zeron.spaces(),
+            self.zeron.sessions()
+        )?;
+        let boards = ticket_rows(&snapshot, "boards")?;
+        let tickets = ticket_rows(&snapshot, "tickets")?;
+        let candidate_rows: Vec<Value> = if let Some(board) = args.board.as_deref() {
+            let board = resolve_ticket_row(boards, board, "name", "board")?;
+            tickets
+                .iter()
+                .filter(|ticket| ticket["boardId"] == board["id"])
+                .cloned()
+                .collect()
+        } else {
+            tickets.to_vec()
+        };
+        let ticket = resolve_ticket_row(&candidate_rows, &args.ticket, "title", "ticket")?;
+        let id = ticket["id"].as_str().unwrap_or_default();
+        let board_id = ticket["boardId"].as_str().unwrap_or_default();
+        let board = boards.iter().find(|board| board["id"] == board_id);
+        let children: Vec<&Value> = tickets
+            .iter()
+            .filter(|child| child["parentTicketId"] == id)
+            .collect();
+        let comments: Vec<&Value> = ticket_rows(&snapshot, "comments")?
+            .iter()
+            .filter(|comment| comment["ticketId"] == id)
+            .collect();
+        let links = ticket_rows(&snapshot, "chatLinks")?;
+        let direct_ids: std::collections::HashSet<&str> = links
+            .iter()
+            .filter(|link| link["ticketId"] == id)
+            .filter_map(|link| link["chatId"].as_str())
+            .collect();
+        let mut descendant_ids: std::collections::HashSet<&str> = direct_ids.clone();
+        loop {
+            let before = descendant_ids.len();
+            for chat in &chats {
+                if chat
+                    .parent_chat_id
+                    .as_deref()
+                    .is_some_and(|parent| descendant_ids.contains(parent))
+                {
+                    descendant_ids.insert(chat.id.as_str());
+                }
+            }
+            if descendant_ids.len() == before {
+                break;
+            }
+        }
+        let linked_chats: Vec<Value> = chats
+            .iter()
+            .filter(|chat| direct_ids.contains(chat.id.as_str()))
+            .map(|chat| summarize_chat(chat, &spaces, &sessions))
+            .collect();
+        let child_chats: Vec<Value> = chats
+            .iter()
+            .filter(|chat| {
+                descendant_ids.contains(chat.id.as_str()) && !direct_ids.contains(chat.id.as_str())
+            })
+            .map(|chat| summarize_chat(chat, &spaces, &sessions))
+            .collect();
+        Ok(json!({
+            "ticket": ticket,
+            "board": board,
+            "parent": ticket["parentTicketId"].as_str()
+                .and_then(|parent| tickets.iter().find(|row| row["id"] == parent)),
+            "children": children,
+            "comments": comments,
+            "linkedChats": linked_chats,
+            "childChats": child_chats,
+        }))
+    }
+
+    async fn mutate_ticket(&self, mut args: Value) -> anyhow::Result<Value> {
+        let op = args
+            .get("op")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("op is required"))?
+            .to_string();
+        let object = args
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("ticket mutation must be an object"))?;
+        match op.as_str() {
+            "createBoard" => {
+                object
+                    .entry("boardId")
+                    .or_insert_with(|| json!(uuid::Uuid::new_v4().to_string()));
+            }
+            "createTicket" => {
+                object
+                    .entry("ticketId")
+                    .or_insert_with(|| json!(uuid::Uuid::new_v4().to_string()));
+            }
+            "createComment" => {
+                object
+                    .entry("commentId")
+                    .or_insert_with(|| json!(uuid::Uuid::new_v4().to_string()));
+                let author = self
+                    .zeron
+                    .origin()
+                    .chat_id
+                    .as_ref()
+                    .map(|id| format!("Agent ({})", short(id)))
+                    .unwrap_or_else(|| "Agent".into());
+                object.entry("author").or_insert_with(|| json!(author));
+            }
+            _ => {}
+        }
+        let _: TicketMutation = serde_json::from_value(args.clone())
+            .map_err(|error| anyhow::anyhow!("invalid ticket mutation: {error}"))?;
+        let mut result = self.zeron.mutate_ticket(args.clone()).await?;
+        if !result.is_object() {
+            result = json!({ "result": result });
+        }
+        result["op"] = json!(op);
+        for id_key in ["boardId", "ticketId", "commentId"] {
+            if let Some(id) = args.get(id_key) {
+                result[id_key] = id.clone();
+            }
+        }
+        Ok(result)
     }
 
     async fn interrupt_chat(&self, args: ChatArgs) -> anyhow::Result<Value> {
@@ -1062,10 +1468,45 @@ mod tests {
                     },
                     {
                         "id": "chat-beta-2", "deviceId": "dev-local", "title": "Beta",
-                        "archived": false, "spaceId": "space-1",
+                        "archived": false, "spaceId": "space-1", "parentChatId": "chat-alpha-1",
                         "createdAt": "2026-09-02T00:00:00Z"
                     }
                 ])),
+                methods::WATCH_TICKETS => stream(json!({
+                    "boards": [{
+                        "id": "board-comet", "name": "Comet", "description": "Flight plan",
+                        "archived": false, "createdAt": "2026-09-01T00:00:00Z",
+                        "updatedAt": "2026-09-01T00:00:00Z"
+                    }],
+                    "boardSpaceLinks": [{
+                        "id": "link-space", "boardId": "board-comet", "spaceId": "space-1",
+                        "createdAt": "2026-09-01T00:00:00Z"
+                    }],
+                    "tickets": [
+                        {
+                            "id": "ticket-epic", "boardId": "board-comet", "kind": "epic",
+                            "title": "Launch", "description": "Ship the app", "status": "inProgress",
+                            "priority": "high", "archived": false,
+                            "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-02T00:00:00Z"
+                        },
+                        {
+                            "id": "ticket-issue", "boardId": "board-comet", "kind": "issue",
+                            "parentTicketId": "ticket-epic", "title": "Checklist",
+                            "description": "Prepare release", "status": "todo", "priority": "medium",
+                            "archived": false, "createdAt": "2026-09-01T00:00:00Z",
+                            "updatedAt": "2026-09-03T00:00:00Z"
+                        }
+                    ],
+                    "chatLinks": [{
+                        "id": "link-chat", "ticketId": "ticket-issue", "chatId": "chat-alpha-1",
+                        "createdAt": "2026-09-01T00:00:00Z"
+                    }],
+                    "comments": [{
+                        "id": "comment-1", "ticketId": "ticket-issue", "body": "Ready to start",
+                        "author": "Agent", "createdAt": "2026-09-02T00:00:00Z",
+                        "updatedAt": "2026-09-02T00:00:00Z"
+                    }]
+                })),
                 methods::WATCH_SESSIONS => stream(json!([])),
                 methods::LIST_HARNESSES => RpcReply::Value(json!([
                     { "id": "claude-code", "name": "Claude Code", "supportsSteering": true,
@@ -1083,7 +1524,10 @@ mod tests {
                       "status": "complete",
                       "parts": [{ "kind": "text", "id": "t", "text": "hello back" }] }
                 ]})),
-                methods::MUTATE | methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE => {
+                methods::MUTATE
+                | methods::MUTATE_TICKET
+                | methods::QUEUE_COMMAND
+                | methods::QUEUE_MESSAGE => {
                     self.writes
                         .lock()
                         .unwrap()
@@ -1257,6 +1701,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_can_read_ticket_hierarchy_and_child_chats() {
+        let world = Arc::new(World::default());
+        let tools = tools(world, Origin::default());
+        let boards = tools.call("list_ticket_boards", json!({})).await.unwrap();
+        assert_eq!(boards["boards"][0]["spaces"][0]["path"], "/repo/comet");
+        assert_eq!(boards["boards"][0]["ticketCount"], 2);
+
+        let issues = tools
+            .call(
+                "list_tickets",
+                json!({
+                    "board": "Comet", "kind": "issue", "status": "todo", "query": "release"
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(issues["total"], 1);
+        assert_eq!(issues["tickets"][0]["title"], "Checklist");
+        assert_eq!(issues["tickets"][0]["boardName"], "Comet");
+
+        let ticket = tools
+            .call("get_ticket", json!({ "ticket": "Checklist" }))
+            .await
+            .unwrap();
+        assert_eq!(ticket["parent"]["id"], "ticket-epic");
+        assert_eq!(ticket["comments"][0]["body"], "Ready to start");
+        assert_eq!(ticket["linkedChats"][0]["id"], "chat-alpha-1");
+        assert_eq!(ticket["childChats"][0]["id"], "chat-beta-2");
+    }
+
+    #[tokio::test]
+    async fn agent_can_mutate_tickets_and_link_a_new_child_chat() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                device_id: Some("dev-local".into()),
+            },
+        );
+        let created = tools
+            .call(
+                "mutate_ticket",
+                json!({
+                    "op": "createTicket", "boardId": "board-comet", "kind": "issue",
+                    "parentTicketId": "ticket-epic", "title": "Smoke test"
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            created["ticketId"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+        let comment = tools
+            .call(
+                "mutate_ticket",
+                json!({
+                    "op": "createComment", "ticketId": "ticket-issue", "body": "Starting now"
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            comment["commentId"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+
+        let created_chat = tools.call("create_chat", json!({
+            "project": "comet", "ticket": "Checklist", "parent": "Alpha", "title": "Reviewer"
+        })).await.unwrap();
+        assert_eq!(created_chat["ticketId"], "ticket-issue");
+        let chat_id = created_chat["chatId"].as_str().unwrap();
+        let writes = world.writes.lock().unwrap();
+        assert_eq!(writes[0].0, methods::MUTATE_TICKET);
+        assert_eq!(writes[0].1["ticketId"], created["ticketId"]);
+        assert_eq!(writes[1].1["author"], "Agent (chat-alp)");
+        assert_eq!(writes[4].0, methods::MUTATE_TICKET);
+        assert_eq!(writes[4].1["op"], "linkTicketChat");
+        assert_eq!(writes[4].1["chatId"], chat_id);
+        assert_eq!(writes[4].1["ticketId"], "ticket-issue");
+    }
+
+    #[tokio::test]
     async fn wait_on_an_idle_chat_returns_immediately() {
         let world = Arc::new(World::default());
         let tools = tools(world, Origin::default());
@@ -1301,7 +1831,7 @@ mod tests {
         )
         .await;
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
-        assert_eq!(init["result"]["serverInfo"]["name"], "zeron");
+        assert_eq!(init["result"]["serverInfo"]["name"], "glitch-flow");
         let list =
             crate::jsonrpc::handle_request(&tools, json!(2), "tools/list", Value::Null).await;
         assert!(list["result"]["tools"].as_array().unwrap().len() >= 10);

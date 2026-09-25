@@ -27,12 +27,14 @@ use chrono::Utc;
 use tokio::sync::watch;
 
 use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
-use zeron_proto::{Chat, ChatConfig, Device, Session, SidebarPreferencesState, Space};
+use zeron_proto::{Chat, ChatConfig, Device, Session, SidebarPreferencesState, Space, TicketSnapshot};
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
 use crate::doc_host::EdgeConfig;
 use crate::http_error::describe_http_error;
 use crate::{EngineError, now_ms};
+
+mod tickets;
 
 /// Legacy Loro workspace snapshot row — now only read once, as the migration
 /// source for the registry seed. Kept on disk for rollback.
@@ -160,6 +162,7 @@ struct WorkspaceHostInner {
     devices_tx: watch::Sender<Vec<Device>>,
     sessions_tx: watch::Sender<Vec<Session>>,
     spaces_tx: watch::Sender<Vec<Space>>,
+    tickets_tx: watch::Sender<TicketSnapshot>,
     sidebar_preferences_tx: watch::Sender<SidebarPreferencesState>,
     room: Mutex<Option<Arc<RegistryClient>>>,
     /// Bumped on every registry change (local mutation or applied server
@@ -280,6 +283,7 @@ impl WorkspaceHost {
         let (devices_tx, _) = watch::channel(state.devices);
         let (sessions_tx, _) = watch::channel(state.sessions);
         let (spaces_tx, _) = watch::channel(state.spaces);
+        let (tickets_tx, _) = watch::channel(doc.read_tickets()?);
         let preferences = doc.sidebar_preferences();
         let (sidebar_preferences_tx, _) = watch::channel(SidebarPreferencesState {
             revision: 0,
@@ -304,6 +308,7 @@ impl WorkspaceHost {
                 devices_tx,
                 sessions_tx,
                 spaces_tx,
+                tickets_tx,
                 sidebar_preferences_tx,
                 room: Mutex::new(None),
                 changed_tx,
@@ -695,6 +700,10 @@ impl WorkspaceHost {
         self.inner.spaces_tx.subscribe()
     }
 
+    pub fn watch_tickets(&self) -> watch::Receiver<TicketSnapshot> {
+        self.inner.tickets_tx.subscribe()
+    }
+
     pub fn watch_sidebar_preferences(&self) -> watch::Receiver<SidebarPreferencesState> {
         self.inner.sidebar_preferences_tx.subscribe()
     }
@@ -895,8 +904,8 @@ impl WorkspaceHost {
         self.create_chat_with_parent(chat_id, space_id, device_id, config, cwd, None)
     }
 
-    /// [`create_chat`](Self::create_chat) recording the creating chat
-    /// (`parentChatId`) — the Zeron MCP's orchestration link.
+    /// [`create_chat`](Self::create_chat) recording the parent conversation
+    /// (`parentChatId`) for user-created children and agent workers.
     pub fn create_chat_with_parent(
         &self,
         chat_id: &str,
@@ -940,6 +949,7 @@ impl WorkspaceHost {
                 branch: None,
                 checkout_id: None,
                 source_context: None,
+                pull_request_urls: Vec::new(),
                 config,
                 last_message_preview: None,
                 last_message_at: None,
@@ -1043,6 +1053,14 @@ impl WorkspaceHost {
 
     pub fn rename_chat(&self, chat_id: &str, title: &str) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.rename_chat(chat_id, title))?)
+    }
+
+    pub fn set_chat_pull_request_urls(
+        &self,
+        chat_id: &str,
+        urls: &[String],
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_pull_request_urls(chat_id, urls))?)
     }
 
     /// Backdate a chat's activity timestamps (epoch ms). Returns false when
@@ -1192,9 +1210,12 @@ impl WorkspaceHostInner {
                 Err(error) => tracing::warn!(%error, "sidebar pin cleanup failed"),
             }
             self.publish_sidebar_preferences(&doc, registry_synced);
-            doc.read_all()
+            (doc.read_all(), doc.read_tickets())
         };
-        match snapshot {
+        if let Ok(tickets) = snapshot.1 {
+            publish_if_changed(&self.tickets_tx, tickets);
+        }
+        match snapshot.0 {
             Ok(mut state) => {
                 self.overlay_presence(&mut state.devices);
                 // Retain the latest value even with no subscribers, but don't

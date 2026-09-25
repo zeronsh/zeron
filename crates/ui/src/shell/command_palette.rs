@@ -154,14 +154,14 @@ impl Shell {
                 let branch =
                     crate::change_requests::conversation_branch(chat, &state.spaces).unwrap_or("");
                 let pr = state
-                    .change_request_for_chat(chat)
+                    .change_requests_for_chat(chat)
+                    .iter()
                     .map(|pr| {
-                        format!(
-                            "#{} {} {} {}",
-                            pr.number, pr.title, pr.head_ref, pr.base_ref
-                        )
+                        format!("#{} {} {} {}", pr.number, pr.title, pr.head_ref, pr.base_ref)
                     })
-                    .unwrap_or_default();
+                    .chain(chat.pull_request_urls.iter().cloned())
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 matches_query(
                     &query,
                     &format!(
@@ -298,8 +298,13 @@ impl Shell {
                 let pr = self
                     .settings
                     .sidebar_show_pull_request
-                    .then(|| state.change_request_for_chat(chat).cloned())
-                    .flatten();
+                    .then(|| state.change_requests_for_chat(chat).to_vec())
+                    .unwrap_or_default();
+                let pr_urls = self
+                    .settings
+                    .sidebar_show_pull_request
+                    .then(|| chat.pull_request_urls.clone())
+                    .unwrap_or_default();
                 let harness = self
                     .settings
                     .sidebar_show_harness
@@ -313,6 +318,7 @@ impl Shell {
                     folder.into(),
                     branch,
                     pr,
+                    pr_urls,
                     harness,
                     state.display_status_for(chat, Utc::now()),
                     ix == active,
@@ -321,6 +327,8 @@ impl Shell {
                     None,
                     None,
                     Some(&query),
+                    false,
+                    false,
                     &theme,
                     cx,
                 )

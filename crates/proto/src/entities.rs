@@ -194,6 +194,10 @@ pub struct Chat {
     /// chat sharing the same checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_context: Option<ConversationSourceContext>,
+    /// GitHub pull requests explicitly linked to this conversation. These are
+    /// retained across branch changes; checkout discovery may add more badges.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pull_request_urls: Vec<String>,
     pub config: Option<ChatConfig>,
     pub last_message_preview: Option<String>,
     pub last_message_at: Option<DateTime<Utc>>,
@@ -225,9 +229,8 @@ pub struct Chat {
     /// dials the room the registry names. Per-chat and instantly revertible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_gen: Option<u32>,
-    /// The chat whose agent created this one (via the Zeron MCP server):
-    /// a parent → child link for orchestration trees. Absent for chats a
-    /// human started; a dangling id (parent deleted) is tolerated.
+    /// Parent conversation for a user-created child thread or an agent-created
+    /// worker (via MCP). A dangling id (parent deleted) is tolerated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
 }
@@ -817,6 +820,15 @@ pub struct CheckoutChangeRequestStatus {
     pub device_id: String,
     pub cwd: String,
     pub branch: String,
+    /// `Some(false)` means the host's GitHub CLI needs authentication/setup;
+    /// `Some(true)` means a GitHub lookup succeeded on that host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_connected: Option<bool>,
+    /// Every pull request associated with the captured branch.
+    #[serde(default)]
+    pub change_requests: Vec<ChangeRequestSummary>,
+    /// Compatibility field for older clients; mirrors the first result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_request: Option<ChangeRequestSummary>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1147,6 +1159,8 @@ mod tests {
                 device_id: "device-1".into(),
                 cwd: "/repo".into(),
                 branch: "feature/change".into(),
+                github_connected: Some(true),
+                change_requests: vec![],
                 change_request: Some(ChangeRequestSummary {
                     provider: "github".into(),
                     number: 90,

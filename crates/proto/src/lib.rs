@@ -10,6 +10,7 @@ pub mod invocation;
 pub mod motion;
 pub mod preview;
 pub mod sidebar_pins;
+pub mod tickets;
 pub mod view;
 pub mod workspace;
 
@@ -17,6 +18,7 @@ pub use agent::*;
 pub use entities::*;
 pub use preview::*;
 pub use sidebar_pins::*;
+pub use tickets::*;
 pub use workspace::*;
 
 /// Parse "0.2.12" (tolerating a `-suffix`/`+build` tail on the last part)

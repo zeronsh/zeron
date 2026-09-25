@@ -5,23 +5,23 @@
 #   scripts/dev-demo.sh            # build, seed demo data, open the app
 #   scripts/dev-demo.sh --slow     # pace mock streams (~10s) to watch streaming
 #
-# Everything lives under /tmp/zeron-demo-*; re-runs reuse it. Ctrl-C cleans up.
+# Everything lives under /tmp/glitch-flow-demo-*; re-runs reuse it. Ctrl-C cleans up.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-DAEMON_DIR=/tmp/zeron-demo-daemon
-UI_DIR=/tmp/zeron-demo-ui
+DAEMON_DIR=/tmp/glitch-flow-demo-daemon
+UI_DIR=/tmp/glitch-flow-demo-ui
 IPC=27921
 DELAY=""
 [[ "${1:-}" == "--slow" ]] && DELAY=350
 
 echo "▸ building (first run takes a few minutes)…"
-cargo build -p zeron -q
+cargo build -p glitch-flow -q
 
 echo "▸ starting engine daemon on :$IPC"
-env ZERON_DATA_DIR="$DAEMON_DIR" ZERON_IPC_PORT=$IPC ZERON_HARNESS=mock \
-  ${DELAY:+ZERON_MOCK_DELAY_MS=$DELAY} RUST_LOG=warn \
-  ./target/debug/zeron headless &
+env GLITCH_FLOW_DATA_DIR="$DAEMON_DIR" GLITCH_FLOW_IPC_PORT=$IPC GLITCH_FLOW_HARNESS=mock \
+  ${DELAY:+GLITCH_FLOW_MOCK_DELAY_MS=$DELAY} RUST_LOG=warn \
+  ./target/debug/glitch-flow headless &
 DAEMON_PID=$!
 trap 'kill $DAEMON_PID 2>/dev/null || true' EXIT
 for _ in $(seq 1 40); do
@@ -36,7 +36,7 @@ if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
   DEV=$(probe LocalDevice '{}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["deviceId"])')
   # One space per demo folder, created up-front (chats join by space id).
   declare -A SPACES=()
-  for project in zeron soccertcg zeron aether; do
+  for project in glitch-flow soccertcg aether; do
     sid=$(uuidgen | tr 'A-Z' 'a-z')
     probe Mutate "{\"op\":\"createSpace\",\"spaceId\":\"$sid\",\"deviceId\":\"$DEV\",\"path\":\"$HOME/github/$project\"}" >/dev/null
     SPACES[$project]="$sid"
@@ -53,13 +53,13 @@ if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
     fi
     probe Mutate "{\"op\":\"setChatActivity\",\"chatId\":\"$id\",\"lastMessageAt\":$(( ($(date +%s) - $4*3600) * 1000 ))}" >/dev/null
   }
-  seed "Native Zeron Rust Rewrite"    zeron zeron/main                 0  run
-  seed "Rebalance Player Stats Caps"  soccertcg    zeron/rebalance-player-stat-caps  2  run
-  seed "Craft Premium TCG Experience" soccertcg    zeron/craft-premium-tcg-exp       26 skip
-  seed "Initial Context Exploration"  zeron        zeron/initial-context-exploration 14 skip
+  seed "Glitch Flow Local Client"      glitch-flow glitch-flow/main                 0  run
+  seed "Rebalance Player Stats Caps"  soccertcg   glitch-flow/rebalance-player-stat-caps  2  run
+  seed "Craft Premium TCG Experience" soccertcg   glitch-flow/craft-premium-tcg-exp       26 skip
+  seed "Initial Context Exploration"  glitch-flow glitch-flow/initial-context-exploration 14 skip
   seed "Soccer TCG Repo Creation"     aether       aether/main                       48 skip
   touch "$DAEMON_DIR/.demo-seeded"
 fi
 
-echo "▸ opening zeron (composer is live — type into it; --slow shows streaming)"
-ZERON_DATA_DIR="$UI_DIR" ZERON_IPC_PORT=$IPC RUST_LOG=warn ./target/debug/zeron
+echo "▸ opening Glitch Flow (composer is live — type into it; --slow shows streaming)"
+GLITCH_FLOW_DATA_DIR="$UI_DIR" GLITCH_FLOW_IPC_PORT=$IPC RUST_LOG=warn ./target/debug/glitch-flow

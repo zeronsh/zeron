@@ -3189,6 +3189,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "glitch-flow"
+version = "0.2.84"
+dependencies = [
+ "anyhow",
+ "clap",
+ "embed-resource",
+ "libc",
+ "mimalloc",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "windows-sys 0.61.2",
+ "zeron-engine",
+ "zeron-mcp",
+ "zeron-rpc",
+ "zeron-ui",
+ "zeron-update",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11739,28 +11761,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "zeron"
-version = "0.2.84"
-dependencies = [
- "anyhow",
- "clap",
- "embed-resource",
- "libc",
- "mimalloc",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "windows-sys 0.61.2",
- "zeron-engine",
- "zeron-mcp",
- "zeron-rpc",
- "zeron-ui",
- "zeron-update",
 ]
 
 [[package]]

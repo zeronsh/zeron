@@ -4,9 +4,9 @@
 //! Repos are device-local (paths differ per machine), so the known set is a plain
 //! JSON list (`{data_dir}/repos.json`) — no sync. Existing repos can live anywhere
 //! the user points us; cloned/created ones land in `{data_dir}/repos`. Worktrees are
-//! created under `~/.zeron/worktrees/<repoName>/<worktreeName>` (NOT the data
+//! created under `~/.glitch-flow/worktrees/<repoName>/<worktreeName>` (NOT the data
 //! dir — worktrees are user-facing working checkouts), with an auto-generated name +
-//! matching `zeron/<name>` branch. `ZERON_WORKTREES_DIR` overrides the root.
+//! matching `glitch-flow/<name>` branch. `GLITCH_FLOW_WORKTREES_DIR` overrides the root.
 //!
 //! All git access is via subprocess (`tokio::process`) — never libgit2.
 
@@ -53,7 +53,7 @@ const ADJECTIVES: &[&str] = &[
     "sharp", "gentle", "vivid", "amber", "cobalt",
 ];
 const NOUNS: &[&str] = &[
-    "otter", "harbor", "falcon", "cedar", "meadow", "zeron", "delta", "ember", "lynx", "maple",
+    "otter", "harbor", "falcon", "cedar", "meadow", "glitch", "delta", "ember", "lynx", "maple",
     "onyx", "quartz", "raven", "summit", "willow", "aspen",
 ];
 
@@ -82,13 +82,14 @@ pub(crate) fn home_dir() -> PathBuf {
 }
 
 /// Where new worktrees live. Deliberately NOT under the backend data dir —
-/// worktrees are user-facing working checkouts. `ZERON_WORKTREES_DIR` overrides
-/// (test isolation); empty reads as unset.
+/// worktrees are user-facing working checkouts. `GLITCH_FLOW_WORKTREES_DIR`
+/// overrides (test isolation); the legacy key remains supported.
 fn default_worktrees_root() -> PathBuf {
-    std::env::var_os("ZERON_WORKTREES_DIR")
+    std::env::var_os("GLITCH_FLOW_WORKTREES_DIR")
         .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var_os("ZERON_WORKTREES_DIR").filter(|s| !s.is_empty()))
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".zeron").join("worktrees"))
+        .unwrap_or_else(|| home_dir().join(".glitch-flow").join("worktrees"))
 }
 
 struct ReposInner {
@@ -126,7 +127,7 @@ impl Repos {
     }
 
     /// `data_dir` holds `repos.json` + cloned/created repos; the worktree root
-    /// comes from `$ZERON_WORKTREES_DIR` or `~/.zeron/worktrees`.
+    /// comes from `$GLITCH_FLOW_WORKTREES_DIR` or `~/.glitch-flow/worktrees`.
     pub fn new(data_dir: &Path, device_id: &str) -> Self {
         Self::with_worktrees_root(data_dir, device_id, default_worktrees_root())
     }
@@ -1049,10 +1050,43 @@ impl Repos {
         Ok(out.trim().to_string())
     }
 
+    /// Create and check out a new local branch. Git validates the ref name and
+    /// refuses to switch when local changes would be overwritten. Supplying a
+    /// base makes the operation independent of whatever branch happens to be
+    /// checked out when the RPC arrives.
+    pub async fn create_branch(
+        &self,
+        cwd: &Path,
+        branch: &str,
+        base_ref: Option<&str>,
+        checkout: bool,
+    ) -> Result<String, EngineError> {
+        let branch = branch.trim();
+        if branch.is_empty() {
+            return Err(EngineError::Other("Branch name cannot be empty".into()));
+        }
+        self.git(&["check-ref-format", "--branch", branch], Some(cwd))
+            .await?;
+        let mut args = if checkout {
+            vec!["switch", "--create", branch]
+        } else {
+            vec!["branch", "--", branch]
+        };
+        if let Some(base_ref) = base_ref.filter(|base| !base.trim().is_empty()) {
+            args.push(base_ref);
+        }
+        self.git(&args, Some(cwd)).await?;
+        if checkout {
+            self.current_branch(cwd).await
+        } else {
+            Ok(branch.to_owned())
+        }
+    }
+
     // ── worktrees ───────────────────────────────────────────────────────────
 
     /// `git worktree add` an isolated checkout under
-    /// `{worktrees_root}/<repoName>/<generatedName>`, on a fresh `zeron/<name>`
+    /// `{worktrees_root}/<repoName>/<generatedName>`, on a fresh `glitch-flow/<name>`
     /// branch off `branch`.
     pub async fn create_worktree(
         &self,
@@ -1084,7 +1118,9 @@ impl Repos {
                 ADJECTIVES[(seed % ADJECTIVES.len() as u64) as usize],
                 NOUNS[((seed / 31) % NOUNS.len() as u64) as usize]
             );
-            if !base.join(&candidate).exists() && !existing.contains(&format!("zeron/{candidate}"))
+            if !base.join(&candidate).exists()
+                && !existing.contains(&format!("glitch-flow/{candidate}"))
+                && !existing.contains(&format!("zeron/{candidate}"))
             {
                 name = Some(candidate);
                 break;
@@ -1092,17 +1128,15 @@ impl Repos {
         }
         let name =
             name.ok_or_else(|| EngineError::Other("Could not allocate a worktree name".into()))?;
-        let path = base.join(&name);
-        let branch_name = format!("zeron/{name}");
+        let path = normalize_worktree_path(base.join(&name));
+        let branch_name = format!("glitch-flow/{name}");
+        // Rust's `canonicalize()` returns `\\?\` paths on Windows. Git's
+        // path conversion turns an extended destination into `//?/C:/...`,
+        // which Git rejects; terminals also cannot use that form as a shell
+        // cwd. Return the ordinary Win32 spelling throughout the engine.
+        let path_arg = path.to_string_lossy();
         self.git(
-            &[
-                "worktree",
-                "add",
-                "-b",
-                &branch_name,
-                &path.to_string_lossy(),
-                branch,
-            ],
+            &["worktree", "add", "-b", &branch_name, &path_arg, branch],
             Some(repo_path),
         )
         .await?;
@@ -1130,10 +1164,10 @@ impl Repos {
         .is_ok()
     }
 
-    /// Rename a zeron-created worktree branch after its chat's generated title
+    /// Rename a client-created worktree branch after its chat's generated title
     /// (port of zeron's `renameWorktreeBranch`). Guards:
     /// - respect an external checkout/rename: only act while the worktree is still
-    ///   on `expected_branch` AND that branch is the original `zeron/<folderName>`;
+    ///   on `expected_branch` AND that branch is the original client branch;
     /// - a title-slug collision gets a stable 6-hex suffix (hash of the worktree
     ///   path); a collision on THAT too fails.
     ///
@@ -1150,7 +1184,10 @@ impl Repos {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        if current != expected_branch || expected_branch != format!("zeron/{folder}") {
+        if current != expected_branch
+            || (expected_branch != format!("glitch-flow/{folder}")
+                && expected_branch != format!("zeron/{folder}"))
+        {
             return Ok(current);
         }
         let preferred = worktree_branch_from_title(title);
@@ -1179,7 +1216,7 @@ impl Repos {
     }
 
     /// Best-effort worktree removal (if it still exists), then prune stale refs.
-    /// Deletes the worktree's branch ONLY when zeron created it (`zeron/…`) — the
+    /// Deletes the worktree's branch ONLY when the client created it — the
     /// user may have checked out their own branch inside the worktree.
     pub async fn delete_worktree(
         &self,
@@ -1209,7 +1246,7 @@ impl Repos {
             }
         }
         let _ = self.git(&["worktree", "prune"], Some(repo_path)).await;
-        if branch.starts_with("zeron/") {
+        if branch.starts_with("glitch-flow/") || branch.starts_with("zeron/") {
             let _ = self.git(&["branch", "-D", &branch], Some(repo_path)).await;
         }
         Ok(())
@@ -1338,6 +1375,23 @@ impl Repos {
     }
 }
 
+#[cfg(windows)]
+fn normalize_worktree_path(path: PathBuf) -> PathBuf {
+    let value = path.to_string_lossy().into_owned();
+    if let Some(unc_path) = value.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{unc_path}"))
+    } else if let Some(drive_path) = value.strip_prefix(r"\\?\") {
+        PathBuf::from(drive_path)
+    } else {
+        path
+    }
+}
+
+#[cfg(not(windows))]
+fn normalize_worktree_path(path: PathBuf) -> PathBuf {
+    path
+}
+
 struct CancelOnDrop(std::sync::Arc<AtomicBool>);
 
 impl Drop for CancelOnDrop {
@@ -1365,7 +1419,7 @@ async fn disposable_worker<T: Send + 'static>(
 fn list_folders_blocking(target: &Path) -> Result<FolderListing, EngineError> {
     let read = std::fs::read_dir(target).map_err(|e| match e.kind() {
         std::io::ErrorKind::PermissionDenied => {
-            EngineError::Other("Zeron doesn't have access to this folder on the device.".into())
+            EngineError::Other("Glitch Flow doesn't have access to this folder on the device.".into())
         }
         _ => EngineError::Other(format!("could not read that folder: {e}")),
     })?;
@@ -1986,7 +2040,7 @@ pub fn worktree_branch_from_title(title: &str) -> String {
     }
     slug.truncate(48);
     let slug = slug.trim_matches('-');
-    format!("zeron/{}", if slug.is_empty() { "update" } else { slug })
+    format!("glitch-flow/{}", if slug.is_empty() { "update" } else { slug })
 }
 
 fn bounded_field(value: &str, max_chars: usize) -> String {
@@ -2152,6 +2206,70 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git_for_test(repo: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn init_branch_test_repo(repo: &Path) {
+        std::fs::create_dir_all(repo).unwrap();
+        git_for_test(repo, &["init", "-q", "-b", "main"]);
+        git_for_test(repo, &["config", "user.email", "test@example.com"]);
+        git_for_test(repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("tracked.txt"), "main\n").unwrap();
+        git_for_test(repo, &["add", "tracked.txt"]);
+        git_for_test(repo, &["commit", "-qm", "main"]);
+    }
+
+    #[tokio::test]
+    async fn create_branch_uses_explicit_base_and_preserves_dirty_checkout() {
+        let data = tempfile::tempdir().unwrap();
+        let repo = data.path().join("repo");
+        init_branch_test_repo(&repo);
+        git_for_test(&repo, &["switch", "-q", "-c", "base"]);
+        std::fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        git_for_test(&repo, &["commit", "-qam", "base change"]);
+        let base_head = git_for_test(&repo, &["rev-parse", "HEAD"]);
+        git_for_test(&repo, &["switch", "-q", "main"]);
+
+        let repos =
+            Repos::with_worktrees_root(data.path(), "device", data.path().join("worktrees"));
+        repos
+            .create_branch(&repo, "feature/from-base", Some("base"), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            git_for_test(&repo, &["rev-parse", "feature/from-base"]),
+            base_head,
+            "branch must start at the selected base"
+        );
+        assert_eq!(git_for_test(&repo, &["branch", "--show-current"]), "main");
+
+        std::fs::write(repo.join("tracked.txt"), "local dirty edit\n").unwrap();
+        let error = repos
+            .create_branch(&repo, "feature/dirty", Some("base"), true)
+            .await
+            .expect_err("switching over a conflicting dirty edit must fail");
+        assert!(
+            error.to_string().contains("would be overwritten"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("tracked.txt")).unwrap(),
+            "local dirty edit\n"
+        );
+        assert_eq!(git_for_test(&repo, &["branch", "--show-current"]), "main");
+    }
 
     fn history_commit(sha: String, parent_sha: Option<String>) -> GitHistoryCommit {
         GitHistoryCommit {

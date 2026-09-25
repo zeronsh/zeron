@@ -11,7 +11,7 @@
 //
 // Protocol: JSONL, one frame per line.
 //   stdin  (engine → shim):
-//     {"op":"run","prompt","cwd","model"?,"modelOptions"?,"resume"?}   start / first turn
+//     {"op":"run","prompt","cwd","model"?,"modelOptions"?,"resume"?,"mcpServers"?}   start / first turn
 //     {"op":"user","prompt"}                            next turn (parked)
 //     {"op":"interrupt"}                                cancel the live run
 //   stdout (shim → engine):
@@ -493,6 +493,12 @@ async function start(msg) {
     disallowedTools: ["askQuestion", "generateImage"],
     local,
   };
+  if (msg.mcpServers && Object.keys(msg.mcpServers).length) {
+    // Inline MCP servers are not persisted by @cursor/sdk. Supply the same
+    // per-chat server to Agent.create and Agent.resume without writing a
+    // project or user mcp.json file.
+    options.mcpServers = msg.mcpServers;
+  }
   try {
     // SDK startup validates the model via get_models. Rapid process resumes
     // can hit its 30/minute limit. Retry ONLY this pre-send discovery failure;

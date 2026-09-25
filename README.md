@@ -1,68 +1,48 @@
-# Zeron
+# Glitch Flow
 
-Control your coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Antigravity) locally by default, with optional multi-device sync.
+Glitch Flow is a native Rust desktop prototype for working with coding agents. It
+uses GPUI for the conversation, workspace, file, editor, and Git views. The
+default appearance is a restrained graphite theme.
 
-*English | [简体中文](README.zh-CN.md)*
+## Try the Windows demo
 
-![Zeron driving a Claude Code session with a live branch diff sidebar](apps/landing/public/assets/app-screenshot.jpg)
+From PowerShell in this repository:
 
-Every device runs a small engine that stores sessions on that device. A new installation starts in local-only mode without an account or a network connection.
-
-## Install and run locally (Linux)
-
-```bash
-curl -fsSL https://zeron.sh/install.sh | sh
-zeron status
+```powershell
+.\scripts\dev-demo.ps1
 ```
 
-The installer starts the daemon immediately and keeps it running across reboots. No sign-in or sync configuration is required.
+The script builds the app, starts an isolated local mock engine, seeds a small
+Git project, sample conversations, and a task board, then opens Glitch Flow. Closing the app stops
+the demo engine. No agent account or cloud service is needed for this demo.
 
-The desktop sidebar browser also needs the [Linux browser runtime](docs/reference/linux-browser.md).
+For development outside the seeded demo, run `cargo run --locked -p glitch-flow`.
+The local app command and packages use `glitch-flow`. Shared Rust library crate
+names retain their upstream identifiers for now.
 
-Day-to-day:
+## Current scope
 
-```bash
-zeron status      # local/synced mode and engine status
-zeron update      # update to the latest release
-zeron daemon start|stop|restart|status
-```
+- Local conversations, agent selection, and agent-supplied model choices.
+- Native Tasks with boards, epics, issues, subissues, comments, list/board views,
+  and links to agent conversations. Agents can manage the same records through
+  the app's MCP tools.
+- Branch and worktree selection for a conversation's Git workspace.
+- Multiple GitHub pull request links on one conversation. Discovery uses `gh`
+  authenticated on the selected device; links can also be attached manually.
+- Optional sync with connected devices through an explicitly configured edge.
+  This prototype does not connect to Zeron's production account service or
+  provide managed cloud compute.
 
-## Optional multi-device sync
+For GitHub sign-in and multi-device sync, see [Glitch Flow cloud setup](docs/production-cloud.md).
+The service address is packaged with a configured release; users sign in on
+each computer with their own GitHub account.
 
-Sign in only when you want to open your account's synced workspace. Authentication changes the profile selected by the next engine start, so stop the daemon before changing it:
+See [PROTOTYPE.md](PROTOTYPE.md) for the demo workflow and current limitations.
 
-```bash
-zeron daemon stop
-zeron login
-zeron daemon start
-```
+## Origin and license
 
-You can then start an agent on one synced device and follow or drive it from another. An always-on machine such as a VPS can keep those agents working after you close your laptop.
-
-Devices signed in to the same synced account are trusted with remote workspace access. A device controlling a workspace on another device can list, read, and write its files; enabling `Show ignored files` also makes gitignored files such as `.env` available remotely. `.git` is always excluded. Only sign in devices you trust with the full contents of your workspaces.
-
-Signing in does not upload, move, or import existing local sessions. Local sessions and their attachments remain under the local profile and reappear when you return to local-only mode:
-
-```bash
-zeron daemon stop
-zeron logout
-zeron daemon start
-```
-
-`zeron login` and `zeron logout` refuse to modify credentials while an engine owns the data directory. The desktop app follows the same next-restart profile boundary.
-
-On macOS: use the desktop release, or build `zeron` from source and run `zeron daemon install` to install the launchd service.
-
-On Windows: extract the portable release ZIP and run `zeron.exe`. Keep `zeron-update.json` beside it for in-app updates. See the [development notes](docs/reference/windows-development.md) for source builds.
-
-## Sponsors
-
-Thank you to [The Context Company](https://www.thecontextcompany.com/) for sponsoring Zeron.
-
-You can help fund Zeron's development too. Individuals and companies are welcome to [become a sponsor on GitHub](https://github.com/sponsors/zeronsh).
-
----
-
-Developing or curious how it works? [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/zeronsh/zeron) or check out [ARCHITECTURE.md](ARCHITECTURE.md).
-
-Licensed under the [MIT License](LICENSE).
+Glitch Flow currently builds on [Zeron](https://github.com/zeronsh/zeron) commit
+`a9a78d7`. The existing source and its changes retain Zeron's
+[MIT license](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
+Glitch Flow's name and new icon identify this prototype; they do not change the
+provenance of the underlying code.

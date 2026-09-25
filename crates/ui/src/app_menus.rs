@@ -165,7 +165,7 @@ pub fn app_menus() -> Vec<Menu> {
     // what we pass, but gpui still wants a name.
     let mut app_items = vec![
         // The native AppKit about panel; no equivalent elsewhere yet.
-        MenuItem::action("About Zeron", About).disabled(!macos),
+        MenuItem::action("About Glitch Flow", About).disabled(!macos),
         MenuItem::separator(),
         MenuItem::action("Settings", shell::OpenSettings),
         MenuItem::separator(),
@@ -174,16 +174,16 @@ pub fn app_menus() -> Vec<Menu> {
         app_items.extend([
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action("Hide Zeron", Hide),
+            MenuItem::action("Hide Glitch Flow", Hide),
             MenuItem::action("Hide Others", HideOthers),
             MenuItem::action("Show All", ShowAll),
             MenuItem::separator(),
         ]);
     }
-    app_items.push(MenuItem::action("Quit Zeron", Quit));
+    app_items.push(MenuItem::action("Quit Glitch Flow", Quit));
 
     let mut menus = vec![
-        Menu::new("Zeron").items(app_items),
+        Menu::new("Glitch Flow").items(app_items),
         // Standard clipboard verbs tied to the composer's existing actions via
         // their native selectors (`OsAction` → cut:/copy:/paste:/selectAll:),
         // so the OS Edit menu routes through the responder chain to the focused
@@ -239,11 +239,11 @@ mod tests {
     #[test]
     fn app_menu_ends_with_quit() {
         let menus = app_menus();
-        assert_eq!(menus[0].name.as_ref(), "Zeron");
+        assert_eq!(menus[0].name.as_ref(), "Glitch Flow");
         let Some(MenuItem::Action { name, action, .. }) = menus[0].items.last() else {
             panic!("last app-menu item must be an action");
         };
-        assert_eq!(name.as_ref(), "Quit Zeron");
+        assert_eq!(name.as_ref(), "Quit Glitch Flow");
         assert_eq!(action.name(), Quit.name());
     }
 
@@ -358,7 +358,7 @@ mod tests {
 
 // Standard AppKit about panel. Icon and copyright still come from the bundle's
 // Info.plist; name and version are passed explicitly so unbundled dev builds
-// (`cargo run`) show "Zeron" and the crate version instead of the process name.
+// (`cargo run`) show the prototype name and crate version instead of the process name.
 #[cfg(target_os = "macos")]
 mod about_panel {
     use objc2::MainThreadMarker;
@@ -373,7 +373,7 @@ mod about_panel {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let name = NSString::from_str("Zeron");
+        let name = NSString::from_str("Glitch Flow");
         let version = NSString::from_str(env!("CARGO_PKG_VERSION"));
         // Empty build version: CFBundleVersion equals the marketing version, and
         // AppKit would otherwise render "Version 0.2.61 (0.2.61)".

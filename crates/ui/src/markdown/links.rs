@@ -19,7 +19,7 @@ pub enum LinkAction {
     /// Normal click or keyboard activation; the user's persisted preference
     /// decides whether this routes internally or externally.
     Primary,
-    /// Explicit "Open in Zeron" context-menu action.
+    /// Explicit "Open in Glitch Flow" context-menu action.
     Internal,
     External,
     Copy,

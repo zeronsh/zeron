@@ -5,17 +5,17 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>Zeron Dev</string>
+    <string>Glitch Flow Dev</string>
     <key>CFBundleExecutable</key>
-    <string>zeron</string>
+    <string>glitch-flow</string>
     <key>CFBundleIconFile</key>
-    <string>zeron.icns</string>
+    <string>glitch-flow.icns</string>
     <key>CFBundleIdentifier</key>
-    <string>sh.zeron.app.dev</string>
+    <string>local.glitchflow.app.dev</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Zeron Dev</string>
+    <string>Glitch Flow Dev</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -29,9 +29,9 @@
          the same isolated development instance. -->
     <key>LSEnvironment</key>
     <dict>
-        <key>ZERON_DATA_DIR</key>
+        <key>GLITCH_FLOW_DATA_DIR</key>
         <string>__DATA_DIR__</string>
-        <key>ZERON_IPC_PORT</key>
+        <key>GLITCH_FLOW_IPC_PORT</key>
         <string>__IPC_PORT__</string>
     </dict>
     <key>NSHighResolutionCapable</key>

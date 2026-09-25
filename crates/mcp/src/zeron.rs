@@ -45,8 +45,8 @@ impl Origin {
                 .filter(|v| !v.is_empty())
         };
         Self {
-            chat_id: read("ZERON_CHAT_ID"),
-            device_id: read("ZERON_DEVICE_ID"),
+            chat_id: read("GLITCH_FLOW_CHAT_ID").or_else(|| read("ZERON_CHAT_ID")),
+            device_id: read("GLITCH_FLOW_DEVICE_ID").or_else(|| read("ZERON_DEVICE_ID")),
         }
     }
 }
@@ -247,6 +247,11 @@ impl Zeron {
         self.snapshot_as(methods::WATCH_SESSIONS, json!({})).await
     }
 
+    /// A profile-wide snapshot of boards, issues, comments and chat links.
+    pub async fn tickets(&self) -> anyhow::Result<Value> {
+        self.snapshot(methods::WATCH_TICKETS, json!({})).await
+    }
+
     pub async fn harnesses(&self) -> anyhow::Result<Vec<HarnessInfo>> {
         let value = self.call(methods::LIST_HARNESSES, json!({})).await?;
         serde_json::from_value(value).context("ListHarnesses: unexpected shape")
@@ -296,6 +301,10 @@ impl Zeron {
 
     pub async fn mutate(&self, params: Value) -> anyhow::Result<Value> {
         self.call(methods::MUTATE, params).await
+    }
+
+    pub async fn mutate_ticket(&self, params: Value) -> anyhow::Result<Value> {
+        self.call(methods::MUTATE_TICKET, params).await
     }
 
     /// Durable command into the chat doc; the host device drains it.
@@ -595,6 +604,7 @@ mod tests {
             branch: None,
             checkout_id: None,
             source_context: None,
+            pull_request_urls: Vec::new(),
             config: None,
             last_message_preview: None,
             last_message_at: None,

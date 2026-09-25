@@ -272,8 +272,8 @@ impl CheckoutChangeRequests {
         }
 
         match self.inner.lookup.resolve_github_source(source).await {
-            Ok(change_request) => {
-                let ttl = if change_request.is_some() {
+            Ok(change_requests) => {
+                let ttl = if !change_requests.is_empty() {
                     self.inner.timing.with_change_request_ttl
                 } else {
                     self.inner.timing.without_change_request_ttl
@@ -283,7 +283,9 @@ impl CheckoutChangeRequests {
                     device_id: self.inner.device_id.clone(),
                     cwd: source.checkout_root.to_string_lossy().into_owned(),
                     branch: source.branch.local_branch.clone(),
-                    change_request,
+                    github_connected: Some(true),
+                    change_request: change_requests.first().cloned(),
+                    change_requests,
                     updated_at: chrono::Utc::now(),
                 };
                 state.last_success = Some(snapshot.clone());
@@ -304,7 +306,30 @@ impl CheckoutChangeRequests {
                     tracing::warn!(%error, "change request refresh failed; retaining last success");
                     state.last_error = Some(error);
                 }
-                (state.last_success.clone(), state.next_refresh)
+                let snapshot = if matches!(
+                    error,
+                    ChangeRequestError::Authentication | ChangeRequestError::CliUnavailable
+                ) {
+                    let mut snapshot = state.last_success.clone().unwrap_or_else(|| {
+                        CheckoutChangeRequestStatus {
+                            checkout_id: key.checkout_id.clone(),
+                            device_id: self.inner.device_id.clone(),
+                            cwd: source.checkout_root.to_string_lossy().into_owned(),
+                            branch: source.branch.local_branch.clone(),
+                            github_connected: None,
+                            change_requests: Vec::new(),
+                            change_request: None,
+                            updated_at: chrono::Utc::now(),
+                        }
+                    });
+                    snapshot.github_connected = Some(false);
+                    snapshot.updated_at = chrono::Utc::now();
+                    state.last_success = Some(snapshot.clone());
+                    Some(snapshot)
+                } else {
+                    state.last_success.clone()
+                };
+                (snapshot, state.next_refresh)
             }
         }
     }
@@ -362,7 +387,9 @@ struct SemanticStatus {
     device_id: String,
     cwd: String,
     branch: String,
+    github_connected: Option<bool>,
     change_request: Option<zeron_proto::ChangeRequestSummary>,
+    change_requests: Vec<zeron_proto::ChangeRequestSummary>,
 }
 
 impl From<&CheckoutChangeRequestStatus> for SemanticStatus {
@@ -372,7 +399,9 @@ impl From<&CheckoutChangeRequestStatus> for SemanticStatus {
             device_id: status.device_id.clone(),
             cwd: status.cwd.clone(),
             branch: status.branch.clone(),
+            github_connected: status.github_connected,
             change_request: status.change_request.clone(),
+            change_requests: status.change_requests.clone(),
         }
     }
 }
@@ -419,14 +448,14 @@ mod tests {
 
     struct FakeLookup {
         source: Mutex<CheckoutSourceContext>,
-        results: Mutex<VecDeque<Result<Option<ChangeRequestSummary>, ChangeRequestError>>>,
+        results: Mutex<VecDeque<Result<Vec<ChangeRequestSummary>, ChangeRequestError>>>,
         resolves: AtomicUsize,
     }
 
     impl FakeLookup {
         fn new(
             source: CheckoutSourceContext,
-            results: impl IntoIterator<Item = Result<Option<ChangeRequestSummary>, ChangeRequestError>>,
+            results: impl IntoIterator<Item = Result<Vec<ChangeRequestSummary>, ChangeRequestError>>,
         ) -> Arc<Self> {
             Arc::new(Self {
                 source: Mutex::new(source),
@@ -456,7 +485,7 @@ mod tests {
         async fn resolve_github_source(
             &self,
             _source: &CheckoutSourceContext,
-        ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError> {
+        ) -> Result<Vec<ChangeRequestSummary>, ChangeRequestError> {
             self.resolves.fetch_add(1, Ordering::AcqRel);
             self.results
                 .lock()
@@ -521,7 +550,7 @@ mod tests {
 
     #[tokio::test]
     async fn requested_conversation_branch_overrides_live_checkout_branch() {
-        let lookup = FakeLookup::new(source("main"), [Ok(Some(pull_request(90)))]);
+        let lookup = FakeLookup::new(source("main"), [Ok(vec![pull_request(90)])]);
         let service = service(lookup, Timing::default());
         let mut stream = service.watch_checkout_for_branch(
             PathBuf::from("/checkout"),
@@ -534,7 +563,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_subscribers_share_one_provider_query() {
-        let lookup = FakeLookup::new(source("feature/status"), [Ok(Some(pull_request(90)))]);
+        let lookup = FakeLookup::new(source("feature/status"), [Ok(vec![pull_request(90)])]);
         let service = service(lookup.clone(), Timing::default());
         let mut first = service.watch_checkout(PathBuf::from("/chat-a"), identity());
         let mut second = service.watch_checkout(PathBuf::from("/chat-b"), identity());
@@ -550,7 +579,7 @@ mod tests {
     async fn branch_change_moves_to_a_new_cache_key() {
         let lookup = FakeLookup::new(
             source("feature/one"),
-            [Ok(Some(pull_request(1))), Ok(Some(pull_request(2)))],
+            [Ok(vec![pull_request(1)]), Ok(vec![pull_request(2)])],
         );
         let service = service(lookup.clone(), fast_timing());
         let mut stream = service.watch_checkout(PathBuf::from("/checkout"), identity());
@@ -572,7 +601,7 @@ mod tests {
     async fn successful_none_clears_a_previous_pull_request() {
         let lookup = FakeLookup::new(
             source("feature/status"),
-            [Ok(Some(pull_request(90))), Ok(None)],
+            [Ok(vec![pull_request(90)]), Ok(vec![])],
         );
         let service = service(lookup, fast_timing());
         let mut stream = service.watch_checkout(PathBuf::from("/checkout"), identity());
@@ -591,9 +620,9 @@ mod tests {
         let lookup = FakeLookup::new(
             source("feature/status"),
             [
-                Ok(Some(pull_request(90))),
-                Ok(Some(pull_request(90))),
-                Ok(Some(pull_request(91))),
+                Ok(vec![pull_request(90)]),
+                Ok(vec![pull_request(90)]),
+                Ok(vec![pull_request(91)]),
             ],
         );
         let service = service(lookup.clone(), fast_timing());
@@ -617,7 +646,7 @@ mod tests {
         let lookup = FakeLookup::new(
             source("feature/status"),
             [
-                Ok(Some(pull_request(90))),
+                Ok(vec![pull_request(90)]),
                 Err(ChangeRequestError::RateLimited),
             ],
         );
@@ -644,7 +673,7 @@ mod tests {
         let lookup = FakeLookup::new(
             source.clone(),
             [
-                Ok(Some(pull_request(90))),
+                Ok(vec![pull_request(90)]),
                 Err(ChangeRequestError::Authentication),
                 Err(ChangeRequestError::RateLimited),
             ],
@@ -666,8 +695,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(2)).await;
         let (after_rate_limit, _) = service.refresh(&key, &source).await;
 
-        assert_eq!(after_auth, first);
-        assert_eq!(after_rate_limit, first);
+        assert_eq!(after_auth.as_ref().unwrap().github_connected, Some(false));
+        assert_eq!(
+            after_auth.as_ref().unwrap().change_requests,
+            first.as_ref().unwrap().change_requests
+        );
+        assert_eq!(after_rate_limit, after_auth);
         assert_eq!(lookup.resolve_count(), 3);
     }
 
@@ -701,7 +734,7 @@ mod tests {
     async fn dropping_last_subscriber_evicts_cache_and_stops_refresh_work() {
         let lookup = FakeLookup::new(
             source("feature/status"),
-            [Ok(Some(pull_request(90))), Ok(Some(pull_request(91)))],
+            [Ok(vec![pull_request(90)]), Ok(vec![pull_request(91)])],
         );
         let service = service(lookup.clone(), fast_timing());
         let mut stream = service.watch_checkout(PathBuf::from("/checkout"), identity());
@@ -723,7 +756,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_ends_an_active_stream() {
-        let lookup = FakeLookup::new(source("feature/status"), [Ok(Some(pull_request(90)))]);
+        let lookup = FakeLookup::new(source("feature/status"), [Ok(vec![pull_request(90)])]);
         let service = service(lookup, Timing::default());
         let mut stream = service.watch_checkout(PathBuf::from("/checkout"), identity());
         stream.next().await.unwrap();

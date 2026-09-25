@@ -21,10 +21,13 @@ const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const LATEST_PROTOCOL: &str = "2025-06-18";
 
 const INSTRUCTIONS: &str = "\
-Zeron runs coding agents in chats, each hosted on a device inside a project \
-(a folder on that device). These tools operate the local Zeron engine: \
-discover devices/projects/chats, create chats with a chosen harness and \
-model, read transcripts, and send messages between chats.\n\
+Glitch Flow runs coding agents in chats, each hosted on a device inside a \
+project (a folder on that device). Native ticket boards contain epics, issues, \
+and subissues; they may link to device folders and agent chats. These tools \
+operate the same local engine as the desktop UI. Use `list_ticket_boards`, \
+`list_tickets`, and `get_ticket` to read work, then `mutate_ticket` to create \
+or change boards, tickets, comments, and links. `create_chat` can attach a new \
+child chat to a ticket.\n\
 \n\
 Chats are referenced by full id, a unique id prefix, or an exact title. Use \
 `whoami` to learn which chat you are speaking from; messages you send are \
@@ -141,7 +144,7 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                     "protocolVersion": version,
                     "capabilities": { "tools": { "listChanged": false } },
                     "serverInfo": {
-                        "name": "zeron",
+                        "name": "glitch-flow",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
                     "instructions": INSTRUCTIONS,

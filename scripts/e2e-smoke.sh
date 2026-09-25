@@ -91,9 +91,9 @@ echo "build: zeron + e2e_driver"
 # Two invocations: a single one with `--example` builds ONLY the example
 # (the target filter applies across every -p), silently skipping the zeron
 # bin — the smoke then dies on "No such file or directory".
-(cd "$ROOT" && cargo build -q -p zeron)
+(cd "$ROOT" && cargo build -q -p glitch-flow)
 (cd "$ROOT" && cargo build -q -p zeron-rpc --example e2e_driver)
-ZERON="$ROOT/target/debug/zeron"
+ZERON="$ROOT/target/debug/glitch-flow"
 DRIVER="$ROOT/target/debug/examples/e2e_driver"
 
 # ── 3. Two headless engines, one user, two devices ─────────────────────────────

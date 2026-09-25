@@ -45,12 +45,16 @@ pub fn format_last_seen(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) ->
     }
 }
 
-/// Scope-aware copy: a local registry describes only the active local
-/// workspace and must not imply that account device metadata is already live.
+/// Scope-aware onboarding copy: local devices stay on this computer until
+/// account sync is enabled; signed-in computers register automatically.
 pub fn devices_subtitle(scope: Option<WorkspaceScope>) -> &'static str {
     match scope {
-        Some(WorkspaceScope::Local) => "Manage device details stored in this local workspace.",
-        Some(WorkspaceScope::Synced) => "Manage device names and inspect synced device metadata.",
+        Some(WorkspaceScope::Local) => {
+            "This is a local workspace. Choose Enable sync in the account menu and sign in with GitHub before connecting another computer."
+        }
+        Some(WorkspaceScope::Synced) => {
+            "Sign in with the same GitHub account on another computer and select this workspace. Its device appears here automatically."
+        }
         Some(WorkspaceScope::Development) | None => "Manage device names for this workspace.",
     }
 }

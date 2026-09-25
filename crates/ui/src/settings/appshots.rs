@@ -332,7 +332,7 @@ impl ShortcutsPage {
                                             .text_size(px(12.0))
                                             .text_color(theme.text_muted)
                                             .child(
-                                                "Changed a permission? Check again after returning to Zeron.",
+                                                "Changed a permission? Check again after returning to Glitch Flow.",
                                             ),
                                     )
                                     .child(refresh),

@@ -259,7 +259,28 @@ impl ChangeRequestClientState {
         chat: &Chat,
         spaces: &[Space],
     ) -> Option<&'a ChangeRequestSummary> {
-        change_request_for_chat(chat, spaces, self.snapshots.values())
+        change_requests_for_chat(chat, spaces, self.snapshots.values()).first()
+    }
+
+    pub fn change_requests_for_chat<'a>(
+        &'a self,
+        chat: &Chat,
+        spaces: &[Space],
+    ) -> &'a [ChangeRequestSummary] {
+        change_requests_for_chat(chat, spaces, self.snapshots.values())
+    }
+
+    pub fn github_connected_for_chat(&self, chat: &Chat) -> Option<bool> {
+        let source = chat.source_context.as_ref()?;
+        self.snapshots
+            .values()
+            .find(|snapshot| {
+                snapshot.device_id == chat.device_id
+                    && snapshot.cwd == source.repo_root
+                    && snapshot.branch == source.branch
+                    && snapshot.checkout_id == source.checkout_id
+            })
+            .and_then(|snapshot| snapshot.github_connected)
     }
 }
 
@@ -321,11 +342,86 @@ pub fn change_request_for_chat<'a>(
     spaces: &[Space],
     snapshots: impl IntoIterator<Item = &'a CheckoutChangeRequestStatus>,
 ) -> Option<&'a ChangeRequestSummary> {
-    let branch = conversation_branch(chat, spaces)?.trim();
-    if branch.is_empty() {
+    change_requests_for_chat(chat, spaces, snapshots).first()
+}
+
+/// Badge for a PR URL explicitly linked to a conversation. Its number and
+/// destination come from the saved GitHub URL; live state comes from branch
+/// discovery when available.
+pub(crate) fn linked_pull_request_badge(
+    id: SharedString,
+    url: String,
+    theme: &Theme,
+) -> Option<AnyElement> {
+    let parsed = url::Url::parse(&url).ok()?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
         return None;
     }
-    let source = chat.source_context.as_ref()?;
+    let segments: Vec<_> = parsed.path_segments()?.collect();
+    let number = segments
+        .windows(2)
+        .find(|pair| pair[0] == "pull")?
+        .get(1)?
+        .parse::<u64>()
+        .ok()?;
+    let color = theme.code_text;
+    let destination = parsed.to_string();
+    Some(
+        div()
+            .id(id)
+            .h(px(16.0))
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(3.0))
+            .px(px(4.0))
+            .rounded(px(4.0))
+            .bg(color.opacity(0.08))
+            .text_size(px(10.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(color.opacity(0.85))
+            .cursor_pointer()
+            .hover(move |style| style.bg(color.opacity(0.16)).text_color(color))
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                cx.open_url(&destination);
+            })
+            .child(crate::icons::icon(crate::icons::PULL_REQUEST).size(px(10.0)).flex_none())
+            .child(div().font_family(theme.font_mono.clone()).child(format!("Linked #{number}")))
+            .into_any_element(),
+    )
+}
+
+pub(crate) fn is_github_pull_request_url(raw: &str) -> bool {
+    let Ok(url) = url::Url::parse(raw.trim()) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.path_segments().is_some_and(|segments| {
+            segments
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|pair| pair[0] == "pull" && pair[1].parse::<u64>().is_ok_and(|n| n > 0))
+        })
+}
+
+pub fn change_requests_for_chat<'a>(
+    chat: &Chat,
+    spaces: &[Space],
+    snapshots: impl IntoIterator<Item = &'a CheckoutChangeRequestStatus>,
+) -> &'a [ChangeRequestSummary] {
+    let Some(branch) = conversation_branch(chat, spaces) else {
+        return &[];
+    };
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return &[];
+    }
+    let Some(source) = chat.source_context.as_ref() else {
+        return &[];
+    };
     let cwd = source.repo_root.as_str();
     let checkout_id = chat
         .source_context
@@ -343,7 +439,14 @@ pub fn change_request_for_chat<'a>(
                     !snapshot.checkout_id.is_empty() && snapshot.checkout_id == checkout_id
                 })
         })
-        .and_then(|snapshot| snapshot.change_request.as_ref())
+        .map(|snapshot| {
+            if snapshot.change_requests.is_empty() {
+                snapshot.change_request.as_slice()
+            } else {
+                snapshot.change_requests.as_slice()
+            }
+        })
+        .unwrap_or(&[])
 }
 
 /// Branch metadata safe to render for this conversation. Pre-source-context
@@ -373,6 +476,7 @@ mod tests {
             branch: Some("feature/pr".into()),
             checkout_id: checkout.map(str::to_owned),
             source_context: None,
+            pull_request_urls: Vec::new(),
             config: None,
             last_message_preview: None,
             last_message_at: None,
@@ -405,6 +509,8 @@ mod tests {
             device_id: device.into(),
             cwd: cwd.into(),
             branch: "feature/pr".into(),
+            github_connected: Some(true),
+            change_requests: vec![],
             change_request: Some(ChangeRequestSummary {
                 provider: "github".into(),
                 number: 90,

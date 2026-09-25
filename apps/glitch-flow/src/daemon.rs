@@ -1,42 +1,41 @@
-//! `zeron daemon …` — install/manage `zeron headless` as a background service:
+//! `glitch-flow daemon …` — install/manage `glitch-flow headless` as a background service:
 //! a systemd **user** unit on Linux (the VPS deployment target), a launchd
 //! LaunchAgent on macOS. The unit runs the current executable with the
-//! `ZERON_*` environment captured at install time, so
-//! `ZERON_EDGE_URL=… zeron daemon install` bakes that override in.
+//! `GLITCH_FLOW_*` environment captured at install time, so
+//! `GLITCH_FLOW_EDGE_URL=… glitch-flow daemon install` bakes that override in.
 //!
 //! Auth is decoupled: without a saved session the service remains up on the
-//! local-only profile. `zeron login` and a service restart opt into sync.
+//! local-only profile. `glitch-flow login` and a service restart opt into sync.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, bail};
 
-const LAUNCHD_LABEL: &str = "sh.zeron.app";
-/// Same unit name the curl|sh installer (`edge/src/install.sh`) writes, so
-/// `zeron daemon …` manages that installation rather than a competing copy.
-const SYSTEMD_UNIT: &str = "zeron.service";
+const LAUNCHD_LABEL: &str = "local.glitchflow.app";
+/// Local service name used by `glitch-flow daemon …`.
+const SYSTEMD_UNIT: &str = "glitch-flow.service";
 
 /// Environment captured into the unit file. `PATH` is always included (the
 /// engine spawns harness CLIs like `claude`, which service managers' minimal
-/// default PATH won't find); the `ZERON_*`/logging vars only when set.
+/// default PATH won't find); the `GLITCH_FLOW_*`/logging vars only when set.
 const CAPTURED_ENV: &[&str] = &[
     "PATH",
-    "ZERON_DATA_DIR",
-    "ZERON_EDGE_URL",
-    "ZERON_EDGE_TOKEN",
-    "ZERON_ORG_ID",
-    "ZERON_WORKOS_CLIENT_ID",
-    "ZERON_WORKOS_API_BASE",
-    "ZERON_IPC_PORT",
-    "ZERON_CALLBACK_PORT",
-    "ZERON_HARNESS",
-    "ZERON_DEVICE_NAME",
+    "GLITCH_FLOW_DATA_DIR",
+    "GLITCH_FLOW_EDGE_URL",
+    "GLITCH_FLOW_EDGE_TOKEN",
+    "GLITCH_FLOW_ORG_ID",
+    "GLITCH_FLOW_WORKOS_CLIENT_ID",
+    "GLITCH_FLOW_WORKOS_API_BASE",
+    "GLITCH_FLOW_IPC_PORT",
+    "GLITCH_FLOW_CALLBACK_PORT",
+    "GLITCH_FLOW_HARNESS",
+    "GLITCH_FLOW_DEVICE_NAME",
     "RUST_LOG",
 ];
 
 pub fn install(data_dir: &Path) -> anyhow::Result<()> {
-    let exe = std::env::current_exe().context("resolving the zeron executable path")?;
+    let exe = std::env::current_exe().context("resolving the glitch-flow executable path")?;
     let env = captured_env();
     if cfg!(target_os = "macos") {
         let plist = launchd_plist_path()?;
@@ -67,7 +66,7 @@ pub fn install(data_dir: &Path) -> anyhow::Result<()> {
             "For start-at-boot without an active login session (VPS): loginctl enable-linger $USER"
         );
     } else {
-        bail!("zeron daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("glitch-flow daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
     println!(
         "Without a saved account the engine stays local-only; sign-in and restart are optional for sync."
@@ -108,7 +107,7 @@ pub fn uninstall() -> anyhow::Result<()> {
             Err(err) => return Err(err.into()),
         }
     } else {
-        bail!("zeron daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("glitch-flow daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
     Ok(())
 }
@@ -117,7 +116,7 @@ pub fn start() -> anyhow::Result<()> {
     if cfg!(target_os = "macos") {
         let plist = launchd_plist_path()?;
         if !plist.exists() {
-            bail!("not installed — run `zeron daemon install` first");
+            bail!("not installed — run `glitch-flow daemon install` first");
         }
         // `stop` boots the job out of the domain, so start = bootstrap; already
         // loaded is fine, then kickstart guarantees a running process either way.
@@ -129,7 +128,7 @@ pub fn start() -> anyhow::Result<()> {
     } else if cfg!(target_os = "linux") {
         run("systemctl", &["--user", "start", SYSTEMD_UNIT])?;
     } else {
-        bail!("zeron daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("glitch-flow daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
     println!("Started.");
     Ok(())
@@ -142,7 +141,7 @@ pub fn stop() -> anyhow::Result<()> {
     } else if cfg!(target_os = "linux") {
         run("systemctl", &["--user", "stop", SYSTEMD_UNIT])?;
     } else {
-        bail!("zeron daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("glitch-flow daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
     println!("Stopped.");
     Ok(())
@@ -166,7 +165,7 @@ pub fn restart() -> anyhow::Result<()> {
         println!("Restarted.");
         Ok(())
     } else {
-        bail!("zeron daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("glitch-flow daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
 }
 
@@ -180,9 +179,9 @@ pub fn status() -> anyhow::Result<()> {
             println!(
                 "{LAUNCHD_LABEL}: not loaded{}",
                 if launchd_plist_path()?.exists() {
-                    " (installed — `zeron daemon start`)"
+                    " (installed — `glitch-flow daemon start`)"
                 } else {
-                    " (not installed — `zeron daemon install`)"
+                    " (not installed — `glitch-flow daemon install`)"
                 }
             );
             return Ok(());
@@ -209,7 +208,7 @@ pub fn status() -> anyhow::Result<()> {
             .context("running systemctl")?;
         Ok(())
     } else {
-        bail!("zeron daemon is only supported on macOS (launchd) and Linux (systemd)");
+        bail!("glitch-flow daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
 }
 
@@ -226,7 +225,7 @@ fn captured_env() -> Vec<(String, String)> {
 
 fn render_systemd_unit(exe: &Path, env: &[(String, String)]) -> String {
     let mut unit = String::from(
-        "[Unit]\nDescription=Zeron headless engine\nAfter=network-online.target\nStartLimitIntervalSec=60\nStartLimitBurst=5\n\n[Service]\n",
+        "[Unit]\nDescription=Glitch Flow headless engine\nAfter=network-online.target\nStartLimitIntervalSec=60\nStartLimitBurst=5\n\n[Service]\n",
     );
     for (key, value) in env {
         // systemd unquotes the value; escape the characters it treats specially.
@@ -234,13 +233,13 @@ fn render_systemd_unit(exe: &Path, env: &[(String, String)]) -> String {
         unit.push_str(&format!("Environment=\"{key}={value}\"\n"));
     }
     unit.push_str(&format!(
-        "ExecStart={} headless\nRestart=on-failure\nRestartSec=5\nEnvironmentFile=-%h/.zeron/env\n\n[Install]\nWantedBy=default.target\n",
+        "ExecStart={} headless\nRestart=on-failure\nRestartSec=5\nEnvironmentFile=-%h/.glitch-flow/env\n\n[Install]\nWantedBy=default.target\n",
         systemd_exec_path(exe)
     ));
     unit
 }
 
-/// The ExecStart binary path. An exe under `~/.zeron/app/` came from the
+/// The ExecStart binary path. An exe under `~/.glitch-flow/app/` came from the
 /// curl|sh installer, whose upgrades relink `app/current` — point the unit at
 /// the symlink (as the installer's own unit does) so it never pins one version.
 /// (`current_exe` resolves symlinks, so the versioned dir is what we see here.)
@@ -250,10 +249,10 @@ fn systemd_exec_path(exe: &Path) -> String {
 
 fn exec_path_for(exe: &Path, home: Option<&Path>) -> String {
     let installed = home
-        .map(|home| home.join(".zeron/app"))
+        .map(|home| home.join(".glitch-flow/app"))
         .is_some_and(|app_root| exe.starts_with(app_root));
     if installed {
-        "%h/.zeron/app/current/zeron".to_string()
+        "%h/.glitch-flow/app/current/glitch-flow".to_string()
     } else {
         format!("{}", exe.display())
     }
@@ -380,37 +379,35 @@ mod tests {
     #[test]
     fn systemd_unit_shape() {
         let unit = render_systemd_unit(
-            Path::new("/usr/local/bin/zeron"),
+            Path::new("/usr/local/bin/glitch-flow"),
             &[
                 ("PATH".into(), "/usr/bin:/bin".into()),
-                ("ZERON_EDGE_URL".into(), "https://edge.example".into()),
-                ("RUST_LOG".into(), "info,zeron=\"debug\"".into()),
+                ("GLITCH_FLOW_EDGE_URL".into(), "https://edge.example".into()),
+                ("RUST_LOG".into(), "info,glitch_flow=\"debug\"".into()),
             ],
         );
-        assert!(unit.contains("ExecStart=/usr/local/bin/zeron headless\n"));
+        assert!(unit.contains("ExecStart=/usr/local/bin/glitch-flow headless\n"));
         assert!(unit.contains("Environment=\"PATH=/usr/bin:/bin\"\n"));
-        assert!(unit.contains("Environment=\"ZERON_EDGE_URL=https://edge.example\"\n"));
+        assert!(unit.contains("Environment=\"GLITCH_FLOW_EDGE_URL=https://edge.example\"\n"));
         // Inner quotes escaped so systemd re-parses the value verbatim.
-        assert!(unit.contains("Environment=\"RUST_LOG=info,zeron=\\\"debug\\\"\"\n"));
+        assert!(unit.contains("Environment=\"RUST_LOG=info,glitch_flow=\\\"debug\\\"\"\n"));
         assert!(unit.contains("StartLimitIntervalSec=60\n"));
         assert!(unit.contains("StartLimitBurst=5\n"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(!unit.contains("session.json"));
         assert!(!unit.contains("ConditionPathExists"));
-        assert!(unit.contains("EnvironmentFile=-%h/.zeron/env"));
+        assert!(unit.contains("EnvironmentFile=-%h/.glitch-flow/env"));
         assert!(unit.contains("WantedBy=default.target"));
     }
 
     #[test]
-    fn curl_installer_always_starts_the_local_capable_service() {
+    fn local_package_installer_uses_branded_paths() {
         // Git for Windows can check out this source fixture with CRLF. These
         // assertions cover the installer directives, not checkout line endings.
-        let installer = include_str!("../../../edge/src/install.sh").replace("\r\n", "\n");
-        assert!(!installer.contains("session.json"));
-        assert!(installer.contains("StartLimitIntervalSec=60\n"));
-        assert!(installer.contains("StartLimitBurst=5\n"));
-        assert!(installer.contains("systemctl --user enable zeron"));
-        assert!(installer.contains("systemctl --user restart zeron"));
+        let installer = include_str!("../../../scripts/package-linux.sh").replace("\r\n", "\n");
+        assert!(installer.contains("$HOME/.local/bin/glitch-flow"));
+        assert!(installer.contains("$HOME/.local/share/applications/glitch-flow.desktop"));
+        assert!(!installer.contains("zeron.sh"));
     }
 
     #[test]
@@ -419,36 +416,36 @@ mod tests {
         // the versioned dir): the unit must point back at the symlink.
         assert_eq!(
             exec_path_for(
-                Path::new("/home/u/.zeron/app/0.3.0/zeron"),
+                Path::new("/home/u/.glitch-flow/app/0.3.0/glitch-flow"),
                 Some(Path::new("/home/u")),
             ),
-            "%h/.zeron/app/current/zeron"
+            "%h/.glitch-flow/app/current/glitch-flow"
         );
         // Source build: literal path.
         assert_eq!(
             exec_path_for(
-                Path::new("/src/target/debug/zeron"),
+                Path::new("/src/target/debug/glitch-flow"),
                 Some(Path::new("/home/u"))
             ),
-            "/src/target/debug/zeron"
+            "/src/target/debug/glitch-flow"
         );
     }
 
     #[test]
     fn launchd_plist_shape() {
         let plist = render_launchd_plist(
-            Path::new("/Users/x/zeron & co/zeron"),
+            Path::new("/Users/x/glitch-flow & co/glitch-flow"),
             &[("ZERON_EDGE_URL".into(), "https://e?a=1&b=2".into())],
-            Path::new("/Users/x/.zeron/daemon.log"),
+            Path::new("/Users/x/.glitch-flow/daemon.log"),
         );
-        assert!(plist.contains("<key>Label</key><string>sh.zeron.app</string>"));
+        assert!(plist.contains("<key>Label</key><string>local.glitchflow.app</string>"));
         // XML-escaped exe path and env value.
-        assert!(plist.contains("<string>/Users/x/zeron &amp; co/zeron</string>"));
+        assert!(plist.contains("<string>/Users/x/glitch-flow &amp; co/glitch-flow</string>"));
         assert!(plist.contains("<string>https://e?a=1&amp;b=2</string>"));
         assert!(plist.contains("<string>headless</string>"));
         assert!(plist.contains("<key>SuccessfulExit</key><false/>"));
         assert!(
-            plist.contains("<key>StandardOutPath</key><string>/Users/x/.zeron/daemon.log</string>")
+            plist.contains("<key>StandardOutPath</key><string>/Users/x/.glitch-flow/daemon.log</string>")
         );
     }
 }

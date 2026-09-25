@@ -59,7 +59,7 @@ use zeron_proto::{
 
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::process::{Child, Command, Stdio};
-use crate::{Harness, HarnessError, RunControls};
+use crate::{Harness, HarnessError, NativeMcpContext, RunControls};
 use catalog::{REASONING_LEVELS, sandbox_mode, sandbox_policy_value, static_models, to_effort};
 use normalize::{
     ChildRoute, Phase, ReasoningStream, delta_text, item_id, item_type, notification_thread_id,
@@ -638,7 +638,16 @@ impl Harness for CodexHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false).await
+        self.run_with_mode(request, controls, false, None).await
+    }
+
+    async fn run_with_context(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        mcp: Option<NativeMcpContext>,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_with_mode(request, controls, false, mcp).await
     }
 
     async fn run_title(
@@ -651,7 +660,7 @@ impl Harness for CodexHarness {
         request.attachments.clear();
         request.model_options.clear();
         request.auto_approve = false;
-        self.run_with_mode(request, controls, true).await
+        self.run_with_mode(request, controls, true, None).await
     }
 }
 
@@ -661,7 +670,9 @@ impl CodexHarness {
         mut request: RunRequest,
         controls: RunControls,
         title_only: bool,
+        mcp: Option<NativeMcpContext>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let mcp_overrides = mcp.as_ref().map(native_mcp_overrides).transpose()?;
         let native = command_request(&request.prompt, "")?;
         if native
             .as_ref()
@@ -738,6 +749,7 @@ impl CodexHarness {
             event_tx,
             controls,
             request,
+            mcp_overrides,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             stderr_tail,
@@ -748,6 +760,27 @@ impl CodexHarness {
         })
         .boxed())
     }
+}
+
+/// Thread-local config overrides merge with the user's Codex configuration.
+/// The app server accepts dotted config keys on thread/start and thread/resume;
+/// this adds just the app-owned server without replacing personal MCP servers.
+fn native_mcp_overrides(
+    mcp: &NativeMcpContext,
+) -> Result<serde_json::Map<String, Value>, HarnessError> {
+    let command = mcp.server_command()?;
+    let command = command.to_str().ok_or_else(|| {
+        HarnessError::Protocol("Glitch Flow executable path is not valid Unicode".into())
+    })?;
+    let prefix = "mcp_servers.glitch_flow_native";
+    let mut config = serde_json::Map::new();
+    config.insert(format!("{prefix}.command"), command.into());
+    config.insert(format!("{prefix}.args"), json!(["mcp"]));
+    config.insert(format!("{prefix}.enabled"), true.into());
+    for (name, value) in mcp.server_env() {
+        config.insert(format!("{prefix}.env.{name}"), value.into());
+    }
+    Ok(config)
 }
 
 // ---------------------------------------------------------------------------
@@ -762,6 +795,7 @@ struct Session {
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
     request: RunRequest,
+    mcp_overrides: Option<serde_json::Map<String, Value>>,
     interrupt_grace: Duration,
     kill_grace: Duration,
     /// Rolling stderr tail for the crash message on an unexpected exit.
@@ -938,6 +972,7 @@ async fn run_session(session: Session) {
         event_tx,
         controls,
         request,
+        mcp_overrides,
         interrupt_grace,
         kill_grace,
         stderr_tail,
@@ -1004,6 +1039,13 @@ async fn run_session(session: Session) {
         }
         if let Some(tier) = &service_tier {
             p.insert("serviceTier".into(), Value::String(tier.clone()));
+        }
+        if let Some(overrides) = mcp_overrides {
+            p.entry("config")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .expect("Codex thread config object")
+                .extend(overrides);
         }
         p
     };
@@ -1854,6 +1896,38 @@ use crate::{Signal, send_signal, shutdown_child};
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn native_mcp_overrides_are_scoped_to_one_server_and_chat() {
+        let mcp = NativeMcpContext {
+            chat_id: "chat-a".into(),
+            device_id: "device-b".into(),
+            ipc_port: 31001,
+        };
+        let config = native_mcp_overrides(&mcp).unwrap();
+        let prefix = "mcp_servers.glitch_flow_native";
+        assert_eq!(config[&format!("{prefix}.args")], json!(["mcp"]));
+        assert_eq!(config[&format!("{prefix}.enabled")], json!(true));
+        assert_eq!(
+            config[&format!("{prefix}.env.ZERON_CHAT_ID")],
+            json!("chat-a")
+        );
+        assert_eq!(
+            config[&format!("{prefix}.env.ZERON_DEVICE_ID")],
+            json!("device-b")
+        );
+        assert_eq!(
+            config[&format!("{prefix}.env.ZERON_IPC_PORT")],
+            json!("31001")
+        );
+        assert!(
+            config[&format!("{prefix}.command")]
+                .as_str()
+                .unwrap()
+                .ends_with(std::env::consts::EXE_SUFFIX)
+        );
+        assert!(config.keys().all(|key| key.starts_with(prefix)));
+    }
 
     #[test]
     fn current_schema_and_legacy_visibility_are_compatible() {

@@ -1887,6 +1887,14 @@ pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
     }
 }
 
+fn first_row_top_gap(doc_override: bool, split_pane: bool) -> f32 {
+    if doc_override || split_pane {
+        Theme::SPACE_LG
+    } else {
+        Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0
+    }
+}
+
 /// Minimal splice for a row-set change: `Some((old_range, new_count))`, or
 /// `None` when the sets are identical by (id, version).
 pub fn diff_rows(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
@@ -2156,7 +2164,7 @@ fn format_kb(bytes: u64) -> String {
 
 /// Rotating flavour vocabulary (21 words / 7s, seeded per chat).
 pub const FLAVOUR_WORDS: [&str; 21] = [
-    "Zeroning",
+    "Flowing",
     "Thinking",
     "Pondering",
     "Scheming",
@@ -3033,6 +3041,9 @@ pub struct Transcript {
     /// attachment protection (that set is shared with the primary transcript
     /// and overwritten wholesale).
     doc_override: Option<String>,
+    /// The split pane supplies its own header, so the first row needs only
+    /// the ordinary turn gap instead of the full-window titlebar inset.
+    split_pane: bool,
     /// Whether an override instance watches a LIVE doc (`for_doc(follow)`):
     /// only then may the working trailer render — a frozen snapshot must
     /// never spin, whatever its entries claim.
@@ -3291,6 +3302,16 @@ impl Transcript {
         Self::build(state, Some(doc_id), follow, cx)
     }
 
+    #[cfg(test)]
+    pub(crate) fn painted_row_count(&self) -> usize {
+        self.rendered_rows.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
     fn build(
         state: Entity<AppState>,
         doc_override: Option<String>,
@@ -3358,6 +3379,7 @@ impl Transcript {
             land_end_pending: doc_override.is_some() && !follow,
             doc_live: doc_override.is_some() && follow,
             doc_override,
+            split_pane: false,
             saved_viewports: SavedViewportCache::default(),
             pending_viewport: None,
             viewport_generation: 0,
@@ -3446,6 +3468,35 @@ impl Transcript {
 
     pub(crate) fn rail_enabled(&self) -> bool {
         self.rail_enabled
+    }
+
+    pub(crate) fn set_split_pane(&mut self, split_pane: bool, cx: &mut Context<Self>) {
+        if self.split_pane != split_pane {
+            let offset = self.list.logical_scroll_top();
+            self.split_pane = split_pane;
+            // GPUI's alignment is fixed when a list is created. A split's
+            // short conversations must rest at the top in either pane.
+            self.list = ListState::new(
+                self.rows.len(),
+                if split_pane || self.doc_override.is_some() {
+                    ListAlignment::Top
+                } else {
+                    ListAlignment::Bottom
+                },
+                px(OVERDRAW_PX),
+            );
+            self.list.scroll_to(offset);
+            let weak = cx.weak_entity();
+            self.list.set_scroll_handler(move |event, _, cx| {
+                weak.update(cx, |this, cx| this.handle_scroll(event, cx))
+                    .ok();
+            });
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn scrolled_under_top(&self) -> bool {
+        f32::from(self.list.max_offset_for_scrollbar().y) - self.distance_from_bottom() > 1.0
     }
 
     /// Shell-driven: the measured height of the bottom chrome stack the
@@ -6275,11 +6326,7 @@ impl Transcript {
         // for the titlebar — an override instance's first row keeps only the
         // ordinary turn gap, or the content sits double-chrome low.
         let top_gap = if ix == 0 {
-            if self.doc_override.is_some() {
-                Theme::SPACE_LG
-            } else {
-                Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0
-            }
+            first_row_top_gap(self.doc_override.is_some(), self.split_pane)
         } else {
             top_gap_for(ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row)
         };
@@ -6595,6 +6642,10 @@ impl Transcript {
         });
         let entry_id = row.entry_id.clone();
         let row_id = row.id.clone();
+        let content_selector = format!(
+            "transcript-content-{}-{ix}",
+            self.chat_id.as_deref().unwrap_or_default()
+        );
         let outer = div()
             .id(row.id.clone())
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -6631,6 +6682,8 @@ impl Transcript {
             .px(px(48.0))
             .child(
                 div()
+                    .id(SharedString::from(content_selector.clone()))
+                    .debug_selector(move || content_selector.clone().into())
                     .w_full()
                     .max_w(px(self.content_width))
                     .min_w_0()
@@ -8841,6 +8894,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn split_transcript_uses_the_same_first_row_inset_in_both_panes() {
+        assert_eq!(
+            first_row_top_gap(false, true),
+            first_row_top_gap(true, false)
+        );
+        assert_eq!(first_row_top_gap(false, true), Theme::SPACE_LG);
+        assert_eq!(
+            first_row_top_gap(false, false),
+            Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0
+        );
+    }
+
+    #[test]
     fn jump_button_stays_available_when_scrolling_down_until_near_bottom() {
         let mut shown = false;
         for distance in [500.0, 330.0, 319.0, 200.0, 100.0] {
@@ -8878,6 +8944,51 @@ mod tests {
         });
     }
     use zeron_doc::MessagePart;
+
+    #[gpui::test]
+    fn override_transcript_paints_an_inactive_chat(cx: &mut gpui::TestAppContext) {
+        struct TranscriptHost(Entity<Transcript>);
+        impl Render for TranscriptHost {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(600.0)).h(px(500.0)).child(self.0.clone())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::for_doc(state.clone(), "inactive".into(), true, cx));
+        state.update(cx, |state, cx| {
+            state.selected_chat = Some("active".into());
+            state.set_subagent_snapshot(
+                "inactive".into(),
+                vec![SessionMessageEntry {
+                    id: "inactive-message".into(),
+                    role: MessageRole::User,
+                    parts: vec![text_part("body", "A different conversation")],
+                    created_at: 0,
+                    device_id: "local".into(),
+                    status: None,
+                    continuation_of: None,
+                    duration_ms: None,
+                }],
+            );
+            cx.notify();
+        });
+        let _window = cx.add_window(|_, _| TranscriptHost(transcript.clone()));
+        cx.run_until_parked();
+        transcript.read_with(cx, |transcript, _| {
+            assert!(!transcript.rows.is_empty(), "inactive chat must build transcript rows");
+            assert!(
+                !transcript.rendered_rows.is_empty(),
+                "inactive chat rows must be painted"
+            );
+        });
+    }
 
     fn with_tool_group_navigation(
         cx: &mut gpui::TestAppContext,

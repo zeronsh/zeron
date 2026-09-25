@@ -58,7 +58,7 @@ fn helper_path() -> Result<std::path::PathBuf, String> {
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|p| std::path::PathBuf::from(p).join(".cache")))
         .ok_or("Could not locate the browser cache directory")?
-        .join("zeron/browser");
+        .join("glitch-flow/browser");
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     let path = root.join(format!("webkit-{hash}"));
     if std::fs::read(&path).ok().as_deref() != Some(HELPER) {

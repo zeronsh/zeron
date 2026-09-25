@@ -13,7 +13,7 @@ members = [
     "crates/ui",
     "crates/syntax",
     "crates/mcp",
-    "apps/zeron",
+    "apps/glitch-flow",
 ]
 
 [workspace.package]

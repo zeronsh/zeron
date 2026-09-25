@@ -1,33 +1,19 @@
 {
-  // Zeron edge: per-session + per-workspace Loro sync DOs, per-device
+  // Glitch Flow edge: per-session + per-workspace Loro sync DOs, per-device
   // relay DOs, R2 blobs, and the absorbed WorkOS auth routes.
   // Design: loro-sessions §2 (topology), §3 (persistence), §6.1 (diff
   // sidecar), §8 (device-room streams), §1.2 (R2 attachments), §3.3 (R2
   // backups); ARCHITECTURE.md §6.
-  // NOTE: the worker name and R2 bucket names keep the historical "comet"
-  // prefix on purpose — Durable Object storage is bound to the script name,
-  // so renaming the worker would orphan every session/registry/chat room.
+  // The Worker name owns its Durable Object storage. Keep this name stable
+  // after the first production deploy, or existing rooms become inaccessible.
   "$schema": "node_modules/wrangler/config-schema.json",
-  // Deployed by .github/workflows/deploy.yml on pushes to main that touch
-  // edge/ (CLOUDFLARE_API_TOKEN repo secret).
-  "name": "comet-native-edge",
+  // Deployment is manual; see docs/production-cloud.md.
+  "name": "glitch-flow-edge",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
-  "account_id": "b57dde68ee5964dccc025437b5478a5b",
   "workers_dev": true,
-  // Public hostname on the zeron.sh zone, plus the install surface carved out
-  // of the landing host: path routes beat the landing worker's custom
-  // domain, so `curl -fsSL https://zeron.sh/install.sh | sh` installs Zeron
-  // while the rest of zeron.sh serves the landing page.
-  "routes": [
-    { "pattern": "edge.zeron.sh", "custom_domain": true },
-    { "pattern": "zeron.sh/install.sh", "zone_name": "zeron.sh" },
-    { "pattern": "zeron.sh/releases/*", "zone_name": "zeron.sh" },
-    // Legacy comet hostnames — keep until 0.1.x clients are gone.
-    { "pattern": "edge.comet.zeron.sh", "custom_domain": true },
-    { "pattern": "comet.zeron.sh/install.sh", "zone_name": "zeron.sh" },
-    { "pattern": "comet.zeron.sh/releases/*", "zone_name": "zeron.sh" }
-  ],
+  // Cloudflare supplies https://glitch-flow-edge.<account>.workers.dev.
+  // A custom domain can be added later without changing the room protocol.
   // Serve src/install.sh as a string (the /install.sh route).
   "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
   // loro-crdt's default entry loads its WASM via URL fetch, which workerd
@@ -66,20 +52,19 @@
   "r2_buckets": [
     {
       "binding": "BLOBS",
-      "bucket_name": "comet-native-blobs"
+      "bucket_name": "glitch-flow-blobs"
     },
     {
       // Release artifacts for /releases/* (curl-install + dmg downloads).
       "binding": "RELEASES",
-      "bucket_name": "comet-native-releases"
+      "bucket_name": "glitch-flow-releases"
     }
   ],
   "vars": {
-    // WorkOS AuthKit client id — JWTs verified against its JWKS. Placeholder;
-    // set the real client id before deploying. Set AUTH_MODE=dev locally to
-    // accept bearer==userId. WORKOS_API_KEY is a wrangler secret
-    // (`wrangler secret put WORKOS_API_KEY`) powering the /auth/* routes.
-    "WORKOS_CLIENT_ID": "client_01KWD0EAKZKD50YCQJNYSRE4BY",
+    // Public WorkOS AuthKit client ID. Replace before deploying. The API key
+    // belongs only in the Worker secret store, never here or in the app.
+    // Set AUTH_MODE=dev only for local tests (bearer == user ID).
+    "WORKOS_CLIENT_ID": "REPLACE_WITH_WORKOS_CLIENT_ID",
     "AUTH_MODE": "workos"
   },
   "observability": {

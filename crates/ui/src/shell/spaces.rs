@@ -11,7 +11,7 @@
 use super::*;
 use crate::pickers::{breadcrumbs, browser_rows, completion_prefix_len, parent_path};
 use gpui::{FocusHandle, Window};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use zeron_proto::{ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, Space};
 
 /// Promote the user's ordered pins above the untouched activity projection.
@@ -1411,7 +1411,8 @@ mod pinned_session_tests {
             Some(MouseButton::Left),
             gpui::Modifiers::default(),
         );
-        let regular = cx.debug_bounds("session-slot-older").unwrap().center();
+        let regular_bounds = cx.debug_bounds("session-slot-older").unwrap();
+        let regular = gpui::point(regular_bounds.center().x, regular_bounds.bottom() - px(3.0));
         cx.simulate_mouse_move(regular, Some(MouseButton::Left), gpui::Modifiers::default());
         shell.update(cx, |shell, cx| {
             let drag = shell.sidebar_session_transfer.as_mut().unwrap();
@@ -1600,6 +1601,28 @@ mod pinned_session_tests {
         cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
         shell.read_with(cx, |shell, cx| {
             assert!(shell.sessions_open);
+            assert!(shell.active_sidebar_pins(cx).is_empty());
+        });
+
+        // Dropping at the stable row center creates a saved pair rather than reordering.
+        shell.update(cx, |shell, cx| {
+            shell.sidebar_session_return = None;
+            shell.sidebar_resort.clear();
+            shell.sidebar_disclosure_motion.clear();
+            shell.reduced_motion = true;
+            cx.notify();
+        });
+        let from = cx.debug_bounds("chat-older").unwrap().center();
+        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(from + gpui::point(px(8.0), px(0.0)), Some(MouseButton::Left), gpui::Modifiers::default());
+        let target = cx.debug_bounds("session-slot-newer").unwrap().center();
+        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.chat_split.is_some());
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("newer"));
+            let profile = shell.active_sidebar_pin_profile_key(cx).unwrap();
+            assert_eq!(shell.settings.chat_splits[&profile], vec![["newer".to_string(), "older".to_string()]]);
             assert!(shell.active_sidebar_pins(cx).is_empty());
         });
     }
@@ -1810,8 +1833,197 @@ struct ActiveChatRow {
     chat: zeron_proto::Chat,
     folder: String,
     branch: Option<String>,
-    change_request: Option<zeron_proto::ChangeRequestSummary>,
+    change_requests: Vec<zeron_proto::ChangeRequestSummary>,
     group: Option<(String, String)>,
+    thread_depth: usize,
+    has_children: bool,
+}
+
+/// Build the same parent/child projection for the rendered list and its jump
+/// order. A missing, archived, or filtered-out parent makes the child a root,
+/// so it never disappears from the sidebar. Malformed parent cycles are roots
+/// as well; recursive rendering can then stay finite.
+struct SidebarThreadTree {
+    roots: Vec<zeron_proto::Chat>,
+    children: HashMap<String, Vec<zeron_proto::Chat>>,
+}
+
+fn sidebar_thread_tree(
+    state: &AppState,
+    filter: Option<&str>,
+    sort: SidebarSort,
+    archived: bool,
+) -> SidebarThreadTree {
+    let mut chats: Vec<_> = state
+        .chats
+        .iter()
+        .filter(|chat| chat.archived == archived)
+        .filter(|chat| match chat.space_id.as_deref() {
+            None => true,
+            Some(space_id) => state.space_row(space_id).is_some(),
+        })
+        .filter(|chat| filter.is_none_or(|space_id| chat.space_id.as_deref() == Some(space_id)))
+        .cloned()
+        .collect();
+    chats.sort_by(|left, right| compare_sidebar_chats(sort, left, right));
+    let by_id: HashMap<_, _> = chats.iter().map(|chat| (chat.id.as_str(), chat)).collect();
+    let mut roots = Vec::new();
+    let mut children: HashMap<String, Vec<zeron_proto::Chat>> = HashMap::new();
+    for chat in &chats {
+        let mut seen = HashSet::from([chat.id.as_str()]);
+        let mut ancestor = chat.parent_chat_id.as_deref();
+        let mut cycle = false;
+        while let Some(id) = ancestor {
+            let Some(parent) = by_id.get(id) else { break };
+            if !seen.insert(id) {
+                cycle = true;
+                break;
+            }
+            ancestor = parent.parent_chat_id.as_deref();
+        }
+        match chat.parent_chat_id.as_deref() {
+            Some(parent) if !cycle && by_id.contains_key(parent) => {
+                children.entry(parent.to_owned()).or_default().push(chat.clone());
+            }
+            _ => roots.push(chat.clone()),
+        }
+    }
+    if sort == SidebarSort::LastUpdated {
+        // A busy child keeps its parent family near the top of the list.
+        let mut family_activity: HashMap<String, _> = chats
+            .iter()
+            .map(|chat| (chat.id.clone(), chat.last_message_at.unwrap_or(chat.created_at)))
+            .collect();
+        for chat in &chats {
+            let activity = chat.last_message_at.unwrap_or(chat.created_at);
+            let mut ancestor = chat.parent_chat_id.as_deref();
+            let mut seen = HashSet::from([chat.id.as_str()]);
+            while let Some(id) = ancestor.filter(|id| seen.insert(*id)) {
+                let Some(parent) = by_id.get(id) else { break };
+                family_activity.entry(id.to_owned()).and_modify(|latest| {
+                    *latest = (*latest).max(activity);
+                });
+                ancestor = parent.parent_chat_id.as_deref();
+            }
+        }
+        let compare = |left: &zeron_proto::Chat, right: &zeron_proto::Chat| {
+            family_activity[&right.id]
+                .cmp(&family_activity[&left.id])
+                .then_with(|| left.id.cmp(&right.id))
+        };
+        roots.sort_by(compare);
+        for siblings in children.values_mut() {
+            siblings.sort_by(compare);
+        }
+    }
+    SidebarThreadTree { roots, children }
+}
+
+/// Split sessions have their own sidebar rows. Promote their descendants into
+/// the regular tree, including when consecutive generations are split rows.
+fn promote_children_of_split_chats(tree: &mut SidebarThreadTree, split_ids: &HashSet<String>) {
+    if split_ids.is_empty() {
+        return;
+    }
+
+    fn promote(
+        rows: Vec<zeron_proto::Chat>,
+        children: &mut HashMap<String, Vec<zeron_proto::Chat>>,
+        split_ids: &HashSet<String>,
+    ) -> Vec<zeron_proto::Chat> {
+        let mut visible = Vec::with_capacity(rows.len());
+        for row in rows {
+            let descendants = children.remove(&row.id).unwrap_or_default();
+            let descendants = promote(descendants, children, split_ids);
+            if split_ids.contains(&row.id) {
+                visible.extend(descendants);
+            } else {
+                if !descendants.is_empty() {
+                    children.insert(row.id.clone(), descendants);
+                }
+                visible.push(row);
+            }
+        }
+        visible
+    }
+
+    tree.roots = promote(std::mem::take(&mut tree.roots), &mut tree.children, split_ids);
+}
+
+fn expand_thread_ids(
+    roots: Vec<String>,
+    children: &HashMap<String, Vec<zeron_proto::Chat>>,
+    collapsed: &HashSet<String>,
+) -> Vec<String> {
+    fn append(
+        id: String,
+        children: &HashMap<String, Vec<zeron_proto::Chat>>,
+        collapsed: &HashSet<String>,
+        output: &mut Vec<String>,
+    ) {
+        output.push(id.clone());
+        if !collapsed.contains(&id) {
+            for child in children.get(&id).into_iter().flatten() {
+                append(child.id.clone(), children, collapsed, output);
+            }
+        }
+    }
+    let mut output = Vec::new();
+    for root in roots {
+        append(root, children, collapsed, &mut output);
+    }
+    output
+}
+
+fn expand_thread_rows(
+    roots: Vec<ActiveChatRow>,
+    children: &mut HashMap<String, Vec<ActiveChatRow>>,
+    collapsed: &HashSet<String>,
+) -> Vec<ActiveChatRow> {
+    fn append(
+        mut row: ActiveChatRow,
+        depth: usize,
+        children: &mut HashMap<String, Vec<ActiveChatRow>>,
+        collapsed: &HashSet<String>,
+        output: &mut Vec<ActiveChatRow>,
+    ) {
+        let id = row.chat.id.clone();
+        row.thread_depth = depth;
+        row.has_children = children.get(&id).is_some_and(|rows| !rows.is_empty());
+        output.push(row);
+        if !collapsed.contains(&id) {
+            for child in children.remove(&id).unwrap_or_default() {
+                append(child, depth + 1, children, collapsed, output);
+            }
+        }
+    }
+    let mut output = Vec::new();
+    for root in roots {
+        append(root, 0, children, collapsed, &mut output);
+    }
+    output
+}
+
+fn indent_thread_row(row: AnyElement, depth: usize, theme: &Theme) -> AnyElement {
+    if depth == 0 {
+        return row;
+    }
+    let inset = depth.min(8) as f32 * 16.0;
+    div()
+        .relative()
+        .w_full()
+        .pl(px(inset))
+        .child(
+            div()
+                .absolute()
+                .left(px(inset - 9.0))
+                .top(px(-SIDEBAR_LIST_GAP))
+                .bottom(px(-SIDEBAR_LIST_GAP))
+                .w(px(1.0))
+                .bg(theme.border.opacity(0.45)),
+        )
+        .child(row)
+        .into_any_element()
 }
 
 pub(super) fn compare_sidebar_chats(
@@ -2446,11 +2658,16 @@ impl Shell {
             return false;
         }
         let state = self.state.read(cx);
-        let visible: HashSet<String> = state
-            .sidebar_chats(Utc::now(), payload.filter.as_deref())
-            .into_iter()
-            .map(|(_, chat)| chat.id.clone())
-            .collect();
+        let visible: HashSet<String> = sidebar_thread_tree(
+            state,
+            payload.filter.as_deref(),
+            self.settings.sidebar_sort,
+            false,
+        )
+        .roots
+        .into_iter()
+        .map(|chat| chat.id)
+        .collect();
         if !visible.contains(&payload.chat_id) {
             return false;
         }
@@ -2460,6 +2677,7 @@ impl Shell {
     }
 
     pub(super) fn cancel_sidebar_session_transfer(&mut self, cx: &mut Context<Self>) {
+        self.chat_split_drop_target = None;
         self.chat_status_hover = None;
         self.cancel_pinned_session_drag(cx);
         if let Some(mut transfer) = self.sidebar_session_transfer.take() {
@@ -4017,6 +4235,12 @@ impl Shell {
     /// and local-device promotion. Jump shortcuts and session cycling read
     /// this projection so keyboard order never drifts from the screen.
     pub(super) fn sidebar_visible_order(&self, cx: &Context<Self>) -> Vec<String> {
+        let split_order: Vec<String> = self
+            .visible_chat_splits(cx)
+            .into_iter()
+            .flat_map(|pair| pair.into_iter())
+            .collect();
+        let split_ids: HashSet<String> = split_order.iter().cloned().collect();
         let filter = self.settings.space_filter.clone();
         let profile_key = self.active_sidebar_pin_profile_key(cx);
         let saved_pins = self.active_sidebar_pins(cx);
@@ -4031,12 +4255,10 @@ impl Shell {
             .as_ref()
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let state = self.state.read(cx);
-        let mut chats: Vec<zeron_proto::Chat> = state
-            .sidebar_chats(Utc::now(), filter.as_deref())
-            .into_iter()
-            .map(|(_, chat)| chat.clone())
-            .collect();
-        chats.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
+        let mut tree =
+            sidebar_thread_tree(state, filter.as_deref(), self.settings.sidebar_sort, false);
+        promote_children_of_split_chats(&mut tree, &split_ids);
+        let chats = tree.roots;
         let (pinned_chats, chats): (Vec<_>, Vec<_>) = chats
             .into_iter()
             .partition(|chat| pinned_order.contains(&chat.id));
@@ -4106,7 +4328,13 @@ impl Shell {
             let pins: HashSet<&str> = pinned_order.iter().map(String::as_str).collect();
             visible.retain(|id| !pins.contains(id.as_str()));
         }
-        visible
+        let mut seen = HashSet::new();
+        let visible = expand_thread_ids(visible, &tree.children, &self.sidebar_collapsed_threads);
+        split_order
+            .into_iter()
+            .chain(visible)
+            .filter(|id| seen.insert(id.clone()))
+            .collect()
     }
 
     /// Shared metadata and visibility settings for active and archived sessions.
@@ -4140,10 +4368,11 @@ impl Shell {
             .filter(|b| !b.is_empty())
             .map(str::to_string)
             .filter(|_| self.settings.sidebar_show_branch);
-        let change_request = state
-            .change_request_for_chat(&chat)
-            .cloned()
-            .filter(|_| self.settings.sidebar_show_pull_request);
+        let change_requests = self
+            .settings
+            .sidebar_show_pull_request
+            .then(|| state.change_requests_for_chat(&chat).to_vec())
+            .unwrap_or_default();
         let group = match self.settings.sidebar_organization {
             SidebarOrganization::ByDevice => Some((chat.device_id.clone(), device)),
             SidebarOrganization::ByProject => Some((
@@ -4159,8 +4388,10 @@ impl Shell {
             chat: chat.clone(),
             folder,
             branch,
-            change_request,
+            change_requests,
             group,
+            thread_depth: 0,
+            has_children: false,
         }
     }
 
@@ -4170,6 +4401,11 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> SidebarSessionRows {
         let now = Utc::now();
+        let split_ids: HashSet<String> = self
+            .visible_chat_splits(cx)
+            .into_iter()
+            .flat_map(|pair| pair.into_iter())
+            .collect();
         let filter = self.settings.space_filter.clone();
         let profile_key = self.active_sidebar_pin_profile_key(cx);
         let saved_pins = self.active_sidebar_pins(cx);
@@ -4180,20 +4416,32 @@ impl Shell {
                 drag.filter == filter && profile_key.as_deref() == Some(&drag.profile_key)
             })
             .map(|drag| drag.visible_ids.clone());
-        let mut rows: Vec<ActiveChatRow> = {
+        let (mut rows, mut thread_children): (Vec<ActiveChatRow>, HashMap<String, Vec<ActiveChatRow>>) = {
             let state = self.state.read(cx);
-            let mut chats: Vec<_> = state
-                .sidebar_chats(now, filter.as_deref())
+            let mut tree =
+                sidebar_thread_tree(state, filter.as_deref(), self.settings.sidebar_sort, false);
+            promote_children_of_split_chats(&mut tree, &split_ids);
+            let roots = tree
+                .roots
                 .into_iter()
-                .map(|(status, chat)| (status, chat.clone()))
+                .map(|chat| {
+                    self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state)
+                })
                 .collect();
-            chats.sort_by(|left, right| {
-                compare_sidebar_chats(self.settings.sidebar_sort, &left.1, &right.1)
-            });
-            chats
+            let children = tree
+                .children
                 .into_iter()
-                .map(|(status, chat)| self.sidebar_chat_data(status, chat, state))
-                .collect()
+                .map(|(parent, chats)| {
+                    let rows = chats
+                        .into_iter()
+                        .map(|chat| {
+                            self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state)
+                        })
+                        .collect();
+                    (parent, rows)
+                })
+                .collect();
+            (roots, children)
         };
         let pinned_order = frozen_pinned
             .as_ref()
@@ -4218,17 +4466,6 @@ impl Shell {
             .len();
         let regular_rows = rows.split_off(pinned_count);
         let pinned_rows = rows;
-        self.sidebar_pinned_heights = pinned_rows
-            .iter()
-            .map(|row| {
-                sidebar_row_height(
-                    self.settings.sidebar_compact,
-                    self.settings.sidebar_show_project_label,
-                    row.branch.is_some(),
-                    row.change_request.is_some(),
-                )
-            })
-            .collect();
         let visible_pinned_ids = std::sync::Arc::new(
             pinned_rows
                 .iter()
@@ -4280,6 +4517,38 @@ impl Shell {
         sections.extend(custom_groups);
         sections.extend(regular_groups);
 
+        // Keep each family inside its root's pin, custom section, or project
+        // group. The tree projection also drives jump order below.
+        for (_, rows) in &mut sections {
+            *rows = expand_thread_rows(
+                std::mem::take(rows),
+                &mut thread_children,
+                &self.sidebar_collapsed_threads,
+            );
+        }
+        let pinned_count = if pinned_count > 0 { sections[0].1.len() } else { 0 };
+        self.sidebar_pinned_heights = sections
+            .first()
+            .filter(|_| pinned_count > 0)
+            .map(|(_, rows)| {
+                let mut heights = Vec::new();
+                for row in rows {
+                    let height = sidebar_row_height(
+                        self.settings.sidebar_compact,
+                        self.settings.sidebar_show_project_label,
+                        row.branch.is_some(),
+                        !row.change_requests.is_empty() || !row.chat.pull_request_urls.is_empty(),
+                    );
+                    if row.thread_depth == 0 {
+                        heights.push(height);
+                    } else if let Some(family_height) = heights.last_mut() {
+                        *family_height += SIDEBAR_LIST_GAP + height;
+                    }
+                }
+                heights
+            })
+            .unwrap_or_default();
+
         let returning = self.sidebar_session_transfer.is_none();
         let transfer = self.sidebar_session_transfer.as_mut().or_else(|| {
             self.sidebar_session_return
@@ -4306,7 +4575,8 @@ impl Shell {
                     self.settings.sidebar_compact,
                     self.settings.sidebar_show_project_label,
                     rows[index].branch.is_some(),
-                    rows[index].change_request.is_some(),
+                    !rows[index].change_requests.is_empty()
+                        || !rows[index].chat.pull_request_urls.is_empty(),
                 );
                 // Move the vacant slot to the destination instead of keeping two
                 // holes. Sample layout and paint with the same reversible easing.
@@ -4406,8 +4676,10 @@ impl Shell {
                     chat,
                     folder,
                     branch,
-                    change_request,
+                    change_requests,
                     group: _,
+                    thread_depth,
+                    has_children,
                 } = row;
                 let time_ago: SharedString =
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
@@ -4421,7 +4693,7 @@ impl Shell {
                     self.settings.sidebar_compact,
                     self.settings.sidebar_show_project_label,
                     branch.is_some(),
-                    change_request.is_some(),
+                    !change_requests.is_empty() || !chat.pull_request_urls.is_empty(),
                 );
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
@@ -4432,7 +4704,7 @@ impl Shell {
                 } else {
                     None
                 };
-                let drag = (self.pinned_open || slot >= pinned_count)
+                let drag = (thread_depth == 0 && !has_children && (self.pinned_open || slot >= pinned_count))
                     .then(|| {
                         profile_key.as_ref().map(|profile_key| SidebarSessionDrag {
                             chat_id: chat.id.clone(),
@@ -4475,7 +4747,8 @@ impl Shell {
                     time_ago,
                     folder.into(),
                     branch.map(SharedString::from),
-                    change_request,
+                    change_requests,
+                    chat.pull_request_urls.clone(),
                     harness,
                     status,
                     is_selected,
@@ -4484,9 +4757,12 @@ impl Shell {
                     if is_moving { None } else { drag },
                     jump_label,
                     None,
+                    has_children,
+                    self.sidebar_collapsed_threads.contains(&chat.id),
                     theme,
                     cx,
                 );
+                let element = indent_thread_row(element, thread_depth, theme);
                 // The source slot shrinks when its vacancy moves across sections.
                 // Its zero-height anchor still tracks the live activity position.
                 let element = if let Some(origin) = origin {
@@ -4505,6 +4781,9 @@ impl Shell {
                 // The hit region stays at the natural slot while its content slides;
                 // preview movement must not move its own insertion thresholds.
                 let target_group = drag_group.clone();
+                let drop_group = drag_group.clone();
+                let split_target_id = chat.id.clone();
+                let split_hover_id = chat.id.clone();
                 let element = div()
                     .id(SharedString::from(format!("session-slot-{}", chat.id)))
                     .debug_selector({
@@ -4517,9 +4796,21 @@ impl Shell {
                     .child(element)
                     .on_drag_move::<SidebarSessionDrag>(cx.listener(
                         move |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, cx| {
+                            if this.chat_split_drop_target.as_ref() == Some(&split_hover_id) { this.chat_split_drop_target = None; }
                             if !event.bounds.contains(&event.event.position)
                                 || !this.sidebar_scroll.bounds().contains(&event.event.position)
                             {
+                                return;
+                            }
+                            // The middle of a stable slot combines chats; its edges
+                            // keep the existing pin/section insertion behavior.
+                            let relative_y = f32::from(event.event.position.y - event.bounds.top());
+                            let height = f32::from(event.bounds.size.height);
+                            if this.sidebar_session_transfer.as_ref().is_some_and(|drag| drag.payload.chat_id != split_hover_id)
+                                && relative_y >= height * 0.25 && relative_y <= height * 0.75 {
+                                this.chat_split_drop_target = Some(split_hover_id.clone());
+                                if let Some(drag) = this.sidebar_session_transfer.as_mut() { drag.preview = None; }
+                                cx.notify();
                                 return;
                             }
                             let scroll_top = -f32::from(this.sidebar_scroll.offset().y);
@@ -4548,6 +4839,25 @@ impl Shell {
                             cx.notify();
                         },
                     ))
+                    .on_drop::<SidebarSessionDrag>(cx.listener(move |this, payload, _, cx| {
+                        if this.chat_split_drop_target.as_ref() == Some(&split_target_id) {
+                            cx.stop_propagation();
+                            this.create_chat_split(split_target_id.clone(), payload, cx);
+                        } else {
+                            let target = if pinned_group {
+                                let index = this.sidebar_session_transfer.as_ref()
+                                    .and_then(|drag| drag.preview.as_ref())
+                                    .filter(|preview| preview.group == drop_group)
+                                    .map_or(group_index, |preview| preview.index);
+                                SidebarSessionDrop::Pinned(index)
+                            } else if let Some(section) = drop_group.strip_prefix("section:") {
+                                SidebarSessionDrop::Section(section.to_owned())
+                            } else {
+                                SidebarSessionDrop::Regular
+                            };
+                            this.finish_sidebar_session_transfer(payload, target, cx);
+                        }
+                    }))
                     .into_any_element();
                 rendered_rows.push((format!("c:{}", chat.id), slot_height, element));
             }
@@ -4831,33 +5141,24 @@ impl Shell {
         const PAGE: usize = 25;
         let now = Utc::now();
         let filter = self.settings.space_filter.clone();
-        let mut rows: Vec<zeron_proto::Chat> = {
+        let rows: Vec<_> = {
             let state = self.state.read(cx);
-            state
-                .chats
-                .iter()
-                // Spawned children stay out of the Archived section too — the
-                // same top-level rule as `visible_chats`.
-                .filter(|c| c.archived && c.parent_chat_id.is_none())
-                .filter(|chat| match &filter {
-                    Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
-                    None => true,
+            let tree = sidebar_thread_tree(state, filter.as_deref(), self.settings.sidebar_sort, true);
+            let roots = tree.roots.into_iter().map(|chat| {
+                self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state)
+            }).collect();
+            let mut children = tree.children.into_iter().map(|(parent, chats)| {
+                let rows = chats.into_iter().map(|chat| {
+                    self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state)
                 })
-                .cloned()
-                .collect()
+                .collect();
+                (parent, rows)
+            }).collect();
+            expand_thread_rows(roots, &mut children, &self.sidebar_collapsed_threads)
         };
-        rows.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
         if rows.is_empty() {
             return None;
         }
-        let rows: Vec<_> = {
-            let state = self.state.read(cx);
-            rows.into_iter()
-                .map(|chat| {
-                    self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state)
-                })
-                .collect()
-        };
         let total = rows.len();
         let open = self.archived_open;
         let shown = self.archived_shown.max(INITIAL);
@@ -4879,7 +5180,7 @@ impl Shell {
                         self.settings.sidebar_compact,
                         self.settings.sidebar_show_project_label,
                         row.branch.is_some(),
-                        row.change_request.is_some(),
+                        !row.change_requests.is_empty() || !row.chat.pull_request_urls.is_empty(),
                     )
                 })
                 .sum::<f32>()
@@ -4920,14 +5221,14 @@ impl Shell {
                 .gap(px(SIDEBAR_LIST_GAP));
             for row in rows.into_iter().take(shown) {
                 let chat = row.chat;
+                let thread_depth = row.thread_depth;
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
                 let harness = self
                     .settings
                     .sidebar_show_harness
                     .then(|| chat.config.as_ref().map(|c| c.harness))
                     .flatten();
-                list = list.child(
-                    self.render_chat_row(
+                let element = self.render_chat_row(
                         chat.id.clone(),
                         transcript::single_line(
                             &chat.title.clone().unwrap_or_else(|| "New session".into()),
@@ -4937,7 +5238,8 @@ impl Shell {
                             .into(),
                         row.folder.into(),
                         row.branch.map(SharedString::from),
-                        row.change_request,
+                        row.change_requests,
+                        chat.pull_request_urls.clone(),
                         harness,
                         row.status,
                         is_selected,
@@ -4946,10 +5248,12 @@ impl Shell {
                         None,
                         None,
                         None,
+                        row.has_children,
+                        self.sidebar_collapsed_threads.contains(&chat.id),
                         theme,
                         cx,
-                    ),
-                );
+                    );
+                list = list.child(indent_thread_row(element, thread_depth, theme));
             }
             let mut body = div().w_full().flex().flex_col().child(list);
             if has_more {
@@ -6316,9 +6620,14 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use chrono::{TimeZone as _, Utc};
 
-    use super::{compare_sidebar_chats, promote_local_device_group};
+    use super::{
+        compare_sidebar_chats, expand_thread_ids, promote_children_of_split_chats,
+        promote_local_device_group, sidebar_thread_tree,
+    };
     use crate::settings::SidebarSort;
 
     fn group(device: &str, value: u8) -> (Option<(String, String)>, Vec<u8>) {
@@ -6335,6 +6644,7 @@ mod tests {
             branch: None,
             checkout_id: None,
             source_context: None,
+            pull_request_urls: Vec::new(),
             config: None,
             last_message_preview: None,
             last_message_at: Some(Utc.timestamp_opt(10, 0).unwrap()),
@@ -6354,6 +6664,105 @@ mod tests {
         let beta = chat("beta");
         assert!(compare_sidebar_chats(SidebarSort::Created, &alpha, &beta).is_lt());
         assert!(compare_sidebar_chats(SidebarSort::LastUpdated, &alpha, &beta).is_lt());
+    }
+
+    #[test]
+    fn child_threads_follow_their_parent_and_can_be_collapsed() {
+        let mut state = crate::state::AppState::new();
+        let root = chat("root");
+        let mut child = chat("child");
+        child.parent_chat_id = Some("root".into());
+        let mut grandchild = chat("grandchild");
+        grandchild.parent_chat_id = Some("child".into());
+        let mut orphan = chat("orphan");
+        orphan.parent_chat_id = Some("deleted".into());
+        state.apply_chats(vec![grandchild, root, child, orphan]);
+
+        let tree = sidebar_thread_tree(&state, None, SidebarSort::Created, false);
+        assert_eq!(tree.roots.iter().map(|chat| chat.id.as_str()).collect::<Vec<_>>(), ["orphan", "root"]);
+        let roots = tree.roots.iter().map(|chat| chat.id.clone()).collect();
+        assert_eq!(
+            expand_thread_ids(roots, &tree.children, &Default::default()),
+            ["orphan", "root", "child", "grandchild"]
+        );
+        let collapsed = std::collections::HashSet::from(["root".to_string()]);
+        assert_eq!(
+            expand_thread_ids(vec!["orphan".into(), "root".into()], &tree.children, &collapsed),
+            ["orphan", "root"]
+        );
+    }
+
+    #[test]
+    fn split_parent_keeps_descendants_in_regular_sidebar() {
+        let mut state = crate::state::AppState::new();
+        let parent = chat("split-parent");
+        let mut first = chat("first-child");
+        first.parent_chat_id = Some(parent.id.clone());
+        let mut second = chat("second-child");
+        second.parent_chat_id = Some(parent.id.clone());
+        let mut grandchild = chat("grandchild");
+        grandchild.parent_chat_id = Some(first.id.clone());
+        state.apply_chats(vec![parent, first, second, grandchild, chat("other")]);
+
+        let mut tree = sidebar_thread_tree(&state, None, SidebarSort::Created, false);
+        promote_children_of_split_chats(&mut tree, &HashSet::from(["split-parent".into()]));
+        assert_eq!(
+            tree.roots
+                .iter()
+                .map(|chat| chat.id.as_str())
+                .collect::<Vec<_>>(),
+            ["other", "first-child", "second-child"]
+        );
+        let roots = tree.roots.iter().map(|chat| chat.id.clone()).collect();
+        assert_eq!(
+            expand_thread_ids(roots, &tree.children, &Default::default()),
+            ["other", "first-child", "grandchild", "second-child"]
+        );
+
+        let mut tree = sidebar_thread_tree(&state, None, SidebarSort::Created, false);
+        promote_children_of_split_chats(
+            &mut tree,
+            &HashSet::from(["split-parent".into(), "first-child".into()]),
+        );
+        assert_eq!(
+            tree.roots
+                .iter()
+                .map(|chat| chat.id.as_str())
+                .collect::<Vec<_>>(),
+            ["other", "grandchild", "second-child"]
+        );
+        let roots = tree.roots.iter().map(|chat| chat.id.clone()).collect();
+        assert_eq!(
+            expand_thread_ids(roots, &tree.children, &Default::default()),
+            ["other", "grandchild", "second-child"]
+        );
+    }
+
+    #[test]
+    fn archived_parent_exposes_its_active_child_as_a_root() {
+        let mut state = crate::state::AppState::new();
+        let mut parent = chat("parent");
+        parent.archived = true;
+        let mut child = chat("child");
+        child.parent_chat_id = Some("parent".into());
+        state.apply_chats(vec![parent, child]);
+        let tree = sidebar_thread_tree(&state, None, SidebarSort::Created, false);
+        assert_eq!(tree.roots.iter().map(|chat| chat.id.as_str()).collect::<Vec<_>>(), ["child"]);
+    }
+
+    #[test]
+    fn recent_child_promotes_its_parent_family() {
+        let mut state = crate::state::AppState::new();
+        let mut parent = chat("parent");
+        parent.last_message_at = Some(Utc.timestamp_opt(2, 0).unwrap());
+        let mut child = chat("child");
+        child.parent_chat_id = Some("parent".into());
+        child.last_message_at = Some(Utc.timestamp_opt(20, 0).unwrap());
+        let mut other = chat("other");
+        other.last_message_at = Some(Utc.timestamp_opt(10, 0).unwrap());
+        state.apply_chats(vec![parent, child, other]);
+        let tree = sidebar_thread_tree(&state, None, SidebarSort::LastUpdated, false);
+        assert_eq!(tree.roots.iter().map(|chat| chat.id.as_str()).collect::<Vec<_>>(), ["parent", "other"]);
     }
 
     #[test]

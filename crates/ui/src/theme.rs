@@ -48,7 +48,7 @@ use zeron_theme::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AccentColor {
-    /// The exact upstream Zeron indigo.
+    /// The prototype's grayscale default accent.
     #[default]
     #[serde(alias = "violet", alias = "indigo", alias = "red", alias = "purple")]
     Zeron,
@@ -74,7 +74,7 @@ impl AccentColor {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Zeron => "Zeron",
+            Self::Zeron => "Graphite",
             Self::Orange => "Orange",
             Self::Amber => "Amber",
             Self::Green => "Green",
@@ -89,12 +89,11 @@ impl AccentColor {
         // used to gamut-clip OKLCH into sRGB and then mutate HSL lightness,
         // producing different chroma and apparent hues across light/dark.
         let (primary, strong) = match (self, appearance) {
-            (Self::Zeron, Appearance::Dark) => {
-                (oklch(0.673, 0.182, 276.935), oklch(0.585, 0.233, 277.117))
-            }
-            (Self::Zeron, Appearance::Light) => {
-                (oklch(0.511, 0.262, 276.966), oklch(0.511, 0.262, 276.966))
-            }
+            // The prototype's default interaction color is graphite. Keeping
+            // the neutral family on both appearances makes focus, selection,
+            // activity, and code marks feel like part of the same restrained UI.
+            (Self::Zeron, Appearance::Dark) => (neutral(0.72), neutral(0.44)),
+            (Self::Zeron, Appearance::Light) => (neutral(0.32), neutral(0.32)),
             (Self::Orange, Appearance::Dark) => (oklch(0.75, 0.18, 55.0), oklch(0.54, 0.19, 55.0)),
             (Self::Orange, Appearance::Light) => (oklch(0.50, 0.19, 55.0), oklch(0.50, 0.19, 55.0)),
             (Self::Amber, Appearance::Dark) => (oklch(0.80, 0.17, 84.0), oklch(0.52, 0.14, 84.0)),
@@ -373,9 +372,8 @@ pub const INK_FILL_SCALE: f32 = 1.0;
 /// keeps separators legible instead of dissolving into the panel.
 pub const INK_HAIRLINE_SCALE: f32 = 1.35;
 
-/// Paint-only syntax colors. The hues follow the Git history graph's lane
-/// palette (indigo, pink, emerald, amber, red, neutral), while light-mode
-/// variants are darkened enough to remain readable as text on white.
+/// Paint-only syntax colors. The prototype keeps syntax in a quiet neutral
+/// range and reserves color for semantic errors and status indicators.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SyntaxPalette {
     pub comment: Hsla,
@@ -490,84 +488,72 @@ impl SyntaxPalette {
     }
 
     fn dark(text: Hsla, comment: Hsla, danger: Hsla) -> Self {
-        // Same sources and 72% saturation treatment as history::graph_color.
-        let indigo = git_graph_tone(oklch(0.673, 0.182, 276.935));
-        let pink = git_graph_tone(oklch(0.718, 0.202, 349.761));
-        let emerald = git_graph_tone(oklch(0.765, 0.177, 163.223));
-        let amber = git_graph_tone(oklch(0.828, 0.189, 84.429));
-        let red = git_graph_tone(danger);
         Self {
             comment,
-            keyword: indigo,
-            string: emerald,
-            string_special: pink,
-            escape: pink,
-            number: amber,
-            boolean: amber,
-            type_name: amber,
-            type_builtin: emerald,
-            constructor: amber,
-            function: indigo,
-            function_builtin: pink,
-            macro_name: pink,
-            property: amber,
-            constant: emerald,
+            keyword: neutral(0.82),
+            string: neutral(0.76),
+            string_special: neutral(0.72),
+            escape: neutral(0.80),
+            number: neutral(0.76),
+            boolean: neutral(0.80),
+            type_name: neutral(0.86),
+            type_builtin: neutral(0.78),
+            constructor: neutral(0.84),
+            function: neutral(0.82),
+            function_builtin: neutral(0.74),
+            macro_name: neutral(0.78),
+            property: neutral(0.82),
+            constant: neutral(0.76),
             variable: text,
-            variable_special: pink,
+            variable_special: neutral(0.80),
             parameter: text,
-            operator: text,
-            punctuation: text,
-            tag: pink,
-            attribute: amber,
-            label: amber,
-            markup_heading: indigo,
-            markup_raw: emerald,
-            markup_link: pink,
-            markup_reference: amber,
-            markup_emphasis: pink,
-            markup_strong: indigo,
-            invalid: red,
+            operator: neutral(0.78),
+            punctuation: neutral(0.70),
+            tag: neutral(0.82),
+            attribute: neutral(0.76),
+            label: neutral(0.80),
+            markup_heading: neutral(0.86),
+            markup_raw: neutral(0.76),
+            markup_link: neutral(0.80),
+            markup_reference: neutral(0.76),
+            markup_emphasis: neutral(0.80),
+            markup_strong: neutral(0.86),
+            invalid: danger,
         }
     }
 
     fn light(text: Hsla, comment: Hsla, danger: Hsla) -> Self {
-        // Match the light graph's hue families at text-safe lightness.
-        let indigo = git_graph_tone(oklch(0.47, 0.20, 276.966));
-        let pink = git_graph_tone(oklch(0.47, 0.17, 0.584));
-        let emerald = git_graph_tone(oklch(0.46, 0.11, 163.225));
-        let amber = git_graph_tone(oklch(0.47, 0.12, 48.998));
-        let red = git_graph_tone(danger);
         Self {
             comment,
-            keyword: indigo,
-            string: emerald,
-            string_special: pink,
-            escape: pink,
-            number: amber,
-            boolean: amber,
-            type_name: amber,
-            type_builtin: emerald,
-            constructor: amber,
-            function: indigo,
-            function_builtin: pink,
-            macro_name: pink,
-            property: amber,
-            constant: emerald,
+            keyword: neutral(0.36),
+            string: neutral(0.42),
+            string_special: neutral(0.48),
+            escape: neutral(0.38),
+            number: neutral(0.44),
+            boolean: neutral(0.40),
+            type_name: neutral(0.32),
+            type_builtin: neutral(0.40),
+            constructor: neutral(0.34),
+            function: neutral(0.36),
+            function_builtin: neutral(0.46),
+            macro_name: neutral(0.40),
+            property: neutral(0.38),
+            constant: neutral(0.44),
             variable: text,
-            variable_special: pink,
+            variable_special: neutral(0.40),
             parameter: text,
-            operator: text,
-            punctuation: text,
-            tag: pink,
-            attribute: amber,
-            label: amber,
-            markup_heading: indigo,
-            markup_raw: emerald,
-            markup_link: pink,
-            markup_reference: amber,
-            markup_emphasis: pink,
-            markup_strong: indigo,
-            invalid: red,
+            operator: neutral(0.42),
+            punctuation: neutral(0.50),
+            tag: neutral(0.40),
+            attribute: neutral(0.44),
+            label: neutral(0.40),
+            markup_heading: neutral(0.32),
+            markup_raw: neutral(0.44),
+            markup_link: neutral(0.40),
+            markup_reference: neutral(0.44),
+            markup_emphasis: neutral(0.40),
+            markup_strong: neutral(0.32),
+            invalid: danger,
         }
     }
 
@@ -577,13 +563,6 @@ impl SyntaxPalette {
             Appearance::Light => Self::light(text, comment, danger),
         }
     }
-}
-
-/// Git history intentionally softens lane saturation so the graph remains
-/// colorful without competing with content. Syntax uses the same treatment.
-fn git_graph_tone(mut color: Hsla) -> Hsla {
-    color.s *= 0.72;
-    color
 }
 
 /// The app theme. Two concrete instances — [`Theme::dark`] and [`Theme::light`].
@@ -776,7 +755,7 @@ impl TerminalColors {
             Appearance::Light => "zeron-light",
         };
         let registry = ThemeRegistry::active();
-        Self::from_variant(registry.variant(id).expect("Zeron terminal palette exists"))
+        Self::from_variant(registry.variant(id).expect("Glitch Flow terminal palette exists"))
     }
 }
 
@@ -1283,7 +1262,7 @@ impl Theme {
             .variant(variant_id)
             .filter(|variant| model_appearance(variant.appearance) == appearance)
             .or_else(|| registry.variant(fallback_id))
-            .expect("the built-in registry contains both Zeron appearances");
+            .expect("the built-in registry contains both Glitch Flow appearances");
         Self::from_variant(variant, accent_selection, surface_preference)
     }
 
@@ -1951,18 +1930,19 @@ mod tests {
     }
 
     #[test]
-    fn zeron_accent_is_the_exact_upstream_default() {
+    fn graphite_accent_is_the_monochrome_prototype_default() {
         let dark = Theme::dark();
         let light = Theme::light();
         assert_eq!(dark.accent_color, AccentColor::Zeron);
-        assert_eq!(dark.accent, oklch(0.673, 0.182, 276.935));
-        assert_eq!(dark.accent_strong, oklch(0.585, 0.233, 277.117));
+        assert_eq!(dark.accent_color.label(), "Graphite");
+        assert_eq!(dark.accent, neutral(0.72));
+        assert_eq!(dark.accent_strong, neutral(0.44));
         assert_eq!(dark.code_text, dark.accent);
         assert_eq!(dark.busy, dark.accent);
         assert_eq!(dark.glyph.mid, dark.accent);
         assert_eq!(dark.caret, dark.accent);
-        assert_eq!(light.accent, oklch(0.511, 0.262, 276.966));
-        assert_eq!(light.accent_strong, oklch(0.511, 0.262, 276.966));
+        assert_eq!(light.accent, neutral(0.32));
+        assert_eq!(light.accent_strong, neutral(0.32));
         assert_eq!(light.code_text, light.accent);
         assert_eq!(light.busy, light.accent);
         assert_eq!(light.glyph.mid, light.accent);
@@ -2411,11 +2391,9 @@ mod tests {
 
     /// Solid (primary button) plates must carry their label at AA in both modes.
     ///
-    /// The accent plate is held to 4.0 rather than 4.5: dark mode's indigo-500
-    /// fill — inherited unchanged from the original palette — measures 4.38:1
-    /// under white, which clears WCAG AA for the medium-weight 14px labels these
-    /// buttons use (large-text AA is 3:1) but not body copy. Light mode's
-    /// indigo-600 clears the stricter bar with room to spare.
+    /// Accent plates carry their own foreground at AA. The dark graphite plate
+    /// is intentionally deeper than the focus accent so its white label remains
+    /// legible; the light graphite plate pairs with dark text.
     #[test]
     fn solid_button_is_legible_in_both_appearances() {
         for t in [Theme::dark(), Theme::light()] {

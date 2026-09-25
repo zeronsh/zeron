@@ -22,9 +22,11 @@
 //! target is skipped, so re-running after a partial import (or after new
 //! local work from a later signed-out stretch) imports only what's missing.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use zeron_doc::{REGISTRY_DOC_ID, RegistryDoc};
 use zeron_sync::DocsStore;
@@ -63,6 +65,75 @@ struct MarkerEntry {
     imported_at_ms: i64,
     imported_chats: usize,
     imported_spaces: usize,
+    /// Missing in markers written by older builds: those imported only local.
+    #[serde(default)]
+    sources: Vec<ImportSourceKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ImportSourceKind {
+    Local,
+    Development,
+}
+
+impl ImportSourceKind {
+    const ALL: [Self; 2] = [Self::Local, Self::Development];
+
+    fn root(self, data_dir: &Path) -> PathBuf {
+        match self {
+            Self::Local => data_dir.join("profiles").join("local"),
+            Self::Development => data_dir.join("orgs").join("dev-org").join("dev-user"),
+        }
+    }
+}
+
+impl MarkerEntry {
+    fn granted_sources(&self) -> Vec<ImportSourceKind> {
+        if self.sources.is_empty() {
+            vec![ImportSourceKind::Local]
+        } else {
+            self.sources.clone()
+        }
+    }
+}
+
+/// Opening a source through `DocsStore::open` would run schema migrations.
+/// This connection can only read the user's original profile.
+struct ImportSource {
+    kind: ImportSourceKind,
+    root: PathBuf,
+    conn: Connection,
+    registry: RegistryDoc,
+}
+
+impl ImportSource {
+    fn sql_error(&self, err: rusqlite::Error) -> EngineError {
+        EngineError::Other(format!("source {}: {err}", self.root.display()))
+    }
+
+    fn load_snapshot(&self, doc_id: &str) -> Result<Option<Vec<u8>>, EngineError> {
+        self.conn
+            .query_row(
+                "SELECT bytes FROM snapshots WHERE doc_id = ?1",
+                params![doc_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|err| self.sql_error(err))
+    }
+
+    fn processed_commands(&self) -> Result<Vec<(String, i64)>, EngineError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT command_id, processed_at FROM processed_commands")
+            .map_err(|err| self.sql_error(err))?;
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|err| self.sql_error(err))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| self.sql_error(err))
+    }
 }
 
 /// What the wizard needs to offer (or silently skip) the import step.
@@ -153,14 +224,6 @@ impl LocalImporter {
         }
     }
 
-    fn source_root(&self) -> PathBuf {
-        self.inner.data_dir.join("profiles").join("local")
-    }
-
-    fn source_uploads(&self) -> PathBuf {
-        self.source_root().join("uploads")
-    }
-
     fn marker_path(&self) -> PathBuf {
         self.inner.data_dir.join(MARKER_FILE)
     }
@@ -207,9 +270,20 @@ impl LocalImporter {
     /// marker — so a crash or short write can never truncate the file and
     /// erase other accounts' grants. Failures propagate to the caller and end
     /// up in the import summary.
-    fn record_import(&self, chats: usize, spaces: usize) -> Result<(), EngineError> {
+    fn record_import(
+        &self,
+        chats: usize,
+        spaces: usize,
+        sources: &[ImportSource],
+    ) -> Result<(), EngineError> {
         let _guard = marker_lock();
         let mut marker = self.load_marker_locked();
+        let mut granted: HashSet<_> = sources.iter().map(|source| source.kind).collect();
+        for entry in &marker.imports {
+            if entry.org_id == self.inner.org_id && entry.user_id == self.inner.user_id {
+                granted.extend(entry.granted_sources());
+            }
+        }
         marker
             .imports
             .retain(|e| !(e.org_id == self.inner.org_id && e.user_id == self.inner.user_id));
@@ -219,6 +293,10 @@ impl LocalImporter {
             imported_at_ms: crate::now_ms(),
             imported_chats: chats,
             imported_spaces: spaces,
+            sources: ImportSourceKind::ALL
+                .into_iter()
+                .filter(|kind| granted.contains(kind))
+                .collect(),
         });
         let bytes = serde_json::to_vec_pretty(&marker)
             .map_err(|err| EngineError::Other(format!("marker serialize: {err}")))?;
@@ -239,41 +317,66 @@ impl LocalImporter {
         })
     }
 
-    /// Open the local profile's stores read-only-ish. `None` when the device
-    /// never ran a local profile (nothing to import).
-    fn open_source(&self) -> Result<Option<(DocsStore, RegistryDoc)>, EngineError> {
-        let root = self.source_root();
-        if !root.join("docs.sqlite3").is_file() {
-            return Ok(None);
+    /// Open only the two known source profiles, without creating files or
+    /// running migrations in either original database.
+    fn open_sources(&self) -> Result<Vec<ImportSource>, EngineError> {
+        let mut sources = Vec::new();
+        for kind in ImportSourceKind::ALL {
+            let root = kind.root(&self.inner.data_dir);
+            // A signed-in test/profile can use the development identity. Never
+            // read the target as its own import source.
+            if self.inner.target_journals.parent() == Some(root.as_path()) {
+                continue;
+            }
+            let db = root.join("docs.sqlite3");
+            if !db.is_file() {
+                continue;
+            }
+            let conn = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|err| EngineError::Other(format!("source {}: {err}", db.display())))?;
+            let bytes: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT bytes FROM snapshots WHERE doc_id = ?1",
+                    params![REGISTRY_DOC_ID],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|err| EngineError::Other(format!("source {}: {err}", db.display())))?;
+            let Some(bytes) = bytes else {
+                continue; // no registry replica means no importable rows
+            };
+            let registry = RegistryDoc::from_bytes(&bytes, &self.inner.device_id)?;
+            sources.push(ImportSource {
+                kind,
+                root,
+                conn,
+                registry,
+            });
         }
-        let store = DocsStore::open(&root)?;
-        let Some(bytes) = store.load_snapshot(REGISTRY_DOC_ID)? else {
-            return Ok(None); // store exists but no registry replica — nothing rowed
-        };
-        let registry = RegistryDoc::from_bytes(&bytes, &self.inner.device_id)?;
-        Ok(Some((store, registry)))
+        Ok(sources)
     }
 
     /// What's importable right now (target-dedup applied).
     pub fn status(&self) -> Result<LocalImportStatus, EngineError> {
         let imported_before = self.imported_before();
-        let Some((_, registry)) = self.open_source()? else {
-            return Ok(LocalImportStatus {
-                available_chats: 0,
-                available_spaces: 0,
-                imported_before,
-            });
-        };
         let mut available_chats = 0;
-        for chat in registry.read_chats()? {
-            if self.inner.workspace.chat(&chat.id)?.is_none() {
-                available_chats += 1;
-            }
-        }
         let mut available_spaces = 0;
-        for space in registry.read_spaces()? {
-            if self.inner.workspace.space(&space.id)?.is_none() {
-                available_spaces += 1;
+        let mut seen_chats = HashSet::new();
+        let mut seen_spaces = HashSet::new();
+        for source in self.open_sources()? {
+            for chat in source.registry.read_chats()? {
+                if seen_chats.insert(chat.id.clone())
+                    && self.inner.workspace.chat(&chat.id)?.is_none()
+                {
+                    available_chats += 1;
+                }
+            }
+            for space in source.registry.read_spaces()? {
+                if seen_spaces.insert(space.id.clone())
+                    && self.inner.workspace.space(&space.id)?.is_none()
+                {
+                    available_spaces += 1;
+                }
             }
         }
         Ok(LocalImportStatus {
@@ -286,7 +389,8 @@ impl LocalImporter {
     /// Run the import, emitting [`ImportEvent`]s (the last is always
     /// `Summary`). Blocking (sqlite + fs) — callers run it off the async path.
     pub fn run(&self, mut emit: impl FnMut(ImportEvent)) -> Result<(), EngineError> {
-        let Some((source_store, registry)) = self.open_source()? else {
+        let sources = self.open_sources()?;
+        if sources.is_empty() {
             emit(ImportEvent::Start {
                 chats: 0,
                 spaces: 0,
@@ -305,19 +409,72 @@ impl LocalImporter {
 
         let mut errors: Vec<String> = Vec::new();
 
-        // Spaces first: chats reference `space_id`, and viewers resolve the
-        // reference as soon as the chat row lands.
-        let spaces = registry.read_spaces()?;
-        let chats = registry.read_chats()?;
-        let (total_chats, total_spaces) = (chats.len(), spaces.len());
-        let pending_chats: Vec<_> = chats
-            .into_iter()
-            .filter(|chat| !matches!(self.inner.workspace.chat(&chat.id), Ok(Some(_))))
-            .collect();
-        let pending_spaces: Vec<_> = spaces
-            .into_iter()
-            .filter(|space| !matches!(self.inner.workspace.space(&space.id), Ok(Some(_))))
-            .collect();
+        // Local first preserves the old importer priority. A duplicate id
+        // belongs to one target row, so flag divergent source rows instead of
+        // silently replacing either original profile's work.
+        let mut seen_chats: HashMap<String, (usize, zeron_proto::Chat)> = HashMap::new();
+        let mut seen_spaces: HashMap<String, zeron_proto::Space> = HashMap::new();
+        let mut conflicting_spaces = HashSet::new();
+        let mut pending_chats = Vec::new();
+        let mut pending_spaces = Vec::new();
+        let mut total_chats = 0;
+        let mut total_spaces = 0;
+        for (source_index, source) in sources.iter().enumerate() {
+            for space in source.registry.read_spaces()? {
+                total_spaces += 1;
+                if let Some(previous) = seen_spaces.get(&space.id) {
+                    if previous != &space {
+                        conflicting_spaces.insert(space.id.clone());
+                        errors.push(format!(
+                            "space {} differs between local and development profiles; the original rows were left intact",
+                            space.id
+                        ));
+                    }
+                    continue;
+                }
+                seen_spaces.insert(space.id.clone(), space.clone());
+                if self.inner.workspace.space(&space.id)?.is_none() {
+                    pending_spaces.push((source_index, space));
+                }
+            }
+            for chat in source.registry.read_chats()? {
+                total_chats += 1;
+                if let Some((prior_index, previous)) = seen_chats.get(&chat.id) {
+                    if previous != &chat
+                        || sources[*prior_index].load_snapshot(&chat.id)?
+                            != source.load_snapshot(&chat.id)?
+                    {
+                        errors.push(format!(
+                            "chat {} differs between local and development profiles; the original transcripts were left intact",
+                            chat.id
+                        ));
+                    }
+                    continue;
+                }
+                seen_chats.insert(chat.id.clone(), (source_index, chat.clone()));
+                if self.inner.workspace.chat(&chat.id)?.is_none() {
+                    pending_chats.push((source_index, chat));
+                }
+            }
+        }
+        // A chat from the losing source must not be attached to the winning
+        // source's different space with the same id.
+        pending_chats.retain(|(source_index, chat)| {
+            if *source_index > 0
+                && chat
+                    .space_id
+                    .as_ref()
+                    .is_some_and(|id| conflicting_spaces.contains(id))
+            {
+                errors.push(format!(
+                    "chat {} references a conflicting space; the original chat was left intact",
+                    chat.id
+                ));
+                false
+            } else {
+                true
+            }
+        });
         let skipped_chats = total_chats - pending_chats.len();
         let skipped_spaces = total_spaces - pending_spaces.len();
 
@@ -327,25 +484,25 @@ impl LocalImporter {
         });
 
         let mut imported_spaces = 0;
-        for space in &pending_spaces {
+        for (_, space) in &pending_spaces {
             match self.inner.workspace.import_space_row(space) {
                 Ok(()) => imported_spaces += 1,
                 Err(err) => errors.push(format!("space {}: {err}", space.id)),
             }
         }
 
-        let source_journals = self.source_root().join("journals");
         let total = pending_chats.len();
         let mut imported_chats = 0;
         let mut journals_copied = 0;
-        for (index, chat) in pending_chats.iter().enumerate() {
+        for (index, (source_index, chat)) in pending_chats.iter().enumerate() {
             emit(ImportEvent::Chat {
                 index,
                 total,
                 chat_id: chat.id.clone(),
                 title: chat.title.clone(),
             });
-            match self.import_chat(&source_store, chat, &source_journals) {
+            let source = &sources[*source_index];
+            match self.import_chat(source, chat, &source.root.join("journals")) {
                 Ok(journal) => {
                     imported_chats += 1;
                     if journal {
@@ -358,24 +515,28 @@ impl LocalImporter {
 
         // Merge the source's command ledger so imported pending commands can
         // never re-execute under this profile (mark-before-execute carries over).
-        let ledger_rows_merged = source_store
-            .processed_commands()
-            .and_then(|rows| self.inner.target_store.import_processed_commands(&rows))
-            .unwrap_or_else(|err| {
-                errors.push(format!("command ledger: {err}"));
-                0
-            });
+        let mut ledger_rows_merged = 0;
+        for source in &sources {
+            match source
+                .processed_commands()
+                .and_then(|rows| self.inner.target_store.import_processed_commands(&rows).map_err(Into::into))
+            {
+                Ok(rows) => ledger_rows_merged += rows,
+                Err(err) => errors.push(format!("command ledger {}: {err}", source.root.display())),
+            }
+        }
 
         // Transcripts embed absolute paths under the local uploads root; jail
         // it read-only now (and on future boots, via the marker). A marker
         // that fails to persist means imported attachments stop resolving
         // after a restart — that is a real failure, not a footnote.
-        if self.source_uploads().is_dir() {
-            self.inner
-                .uploads
-                .add_read_only_root(&self.source_uploads());
+        for source in &sources {
+            let uploads = source.root.join("uploads");
+            if uploads.is_dir() {
+                self.inner.uploads.add_read_only_root(&uploads);
+            }
         }
-        if let Err(err) = self.record_import(imported_chats, imported_spaces) {
+        if let Err(err) = self.record_import(imported_chats, imported_spaces, &sources) {
             errors.push(format!("import marker: {err}"));
         }
 
@@ -395,13 +556,13 @@ impl LocalImporter {
     /// Returns whether a journal file was copied.
     fn import_chat(
         &self,
-        source_store: &DocsStore,
+        source: &ImportSource,
         chat: &zeron_proto::Chat,
         source_journals: &Path,
     ) -> Result<bool, EngineError> {
         // Doc bytes may be absent (a chat row created but never opened) — the
         // row alone is still worth carrying; a doc materializes on first open.
-        if let Some(bytes) = source_store.load_snapshot(&chat.id)?
+        if let Some(bytes) = source.load_snapshot(&chat.id)?
             && !self.inner.target_store.has_snapshot(&chat.id)?
         {
             self.inner.target_store.save_snapshot_with_cursor(
@@ -468,17 +629,33 @@ mod tests {
     }
 }
 
-/// Whether a recorded import grants the synced profile `(org, user)` the local
-/// profile's uploads root as a read-only jail root. `EngineCore::assemble`
-/// calls this on every account-scoped boot.
-pub fn marker_grants_read_root(data_dir: &Path, org_id: &str, user_id: &str) -> Option<PathBuf> {
-    let marker: Marker = std::fs::read_to_string(data_dir.join(MARKER_FILE))
+/// Read-only attachment roots granted by recorded imports for this account.
+/// Old marker entries had no `sources` field and grant the local root only.
+pub fn marker_grants_read_roots(data_dir: &Path, org_id: &str, user_id: &str) -> Vec<PathBuf> {
+    let marker: Option<Marker> = std::fs::read_to_string(data_dir.join(MARKER_FILE))
         .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())?;
-    let hit = marker
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+    let Some(marker) = marker else {
+        return Vec::new();
+    };
+    let Some(entry) = marker
         .imports
         .iter()
-        .any(|e| e.org_id == org_id && e.user_id == user_id);
-    let uploads = data_dir.join("profiles").join("local").join("uploads");
-    (hit && uploads.is_dir()).then_some(uploads)
+        .find(|entry| entry.org_id == org_id && entry.user_id == user_id)
+    else {
+        return Vec::new();
+    };
+    entry
+        .granted_sources()
+        .into_iter()
+        .map(|source| source.root(data_dir).join("uploads"))
+        .filter(|uploads| uploads.is_dir())
+        .collect()
+}
+
+/// Compatibility helper for callers that only need the original local root.
+pub fn marker_grants_read_root(data_dir: &Path, org_id: &str, user_id: &str) -> Option<PathBuf> {
+    marker_grants_read_roots(data_dir, org_id, user_id)
+        .into_iter()
+        .find(|root| *root == ImportSourceKind::Local.root(data_dir).join("uploads"))
 }

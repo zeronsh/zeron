@@ -263,6 +263,14 @@ impl WorkspaceDoc {
             )?,
             None => row.delete("sourceContext")?,
         }
+        if chat.pull_request_urls.is_empty() {
+            row.delete("pullRequestUrls")?;
+        } else {
+            row.insert(
+                "pullRequestUrls",
+                LoroValue::from(serde_json::to_value(&chat.pull_request_urls)?),
+            )?;
+        }
         match &chat.config {
             Some(config) => row.insert("config", LoroValue::from(serde_json::to_value(config)?))?,
             None => row.delete("config")?,
@@ -340,6 +348,28 @@ impl WorkspaceDoc {
             return Ok(false);
         };
         row.insert("title", title)?;
+        self.doc.commit();
+        Ok(true)
+    }
+
+    /// Replace the conversation's explicitly linked GitHub pull request URLs.
+    /// These are chat metadata so they survive branch changes and sync.
+    pub fn set_chat_pull_request_urls(
+        &self,
+        chat_id: &str,
+        urls: &[String],
+    ) -> Result<bool, DocError> {
+        let Some(row) = self.existing_row("chats", chat_id) else {
+            return Ok(false);
+        };
+        if urls.is_empty() {
+            row.delete("pullRequestUrls")?;
+        } else {
+            row.insert(
+                "pullRequestUrls",
+                LoroValue::from(serde_json::to_value(urls)?),
+            )?;
+        }
         self.doc.commit();
         Ok(true)
     }
@@ -689,6 +719,8 @@ pub(crate) struct RawChat {
     checkout_id: Option<String>,
     #[serde(default)]
     source_context: Option<zeron_proto::ConversationSourceContext>,
+    #[serde(default)]
+    pull_request_urls: Vec<String>,
     /// LENIENT: a config this build can't decode (a harness/reasoning/sandbox
     /// id from a NEWER peer — field incident: pre-v0.2.10 laptops dropped
     /// every `"opencode"` chat row wholesale, so new sessions silently never
@@ -746,6 +778,7 @@ impl From<RawChat> for Chat {
             branch: raw.branch,
             checkout_id: raw.checkout_id,
             source_context: raw.source_context,
+            pull_request_urls: raw.pull_request_urls,
             config: raw.config,
             last_message_preview: raw.last_message_preview,
             last_message_at: raw.last_message_at.map(dt),
@@ -849,6 +882,7 @@ mod tests {
             branch: Some("main".into()),
             checkout_id: None,
             source_context: None,
+            pull_request_urls: Vec::new(),
             config: Some(ChatConfig {
                 harness: HarnessId::Mock,
                 model: Some("mock-1".into()),

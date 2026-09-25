@@ -1,12 +1,12 @@
 [package]
-name = "zeron"
+name = "glitch-flow"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "zeron"
+name = "glitch-flow"
 path = "src/main.rs"
 
 [dependencies]

@@ -234,6 +234,21 @@ struct SwitchRefParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CreateBranchParams {
+    repo_path: String,
+    branch: String,
+    #[serde(default)]
+    base_ref: Option<String>,
+    #[serde(default = "default_create_branch_checkout")]
+    checkout: bool,
+}
+
+fn default_create_branch_checkout() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CreateWorktreeParams {
     #[serde(alias = "repo")]
     repo_path: String,
@@ -448,7 +463,7 @@ enum MutateParams {
         #[serde(default)]
         cwd: Option<String>,
         /// The chat whose agent is creating this one (Zeron MCP); recorded
-        /// on the row as `parentChatId` for orchestration trees.
+        /// on the row as `parentChatId` for child-thread trees.
         #[serde(default)]
         parent_chat_id: Option<String>,
     },
@@ -478,6 +493,14 @@ enum MutateParams {
     DeleteSpace { space_id: String },
     #[serde(rename_all = "camelCase")]
     RenameChat { chat_id: String, title: String },
+    /// Replace this chat's persistent GitHub PR links. URLs are retained when
+    /// the chat is moved to another branch or worktree.
+    #[serde(rename_all = "camelCase")]
+    SetChatPullRequestUrls {
+        chat_id: String,
+        #[serde(default)]
+        urls: Vec<String>,
+    },
     /// Set the chat's checkout branch label — the sidebar's
     /// "project · branch" sub-line.
     #[serde(rename_all = "camelCase")]
@@ -526,6 +549,33 @@ enum MutateParams {
         #[serde(default)]
         at: Option<i64>,
     },
+}
+
+fn validate_pull_request_urls(urls: Vec<String>) -> Result<Vec<String>, RpcError> {
+    let mut validated = Vec::new();
+    for raw in urls {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let url = reqwest::Url::parse(raw).map_err(|_| {
+            RpcError::Failed("PR links must be valid GitHub pull request URLs".into())
+        })?;
+        let segments: Vec<_> = url.path_segments().into_iter().flatten().collect();
+        let is_pr_path = segments
+            .windows(2)
+            .any(|pair| pair[0] == "pull" && pair[1].parse::<u64>().is_ok_and(|n| n > 0));
+        if url.scheme() != "https" || url.host_str().is_none() || !is_pr_path {
+            return Err(RpcError::Failed(
+                "PR links must be HTTPS URLs ending in a GitHub /pull/<number> path".into(),
+            ));
+        }
+        let canonical = url.to_string();
+        if !validated.iter().any(|existing| existing == &canonical) {
+            validated.push(canonical);
+        }
+    }
+    Ok(validated)
 }
 
 pub struct EngineRpc {
@@ -940,6 +990,13 @@ impl EngineRpc {
                 .rename_chat(&chat_id, &title)
                 .map_err(failed)
                 .map(drop),
+            MutateParams::SetChatPullRequestUrls { chat_id, urls } => {
+                let urls = validate_pull_request_urls(urls)?;
+                self.workspace
+                    .set_chat_pull_request_urls(&chat_id, &urls)
+                    .map_err(failed)
+                    .map(drop)
+            }
             MutateParams::SetChatBranch { chat_id, branch } => self
                 .workspace
                 .set_chat_branch(&chat_id, &branch)
@@ -1147,6 +1204,7 @@ fn forwardable(method: &str) -> bool {
             | methods::RESOLVE_GIT_AVATARS
             | methods::FETCH_ALL
             | methods::SWITCH_REF
+            | methods::CREATE_BRANCH
             | methods::LIST_FOLDERS
             | methods::LIST_DRIVES
             | methods::SEARCH_FILES
@@ -1450,7 +1508,15 @@ impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
-        if forwardable(method)
+        // Only chat creation and rollback are host-directed Mutate operations;
+        // the other registry mutations remain profile-wide writes from this
+        // device and must not be silently redirected.
+        let host_chat_mutation = method == methods::MUTATE
+            && params
+                .get("op")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|op| matches!(op, "createChat" | "deleteChat"));
+        if (forwardable(method) || host_chat_mutation)
             && let Some(target) = params.get("targetDeviceId").and_then(|v| v.as_str())
             && target != self.doc_host.device_id()
         {
@@ -1897,6 +1963,9 @@ impl RpcService for EngineRpc {
             methods::WATCH_CHATS => {
                 Ok(RpcReply::Stream(watch_stream(self.workspace.watch_chats())))
             }
+            methods::WATCH_TICKETS => {
+                Ok(RpcReply::Stream(watch_stream(self.workspace.watch_tickets())))
+            }
             methods::WATCH_SIDEBAR_PREFERENCES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_sidebar_preferences(),
             ))),
@@ -1970,6 +2039,13 @@ impl RpcService for EngineRpc {
                         "ok": true, "sidebarPreferences": self.workspace.sidebar_preferences_snapshot(),
                     }));
                 }
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::MUTATE_TICKET => {
+                let mutation: zeron_proto::TicketMutation = parse_params(params)?;
+                self.workspace
+                    .mutate_ticket(mutation)
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::WATCH_CHECKOUT_DIFFS => {
@@ -2412,6 +2488,21 @@ impl RpcService for EngineRpc {
                     .switch_ref(std::path::Path::new(&p.repo_path), &p.ref_name)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "branch": branch }))
+            }
+            methods::CREATE_BRANCH => {
+                let p: CreateBranchParams = parse_params(params)?;
+                let branch = self
+                    .repos
+                    .create_branch(
+                        std::path::Path::new(&p.repo_path),
+                        &p.branch,
+                        p.base_ref.as_deref(),
+                        p.checkout,
+                    )
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                self.diff_sync.sync_all();
                 RpcReply::value(&serde_json::json!({ "branch": branch }))
             }
             methods::LIST_FOLDERS => {
@@ -3273,6 +3364,7 @@ mod tests {
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));
         assert!(forwardable(methods::FETCH_ALL));
+        assert!(forwardable(methods::CREATE_BRANCH));
         assert!(forwardable(methods::RESOLVE_GIT_AVATARS));
         assert!(forwardable(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));

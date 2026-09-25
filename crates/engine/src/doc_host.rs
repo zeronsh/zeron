@@ -4220,7 +4220,7 @@ impl DocHost {
                     ws.claim_chat(chat_id, Some(&request.cwd))?;
                     // A pre-existing row (the client's createChat raced ahead)
                     // still carries the repo folder — repoint it at the fresh
-                    // worktree, and stamp the actual `zeron/<name>` branch so
+                    // worktree, and stamp the actual `glitch-flow/<name>` branch so
                     // the footer and the title-rename flow see it.
                     if let Some(wt) = &fresh_worktree {
                         if let Err(err) = ws.set_chat_cwd(chat_id, &wt.path) {
@@ -4536,8 +4536,14 @@ impl DocHost {
             && let Ok(Some(chat)) = ws.chat(chat_id)
             && let Some(cwd) = chat.cwd
             && cwd != spec.repo_path
-            && crate::workspace_host::linked_worktree_root(std::path::Path::new(&cwd)).as_deref()
-                == Some(spec.repo_path.as_str())
+            && crate::workspace_host::linked_worktree_root(std::path::Path::new(&cwd))
+                .as_deref()
+                .is_some_and(|root| {
+                    Self::same_filesystem_path(
+                        std::path::Path::new(root),
+                        std::path::Path::new(&spec.repo_path),
+                    )
+                })
         {
             tracing::info!(chat = %chat_id, cwd = %cwd, "worktree spec: reusing the chat's existing worktree");
             return Ok((cwd, None));
@@ -4557,6 +4563,12 @@ impl DocHost {
             "worktree materialized for run"
         );
         Ok((worktree.path.clone(), Some(worktree)))
+    }
+
+    fn same_filesystem_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+        let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+        let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+        left == right
     }
 
     fn complete_worktree_setup_handoff(

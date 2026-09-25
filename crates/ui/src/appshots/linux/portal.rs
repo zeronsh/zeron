@@ -202,7 +202,7 @@ pub(super) async fn capture_target(target: CaptureTarget) -> Result<CapturedApps
         .len();
     if file_len > crate::attachments::MAX_ATTACHMENT_BYTES {
         return Err(CaptureError::CaptureFailed(
-            "The portal screenshot is larger than Zeron's 24 MB image limit.".into(),
+            "The portal screenshot is larger than Glitch Flow's 24 MB image limit.".into(),
         ));
     }
     let file = fs::File::open(path).map_err(|error| {

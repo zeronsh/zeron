@@ -151,13 +151,13 @@ async fn repos_round_trip_add_branches_worktrees() {
     assert_eq!(branches[0], "main", "default branch first: {branches:?}");
     assert!(branches.contains(&"feature/x".to_string()));
 
-    // Worktree add: zeron/<name> branch, isolated dir under the test root.
+    // Worktree add: glitch-flow/<name> branch, isolated dir under the test root.
     let worktree = repos
         .create_worktree(&repo_dir, "main")
         .await
         .expect("worktree");
     assert!(
-        worktree.branch.starts_with("zeron/"),
+        worktree.branch.starts_with("glitch-flow/"),
         "branch: {}",
         worktree.branch
     );
@@ -175,7 +175,7 @@ async fn repos_round_trip_add_branches_worktrees() {
     assert!(branches.contains(&worktree.branch));
 
     // Refs carry checkout state: `main` is current (main folder), the
-    // worktree's zeron/<name> branch maps to its linked-checkout path, and
+    // worktree's glitch-flow/<name> branch maps to its linked-checkout path, and
     // a plain branch has neither.
     let refs = repos.refs(&repo_dir).await.expect("refs");
     let by_name = |name: &str| refs.iter().find(|r| r.name == name).expect("ref row");
@@ -1403,7 +1403,7 @@ async fn project_actions_crud_preserves_saved_actions_with_invalid_imports() {
         )
         .unwrap();
     let client = zeron_rpc::memory_client(core.rpc_service());
-    let path = project.join("zeron.json");
+    let path = project.join("glitch-flow.json");
     // Directories must be reported as an import issue without preventing CRUD.
     std::fs::create_dir(&path).unwrap();
     let listed = client
@@ -1842,7 +1842,7 @@ async fn rpc_dispatch_for_m5_methods() {
         worktree["branch"]
             .as_str()
             .expect("branch")
-            .starts_with("zeron/")
+            .starts_with("glitch-flow/")
     );
     assert!(worktree["checkoutId"].is_string());
     assert!(worktree.get("setupAction").is_none());

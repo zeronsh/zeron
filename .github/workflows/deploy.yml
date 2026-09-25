@@ -1,135 +1,50 @@
-name: deploy
+name: deploy-edge
 
-# Autodeploy the edge Worker + Durable Objects (session/device rooms, R2,
-# WorkOS auth routes) on every push to main that touches edge/. Skips
-# gracefully until the CLOUDFLARE_API_TOKEN secret is configured (until then:
-# `npm -C edge run deploy` from a wrangler-authenticated machine).
-#
-# The token needs: Workers Scripts (edit), Workers Routes (edit) on zeron.sh,
-# Workers R2 Storage (edit). Account id is pinned in edge/wrangler.jsonc.
-
+# Cloud deployment is an explicit operator action. This workflow deploys only
+# the Glitch Flow edge; it does not touch Zeron's landing or redirect Workers.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
-concurrency:
-  group: deploy-main
-  cancel-in-progress: false
+permissions:
+  contents: read
 
 jobs:
   edge:
     runs-on: ubuntu-latest
     env:
-      # `secrets` is not a valid context in step `if:` expressions — surface
-      # the token through job env and gate on that instead.
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          # `github.event.before` may precede several commits in a batched push.
-          fetch-depth: 0
-      - name: detect edge changes
-        id: changed
+      - name: Check deployment configuration
         shell: bash
         run: |
-          before="${{ github.event.before }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
-            || [ -z "$before" ] || ! git cat-file -e "$before" 2>/dev/null; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::Set this repository's CLOUDFLARE_API_TOKEN secret and CLOUDFLARE_ACCOUNT_ID variable."
+            exit 1
           fi
-          if git diff --name-only "$before" "$GITHUB_SHA" | grep -qE "^(edge/|\.github/workflows/deploy\.yml)"; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
+          if [ "$CLOUDFLARE_ACCOUNT_ID" = "b57dde68ee5964dccc025437b5478a5b" ]; then
+            echo "::error::Refusing to deploy to Zeron's inherited Cloudflare account."
+            exit 1
+          fi
+          if grep -q 'REPLACE_WITH_WORKOS_CLIENT_ID' edge/wrangler.jsonc; then
+            echo "::error::Set the Glitch Flow WorkOS client ID in edge/wrangler.jsonc before deploying."
+            exit 1
           fi
       - uses: actions/setup-node@v4
-        if: steps.changed.outputs.changed == 'true'
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: edge/package-lock.json
-      - name: install
-        if: steps.changed.outputs.changed == 'true'
+      - name: Install
         working-directory: edge
         run: npm ci
-      - name: typecheck
-        if: steps.changed.outputs.changed == 'true'
+      - name: Typecheck
         working-directory: edge
         run: npm run typecheck
-      - name: test
-        if: steps.changed.outputs.changed == 'true'
+      - name: Test
         working-directory: edge
         run: npm test
-      - name: deploy
-        if: steps.changed.outputs.changed == 'true' && env.CLOUDFLARE_API_TOKEN != ''
+      - name: Deploy edge
         working-directory: edge
         run: npx wrangler deploy
-
-  # Static landing page (zeron.sh) — assets-only worker, no build step.
-  landing:
-    runs-on: ubuntu-latest
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: detect landing changes
-        id: changed
-        shell: bash
-        run: |
-          before="${{ github.event.before }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
-            || [ -z "$before" ] || ! git cat-file -e "$before" 2>/dev/null; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          if git diff --name-only "$before" "$GITHUB_SHA" | grep -qE "^(apps/landing/|\.github/workflows/deploy\.yml)"; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: actions/setup-node@v4
-        if: steps.changed.outputs.changed == 'true'
-        with:
-          node-version: 22
-      - name: test
-        if: steps.changed.outputs.changed == 'true'
-        working-directory: apps/landing
-        run: node --test *.test.mjs
-      - name: deploy
-        if: steps.changed.outputs.changed == 'true' && env.CLOUDFLARE_API_TOKEN != ''
-        working-directory: apps/landing
-        run: npx wrangler@4 deploy
-
-  # www.zeron.sh → zeron.sh 301 (see apps/www-redirect/wrangler.jsonc).
-  www-redirect:
-    runs-on: ubuntu-latest
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: detect www-redirect changes
-        id: changed
-        shell: bash
-        run: |
-          before="${{ github.event.before }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
-            || [ -z "$before" ] || ! git cat-file -e "$before" 2>/dev/null; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          if git diff --name-only "$before" "$GITHUB_SHA" | grep -qE "^(apps/www-redirect/|\.github/workflows/deploy\.yml)"; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: actions/setup-node@v4
-        if: steps.changed.outputs.changed == 'true'
-        with:
-          node-version: 22
-      - name: deploy
-        if: steps.changed.outputs.changed == 'true' && env.CLOUDFLARE_API_TOKEN != ''
-        working-directory: apps/www-redirect
-        run: npx wrangler@4 deploy

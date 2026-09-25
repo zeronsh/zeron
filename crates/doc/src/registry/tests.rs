@@ -260,6 +260,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         branch: Some("main".into()),
         checkout_id: None,
         source_context: None,
+        pull_request_urls: Vec::new(),
         config: Some(ChatConfig {
             harness: HarnessId::Mock,
             model: Some("mock-1".into()),
@@ -277,6 +278,83 @@ fn chat(id: &str, device_id: &str) -> Chat {
         last_seen_at: None,
         room_gen: None,
     }
+}
+
+#[test]
+fn ticket_rows_survive_restart_and_independent_edits_converge() {
+    use zeron_proto::{TaskBoard, Ticket, TicketKind, TicketPriority, TicketStatus};
+
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    a.upsert_task_board(&TaskBoard {
+        id: "board-1".into(),
+        name: "Product".into(),
+        description: "Plan".into(),
+        archived: false,
+        created_at: ts(1_000),
+        updated_at: ts(1_000),
+    })
+    .unwrap();
+    a.upsert_ticket(&Ticket {
+        id: "issue-1".into(),
+        board_id: "board-1".into(),
+        kind: TicketKind::Issue,
+        parent_ticket_id: None,
+        title: "Build tickets".into(),
+        description: "Initial description".into(),
+        status: TicketStatus::Backlog,
+        priority: TicketPriority::None,
+        archived: false,
+        created_at: ts(1_000),
+        updated_at: ts(1_000),
+    })
+    .unwrap();
+
+    let saved = a.to_bytes().unwrap();
+    a = RegistryDoc::from_bytes(&saved, "dev-a").unwrap();
+    assert_eq!(a.read_tickets().unwrap().tickets.len(), 1);
+    assert_eq!(a.pending_len(), 2);
+
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(a.read_tickets().unwrap(), b.read_tickets().unwrap());
+
+    a.patch_ticket(
+        "issue-1",
+        fields([("status", json!(TicketStatus::InProgress))]),
+    )
+    .unwrap();
+    b.patch_ticket(
+        "issue-1",
+        fields([("priority", json!(TicketPriority::Urgent))]),
+    )
+    .unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    let left = a.read_tickets().unwrap();
+    let right = b.read_tickets().unwrap();
+    assert_eq!(left, right);
+    assert_eq!(left.tickets[0].status, TicketStatus::InProgress);
+    assert_eq!(left.tickets[0].priority, TicketPriority::Urgent);
+}
+
+#[test]
+fn linked_pull_requests_survive_branch_changes_and_registry_reload() {
+    let mut registry = RegistryDoc::new("dev-a");
+    registry.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    let urls = vec![
+        "https://github.com/acme/repo/pull/17".to_owned(),
+        "https://github.com/acme/repo/pull/23".to_owned(),
+    ];
+    assert!(registry
+        .set_chat_pull_request_urls("chat-1", &urls)
+        .unwrap());
+    assert!(registry.set_chat_branch("chat-1", "follow-up").unwrap());
+
+    let restored = RegistryDoc::from_bytes(&registry.to_bytes().unwrap(), "dev-a").unwrap();
+    let restored_chat = restored.chat("chat-1").unwrap().unwrap();
+    assert_eq!(restored_chat.pull_request_urls, urls);
+    assert_eq!(restored_chat.branch.as_deref(), Some("follow-up"));
 }
 
 fn space(id: &str, device_id: &str, path: &str) -> Space {

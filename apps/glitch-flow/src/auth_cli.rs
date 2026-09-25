@@ -1,8 +1,8 @@
-//! `zeron login` / `zeron logout` / `zeron status` — the standalone auth surface.
+//! `glitch-flow login` / `glitch-flow logout` / `glitch-flow status` — the standalone auth surface.
 //!
-//! Sign-in used to live only inside `zeron headless`, coupling authentication to
+//! Sign-in used to live only inside `glitch-flow headless`, coupling authentication to
 //! the long-running daemon. These commands work on the persisted session
-//! (`{data_dir}/session.json`) and exit, so a service-managed `zeron headless`
+//! (`{data_dir}/session.json`) and exit, so a service-managed `glitch-flow headless`
 //! only ever *loads* credentials. While an engine is running it owns the session
 //! (WorkOS refresh tokens are single-use and rotate on every refresh), so login
 //! and logout take the same data-dir lock the engine holds and refuse politely
@@ -62,21 +62,21 @@ fn account_status(scope: WorkspaceScope, auth: &AuthState) -> AccountStatus {
             AuthState::NeedsOrganization { user } => AccountStatus {
                 mode: "synced",
                 auth: format!(
-                    "signed in as {} but no workspace selected — run `zeron login`",
+                    "signed in as {} but no workspace selected — run `glitch-flow login`",
                     user.email
                 ),
                 healthy: false,
             },
             AuthState::SignedOut => AccountStatus {
                 mode: "synced",
-                auth: "saved session is no longer valid — run `zeron login`".into(),
+                auth: "saved session is no longer valid — run `glitch-flow login`".into(),
                 healthy: false,
             },
         },
     }
 }
 
-/// `zeron login`: authenticate via the paste-code flow (and workspace
+/// `glitch-flow login`: authenticate via the paste-code flow (and workspace
 /// onboarding), persist `session.json`, and exit.
 pub async fn login(config: EngineConfig) -> anyhow::Result<()> {
     std::fs::create_dir_all(&config.data_dir)?;
@@ -94,12 +94,12 @@ pub async fn login(config: EngineConfig) -> anyhow::Result<()> {
                 .map(|org| format!(" (workspace {org})"))
                 .unwrap_or_default()
         );
-        println!("Run `zeron logout` first to switch accounts.");
+        println!("Run `glitch-flow logout` first to switch accounts.");
         println!("The next engine start will use the synced workspace.");
         return Ok(());
     }
     if !std::io::stdin().is_terminal() {
-        anyhow::bail!("zeron login needs an interactive terminal");
+        anyhow::bail!("glitch-flow login needs an interactive terminal");
     }
     zeron_engine::terminal_sign_in(&auth).await?;
     match auth.state() {
@@ -112,7 +112,7 @@ pub async fn login(config: EngineConfig) -> anyhow::Result<()> {
                     .unwrap_or_default()
             );
             println!(
-                "Sync is ready. Start or restart Zeron to open the synced workspace; existing local sessions will stay local."
+                "Sync is ready. Start or restart Glitch Flow to open the synced workspace; existing local sessions will stay local."
             );
         }
         // terminal_sign_in only returns Ok once signed in; keep an honest fallback.
@@ -121,7 +121,7 @@ pub async fn login(config: EngineConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `zeron logout`: remove the persisted session.
+/// `glitch-flow logout`: remove the persisted session.
 pub async fn logout(config: EngineConfig) -> anyhow::Result<()> {
     std::fs::create_dir_all(&config.data_dir)?;
     let _lock = engine_lock(&config, "sign out")?;
@@ -156,7 +156,7 @@ pub async fn logout(config: EngineConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `zeron status`: report the fixed scope a new engine would select, optional
+/// `glitch-flow status`: report the fixed scope a new engine would select, optional
 /// auth, and engine liveness. Local-only is a healthy signed-out state.
 pub async fn status(config: EngineConfig) -> anyhow::Result<()> {
     let auth = Engine::build_auth(&config).await;
@@ -214,7 +214,7 @@ fn engine_lock(config: &EngineConfig, verb: &str) -> anyhow::Result<InstanceLock
     InstanceLock::acquire(&config.data_dir).map_err(|err| {
         anyhow::anyhow!(
             "{err}\nCannot {verb} while an engine is running — stop it first \
-             (`zeron daemon stop`, or quit the Zeron app), or use the running UI instead."
+             (`glitch-flow daemon stop`, or quit the Glitch Flow app), or use the running UI instead."
         )
     })
 }

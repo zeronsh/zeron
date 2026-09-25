@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use zeron_doc::{MessagePart, MessageRole, SessionDoc, SessionMessageEntry};
 
-use zeron_engine::local_import::{ImportEvent, marker_grants_read_root};
+use zeron_engine::local_import::{
+    ImportEvent, marker_grants_read_root, marker_grants_read_roots,
+};
 use zeron_engine::run_journal::journal_paths;
 use zeron_engine::{EngineCore, EngineProfile, HarnessId, default_registry};
 
@@ -82,6 +84,60 @@ async fn seed_local(data_dir: &std::path::Path) -> (String, String, String) {
 
     local.shutdown().await;
     (device, "chat-doc".into(), "chat-bare".into())
+}
+
+/// Seed the exact default development profile used by the current desktop app.
+async fn seed_development(data_dir: &std::path::Path) -> String {
+    let dev = assemble(EngineProfile::development(data_dir, "dev-org", "dev-user"));
+    let root = data_dir.join("orgs").join("dev-org").join("dev-user");
+    let device = dev.device_id.clone();
+    dev.workspace
+        .create_space(
+            "space-dev",
+            &device,
+            "/tmp/dev-project",
+            Some("Development project".into()),
+            false,
+        )
+        .expect("create development space");
+    dev.workspace
+        .create_chat("chat-dev", Some("space-dev"), None, None, None)
+        .expect("create development chat");
+    let doc = SessionDoc::init("chat-dev").expect("init development doc");
+    doc.push_message(&SessionMessageEntry {
+        id: "dev-message".into(),
+        role: MessageRole::User,
+        parts: vec![MessagePart::Text {
+            id: "dev-text".into(),
+            text: "hello from development mode".into(),
+        }],
+        created_at: 1_700_000_000_000,
+        device_id: device,
+        status: None,
+        continuation_of: None,
+        duration_ms: None,
+    })
+    .expect("push development message");
+    let store = zeron_sync::DocsStore::open(&root).expect("open development store");
+    store
+        .save_snapshot_with_cursor(
+            "chat-dev",
+            &doc.export_snapshot().expect("development snapshot"),
+            0,
+            2,
+        )
+        .expect("save development doc");
+    drop(store);
+    let journals = root.join("journals");
+    std::fs::create_dir_all(&journals).expect("development journals dir");
+    let (journal, resume) = journal_paths(&journals, "chat-dev");
+    std::fs::write(&journal, "{\"seq\":1,\"event\":{}}\n").expect("development journal");
+    std::fs::write(&resume, "1").expect("development resume");
+    let uploads = root.join("uploads");
+    std::fs::create_dir_all(&uploads).expect("development uploads dir");
+    std::fs::write(uploads.join("dev-shot.png"), b"png").expect("development attachment");
+    dev.shutdown().await;
+    "chat-dev".into()
 }
 
 fn run_import(core: &EngineCore) -> Vec<ImportEvent> {

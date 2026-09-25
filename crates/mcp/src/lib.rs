@@ -29,19 +29,19 @@ pub use zeron::{Origin, Zeron};
 /// How `zeron mcp` finds the engine and who it speaks for.
 #[derive(Debug, Clone)]
 pub struct McpConfig {
-    /// Loopback IPC port of the engine to proxy (`ZERON_IPC_PORT`, default 27654).
+    /// Loopback IPC port of the engine to proxy (`GLITCH_FLOW_IPC_PORT`, default 27654).
     pub ipc_port: u16,
     /// The chat whose agent spawned this server, when injected by the engine.
     pub origin: Origin,
 }
 
 impl McpConfig {
-    /// Resolve from the process environment: `ZERON_IPC_PORT` for the engine,
-    /// `ZERON_CHAT_ID` / `ZERON_DEVICE_ID` for the originating chat.
+    /// Resolve branded environment first, with `ZERON_*` compatibility aliases.
     pub fn from_env() -> Self {
-        let ipc_port = std::env::var("ZERON_IPC_PORT")
+        let ipc_port = std::env::var("GLITCH_FLOW_IPC_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
+            .or_else(|| std::env::var("ZERON_IPC_PORT").ok()?.parse().ok())
             .unwrap_or(27654);
         Self {
             ipc_port,

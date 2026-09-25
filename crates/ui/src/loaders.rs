@@ -365,7 +365,7 @@ pub fn splash_overlay(theme: &Theme, fading: bool, view: EntityId, cx: &mut App)
             div()
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted.opacity(0.7))
-                .child(SharedString::from("Setting up Zeron environment")),
+                .child(SharedString::from("Setting up Glitch Flow")),
         );
     if fading {
         motion::splash_out("boot-splash-out", content).into_any_element()

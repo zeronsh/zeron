@@ -12,7 +12,7 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
     static REGISTRY: OnceLock<ThemeRegistry> = OnceLock::new();
     REGISTRY.get_or_init(|| ThemeRegistry {
         families: vec![
-            family("zeron", "Zeron", vec![zeron_light(), zeron_dark()]),
+            family("zeron", "Graphite", vec![zeron_light(), zeron_dark()]),
             family(
                 "vscode-default",
                 "VS Code Default",
@@ -240,9 +240,9 @@ fn zeron_dark() -> ThemeVariant {
     variant(Seeds {
         id: "zeron-dark",
         family_id: "zeron",
-        name: "Zeron Dark",
+        name: "Graphite Dark",
         appearance: Appearance::Dark,
-        treatment: SurfaceTreatment::Frosted,
+        treatment: SurfaceTreatment::Opaque,
         background: "#060606",
         shell: "#0d0d0d",
         raised: "#343438",
@@ -250,15 +250,16 @@ fn zeron_dark() -> ThemeVariant {
         text: "#e8e8ea",
         muted: "#a9a9ae",
         faint: "#85858a",
-        accent: "#8b7cf6",
+        // The prototype starts with a restrained graphite interaction accent.
+        accent: "#b8b8b8",
         danger: "#f87171",
         warning: "#facc15",
         success: "#34d399",
         terminal_background: "#090909",
         ansi: ANSI_DARK,
         syntax: [
-            "#92929a", "#8b7cf6", "#34d399", "#facc15", "#c084fc", "#60a5fa", "#f472b6", "#e8e8ea",
-            "#a1a1aa", "#f472b6", "#22d3ee", "#f87171",
+            "#737373", "#d4d4d8", "#a3a3a3", "#bdbdc2", "#dedee2", "#c4c4c8", "#b0b0b5", "#e4e4e7",
+            "#a1a1aa", "#c4c4c8", "#bdbdc2", "#f87171",
         ],
         source: source(
             "zeron-dark",
@@ -274,7 +275,7 @@ fn zeron_light() -> ThemeVariant {
     variant(Seeds {
         id: "zeron-light",
         family_id: "zeron",
-        name: "Zeron Light",
+        name: "Graphite Light",
         appearance: Appearance::Light,
         treatment: SurfaceTreatment::Frosted,
         background: "#ffffff",
@@ -284,15 +285,15 @@ fn zeron_light() -> ThemeVariant {
         text: "#303035",
         muted: "#62626a",
         faint: "#797981",
-        accent: "#5b43e8",
+        accent: "#525252",
         danger: "#dc2626",
         warning: "#a16207",
         success: "#15803d",
         terminal_background: "#fafafa",
         ansi: ANSI_LIGHT,
         syntax: [
-            "#6b7280", "#5b43e8", "#15803d", "#a16207", "#7e22ce", "#2563eb", "#be185d", "#303035",
-            "#52525b", "#be185d", "#0e7490", "#b91c1c",
+            "#737373", "#404040", "#555555", "#666666", "#333333", "#454545", "#525252", "#303035",
+            "#737373", "#525252", "#666666", "#b91c1c",
         ],
         source: source(
             "zeron-light",

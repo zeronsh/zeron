@@ -67,6 +67,7 @@ mod sidebar_pins;
 mod sidebar_sections;
 mod spaces;
 mod tabs;
+mod chat_splits;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 
@@ -472,6 +473,7 @@ impl SettingsSection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
     Chat,
+    Tasks,
     Settings(SettingsSection),
 }
 
@@ -577,6 +579,7 @@ impl SessionPanels {
 pub enum NavEntry {
     /// A chat route; the id of the selected chat ("" = the new-chat canvas).
     Chat(String),
+    Tasks,
     Settings(SettingsSection),
 }
 
@@ -946,6 +949,37 @@ impl Render for SurfaceTabGhost {
     }
 }
 
+/// A session remains visible at the pointer while it leaves the sidebar.
+/// The sidebar's own moving row is clipped to its scroll viewport, so it
+/// cannot communicate a cross-pane drag on its own.
+struct SidebarSessionGhost {
+    title: SharedString,
+}
+
+impl Render for SidebarSessionGhost {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div()
+            .id("sidebar-session-drag-ghost")
+            .debug_selector(|| "sidebar-session-drag-ghost".into())
+            .w(px(240.0))
+            .h(px(36.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(8.0))
+            .bg(theme.surface_raised)
+            .border_1()
+            .border_color(theme.border_strong)
+            .shadow_md()
+            .text_color(theme.text)
+            .text_size(crate::typography::ui_rems(12.0))
+            .child(div().size(px(7.0)).rounded_full().bg(theme.accent))
+            .child(div().min_w_0().truncate().child(self.title.clone()))
+    }
+}
+
 struct SurfaceTabTooltip {
     text: SharedString,
 }
@@ -1103,6 +1137,13 @@ struct RenameChatDialog {
     chat_id: String,
     input: Entity<ComposerInput>,
     /// Focus the input on the dialog's first paint (opened without window access).
+    focus_pending: bool,
+    _events: Subscription,
+}
+
+struct PullRequestLinksDialog {
+    chat_id: String,
+    input: Entity<ComposerInput>,
     focus_pending: bool,
     _events: Subscription,
 }
@@ -1324,9 +1365,12 @@ fn import_summary_outcome(item: &serde_json::Value) -> Result<(usize, usize), St
 }
 
 /// The offer step's description of what a switch would bring along, or `None`
-/// when the local profile holds nothing importable. Spaces count as work:
-/// a projects-only profile must get the import choice too.
-fn local_work_phrase(chats: usize, spaces: usize) -> Option<String> {
+/// when neither the local nor earlier development profile has work. Spaces
+/// count as work: a projects-only profile must get the import choice too.
+fn import_work_phrase(chats: usize, spaces: usize, development_source: bool) -> Option<String> {
+    if development_source {
+        return Some("your existing work on this device".to_string());
+    }
     let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
     match (chats, spaces) {
         (0, 0) => None,
@@ -1447,6 +1491,7 @@ impl Render for SidebarPane {
             let theme = Theme::of(cx).clone();
             match shell.route {
                 Route::Settings(section) => shell.render_settings_nav(section, &theme, cx),
+                Route::Tasks => shell.render_chat_sidebar(&theme, cx),
                 Route::Chat => shell.render_chat_sidebar(&theme, cx),
             }
         });
@@ -1466,7 +1511,12 @@ pub struct Shell {
     state: Entity<AppState>,
     sidebar_pane: Entity<SidebarPane>,
     transcript: Entity<Transcript>,
+    tickets_page: Entity<crate::tickets::TicketsView>,
+    _tickets_events: Subscription,
+    pending_ticket_chat_link: Option<(String, std::collections::HashSet<String>)>,
     composer: Entity<Composer>,
+    chat_split: Option<chat_splits::ChatSplit>,
+    chat_split_drop_target: Option<String>,
     /// Measured height of the bottom chrome stack (status strip + composer +
     /// terminal dock) the full-height transcript scrolls under. Paint-time
     /// measurement schedules another frame whenever this value changes.
@@ -1488,6 +1538,8 @@ pub struct Shell {
     pub(super) archived_shown: usize,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
+    /// Expanded by default; each parent can fold its descendants in the sidebar.
+    pub(super) sidebar_collapsed_threads: std::collections::HashSet<String>,
     /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
     pub(super) sidebar_disclosure_motion:
         std::collections::HashMap<String, SidebarDisclosureMotion>,
@@ -1561,7 +1613,10 @@ pub struct Shell {
     appearance_settings_sub: Option<Subscription>,
     /// Session-row context menu, including the Copy submenu.
     chat_menu: popover::Popup<ChatMenuState>,
+    /// Direct-child list in the selected thread's titlebar.
+    thread_header_menu: Option<String>,
     rename_dialog: Option<RenameChatDialog>,
+    pull_request_links_dialog: Option<PullRequestLinksDialog>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
     /// Space-row context menu (dropdown rows): (space id, window position).
@@ -1887,12 +1942,13 @@ impl Shell {
             Some("signin") => Some(GatePhase::SignIn),
             Some("org") => Some(GatePhase::OrgGate),
             Some("failed") => Some(GatePhase::Failed(
-                "Could not reach the zeron engine on port 27901".into(),
+                "Could not reach the Glitch Flow engine on port 27901".into(),
             )),
             _ => None,
         };
         let nav = NavHistory::new(match route {
             Route::Chat => NavEntry::Chat(String::new()),
+            Route::Tasks => NavEntry::Tasks,
             Route::Settings(section) => NavEntry::Settings(section),
         });
         // Parent notifications carry presentation changes (session status,
@@ -1901,6 +1957,16 @@ impl Shell {
             shell.transcript.update(cx, |_, cx| cx.notify());
         });
         let shell = cx.entity();
+        let tickets_page = cx.new(|cx| crate::tickets::TicketsView::new(state.clone(), cx));
+        let tickets_events = cx.subscribe(&tickets_page, |this: &mut Shell, _, event, cx| {
+            match event {
+                crate::tickets::TicketsEvent::OpenChat(id) => this.open_chat(id.clone(), cx),
+                crate::tickets::TicketsEvent::StartChat { ticket_id, space_id } =>
+                    this.start_ticket_chat(ticket_id.clone(), Some(space_id.clone()), None, cx),
+                crate::tickets::TicketsEvent::StartChildChat { ticket_id, parent_chat_id } =>
+                    this.start_ticket_chat(ticket_id.clone(), None, Some(parent_chat_id.clone()), cx),
+            }
+        });
         let sidebar_pane = cx.new(|cx| SidebarPane {
             shell: shell.downgrade(),
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
@@ -1909,7 +1975,12 @@ impl Shell {
             state,
             sidebar_pane,
             transcript,
+            tickets_page,
+            _tickets_events: tickets_events,
+            pending_ticket_chat_link: None,
             composer,
+            chat_split: None,
+            chat_split_drop_target: None,
             // Seed with the compact composer stack's rough height so the
             // first frame's clearance isn't zero (the measure corrects it).
             bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),
@@ -1921,6 +1992,7 @@ impl Shell {
             sessions_open: true,
             archived_shown: 0,
             sidebar_collapsed_groups: std::collections::HashSet::new(),
+            sidebar_collapsed_threads: std::collections::HashSet::new(),
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
             terminal: None,
@@ -1964,7 +2036,9 @@ impl Shell {
             files_settings_sub: None,
             appearance_settings_sub: None,
             chat_menu: popover::Popup::default(),
+            thread_header_menu: None,
             rename_dialog: None,
+            pull_request_links_dialog: None,
             delete_confirm: None,
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
@@ -2312,7 +2386,7 @@ impl Shell {
                 {
                     let body = match connectivity {
                         zeron_proto::ConnectivityState::Offline => "Your device is offline",
-                        _ => "Zeron is trying to reconnect",
+                        _ => "Glitch Flow is trying to reconnect",
                     };
                     crate::notify::post("Connection unavailable", body, None);
                 }
@@ -2378,6 +2452,14 @@ impl Shell {
         // Chat switch: restore THAT chat's panel state (per-session open flags;
         // snap, no tween — the panels belong to the destination chat).
         let selected = state.read(cx).selected_chat.clone().unwrap_or_default();
+        if let Some((_, known)) = self.pending_ticket_chat_link.as_ref()
+            && !selected.is_empty()
+            && !known.contains(&selected)
+            && state.read(cx).chats.iter().any(|chat| chat.id == selected)
+            && let Some((ticket_id, _)) = self.pending_ticket_chat_link.take()
+        {
+            self.tickets_page.update(cx, |page, cx| page.link_chat(ticket_id, selected.clone(), cx));
+        }
         if !selected.is_empty() {
             self.last_appshot_chat = Some(selected.clone());
         }
@@ -2896,7 +2978,7 @@ impl Shell {
         }
         let mut resolved = activation.clone();
         if resolved.action == LinkAction::Primary {
-            resolved.action = if crate::settings::current(cx).open_web_links_in_zeron {
+            resolved.action = if crate::settings::current(cx).open_web_links_in_glitch_flow {
                 LinkAction::Internal
             } else {
                 LinkAction::External
@@ -3728,7 +3810,7 @@ impl Shell {
         self.settings.window_geometry = current.window_geometry;
         self.settings.new_thread_composer_background = current.new_thread_composer_background;
         self.settings.new_thread_background_effect = current.new_thread_background_effect;
-        self.settings.open_web_links_in_zeron = current.open_web_links_in_zeron;
+        self.settings.open_web_links_in_glitch_flow = current.open_web_links_in_glitch_flow;
         self.settings.ui_font_family = current.ui_font_family;
         self.settings.ui_font_size = current.ui_font_size;
         self.settings.terminal_font_family = current.terminal_font_family;
@@ -3769,7 +3851,7 @@ impl Shell {
         }
     }
 
-    fn copy_zeron_conversation_link(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+    fn copy_glitch_flow_conversation_link(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         let link = {
             let state = self.state.read(cx);
             crate::links::workspace_locator(
@@ -3777,11 +3859,11 @@ impl Shell {
                 state.auth.as_ref(),
                 state.local_device_id.as_deref(),
             )
-            .map(|workspace| crate::links::zeron_conversation_link(chat_id, &workspace))
+            .map(|workspace| crate::links::glitch_flow_conversation_link(chat_id, &workspace))
         };
         if let Some(link) = link {
             cx.write_to_clipboard(ClipboardItem::new_string(link));
-            self.sidebar_notice = Some("Zeron conversation link copied".into());
+            self.sidebar_notice = Some("Glitch Flow conversation link copied".into());
         } else {
             self.sidebar_notice = Some("Conversation link is not ready yet".into());
         }
@@ -3822,6 +3904,7 @@ impl Shell {
     }
 
     fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        self.pending_ticket_chat_link = None;
         self.command_palette = None;
         // Recreate per visit: the page's ListHarnesses load re-probes which
         // CLIs are installed, so installing one shows up on the next open.
@@ -3837,6 +3920,41 @@ impl Shell {
         self.nav.push(NavEntry::Settings(section));
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
+        cx.notify();
+    }
+
+    fn open_tasks(&mut self, cx: &mut Context<Self>) {
+        self.pending_ticket_chat_link = None;
+        self.command_palette = None;
+        self.close_user_menu(cx);
+        self.close_chat_menu(cx);
+        self.route = Route::Tasks;
+        self.nav.push(NavEntry::Tasks);
+        cx.notify();
+    }
+
+    fn start_ticket_chat(
+        &mut self,
+        ticket_id: String,
+        space_id: Option<String>,
+        parent_chat_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let known_chats = self.state.read(cx).chats.iter().map(|chat| chat.id.clone()).collect();
+        if let Some(parent_chat_id) = parent_chat_id {
+            if !self.state.read(cx).chats.iter().any(|chat| chat.id == parent_chat_id && !chat.archived) {
+                return;
+            }
+            self.open_child_session(parent_chat_id, cx);
+        } else {
+            self.open_new_session(cx);
+            if let Some(space_id) = space_id {
+                self.state.update(cx, |state, cx| state.select_space(Some(space_id), cx));
+            }
+        }
+        // Chat ids are minted on first send. Attach only the resulting new
+        // row, so visiting an older conversation cannot relink it.
+        self.pending_ticket_chat_link = Some((ticket_id, known_chats));
         cx.notify();
     }
 
@@ -3874,6 +3992,9 @@ impl Shell {
                 if self.state.read(cx).selected_chat != target {
                     self.state.update(cx, |s, cx| s.select_chat(target, cx));
                 }
+            }
+            NavEntry::Tasks => {
+                self.route = Route::Tasks;
             }
             NavEntry::Settings(section) => {
                 if section == SettingsSection::Shortcuts
@@ -4181,6 +4302,69 @@ impl Shell {
                 cx,
             );
         }
+        cx.notify();
+    }
+
+    fn open_pull_request_links(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.close_chat_menu(cx);
+        let current = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .map(|chat| chat.pull_request_urls.join("\n"))
+            .unwrap_or_default();
+        let input = cx.new(|cx| {
+            ComposerInput::new("GitHub PR URLs, one per line", cx)
+                .with_accessibility_role(gpui::Role::TextInput)
+        });
+        input.update(cx, |input, cx| input.set_text(current, cx));
+        let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Submitted) {
+                this.submit_pull_request_links(cx);
+            }
+        });
+        self.pull_request_links_dialog = Some(PullRequestLinksDialog {
+            chat_id,
+            input,
+            focus_pending: true,
+            _events: events,
+        });
+        cx.notify();
+    }
+
+    fn submit_pull_request_links(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.pull_request_links_dialog.as_ref() else {
+            return;
+        };
+        let urls = dialog
+            .input
+            .read(cx)
+            .text()
+            .lines()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if let Some(url) = urls
+            .iter()
+            .find(|url| !crate::change_requests::is_github_pull_request_url(url))
+        {
+            self.sidebar_notice = Some(
+                format!("Invalid pull request URL: {url}. Use an HTTPS GitHub /pull/<number> link.")
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        let Some(dialog) = self.pull_request_links_dialog.take() else {
+            return;
+        };
+        self.mutate(
+            serde_json::json!({ "op": "setChatPullRequestUrls", "chatId": dialog.chat_id, "urls": urls }),
+            cx,
+        );
         cx.notify();
     }
 
@@ -4869,7 +5053,7 @@ impl Shell {
                     },
                     Err(err) => {
                         shell.runtime_change_error = Some(format!(
-                            "Could not stop the remote engine: {err}. Run `zeron daemon stop`, then quit and reopen Zeron."
+                            "Could not stop the remote engine: {err}. Run `glitch-flow daemon stop`, then quit and reopen Glitch Flow."
                         ).into());
                         cx.notify();
                     }
@@ -5192,7 +5376,7 @@ impl Shell {
     fn render_title_bar(&mut self, viewport_height: Pixels, cx: &mut Context<Self>) -> AnyElement {
         match self.route {
             Route::Chat => self.render_session_title_bar(viewport_height, cx),
-            Route::Settings(_) => {
+            Route::Tasks | Route::Settings(_) => {
                 let inner = div()
                     .size_full()
                     .flex()
@@ -5880,7 +6064,8 @@ impl Shell {
         time_ago: SharedString,
         space_name: SharedString,
         branch: Option<SharedString>,
-        change_request: Option<zeron_proto::ChangeRequestSummary>,
+        change_requests: Vec<zeron_proto::ChangeRequestSummary>,
+        pull_request_urls: Vec<String>,
         harness: Option<zeron_proto::HarnessId>,
         status: zeron_proto::ChatIndicator,
         selected: bool,
@@ -5893,6 +6078,8 @@ impl Shell {
         // row is busy or under the pointer.
         jump_label: Option<SharedString>,
         search_query: Option<&str>,
+        has_children: bool,
+        children_collapsed: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -5964,7 +6151,12 @@ impl Shell {
                 zeron_proto::ChatIndicator::Idle => None,
             }
         };
-        let shows_metadata = branch.is_some() || change_request.is_some();
+        let linked_pull_request_urls = pull_request_urls
+            .into_iter()
+            .filter(|url| !change_requests.iter().any(|summary| summary.url == *url))
+            .collect::<Vec<_>>();
+        let shows_pull_requests = !change_requests.is_empty() || !linked_pull_request_urls.is_empty();
+        let shows_metadata = branch.is_some() || shows_pull_requests;
         let queued = queued && !undelivered;
         let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
         let compact_status = compact.then(|| {
@@ -6185,8 +6377,10 @@ impl Shell {
         } else {
             theme.text_muted.opacity(0.5)
         };
+        let split_target = id.clone();
         let select_id = id.clone();
         let menu_id = id.clone();
+        let drag_title = title.clone();
         // Hover fades over transition-colors (zeron session-row.tsx) — both
         // the wash and the title brighten ride the same 150ms blend.
         let fade_key = format!("{row_id}-hover");
@@ -6218,7 +6412,7 @@ impl Shell {
                 compact,
                 show_label,
                 branch.is_some(),
-                change_request.is_some(),
+                shows_pull_requests,
             )))
             .flex()
             .flex_col()
@@ -6270,6 +6464,16 @@ impl Shell {
                     }),
                 )
             })
+            .when(!preview && !archived && search_query.is_none(), |el| {
+                let hover = theme.surface_raised_hover;
+                el.drag_over::<SidebarSessionDrag>(move |style, payload, _, _| {
+                    if payload.chat_id != split_target {
+                        style.bg(hover)
+                    } else {
+                        style
+                    }
+                })
+            })
             .when_some(drag, |el, payload| {
                 let shell = cx.entity();
                 el.on_drag(payload, move |payload, point, window, cx| {
@@ -6277,7 +6481,9 @@ impl Shell {
                         shell.begin_sidebar_session_transfer(payload, point, window, cx);
                     });
                     cx.stop_propagation();
-                    cx.new(|_| DragGhost)
+                    cx.new(|_| SidebarSessionGhost {
+                        title: drag_title.clone(),
+                    })
                 })
             })
             // Line 1: "project @ device", status word / time-ago right.
@@ -6314,6 +6520,48 @@ impl Shell {
                     } else {
                         SIDEBAR_ACTIVE_HARNESS_TITLE_GAP
                     }))
+                    .when(has_children && search_query.is_none(), |el| {
+                        let toggle_id = id.clone();
+                        let chevron = icon(icons::ALT_ARROW_RIGHT)
+                            .size(px(12.0))
+                            .text_color(theme.text_muted.opacity(0.7));
+                        el.child(
+                            div()
+                                .id(SharedString::from(format!("chat-children-toggle-{id}")))
+                                .flex_none()
+                                .size(px(16.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .role(gpui::Role::Button)
+                                .aria_label(if children_collapsed {
+                                    "Expand child threads"
+                                } else {
+                                    "Collapse child threads"
+                                })
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if !this.sidebar_collapsed_threads.insert(toggle_id.clone()) {
+                                        this.sidebar_collapsed_threads.remove(&toggle_id);
+                                    }
+                                    this.sidebar_prev_order.clear();
+                                    this.sidebar_resort.clear();
+                                    this.sidebar_new_keys.clear();
+                                    cx.notify();
+                                }))
+                                .child(if children_collapsed {
+                                    chevron.into_any_element()
+                                } else {
+                                    chevron
+                                        .with_transformation(gpui::Transformation::rotate(
+                                            gpui::percentage(0.25),
+                                        ))
+                                        .into_any_element()
+                                }),
+                        )
+                    })
                     .children(compact_status)
                     .when_some(
                         harness.map(crate::pickers::harness_brand_icon),
@@ -6365,22 +6613,29 @@ impl Shell {
                         },
                     )
                     .when(compact, |el| {
-                        el.children(change_request.clone().map(|summary| {
+                        el.children(change_requests.iter().cloned().enumerate().map(|(index, summary)| {
                             if preview {
                                 crate::change_requests::pull_request_badge_preview(
-                                    format!("{row_id}-compact-pr").into(),
+                                    format!("{row_id}-compact-pr-{index}").into(),
                                     summary,
                                     crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
                                     theme,
                                 )
                             } else {
                                 crate::change_requests::pull_request_badge(
-                                    format!("{row_id}-compact-pr").into(),
+                                    format!("{row_id}-compact-pr-{index}").into(),
                                     summary,
                                     crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
                                     theme,
                                 )
                             }
+                        }))
+                        .children(linked_pull_request_urls.iter().enumerate().filter_map(|(index, url)| {
+                            crate::change_requests::linked_pull_request_badge(
+                                format!("{row_id}-compact-linked-pr-{index}").into(),
+                                url.clone(),
+                                theme,
+                            )
                         }))
                     })
                     .when(compact, |el| {
@@ -6429,24 +6684,31 @@ impl Shell {
                         // Stable invisible spring keeps the optional PR badge
                         // pinned right without changing no-PR paint.
                         .child(div().flex_1().min_w_0())
-                        .when_some(change_request, |el, summary| {
-                            el.child(if preview {
+                        .children(change_requests.iter().cloned().enumerate().map(|(index, summary)| {
+                            if preview {
                                 crate::change_requests::pull_request_badge_preview(
-                                    format!("{row_id}-pr").into(),
+                                    format!("{row_id}-pr-{index}").into(),
                                     summary,
                                     crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
                                     theme,
                                 )
                             } else {
                                 crate::change_requests::pull_request_badge_with_query(
-                                    format!("{row_id}-pr").into(),
+                                    format!("{row_id}-pr-{index}").into(),
                                     summary,
                                     crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
                                     search_query,
                                     theme,
                                 )
-                            })
-                        }),
+                            }
+                        }))
+                        .children(linked_pull_request_urls.iter().enumerate().filter_map(|(index, url)| {
+                            crate::change_requests::linked_pull_request_badge(
+                                format!("{row_id}-linked-pr-{index}").into(),
+                                url.clone(),
+                                theme,
+                            )
+                        })),
                 )
             })
             .into_any_element()
@@ -6624,9 +6886,15 @@ impl Shell {
         // list drives the §1.6 resort FLIP diff below (attention-bucket
         // promotions glide; cleared rows just go).
         let session_rows = self.render_active_rows(theme, cx);
-        let moving_row = session_rows
-            .moving_row
-            .map(|(row, height)| self.render_moving_sidebar_session(row, height, theme));
+        // The GPUI drag ghost carries the row across pane boundaries. Keep
+        // the sidebar-local moving row only for an animated rejected drop.
+        let moving_row = if self.sidebar_session_transfer.is_some() {
+            None
+        } else {
+            session_rows
+                .moving_row
+                .map(|(row, height)| self.render_moving_sidebar_session(row, height, theme))
+        };
         let pinned_count = session_rows.pinned_count;
         let custom_count = session_rows.custom_count;
         let regular_start = pinned_count + custom_count;
@@ -6841,7 +7109,43 @@ impl Shell {
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
         let filter_row = self.render_spaces_filter(theme, cx);
-        let active_list = if !list_items.is_empty() {
+        let tasks_selected = matches!(self.route, Route::Tasks);
+        let tasks_nav = div()
+            .id("sidebar-tasks")
+            .role(gpui::Role::Button)
+            .aria_label("Open tasks")
+            .mx(px(Theme::SPACE_SM))
+            .mb(px(Theme::SPACE_SM))
+            .h(px(32.0))
+            .px(px(Theme::SPACE_SM))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(Theme::SPACE_SM))
+            .rounded(px(Theme::CONTROL_RADIUS))
+            .bg(if tasks_selected {
+                theme.element_active
+            } else {
+                gpui::transparent_black()
+            })
+            .text_color(if tasks_selected { theme.text } else { theme.text_muted })
+            .text_size(crate::typography::ui_rems(12.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.element_hover).text_color(theme.text))
+            .on_click(cx.listener(|this, _, _, cx| this.open_tasks(cx)))
+            .child(
+                icon(icons::CHECKLIST)
+                    .size(px(16.0))
+                    .flex_none()
+                    .text_color(if tasks_selected {
+                        theme.accent
+                    } else {
+                        theme.text_muted
+                    }),
+            )
+            .child("Tasks");
+        let active_list = if !list_items.is_empty() || !self.visible_chat_splits(cx).is_empty() {
             let mut pinned_items = list_items;
             let mut custom_items = pinned_items.split_off(pinned_count);
             let regular_items = custom_items.split_off(custom_count);
@@ -6854,6 +7158,7 @@ impl Shell {
                 .flex_col()
                 .gap(px(SIDEBAR_LIST_GAP))
                 .pb(px(Theme::SPACE_SM))
+                .child(self.render_chat_split_links(theme, cx))
                 .when_some(pinned_group, |el, group| el.child(group))
                 .children(custom_items)
                 .when(
@@ -7011,6 +7316,7 @@ impl Shell {
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
             .child(filter_row)
+            .child(tasks_nav)
             .child(sidebar_lists)
             // Global connection pill (durable-by-design UI truth): appears
             // whenever the edge posture is degraded; hidden while healthy —
@@ -7052,7 +7358,7 @@ impl Shell {
     /// UpdateStatus stream reports a newer release. On a macOS bundle install
     /// it drives the whole flow — click to download, then click to restart into
     /// the staged bundle. Elsewhere (managed/source installs) it is advisory
-    /// (`zeron update`); click dismisses it for that version.
+    /// (`glitch-flow update`); click dismisses it for that version.
     fn render_update_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let status = self.state.read(cx).update.clone()?;
         if !status.update_available {
@@ -7073,7 +7379,7 @@ impl Shell {
             }
         } else {
             (
-                format!("Update available — v{latest} · run `zeron update`").into(),
+                format!("Update available — v{latest} · run `glitch-flow update`").into(),
                 true,
             )
         };
@@ -7378,7 +7684,7 @@ impl Shell {
         } else if remote_engine {
             "Stop daemon and quit"
         } else {
-            "Quit Zeron"
+            "Quit Glitch Flow"
         };
 
         if self.sync_flow == SyncFlow::Enabling && needs_org {
@@ -7395,7 +7701,11 @@ impl Shell {
             let state = self.state.read(cx);
             (state.chats.len(), state.spaces.len())
         };
-        let work_phrase = local_work_phrase(local_chats, local_spaces);
+        let development_source = self
+            .data_dir
+            .join("orgs/dev-org/dev-user/docs.sqlite3")
+            .is_file();
+        let work_phrase = import_work_phrase(local_chats, local_spaces, development_source);
 
         let card = match self.sync_flow {
             SyncFlow::Enabling => popover::dialog_card(&theme)
@@ -7403,7 +7713,7 @@ impl Shell {
                 .child(
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
-                        "Finish signing in in your browser. Zeron will keep using this local workspace until you quit and reopen.",
+                        "Finish signing in in your browser. Glitch Flow will keep using this local workspace until you quit and reopen.",
                     )),
                 )
                 .child(
@@ -7447,14 +7757,14 @@ impl Shell {
                     )
                     .into(),
                     (Some(email), None) => format!(
-                        "You're signed in as {email}. Zeron can switch to your synced workspace now."
+                        "You're signed in as {email}. Glitch Flow can switch to your synced workspace now."
                     )
                     .into(),
                     (None, Some(phrase)) => format!(
                         "Bring {phrase} from this device into your synced workspace, or start it fresh."
                     )
                     .into(),
-                    (None, None) => "Zeron can switch to your synced workspace now.".into(),
+                    (None, None) => "Glitch Flow can switch to your synced workspace now.".into(),
                 };
                 let mut actions = div()
                     .mt(px(16.0))
@@ -7508,7 +7818,7 @@ impl Shell {
                 .child(div().mt(px(6.0)).child(popover::dialog_body(
                     &theme,
                     if import {
-                        "Handing the engine over to your account. Your local sessions come along next."
+                        "Handing the engine over to your account. Your existing work comes along next."
                     } else {
                         "Handing the engine over to your account."
                     },
@@ -7521,7 +7831,7 @@ impl Shell {
                     (done as f32 / total as f32).clamp(0.0, 1.0)
                 };
                 let label: SharedString = if total == 0 {
-                    "Looking for local sessions…".into()
+                    "Looking for existing sessions…".into()
                 } else {
                     format!("Importing session {} of {total}", (done + 1).min(total)).into()
                 };
@@ -7643,9 +7953,9 @@ impl Shell {
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
                         if remote_engine {
-                            "Zeron is using a background daemon. Stop it and quit Zeron, then reopen to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
+                            "Glitch Flow is using a background daemon. Stop it and quit Glitch Flow, then reopen to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
                         } else {
-                            "Quit and reopen Zeron to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
+                            "Quit and reopen Glitch Flow to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
                         },
                     )),
                 )
@@ -7690,7 +8000,7 @@ impl Shell {
                 .child(
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
-                        "Zeron will remove your credentials, close the synced workspace, and continue in local mode.",
+                        "Glitch Flow will remove your credentials, close the synced workspace, and continue in local mode.",
                     )),
                 )
                 .child(
@@ -7791,6 +8101,13 @@ impl Shell {
         if self.right_plus.get().is_some() {
             return true;
         }
+        if matches!(self.route, Route::Tasks)
+            && self
+                .tickets_page
+                .update(cx, |tickets, cx| tickets.handle_escape(cx))
+        {
+            return true;
+        }
         self.active_changes(cx)
             .is_some_and(|changes| changes.update(cx, |changes, cx| changes.handle_escape(cx)))
     }
@@ -7883,6 +8200,14 @@ impl Shell {
             let chat_menu_closing = self.chat_menu.closing_since();
             let is_pinned = self.active_sidebar_pins(cx).contains(&chat_id);
             let rename_id = chat_id.clone();
+            let child_id = chat_id.clone();
+            let can_create_child = self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .any(|chat| chat.id == chat_id && !chat.archived);
+            let pr_links_id = chat_id.clone();
             let pin_id = chat_id.clone();
             let archive_id = chat_id.clone();
             let delete_id = chat_id.clone();
@@ -7896,6 +8221,15 @@ impl Shell {
             let menu = match menu_state.page {
                 ChatMenuPage::Root => menu
                     .child(
+                        popover::menu_row(&theme, false, format!("chat-menu-pr-links-{chat_id}"))
+                            .id("chat-menu-pr-links")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_pull_request_links(pr_links_id.clone(), cx)
+                            }))
+                            .child(icon(icons::PULL_REQUEST).size(px(16.0)).text_color(theme.text_muted))
+                            .child(SharedString::from("Manage pull requests…")),
+                    )
+                    .child(
                         popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
                             .id("chat-menu-rename")
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -7904,6 +8238,18 @@ impl Shell {
                             .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
                             .child(SharedString::from("Rename…")),
                     )
+                    .when(can_create_child, |menu| {
+                        menu.child(
+                            popover::menu_row(&theme, false, format!("chat-menu-child-{chat_id}"))
+                                .id("chat-menu-child")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.close_chat_menu(cx);
+                                    this.open_child_session(child_id.clone(), cx);
+                                }))
+                                .child(icon(icons::PLUS).size(px(16.0)).text_color(theme.text_muted))
+                                .child(SharedString::from("New child thread")),
+                        )
+                    })
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-pin-{chat_id}"))
                             .id("chat-menu-pin")
@@ -7974,7 +8320,7 @@ impl Shell {
                         .as_ref()
                         .and_then(|chat| chat.harness_session_id.as_deref())
                         .is_some_and(|id| !id.trim().is_empty());
-                    let zeron_id = chat_id.clone();
+                    let chat_link_id = chat_id.clone();
                     let harness_id = chat_id.clone();
                     let session_chat_id = chat_id.clone();
                     menu.child(
@@ -7995,17 +8341,17 @@ impl Shell {
                     )
                     .child(popover::menu_separator())
                     .child(
-                        popover::menu_row(&theme, false, format!("chat-copy-zeron-{chat_id}"))
-                            .id("chat-copy-zeron")
+                        popover::menu_row(&theme, false, format!("chat-copy-glitch-flow-{chat_id}"))
+                            .id("chat-copy-glitch-flow")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.copy_zeron_conversation_link(&zeron_id, cx)
+                                this.copy_glitch_flow_conversation_link(&chat_link_id, cx)
                             }))
                             .child(
                                 icon(icons::COPY)
                                     .size(px(16.0))
                                     .text_color(theme.text_muted),
                             )
-                            .child(SharedString::from("Zeron conversation link")),
+                            .child(SharedString::from("Glitch Flow conversation link")),
                     )
                     .when_some(harness_link, |menu, link| {
                         menu.child(
@@ -8100,6 +8446,73 @@ impl Shell {
                 )
                 .into_any_element();
             overlays.push(popover::modal("rename-chat-dialog", viewport, card));
+        }
+
+        if let Some(dialog) = &mut self.pull_request_links_dialog {
+            if std::mem::take(&mut dialog.focus_pending) {
+                window.focus(&dialog.input.focus_handle(cx), cx);
+            }
+            let input = dialog.input.clone();
+            let connection_guidance = {
+                let state = self.state.read(cx);
+                state
+                    .chats
+                    .iter()
+                    .find(|chat| chat.id == dialog.chat_id)
+                    .map(|chat| match state.github_connected_for_chat(chat) {
+                        Some(true) => "GitHub connection: Connected on this session's host.".to_owned(),
+                        Some(false) => format!(
+                            "GitHub connection: Not connected on this session's host. Run `gh auth login` on {} to enable PR discovery.",
+                            state.device_name(&chat.device_id).unwrap_or("the host device")
+                        ),
+                        None => "GitHub connection: Waiting for the first repository lookup. To connect, run `gh auth login` on this session's host device.".to_owned(),
+                    })
+                    .unwrap_or_else(|| "GitHub PR links are stored with this session.".to_owned())
+            };
+            let card = popover::dialog_card(&theme)
+                .max_w(px(520.0))
+                .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                    if ev.keystroke.key == "escape" {
+                        this.pull_request_links_dialog = None;
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(popover::dialog_title(&theme, "Pull requests"))
+                .child(div().mt(px(6.0)).child(popover::dialog_body(
+                    &theme,
+                    format!("Add GitHub pull request URLs, one per line. Press Shift+Enter to add another line. These links stay with this session when its branch changes. {connection_guidance}"),
+                )))
+                .child(
+                    div()
+                        .mt(px(12.0))
+                        .child(popover::dialog_field(input.into_any_element())),
+                )
+                .child(
+                    div()
+                        .mt(px(16.0))
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .child(
+                            popover::btn_ghost(&theme, "Cancel", "pr-links-cancel")
+                                .id("pr-links-cancel")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.pull_request_links_dialog = None;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            popover::btn_primary(&theme, "Save links")
+                                .id("pr-links-save")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.submit_pull_request_links(cx)
+                                })),
+                        ),
+                )
+                .into_any_element();
+            overlays.push(popover::modal("pr-links-dialog", viewport, card));
         }
 
         overlays.extend(self.render_space_overlays(viewport, window, cx));
@@ -8277,6 +8690,15 @@ impl Shell {
         // Settings route: just the section outlet — the section label lives in
         // the unified window titlebar now (render_title_bar). Settings never
         // underlaps: pad below the overlaid titlebar.
+        if matches!(self.route, Route::Tasks) {
+            return div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .pt(px(Theme::TITLEBAR_HEIGHT))
+                .child(self.tickets_page.clone())
+                .into_any_element();
+        }
         if let Route::Settings(section) = self.route {
             let outlet = self.settings_outlet(section, window, cx);
             return div()
@@ -8405,8 +8827,8 @@ impl Shell {
                         .flex_col()
                         .items_center()
                         .child(
-                            icon(icons::ZERON_LOGO)
-                                .w(px(41.9))
+                            icon(icons::BOT)
+                                .w(px(48.0))
                                 .h(px(48.0))
                                 .text_color(theme.text.opacity(0.09)),
                         )
@@ -8512,14 +8934,19 @@ impl Shell {
                     div().absolute().inset_0().bottom(px(term_h)).child(
                         crate::edge_fade::edge_faded(
                             Theme::TRANSCRIPT_FADE_BAND,
-                            true,
+                            self.chat_split.is_none()
+                                || self.transcript.read(cx).scrolled_under_top(),
                             true,
                             div().size_full().child(outlet),
                         )
                         // Fully faded BY the titlebar's bottom edge (the
                         // title text is opaque — overlap read as collision),
                         // ramping in the band just below it.
-                        .inset_top(Theme::TITLEBAR_HEIGHT)
+                        .inset_top(if self.chat_split.is_some() {
+                            0.0
+                        } else {
+                            Theme::TITLEBAR_HEIGHT
+                        })
                         .band_top(Theme::TRANSCRIPT_FADE_BAND)
                         .band_bottom(bottom_band),
                     )
@@ -9161,8 +9588,8 @@ impl Shell {
             .items_center()
             .text_center()
             .child(
-                icon(icons::ZERON_LOGO)
-                    .w(px(31.4))
+                icon(icons::BOT)
+                    .w(px(36.0))
                     .h(px(36.0))
                     .text_color(theme.text),
             )
@@ -9182,7 +9609,7 @@ impl Shell {
                     .line_height(px(19.0))
                     .text_color(theme.text_muted)
                     .child(SharedString::from(
-                        "Zeron removed your credentials but could not finish closing the previous synced workspace. Retry before continuing in local mode.",
+                        "Glitch Flow removed your credentials but could not finish closing the previous synced workspace. Retry before continuing in local mode.",
                     )),
             )
             .when_some(self.runtime_change_error.clone(), |card, error| {
@@ -9796,7 +10223,7 @@ impl Shell {
                 )
                 .into_any_element(),
             // Login card (zeron App.tsx Gate): centered card on the grid —
-            // logo, "Log in to Zeron", copy, full-width white Log in button.
+            // logo, "Log in to Glitch Flow", copy, full-width white Log in button.
             _ => div()
                 .w(px(360.0))
                 .px(px(32.0))
@@ -9811,8 +10238,8 @@ impl Shell {
                 .items_center()
                 .text_center()
                 .child(
-                    icon(icons::ZERON_LOGO)
-                        .w(px(31.4))
+                    icon(icons::BOT)
+                        .w(px(36.0))
                         .h(px(36.0))
                         .text_color(theme.text),
                 )
@@ -9822,7 +10249,7 @@ impl Shell {
                         .text_size(crate::typography::ui_rems(18.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme.text)
-                        .child(SharedString::from("Log in to Zeron")),
+                        .child(SharedString::from("Log in to Glitch Flow")),
                 )
                 .child(
                     div()
@@ -9977,11 +10404,11 @@ impl Shell {
         // then existing memberships and the account escape hatch.
         let blurb: SharedString = match email {
             Some(email) => format!(
-                "Zeron is organized around workspaces — create one for yourself or your team. Signed in as {email}."
+                "Glitch Flow is organized around workspaces — create one for yourself or your team. Signed in as {email}."
             )
             .into(),
             None => {
-                "Zeron is organized around workspaces — create one for yourself or your team."
+                "Glitch Flow is organized around workspaces — create one for yourself or your team."
                     .into()
             }
         };
@@ -9997,8 +10424,8 @@ impl Shell {
             .flex()
             .flex_col()
             .child(
-                icon(icons::ZERON_LOGO)
-                    .w(px(24.4))
+                icon(icons::BOT)
+                    .w(px(28.0))
                     .h(px(28.0))
                     .text_color(theme.text),
             )
@@ -10862,7 +11289,7 @@ impl Render for Shell {
                     expected_has_composer,
                 );
                 self.transcript.update(cx, |t, cx| {
-                    t.set_rail_enabled(rail::rail_visible(main_width), cx);
+                    t.set_rail_enabled(self.chat_split.is_none() && rail::rail_visible(main_width), cx);
                     if bottom_stack_ready && expected_has_composer {
                         t.set_bottom_clearance(stack_h, cx);
                     }
@@ -10879,7 +11306,7 @@ impl Render for Shell {
                     },
                     cx,
                 );
-                let main = self.render_main(window, main_content_width, transcript_width, cx);
+                let main = self.render_chat_workspace(window, main_content_width, transcript_width, cx);
                 // The Changes pane is chat-scoped chrome: the Settings route
                 // never renders it (zeron __root.tsx `!isSettings && activeChat`
                 // around the diff column) — the per-session open flags stay
@@ -11690,16 +12117,24 @@ mod tests {
     }
 
     #[test]
-    fn spaces_only_local_work_still_gets_the_import_offer() {
-        assert_eq!(local_work_phrase(0, 0), None, "nothing to bring");
-        assert_eq!(local_work_phrase(2, 0).as_deref(), Some("the 2 sessions"));
+    fn local_or_development_work_gets_the_import_offer() {
+        assert_eq!(import_work_phrase(0, 0, false), None, "nothing to bring");
         assert_eq!(
-            local_work_phrase(0, 1).as_deref(),
+            import_work_phrase(0, 0, true).as_deref(),
+            Some("your existing work on this device"),
+            "an earlier development profile must be offered the import"
+        );
+        assert_eq!(
+            import_work_phrase(2, 0, false).as_deref(),
+            Some("the 2 sessions")
+        );
+        assert_eq!(
+            import_work_phrase(0, 1, false).as_deref(),
             Some("the 1 project"),
             "a projects-only profile must be offered the import, not a bare switch"
         );
         assert_eq!(
-            local_work_phrase(1, 2).as_deref(),
+            import_work_phrase(1, 2, false).as_deref(),
             Some("the 1 session and 2 projects")
         );
     }
@@ -12392,13 +12827,13 @@ mod exit_regressions {
             .into_iter()
             .enumerate()
         {
-            let open_links_in_zeron = index % 2 == 0;
-            let terminal_family = if open_links_in_zeron {
+            let open_links_in_glitch_flow = index % 2 == 0;
+            let terminal_family = if open_links_in_glitch_flow {
                 crate::typography::UiFontFamily::System
             } else {
                 crate::typography::UiFontFamily::Geist
             };
-            let code_family = if open_links_in_zeron {
+            let code_family = if open_links_in_glitch_flow {
                 crate::typography::UiFontFamily::Geist
             } else {
                 crate::typography::UiFontFamily::System
@@ -12422,7 +12857,7 @@ mod exit_regressions {
                     settings::set_new_thread_background_effect(effect, cx);
                     settings::update(settings::SavePolicy::Immediate, cx, |settings| {
                         settings.window_geometry = geometry;
-                        settings.open_web_links_in_zeron = open_links_in_zeron;
+                        settings.open_web_links_in_glitch_flow = open_links_in_glitch_flow;
                         settings.terminal_font_family = terminal_family.clone();
                         settings.terminal_font_size = terminal_size;
                         settings.code_font_family = code_family.clone();
@@ -12431,7 +12866,7 @@ mod exit_regressions {
                         settings.skill_completion_by_harness.insert(
                             zeron_proto::HarnessId::ClaudeCode,
                             settings::SkillCompletionSettings {
-                                dollar: open_links_in_zeron,
+                                dollar: open_links_in_glitch_flow,
                                 separate_from_slash: true,
                             },
                         );
@@ -12444,7 +12879,7 @@ mod exit_regressions {
                         let current = settings::current(cx);
                         assert_eq!(current.window_geometry, geometry);
                         assert_eq!(current.new_thread_background_effect, effect);
-                        assert_eq!(current.open_web_links_in_zeron, open_links_in_zeron);
+                        assert_eq!(current.open_web_links_in_glitch_flow, open_links_in_glitch_flow);
                         assert_eq!(current.terminal_font_family, terminal_family);
                         assert_eq!(current.terminal_font_size, terminal_size);
                         assert_eq!(current.code_font_family, code_family);
@@ -12454,7 +12889,7 @@ mod exit_regressions {
                             current
                                 .skill_completion(zeron_proto::HarnessId::ClaudeCode)
                                 .dollar,
-                            open_links_in_zeron
+                            open_links_in_glitch_flow
                         );
                         assert!(
                             current
@@ -12466,7 +12901,7 @@ mod exit_regressions {
                     let loaded = settings::UiSettings::load(dir.path());
                     assert_eq!(loaded.window_geometry, geometry);
                     assert_eq!(loaded.new_thread_background_effect, effect);
-                    assert_eq!(loaded.open_web_links_in_zeron, open_links_in_zeron);
+                    assert_eq!(loaded.open_web_links_in_glitch_flow, open_links_in_glitch_flow);
                     assert_eq!(loaded.terminal_font_family, terminal_family);
                     assert_eq!(loaded.terminal_font_size, terminal_size);
                     assert_eq!(loaded.code_font_family, code_family);
@@ -12826,7 +13261,7 @@ mod exit_regressions {
                 shell.activate_session_link(&activation, window, cx);
                 assert_eq!(shell.browsers.len(), 2);
                 settings::update(settings::SavePolicy::Immediate, cx, |settings| {
-                    settings.open_web_links_in_zeron = false;
+                    settings.open_web_links_in_glitch_flow = false;
                 });
                 assert_eq!(
                     shell.activate_session_link(&activation, window, cx),

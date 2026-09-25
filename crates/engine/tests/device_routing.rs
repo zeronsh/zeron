@@ -260,9 +260,9 @@ impl CheckoutChangeRequestLookup for StaticChangeRequestLookup {
     async fn resolve_github_source(
         &self,
         _source: &CheckoutSourceContext,
-    ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError> {
+    ) -> Result<Vec<ChangeRequestSummary>, ChangeRequestError> {
         self.resolves.fetch_add(1, Ordering::AcqRel);
-        Ok(Some(self.summary.clone()))
+        Ok(vec![self.summary.clone()])
     }
 }
 
@@ -863,7 +863,7 @@ async fn target_device_id_routes_over_the_relay() {
     git(&project_root, &["init", "-b", "main"]).await;
     std::fs::write(project_root.join("README.md"), "host B\n").expect("seed repo on B");
     std::fs::write(
-        project_root.join("zeron.json"),
+        project_root.join("glitch-flow.json"),
         r#"{"actions":[{"name":"Lint","command":"pnpm lint","icon":"lint"}]}"#,
     )
     .expect("project file");
@@ -1515,6 +1515,130 @@ async fn workspace_file_surface_proxies_over_the_relay() {
         }
     }
     drop(stream);
+
+    core_a.shutdown().await;
+    core_b.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn selected_remote_space_routes_create_chat_and_run_to_its_host() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let project = dirs.path().join("project-on-device-b");
+    std::fs::create_dir_all(&project).expect("remote project folder");
+
+    let core_b = assemble(&dirs.path().join("b"), "device-b");
+    core_b
+        .workspace
+        .create_space(
+            "space-on-b",
+            "device-b",
+            &project.to_string_lossy(),
+            None,
+            false,
+        )
+        .expect("register remote project on B");
+    let _host = core_b.start_host_relay(&relay_url);
+
+    let core_a = assemble(&dirs.path().join("a"), "device-a");
+    let mut link_config =
+        LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    link_config.probe_timeout = Duration::from_secs(5);
+    core_a.set_links(LinkCache::new(link_config));
+    let client = zeron_rpc::memory_client(core_a.rpc_service());
+
+    // This is the new-chat Mutate payload: the selected Space fixes the cwd,
+    // and its device id routes both creation and the following Run RPC.
+    let create_chat = serde_json::json!({
+        "op": "createChat",
+        "chatId": "chat-created-on-b",
+        "spaceId": "space-on-b",
+        "targetDeviceId": "device-b",
+        "branch": "main",
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        match client.call(methods::MUTATE, create_chat.clone()).await {
+            Ok(_) => break,
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "remote createChat never reached B: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+    let created = core_b
+        .workspace
+        .chat("chat-created-on-b")
+        .expect("read remote chat")
+        .expect("chat exists on host B");
+    assert_eq!(created.device_id, "device-b");
+    assert_eq!(created.space_id.as_deref(), Some("space-on-b"));
+    assert_eq!(
+        created.cwd.as_deref(),
+        Some(project.to_string_lossy().as_ref())
+    );
+    assert_eq!(created.branch.as_deref(), Some("main"));
+    assert!(
+        core_a
+            .workspace
+            .chat("chat-created-on-b")
+            .expect("read local chat")
+            .is_none(),
+        "the selected remote project must not create a local fallback chat"
+    );
+
+    let command = serde_json::to_value(SessionCommandPayload::Run {
+        request: RunRequest {
+            prompt: "run on the selected host".into(),
+            harness: Some(HarnessId::Mock),
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: project.to_string_lossy().to_string(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            resume: None,
+            attachments: Vec::new(),
+            worktree: None,
+        },
+        message_id: "msg-created-on-b".into(),
+    })
+    .expect("serialize remote Run");
+    let queued = client
+        .call(
+            methods::QUEUE_COMMAND,
+            serde_json::json!({
+                "chatId": "chat-created-on-b",
+                "targetDeviceId": "device-b",
+                "command": command,
+            }),
+        )
+        .await
+        .expect("Run routes to the selected host");
+    assert!(queued["commandId"].as_str().is_some());
+
+    let handle = core_b
+        .doc_host
+        .open("chat-created-on-b")
+        .expect("open host transcript");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let entries = handle.doc().read_entries().unwrap_or_default();
+            if entries.iter().any(|entry| {
+                entry.parts.iter().any(
+                    |part| matches!(part, zeron_doc::MessagePart::Text { text, .. } if text == "remote reply"),
+                )
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("host B executes the Run and publishes its reply");
 
     core_a.shutdown().await;
     core_b.shutdown().await;

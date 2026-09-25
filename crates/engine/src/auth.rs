@@ -328,10 +328,9 @@ impl Auth {
         }
     }
 
-    /// Like [`Auth::new`], but additionally probes `{edge}/health`: an edge running in
-    /// dev auth mode forces dev mode even when a client id is configured (matching the
-    /// edge's "bearer = user id" verification).
-    pub async fn detect(mut config: AuthConfig) -> Self {
+    /// Like [`Auth::new`], but additionally probes `{edge}/health`. An explicit
+    /// WorkOS client id must never fall back to a development bearer.
+    pub async fn detect(config: AuthConfig) -> Self {
         if config.workos_client_id.is_some() {
             #[derive(Deserialize)]
             struct Health {
@@ -352,8 +351,7 @@ impl Auth {
             if let Some(health) = probe.await
                 && health.auth.as_deref() == Some("dev")
             {
-                tracing::info!("auth: edge is in dev mode — using dev bearer");
-                config.workos_client_id = None;
+                tracing::warn!("auth: edge is in dev mode — keeping configured WorkOS auth");
             }
         }
         Self::new(config)
@@ -724,7 +722,7 @@ impl Auth {
         let sign_in = lock(&self.inner.sign_in);
         if sign_in.generation != generation {
             return Err(EngineError::Other(
-                "sign-in was canceled — start again from Zeron".into(),
+                "sign-in was canceled — start again from Glitch Flow".into(),
             ));
         }
         let org_id = jwt_claims(&result.access_token).and_then(|c| c.org_id);
@@ -1125,7 +1123,7 @@ async fn handle_loopback_conn(
         let invalid_callback = || {
             (
                 "400 Bad Request",
-                page("Invalid or expired sign-in link. Start again from Zeron."),
+                page("Invalid or expired sign-in link. Start again from Glitch Flow."),
             )
         };
         match (code, state) {
@@ -1134,14 +1132,14 @@ async fn handle_loopback_conn(
                     Ok(result) => match auth.finish_sign_in(result, generation) {
                         Ok(()) => (
                             "200 OK",
-                            page("Signed in. You can close this tab and return to Zeron."),
+                            page("Signed in. You can close this tab and return to Glitch Flow."),
                         ),
                         Err(err) => {
                             tracing::info!(error = %err, "auth: discarded canceled callback exchange");
                             (
                                 "409 Conflict",
                                 page(
-                                    "This sign-in was canceled. Start again from Zeron if you still want to enable sync.",
+                                    "This sign-in was canceled. Start again from Glitch Flow if you still want to enable sync.",
                                 ),
                             )
                         }
@@ -1150,7 +1148,7 @@ async fn handle_loopback_conn(
                         tracing::warn!(error = %err, "auth: loopback code exchange failed");
                         (
                             "502 Bad Gateway",
-                            page("Sign-in failed during token exchange — check the Zeron logs."),
+                            page("Sign-in failed during token exchange — check the Glitch Flow logs."),
                         )
                     }
                 },

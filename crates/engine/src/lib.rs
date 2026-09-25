@@ -268,14 +268,16 @@ impl EngineCore {
             profile.uploads_root(),
             legacy_uploads_root.as_deref(),
         );
-        // A recorded local→synced import grants this account the local
-        // profile's uploads root read-only — transcripts imported earlier
-        // embed absolute paths under it (same shape as the legacy adoption).
-        if profile.scope() != WorkspaceScope::Local
-            && let Some(root) =
-                local_import::marker_grants_read_root(data_dir, profile.org_id(), profile.user_id())
-        {
-            uploads.add_read_only_root(&root);
+        // Imported transcripts retain absolute attachment paths under each
+        // original profile. Re-arm their read-only roots on every synced boot.
+        if profile.scope() == WorkspaceScope::Synced {
+            for root in local_import::marker_grants_read_roots(
+                data_dir,
+                profile.org_id(),
+                profile.user_id(),
+            ) {
+                uploads.add_read_only_root(&root);
+            }
         }
         // Queued-attachment support: the doc host resolves `pending://` refs
         // against this store and pushes staged bytes to remote hosts.
@@ -784,6 +786,7 @@ impl Engine {
                 edge.clone(),
             )?,
         };
+        core.sessions.set_mcp_ipc_port(config.ipc_port);
         core.set_auth(auth.clone());
         let preview_workspace = core.workspace.clone();
         let preview_device = core.device_id.clone();
@@ -998,7 +1001,7 @@ pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
                     // No reader tasks have been spawned on this path (both spawns
                     // are TTY-gated), so an early return leaks nothing.
                     return Err(EngineError::Other(format!(
-                        "signed in as {} but no workspace is selected — run `zeron login` on this machine to pick one",
+                        "signed in as {} but no workspace is selected — run `glitch-flow login` on this machine to pick one",
                         user.email
                     )));
                 }
@@ -1013,12 +1016,12 @@ pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
             AuthState::SignedOut => {
                 if !interactive {
                     return Err(EngineError::Other(
-                        "not signed in — run `zeron login` on this machine first".into(),
+                        "not signed in — run `glitch-flow login` on this machine first".into(),
                     ));
                 }
                 if stdin_reader.is_none() {
                     let url = auth.start_headless_sign_in();
-                    println!("Sign in to Zeron:\n\n  {url}\n");
+                    println!("Sign in to Glitch Flow:\n\n  {url}\n");
                     println!("Then paste the code shown in the browser here and press enter.");
                     let auth = auth.clone();
                     stdin_reader = Some(tokio::spawn(async move {
@@ -1075,7 +1078,7 @@ async fn run_org_onboarding(auth: Auth) {
         Ok(orgs) => orgs,
         Err(err) => {
             println!(
-                "Could not list workspaces ({err}) — create or select one from the Zeron UI to continue."
+                "Could not list workspaces ({err}) — create or select one from the Glitch Flow UI to continue."
             );
             return;
         }

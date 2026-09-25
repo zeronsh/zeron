@@ -11,14 +11,14 @@ use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
 
-const CONFIG: &str = "zeron-update.json";
+const CONFIG: &str = "glitch-flow-update.json";
 /// The running image, moved aside during a swap. A running executable can be
 /// renamed but not deleted, so the file survives until the process exits and
 /// is removed by the relaunched instance (or the next update attempt).
-const BACKUP: &str = "zeron.exe.old";
+const BACKUP: &str = "glitch-flow.exe.old";
 /// Deterministic name for the copy that becomes the next installation; a
 /// crash between the two renames leaves at most this file behind.
-const INCOMING: &str = ".zeron-update-incoming.exe";
+const INCOMING: &str = ".glitch-flow-update-incoming.exe";
 
 #[derive(serde::Deserialize)]
 struct Config {
@@ -26,7 +26,7 @@ struct Config {
 }
 
 pub(super) fn is_managed(exe: &Path) -> bool {
-    exe.file_name().is_some_and(|name| name == "zeron.exe")
+    exe.file_name().is_some_and(|name| name == "glitch-flow.exe")
         && exe.parent().is_some_and(|dir| dir.join(CONFIG).is_file())
 }
 
@@ -41,7 +41,7 @@ pub(super) fn release_url() -> anyhow::Result<Option<String>> {
 }
 
 pub fn artifact(version: &str) -> String {
-    format!("zeron-{version}-windows-{}.exe", std::env::consts::ARCH)
+    format!("glitch-flow-{version}-windows-{}.exe", std::env::consts::ARCH)
 }
 
 /// Download next to the installation, verifying its mandatory checksum.
@@ -70,9 +70,9 @@ pub async fn stage(
         "invalid SHA-256 checksum"
     );
     let temporary = tempfile::Builder::new()
-        .prefix(".zeron-update-")
+        .prefix(".glitch-flow-update-")
         .tempdir_in(directory)?;
-    let staged = temporary.path().join("zeron.exe");
+    let staged = temporary.path().join("glitch-flow.exe");
     super::download_release_file(edge_url, manifest, &file, &staged).await?;
     std::fs::write(temporary.path().join("sha256"), expected)?;
     verify(&staged)?;
@@ -89,7 +89,7 @@ pub async fn stage(
     ensure!(
         output.status.success()
             && String::from_utf8_lossy(&output.stdout).trim()
-                == format!("zeron {}", manifest.version),
+                == format!("glitch-flow {}", manifest.version),
         "staged executable has the wrong version or cannot run"
     );
     let _ = temporary.keep();
@@ -130,7 +130,7 @@ fn verify_digest(path: &Path, expected: &str) -> anyhow::Result<()> {
 /// and [`Self::recover_from_backup`] cover the leftovers of a hard crash
 /// between the two renames.
 pub fn apply(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<()> {
-    let installed = directory.join("zeron.exe");
+    let installed = directory.join("glitch-flow.exe");
     ensure!(
         std::env::current_exe()?.canonicalize()? == installed.canonicalize()?,
         "update must run from its installation"
@@ -290,9 +290,9 @@ mod tests {
         }
     }
 
-    /// A staged update layout: `<dir>/zeron.exe` plus its `sha256` sidecar.
+    /// A staged update layout: `<dir>/glitch-flow.exe` plus its `sha256` sidecar.
     fn staged_with(dir: &Path, bytes: &[u8]) -> PathBuf {
-        let staged = dir.join("zeron.exe");
+        let staged = dir.join("glitch-flow.exe");
         std::fs::write(&staged, bytes).unwrap();
         std::fs::write(dir.join("sha256"), format!("{:x}", Sha256::digest(bytes))).unwrap();
         staged
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn portable_install_requires_explicit_configuration() {
         let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join("zeron.exe");
+        let exe = dir.path().join("glitch-flow.exe");
         assert!(!is_managed(&exe));
         std::fs::write(dir.path().join(CONFIG), "{}").unwrap();
         assert!(is_managed(&exe));
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn changed_staging_file_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join("zeron.exe");
+        let exe = dir.path().join("glitch-flow.exe");
         std::fs::write(&exe, b"original").unwrap();
         std::fs::write(
             dir.path().join("sha256"),
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn failed_swap_after_old_image_moved_restores_the_installation() {
         let install = tempfile::tempdir().unwrap();
-        let installed = install.path().join("zeron.exe");
+        let installed = install.path().join("glitch-flow.exe");
         std::fs::write(&installed, b"old image").unwrap();
         let stage = tempfile::tempdir().unwrap();
         let staged = staged_with(stage.path(), b"new image");
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn corrupt_copy_is_rejected_before_the_installation_moves() {
         let install = tempfile::tempdir().unwrap();
-        let installed = install.path().join("zeron.exe");
+        let installed = install.path().join("glitch-flow.exe");
         std::fs::write(&installed, b"old image").unwrap();
         let stage = tempfile::tempdir().unwrap();
         let staged = staged_with(stage.path(), b"new image");
@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn backup_recovers_a_missing_installation_and_clears_when_intact() {
         let install = tempfile::tempdir().unwrap();
-        let installed = install.path().join("zeron.exe");
+        let installed = install.path().join("glitch-flow.exe");
         let backup = install.path().join(BACKUP);
         std::fs::write(&backup, b"survivor").unwrap();
 
@@ -432,7 +432,7 @@ mod tests {
                 .unwrap();
         });
         let dir = tempfile::tempdir().unwrap();
-        let installed = dir.path().join("zeron.exe");
+        let installed = dir.path().join("glitch-flow.exe");
         std::fs::write(&installed, b"existing installation").unwrap();
         let manifest = super::super::Manifest {
             version: "1.2.3".into(),

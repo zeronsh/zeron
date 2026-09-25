@@ -119,7 +119,7 @@ impl TitleGenerator {
         // Rename the worktree branch when the chat still sits on its original
         // zeron/<name> branch (guards live inside rename_worktree_branch).
         if let (Some(chat_cwd), Some(branch)) = (&latest.cwd, &latest.branch)
-            && branch.starts_with("zeron/")
+            && (branch.starts_with("glitch-flow/") || branch.starts_with("zeron/"))
         {
             match self
                 .inner

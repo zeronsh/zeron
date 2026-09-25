@@ -57,7 +57,9 @@ use crate::process::{Command, Stdio};
 use crate::scratch::ScratchDir;
 use child::Child;
 pub(crate) mod child;
-use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
+use crate::{
+    Harness, HarnessError, NativeMcpContext, RunControls, Signal, send_signal, shutdown_child,
+};
 use normalize::{map_update, parse_commands, preferred_allow_option};
 use subagent::SubagentTracker;
 use subagent_devin::DevinTracker;
@@ -1865,6 +1867,16 @@ impl Harness for AcpHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_with_context(request, controls, None).await
+    }
+
+    async fn run_with_context(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        mcp: Option<NativeMcpContext>,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let mcp_servers = mcp.as_ref().map(acp_mcp_servers).transpose()?;
         let (scratch, mut child, stderr_tail) =
             self.spawn_agent(Some(&request.cwd), true, &[]).await?;
         let stdin = child
@@ -1885,6 +1897,7 @@ impl Harness for AcpHarness {
             event_tx,
             controls,
             request,
+            mcp_servers,
             harness: self.spec.id,
             agent_name: self.spec.display_name,
             prompt_transform: self.spec.prompt_transform,
@@ -1913,6 +1926,27 @@ impl Harness for AcpHarness {
     }
 }
 
+/// ACP v1 `session/new` and `session/load` accept a list of stdio MCP
+/// servers. This is session-local and leaves the agent's other configuration
+/// untouched.
+fn acp_mcp_servers(mcp: &NativeMcpContext) -> Result<Value, HarnessError> {
+    let command = mcp.server_command()?;
+    let command = command.to_str().ok_or_else(|| {
+        HarnessError::Protocol("Glitch Flow executable path is not valid Unicode".into())
+    })?;
+    let env: Vec<_> = mcp
+        .server_env()
+        .into_iter()
+        .map(|(name, value)| json!({ "name": name, "value": value }))
+        .collect();
+    Ok(json!([{
+        "name": "glitch_flow_native",
+        "command": command,
+        "args": ["mcp"],
+        "env": env,
+    }]))
+}
+
 // ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
@@ -1925,6 +1959,7 @@ struct Session {
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
     request: RunRequest,
+    mcp_servers: Option<Value>,
     harness: HarnessId,
     agent_name: &'static str,
     prompt_complete_extension: bool,
@@ -2873,6 +2908,7 @@ async fn run_session(session: Session) {
         event_tx,
         controls,
         request,
+        mcp_servers,
         harness,
         agent_name,
         prompt_complete_extension,
@@ -2903,7 +2939,10 @@ async fn run_session(session: Session) {
         let steer_ext = steering_supported(&init);
         let init_commands = scan_available_commands(&init);
 
-        let session_params = json!({ "cwd": request.cwd, "mcpServers": [] });
+        let session_params = json!({
+            "cwd": request.cwd,
+            "mcpServers": mcp_servers.unwrap_or_else(|| json!([])),
+        });
         let (session_id, mut session_response) = if let Some(resume) = &request.resume {
             let mut load = session_params.clone();
             load["sessionId"] = Value::String(resume.clone());
@@ -4068,6 +4107,35 @@ async fn run_session(session: Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_mcp_uses_acp_v1_stdio_server_shape() {
+        let mcp = NativeMcpContext {
+            chat_id: "chat-a".into(),
+            device_id: "device-b".into(),
+            ipc_port: 31001,
+        };
+        let servers = acp_mcp_servers(&mcp).unwrap();
+        let server = &servers[0];
+        assert_eq!(server["name"], "glitch_flow_native");
+        assert_eq!(server["args"], json!(["mcp"]));
+        assert_eq!(
+            server["env"][0],
+            json!({"name":"ZERON_CHAT_ID","value":"chat-a"})
+        );
+        assert_eq!(
+            server["env"][1],
+            json!({"name":"ZERON_DEVICE_ID","value":"device-b"})
+        );
+        assert_eq!(
+            server["env"][2],
+            json!({"name":"ZERON_IPC_PORT","value":"31001"})
+        );
+        assert_eq!(
+            server["command"].as_str(),
+            std::env::current_exe().unwrap().to_str()
+        );
+    }
 
     #[test]
     fn pi_discovery_allows_cold_extension_startup() {

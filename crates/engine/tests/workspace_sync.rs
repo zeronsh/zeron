@@ -33,6 +33,58 @@ struct ScriptedHarness {
     step_delay: Duration,
 }
 
+#[tokio::test]
+async fn ticket_rpc_watch_and_mutations_sync_between_engines() {
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let a = assemble(dir_a.path(), "ticket-dev-a");
+    let b = assemble(dir_b.path(), "ticket-dev-b");
+    let _room = bridge(&a, &b).await;
+    let client = zeron_rpc::memory_client(a.rpc_service());
+    let mut watch = client
+        .subscribe(methods::WATCH_TICKETS, serde_json::json!({}))
+        .await
+        .unwrap();
+    let initial: zeron_proto::TicketSnapshot =
+        serde_json::from_value(watch.recv().await.unwrap()).unwrap();
+    assert!(initial.boards.is_empty());
+
+    client
+        .call(
+            methods::MUTATE_TICKET,
+            serde_json::json!({"op":"createBoard","boardId":"board-1","name":"Product"}),
+        )
+        .await
+        .unwrap();
+    client
+        .call(
+            methods::MUTATE_TICKET,
+            serde_json::json!({"op":"createTicket","ticketId":"issue-1","boardId":"board-1","kind":"issue","title":"Native tasks"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(a.workspace.watch_tickets().borrow().tickets.len(), 1);
+
+    wait_for(
+        || b.workspace.read_tickets().is_ok_and(|view| view.tickets.len() == 1),
+        "ticket on second engine",
+    )
+    .await;
+    let latest = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let frame: zeron_proto::TicketSnapshot =
+                serde_json::from_value(watch.recv().await.unwrap()).unwrap();
+            if frame.tickets.len() == 1 {
+                break frame;
+            }
+        }
+    })
+    .await
+    .expect("ticket watch update");
+    assert_eq!(latest.boards[0].name, "Product");
+    assert_eq!(latest.tickets[0].title, "Native tasks");
+}
+
 #[async_trait]
 impl Harness for ScriptedHarness {
     fn id(&self) -> HarnessId {
@@ -705,6 +757,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 branch: Some("main".into()),
                 checkout_id: None,
                 source_context: None,
+                pull_request_urls: Vec::new(),
                 config: None,
                 last_message_preview: Some("old preview".into()),
                 last_message_at: Some(now),

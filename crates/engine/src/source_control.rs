@@ -57,6 +57,8 @@ pub struct CheckoutSourceContext {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChangeRequestResolution {
     pub source: CheckoutSourceContext,
+    pub change_requests: Vec<ChangeRequestSummary>,
+    /// Compatibility view of the highest-ranked result.
     pub change_request: Option<ChangeRequestSummary>,
 }
 
@@ -89,7 +91,7 @@ pub trait ChangeRequestProvider: Send + Sync {
     async fn find_for_branch(
         &self,
         source: &CheckoutSourceContext,
-    ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError>;
+    ) -> Result<Vec<ChangeRequestSummary>, ChangeRequestError>;
 }
 
 /// Checkout inspection plus provider resolution, injectable for cache/service tests.
@@ -103,7 +105,7 @@ pub trait CheckoutChangeRequestLookup: Send + Sync {
     async fn resolve_github_source(
         &self,
         source: &CheckoutSourceContext,
-    ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError>;
+    ) -> Result<Vec<ChangeRequestSummary>, ChangeRequestError>;
 }
 
 /// Host-side resolver. All subprocesses run on the device that owns `cwd`.
@@ -127,10 +129,11 @@ impl ChangeRequestResolver {
         cwd: &Path,
     ) -> Result<ChangeRequestResolution, ChangeRequestError> {
         let source = self.inspect_checkout(cwd).await?;
-        let change_request = self.resolve_github_source(&source).await?;
+        let change_requests = self.resolve_github_source(&source).await?;
         Ok(ChangeRequestResolution {
             source,
-            change_request,
+            change_request: change_requests.first().cloned(),
+            change_requests,
         })
     }
 
@@ -146,7 +149,7 @@ impl ChangeRequestResolver {
     pub async fn resolve_github_source(
         &self,
         source: &CheckoutSourceContext,
-    ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError> {
+    ) -> Result<Vec<ChangeRequestSummary>, ChangeRequestError> {
         if source.branch.host.is_none()
             || source.branch.owner.is_none()
             || source.branch.repository.is_none()
@@ -175,7 +178,7 @@ impl CheckoutChangeRequestLookup for ChangeRequestResolver {
     async fn resolve_github_source(
         &self,
         source: &CheckoutSourceContext,
-    ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError> {
+    ) -> Result<Vec<ChangeRequestSummary>, ChangeRequestError> {
         ChangeRequestResolver::resolve_github_source(self, source).await
     }
 }
@@ -281,7 +284,7 @@ impl ChangeRequestProvider for GitHubCli {
     async fn find_for_branch(
         &self,
         source: &CheckoutSourceContext,
-    ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError> {
+    ) -> Result<Vec<ChangeRequestSummary>, ChangeRequestError> {
         if source.branch.host.is_none()
             || source.branch.owner.is_none()
             || source.branch.repository.is_none()
@@ -289,7 +292,7 @@ impl ChangeRequestProvider for GitHubCli {
             return Err(ChangeRequestError::UnsupportedRepository);
         }
         if source.branch.head_selectors.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
         for selector in &source.branch.head_selectors {
@@ -304,14 +307,14 @@ impl ChangeRequestProvider for GitHubCli {
                 }
                 None => None,
             };
-            return select_pull_request(
+            return select_pull_requests(
                 self.provider(),
                 source,
                 default_branch.as_deref(),
                 candidates,
             );
         }
-        Ok(None)
+        Ok(Vec::new())
     }
 }
 
@@ -658,12 +661,12 @@ fn needs_default_branch(source: &CheckoutSourceContext, candidates: &[GhPullRequ
     })
 }
 
-fn select_pull_request(
+fn select_pull_requests(
     provider: &str,
     source: &CheckoutSourceContext,
     default_branch: Option<&str>,
     candidates: Vec<GhPullRequest>,
-) -> Result<Option<ChangeRequestSummary>, ChangeRequestError> {
+) -> Result<Vec<ChangeRequestSummary>, ChangeRequestError> {
     let expected_owner = source.branch.owner.as_deref();
     let on_default_branch = default_branch == Some(&source.branch.head_branch);
     let mut matching: Vec<GhPullRequest> = candidates
@@ -693,9 +696,8 @@ fn select_pull_request(
 
     matching
         .into_iter()
-        .next()
         .map(|pull_request| to_summary(provider, pull_request))
-        .transpose()
+        .collect()
 }
 
 fn to_summary(
@@ -997,7 +999,7 @@ mod tests {
         source: &CheckoutSourceContext,
         response: Result<ProcessOutput, ProcessRunError>,
     ) -> (
-        Result<Option<ChangeRequestSummary>, ChangeRequestError>,
+        Result<Vec<ChangeRequestSummary>, ChangeRequestError>,
         Arc<FakeProcessRunner>,
     ) {
         let runner = FakeProcessRunner::with_responses([response]);
@@ -1019,7 +1021,7 @@ mod tests {
         .unwrap();
         let (result, runner) = resolve_with(&source, command_success(json)).await;
 
-        let summary = result.unwrap().unwrap();
+        let summary = result.unwrap().into_iter().next().unwrap();
         assert_eq!(summary.number, 90);
         assert_eq!(summary.state, ChangeRequestState::Open);
         assert_eq!(summary.provider, "github");
@@ -1230,7 +1232,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         .unwrap();
 
         let (result, _) = resolve_with(&source, command_success(json)).await;
-        let summary = result.unwrap().unwrap();
+        let summary = result.unwrap().into_iter().next().unwrap();
         assert_eq!(summary.number, 91);
         assert_eq!(summary.state, ChangeRequestState::Merged);
     }
@@ -1248,7 +1250,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         .unwrap();
 
         let (result, _) = resolve_with(&source, command_success(json)).await;
-        assert_eq!(result.unwrap().unwrap().state, ChangeRequestState::Closed);
+        assert_eq!(result.unwrap().first().unwrap().state, ChangeRequestState::Closed);
     }
 
     #[tokio::test]
@@ -1274,7 +1276,15 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         .unwrap();
 
         let (result, _) = resolve_with(&source, command_success(json)).await;
-        assert_eq!(result.unwrap().unwrap().number, 94);
+        assert_eq!(
+            result
+                .unwrap()
+                .iter()
+                .map(|summary| summary.number)
+                .collect::<Vec<_>>(),
+            [94, 95, 93],
+            "open PRs sort first and every matching PR is retained",
+        );
     }
 
     #[tokio::test]
@@ -1299,7 +1309,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         .unwrap();
 
         let (result, _) = resolve_with(&source, command_success(json)).await;
-        assert_eq!(result.unwrap().unwrap().number, 97);
+        assert_eq!(result.unwrap().first().unwrap().number, 97);
     }
 
     #[tokio::test]
@@ -1319,7 +1329,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         ]);
         let github = GitHubCli::with_runner(runner.clone());
 
-        let result = github.find_for_branch(&source).await.unwrap().unwrap();
+        let result = github.find_for_branch(&source).await.unwrap().into_iter().next().unwrap();
 
         assert_eq!(result.number, 100);
         let requests = runner.requests();
@@ -1341,7 +1351,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         .unwrap();
 
         let (result, _) = resolve_with(&source, command_success(json)).await;
-        assert_eq!(result.unwrap(), None);
+        assert!(result.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1431,7 +1441,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         .unwrap();
 
         let (result, _) = resolve_with(&source, command_success(json)).await;
-        assert_eq!(result.unwrap(), None);
+        assert!(result.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1453,7 +1463,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
 
         let result = github.find_for_branch(&source).await;
 
-        assert_eq!(result.unwrap(), None, "historical PR on main is suppressed");
+        assert!(result.unwrap().is_empty(), "historical PR on main is suppressed");
         let requests = runner.requests();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[1].program, "gh");
@@ -1484,7 +1494,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
 
         let (result, runner) = resolve_with(&source, command_success(json)).await;
 
-        assert_eq!(result.unwrap().unwrap().number, 90);
+        assert_eq!(result.unwrap().first().unwrap().number, 90);
         assert_eq!(runner.requests().len(), 1);
     }
 
@@ -1507,7 +1517,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
 
         let result = github.find_for_branch(&source).await;
 
-        assert_eq!(result.unwrap().unwrap().number, 99);
+        assert_eq!(result.unwrap().first().unwrap().number, 99);
     }
 
     #[tokio::test]

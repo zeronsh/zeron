@@ -18,6 +18,7 @@
 //! spawn failure, stream error, engine-restart recovery).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use chrono::Utc;
@@ -28,7 +29,7 @@ use zeron_doc::{
     DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
     SessionMessageEntry, fold_event_into_parts, sanitize_tool_call,
 };
-use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage};
+use zeron_harness::{CancellationToken, Harness, NativeMcpContext, RunControls, SteerMessage};
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, UserInputAnswer,
     UserInputQuestion,
@@ -132,6 +133,8 @@ struct RoutedSteer {
 
 struct Inner {
     device_id: String,
+    /// Actual localhost listener for an agent's app-owned MCP process.
+    mcp_ipc_port: AtomicU16,
     journal: Arc<RunJournal>,
     registry: Arc<HarnessRegistry>,
     /// Set-once (first wins), cleared on runtime retirement: sessions and
@@ -183,6 +186,12 @@ impl SessionsEngine {
         Self {
             inner: Arc::new(Inner {
                 device_id,
+                mcp_ipc_port: AtomicU16::new(
+                    std::env::var("ZERON_IPC_PORT")
+                        .ok()
+                        .and_then(|port| port.parse().ok())
+                        .unwrap_or(27654),
+                ),
                 journal,
                 registry,
                 doc_host: Mutex::new(None),
@@ -197,6 +206,11 @@ impl SessionsEngine {
                 turn_listener: OnceLock::new(),
             }),
         }
+    }
+
+    /// Bind app-owned MCP to the port selected by the engine runtime.
+    pub fn set_mcp_ipc_port(&self, port: u16) {
+        self.inner.mcp_ipc_port.store(port, Ordering::Relaxed);
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -1547,7 +1561,17 @@ async fn drive_run(
                 wire_request.prompt =
                     zeron_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
             }
-            harness.run(wire_request, controls).await
+            harness
+                .run_with_context(
+                    wire_request,
+                    controls,
+                    Some(NativeMcpContext {
+                        chat_id: chat_id.clone(),
+                        device_id: device_id.clone(),
+                        ipc_port: inner.mcp_ipc_port.load(Ordering::Relaxed),
+                    }),
+                )
+                .await
         }
         Err(error) => Err(error),
     };

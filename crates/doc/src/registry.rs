@@ -31,12 +31,19 @@ pub const KIND_SPACES: &str = "spaces";
 pub const KIND_CHATS: &str = "chats";
 pub const KIND_SESSIONS: &str = "sessions";
 pub const KIND_PREFERENCES: &str = "preferences";
+pub const KIND_TASK_BOARDS: &str = "taskBoards";
+pub const KIND_BOARD_SPACE_LINKS: &str = "boardSpaceLinks";
+pub const KIND_TICKETS: &str = "tickets";
+pub const KIND_TICKET_CHAT_LINKS: &str = "ticketChatLinks";
+pub const KIND_TICKET_COMMENTS: &str = "ticketComments";
 
 /// Readiness only; membership and order live on individual pins.
 pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 mod sidebar_pins;
 mod sidebar_sections;
+mod tickets;
+pub use tickets::relation_id;
 
 /// Snapshot row id in the local `DocsStore` for the persisted registry state.
 pub const REGISTRY_DOC_ID: &str = "registry1";
@@ -867,6 +874,8 @@ impl RegistryDoc {
         }
         keys.push((KIND_SPACES, space_id));
         self.delete_row_ops(&keys);
+        // A board outlives its machine/folder link. Remove only the relation.
+        self.delete_board_space_links_for_space(space_id);
         Ok(DeletedSpace { existed, chat_ids })
     }
 
@@ -892,6 +901,10 @@ impl RegistryDoc {
                     .map(serde_json::to_value)
                     .transpose()?
                     .unwrap_or(Value::Null),
+            ),
+            (
+                "pullRequestUrls",
+                serde_json::to_value(&chat.pull_request_urls)?,
             ),
             ("config", config),
             (
@@ -991,6 +1004,25 @@ impl RegistryDoc {
             chat_id,
             OpKind::Update,
             fields([("title", json!(title))]),
+        );
+        Ok(true)
+    }
+
+    /// Replace the conversation's explicitly linked GitHub PR URLs. These are
+    /// synced chat metadata and survive branch changes.
+    pub fn set_chat_pull_request_urls(
+        &mut self,
+        chat_id: &str,
+        urls: &[String],
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("pullRequestUrls", serde_json::to_value(urls)?)]),
         );
         Ok(true)
     }

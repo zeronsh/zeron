@@ -355,6 +355,7 @@ mod tests {
             branch: None,
             checkout_id: None,
             source_context: None,
+            pull_request_urls: Vec::new(),
             config: None,
             last_message_preview: None,
             last_message_at: None,

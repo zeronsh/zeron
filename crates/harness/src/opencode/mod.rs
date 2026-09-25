@@ -65,7 +65,7 @@ use zeron_proto::{
 };
 
 use crate::process::{Child, Command, Stdio};
-use crate::{Harness, HarnessError, RunControls, shutdown_child};
+use crate::{Harness, HarnessError, NativeMcpContext, RunControls, shutdown_child};
 
 /// opencode loads plugins and MCP config before the server answers; cold
 /// plugin-heavy starts can take minutes. Shared by chat startup and model
@@ -279,11 +279,19 @@ impl OpencodeHarness {
     /// Boot (or attach to) a server for a run/probe. Probes have no chat cwd:
     /// they boot in the user's home, where global provider config lives.
     async fn server(&self, cwd: Option<&str>) -> Result<Server, HarnessError> {
+        self.server_with_mcp(cwd, None).await
+    }
+
+    async fn server_with_mcp(
+        &self,
+        cwd: Option<&str>,
+        mcp: Option<&NativeMcpContext>,
+    ) -> Result<Server, HarnessError> {
         if let Some(base) = &self.base_url {
             return Ok(Server::attached(base.clone()));
         }
         let exe = self.resolve_executable()?;
-        Server::spawn(&exe, cwd, self.startup_timeout).await
+        Server::spawn(&exe, cwd, self.startup_timeout, mcp).await
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
@@ -429,8 +437,17 @@ impl Harness for OpencodeHarness {
 
     async fn run(
         &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_with_context(request, controls, None).await
+    }
+
+    async fn run_with_context(
+        &self,
         mut request: RunRequest,
         controls: RunControls,
+        mcp: Option<NativeMcpContext>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         // The engine intentionally leaves OpenCode's canonical invocation
         // intact. Capture the selected identity before converting it to the
@@ -438,7 +455,7 @@ impl Harness for OpencodeHarness {
         let initial_native_command_selected = selected_native_command(&request.prompt, self.id());
         request.prompt = zeron_proto::invocation::harness_prompt(&request.prompt, self.id());
         let cwd = (!request.cwd.is_empty()).then(|| request.cwd.clone());
-        let server = self.server(cwd.as_deref()).await?;
+        let server = self.server_with_mcp(cwd.as_deref(), mcp.as_ref()).await?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             server,
@@ -486,6 +503,93 @@ enum Protocol {
 struct ServerVersion {
     raw: String,
     number: Option<(u64, u64, u64)>,
+}
+
+/// OpenCode 1.x and 2.x have different MCP config nesting. Probe the actual
+/// executable before adding a per-run server; never write opencode.json or
+/// replace a caller-supplied OPENCODE_CONFIG_CONTENT blob.
+async fn opencode_mcp_config(
+    exe: &std::path::Path,
+    mcp: &NativeMcpContext,
+) -> Result<String, HarnessError> {
+    let mut version_cmd = Command::new(exe);
+    version_cmd.arg("--version").kill_on_drop(true);
+    crate::compose_child_path(&mut version_cmd, exe);
+    let output = tokio::time::timeout(Duration::from_secs(10), version_cmd.output())
+        .await
+        .map_err(|_| HarnessError::Protocol("OpenCode version probe timed out".into()))??;
+    if !output.status.success() {
+        return Err(HarnessError::Protocol(format!(
+            "OpenCode version probe exited with {}",
+            output.status
+        )));
+    }
+    let version = String::from_utf8_lossy(&output.stdout);
+    let major = ServerVersion::parse(version.trim())
+        .number
+        .map(|number| number.0)
+        .ok_or_else(|| HarnessError::Protocol("OpenCode version probe had no version".into()))?;
+    let existing = match std::env::var("OPENCODE_CONFIG_CONTENT") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(HarnessError::Protocol(
+                "OPENCODE_CONFIG_CONTENT is not valid Unicode".into(),
+            ));
+        }
+    };
+    merge_opencode_mcp_config(existing.as_deref(), major, mcp)
+}
+
+fn merge_opencode_mcp_config(
+    existing: Option<&str>,
+    major: u64,
+    mcp: &NativeMcpContext,
+) -> Result<String, HarnessError> {
+    let mut config: Value = match existing.filter(|value| !value.trim().is_empty()) {
+        Some(raw) => deser_hjson::from_str(raw).map_err(|error| {
+            HarnessError::Protocol(format!(
+                "cannot preserve OPENCODE_CONFIG_CONTENT while adding Glitch Flow MCP: {error}"
+            ))
+        })?,
+        None => json!({}),
+    };
+    let root = config.as_object_mut().ok_or_else(|| {
+        HarnessError::Protocol("OPENCODE_CONFIG_CONTENT must be an object".into())
+    })?;
+    let mcp_table = root
+        .entry("mcp")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| HarnessError::Protocol("OpenCode mcp config must be an object".into()))?;
+    let servers = if major >= 2 {
+        mcp_table
+            .entry("servers")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| {
+                HarnessError::Protocol("OpenCode mcp.servers must be an object".into())
+            })?
+    } else {
+        mcp_table
+    };
+    let command = mcp.server_command()?;
+    let command = command.to_str().ok_or_else(|| {
+        HarnessError::Protocol("Glitch Flow executable path is not valid Unicode".into())
+    })?;
+    let mut server = json!({
+        "type": "local",
+        "command": [command, "mcp"],
+        "environment": mcp.server_env().into_iter().collect::<std::collections::BTreeMap<_, _>>(),
+    });
+    if major >= 2 {
+        server["disabled"] = false.into();
+        server["codemode"] = false.into();
+    } else {
+        server["enabled"] = true.into();
+    }
+    servers.insert("glitch_flow_native".into(), server);
+    Ok(config.to_string())
 }
 
 impl ServerVersion {
@@ -584,6 +688,7 @@ impl Server {
         exe: &std::path::Path,
         cwd: Option<&str>,
         startup: Duration,
+        mcp: Option<&NativeMcpContext>,
     ) -> Result<Self, HarnessError> {
         let port = free_localhost_port().ok_or_else(|| {
             HarnessError::Protocol("no free localhost port for opencode serve".into())
@@ -597,6 +702,12 @@ impl Server {
             .arg("127.0.0.1")
             .env("OPENCODE_SERVER_PASSWORD", &password)
             .env("OPENCODE_CLIENT", "zeron");
+        if let Some(mcp) = mcp {
+            cmd.env(
+                "OPENCODE_CONFIG_CONTENT",
+                opencode_mcp_config(exe, mcp).await?,
+            );
+        }
         crate::compose_child_path(&mut cmd, exe);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
@@ -3979,6 +4090,62 @@ async fn stream_bus(tx: &mpsc::Sender<BusMsg>, resp: reqwest::Response, protocol
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod native_mcp_tests {
+    use super::*;
+
+    fn origin() -> NativeMcpContext {
+        NativeMcpContext {
+            chat_id: "chat-a".into(),
+            device_id: "device-b".into(),
+            ipc_port: 31001,
+        }
+    }
+
+    #[test]
+    fn v1_inline_config_keeps_user_settings_and_servers() {
+        let merged = merge_opencode_mcp_config(
+            Some(r#"{"theme":"user","mcp":{"existing":{"type":"remote","url":"https://example.test"}}}"#),
+            1,
+            &origin(),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(value["theme"], "user");
+        assert_eq!(value["mcp"]["existing"]["url"], "https://example.test");
+        let server = &value["mcp"]["glitch_flow_native"];
+        assert_eq!(server["enabled"], true);
+        assert_eq!(server["command"][1], "mcp");
+        assert_eq!(server["environment"]["ZERON_CHAT_ID"], "chat-a");
+        assert_eq!(server["environment"]["ZERON_DEVICE_ID"], "device-b");
+        assert_eq!(server["environment"]["ZERON_IPC_PORT"], "31001");
+    }
+
+    #[test]
+    fn v2_inline_config_uses_servers_table() {
+        let merged = merge_opencode_mcp_config(
+            Some(r#"{"mcp":{"servers":{"other":{"type":"remote","url":"https://example.test"}}}}"#),
+            2,
+            &origin(),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(
+            value["mcp"]["servers"]["other"]["url"],
+            "https://example.test"
+        );
+        let server = &value["mcp"]["servers"]["glitch_flow_native"];
+        assert_eq!(server["disabled"], false);
+        assert_eq!(server["codemode"], false);
+        assert_eq!(server["command"][1], "mcp");
+    }
+
+    #[test]
+    fn invalid_inline_config_is_not_discarded() {
+        assert!(merge_opencode_mcp_config(Some("["), 1, &origin()).is_err());
+    }
+}
 
 #[cfg(test)]
 mod context_tests {

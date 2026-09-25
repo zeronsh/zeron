@@ -122,6 +122,29 @@ impl Shell {
 
     /// Open a session from the sidebar: select it, the main area follows.
     pub(crate) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.pending_ticket_chat_link = None;
+        self.thread_header_menu = None;
+        // Opening a child from search, a link, or the header reveals its row.
+        let ancestors = {
+            let state = self.state.read(cx);
+            let mut ancestors = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            let mut current = Some(chat_id.as_str());
+            while let Some(id) = current.filter(|id| seen.insert(*id)) {
+                current = state
+                    .chats
+                    .iter()
+                    .find(|chat| chat.id == id)
+                    .and_then(|chat| chat.parent_chat_id.as_deref());
+                if let Some(parent) = current {
+                    ancestors.push(parent.to_owned());
+                }
+            }
+            ancestors
+        };
+        for ancestor in ancestors {
+            self.sidebar_collapsed_threads.remove(&ancestor);
+        }
         self.command_palette = None;
         self.route = Route::Chat;
         self.focus_composer(cx);
@@ -134,6 +157,8 @@ impl Shell {
     /// re-homes the canvas onto that project; under "All" the current pick
     /// (the last selected project, restored from composer defaults) stands.
     pub(super) fn open_new_session(&mut self, cx: &mut Context<Self>) {
+        self.pending_ticket_chat_link = None;
+        self.thread_header_menu = None;
         self.command_palette = None;
         self.route = Route::Chat;
         self.focus_composer(cx);
@@ -161,6 +186,248 @@ impl Shell {
         cx.notify();
     }
 
+    /// Open a child canvas from the selected session. The relationship stays
+    /// pending until its first send creates the chat on the parent's host.
+    pub(super) fn open_child_session(&mut self, parent_id: String, cx: &mut Context<Self>) {
+        self.pending_ticket_chat_link = None;
+        if !self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .any(|chat| chat.id == parent_id && !chat.archived)
+        {
+            return;
+        }
+        self.sidebar_collapsed_threads.remove(&parent_id);
+        self.thread_header_menu = None;
+        self.command_palette = None;
+        self.route = Route::Chat;
+        self.focus_composer(cx);
+        self.state.update(cx, |s, cx| {
+            s.begin_child_chat(&parent_id, cx);
+        });
+        cx.notify();
+    }
+
+    /// Parent navigation and the direct-child dropdown stay with the thread
+    /// title, so a sidebar filter or a folded tree cannot strand a child.
+    fn render_thread_relation_controls(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some((selected_id, parent, children, can_create_child)) = ({
+            let state = self.state.read(cx);
+            state.selected_chat_row().map(|selected| {
+                let parent = selected.parent_chat_id.as_deref().and_then(|id| {
+                    state.chats.iter().find(|chat| chat.id == id).map(|chat| {
+                        (
+                            chat.id.clone(),
+                            transcript::single_line(chat.title.as_deref().unwrap_or("New session")),
+                        )
+                    })
+                });
+                let mut children: Vec<_> = state
+                    .chats
+                    .iter()
+                    .filter(|chat| {
+                        !chat.archived
+                            && chat.parent_chat_id.as_deref() == Some(selected.id.as_str())
+                    })
+                    .collect();
+                children.sort_by(|left, right| {
+                    spaces::compare_sidebar_chats(self.settings.sidebar_sort, left, right)
+                });
+                let children = children
+                    .into_iter()
+                    .map(|chat| {
+                        (
+                            chat.id.clone(),
+                            transcript::single_line(chat.title.as_deref().unwrap_or("New session")),
+                            state.display_status_for(chat, Utc::now()),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                (selected.id.clone(), parent, children, !selected.archived)
+            })
+        }) else {
+            return Vec::new();
+        };
+
+        let mut controls = Vec::new();
+        if let Some((parent_id, parent_title)) = parent {
+            controls.push(
+                div()
+                    .id("thread-parent-link")
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("Open parent thread: {parent_title}"))
+                    .h(px(26.0))
+                    .max_w(px(190.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .px(px(8.0))
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_color(theme.border.opacity(0.7))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.glass_hover()).text_color(theme.text))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.open_chat(parent_id.clone(), cx)),
+                    )
+                    .child(icon(icons::ALT_ARROW_LEFT).size(px(12.0)))
+                    .child(div().min_w_0().truncate().child(parent_title))
+                    .into_any_element(),
+            );
+        }
+
+        if !children.is_empty() {
+            let count = children.len();
+            let needs_input = children
+                .iter()
+                .any(|(_, _, status)| *status == zeron_proto::ChatIndicator::AwaitingInput);
+            let menu_open = self.thread_header_menu.as_deref() == Some(selected_id.as_str());
+            let toggle_id = selected_id.clone();
+            let mut trigger = div()
+                .id("thread-children-trigger")
+                .relative()
+                .role(gpui::Role::Button)
+                .aria_label(format!("Show {count} child threads"))
+                .h(px(26.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .px(px(8.0))
+                .rounded(px(7.0))
+                .border_1()
+                .border_color(theme.border.opacity(0.7))
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(if needs_input {
+                    theme.accent
+                } else {
+                    theme.text_muted
+                })
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.glass_hover()).text_color(theme.text))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.thread_header_menu =
+                        if this.thread_header_menu.as_deref() == Some(toggle_id.as_str()) {
+                            None
+                        } else {
+                            Some(toggle_id.clone())
+                        };
+                    cx.notify();
+                }))
+                .child(
+                    icon(icons::ALT_ARROW_RIGHT)
+                        .size(px(12.0))
+                        .with_transformation(gpui::Transformation::rotate(gpui::percentage(0.25))),
+                )
+                .child(SharedString::from(if needs_input {
+                    "Needs you".to_string()
+                } else {
+                    format!("{count} {}", if count == 1 { "child" } else { "children" })
+                }));
+            if menu_open {
+                let popup_theme = theme.for_popup();
+                let mut menu = popover::popover_card(&popup_theme)
+                    .w(px(320.0))
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.thread_header_menu = None;
+                        cx.notify();
+                    }))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(popup_theme.text_muted)
+                            .child(SharedString::from(format!("Children ({count})"))),
+                    );
+                for (id, title, status) in children {
+                    let color = spaces::status_dot_color(status, &popup_theme);
+                    menu = menu.child(
+                        popover::menu_row(&popup_theme, false, format!("thread-child-{id}"))
+                            .id(SharedString::from(format!("thread-child-{id}")))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.open_chat(id.clone(), cx)),
+                            )
+                            .child(div().size(px(7.0)).rounded_full().bg(color))
+                            .child(div().flex_1().min_w_0().truncate().child(title))
+                            .child(SharedString::from(match status {
+                                zeron_proto::ChatIndicator::AwaitingInput => "Needs input",
+                                zeron_proto::ChatIndicator::Working => "Working",
+                                zeron_proto::ChatIndicator::Completed => "Done",
+                                zeron_proto::ChatIndicator::Errored => "Failed",
+                                zeron_proto::ChatIndicator::Idle => "",
+                            })),
+                    );
+                }
+                if can_create_child {
+                    let new_child_id = selected_id.clone();
+                    menu = menu.child(popover::menu_separator()).child(
+                        popover::menu_row(&popup_theme, false, "thread-child-new")
+                            .id("thread-child-new")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_child_session(new_child_id.clone(), cx)
+                            }))
+                            .child(
+                                icon(icons::PLUS)
+                                    .size(px(14.0))
+                                    .text_color(popup_theme.text_muted),
+                            )
+                            .child(SharedString::from("New child thread")),
+                    );
+                }
+                trigger = trigger.child(popover::anchored_menu_below(
+                    "thread-children-menu",
+                    menu.into_any_element(),
+                    None,
+                ));
+            }
+            controls.push(trigger.into_any_element());
+        }
+
+        if can_create_child {
+            let new_child_id = selected_id;
+            controls.push(
+                div()
+                    .id("new-child-thread")
+                    .role(gpui::Role::Button)
+                    .aria_label("New child thread")
+                    .h(px(26.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .px(px(8.0))
+                    .rounded(px(7.0))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.glass_hover()).text_color(theme.text))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_child_session(new_child_id.clone(), cx)
+                    }))
+                    .child(icon(icons::PLUS).size(px(12.0)))
+                    .child("Child")
+                    .into_any_element(),
+            );
+        }
+        controls
+    }
+
     /// The unified titlebar in chat mode:
     /// `[new-session +] [harness icon + session title] … [toggle-changes]`.
     /// Replaces the tab strip; inherits its titlebar duties (drag region,
@@ -171,9 +438,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        // The canvas titles as NOTHING (user request — a "New session"
-        // header over the empty canvas was noise); the bar keeps its height,
-        // drag region, and buttons. A session appends its target as a muted
+        // The ordinary new-session canvas has no title; a child canvas names
+        // its parent so the pending relationship stays visible before Send.
+        // The bar keeps its height, drag region, and buttons. A session appends its target as a muted
         // "project @ device" tag right of the title (the composer footer no
         // longer carries it).
         let (title, target, harness, on_canvas): (
@@ -203,7 +470,23 @@ impl Shell {
                         false,
                     )
                 }
-                None => (SharedString::from(""), None, None, true),
+                None => {
+                    let child_of = state.pending_child_chat.as_ref().and_then(|pending| {
+                        state
+                            .chats
+                            .iter()
+                            .find(|chat| chat.id == pending.parent_chat_id)
+                    });
+                    let title = child_of.map_or_else(String::new, |parent| {
+                        format!(
+                            "Child of {}",
+                            transcript::single_line(
+                                parent.title.as_deref().unwrap_or("New session")
+                            )
+                        )
+                    });
+                    (SharedString::from(title), None, None, true)
+                }
             }
         };
 
@@ -389,6 +672,11 @@ impl Shell {
                 self.render_project_actions_control(available_titlebar_width, viewport_height, cx)
             })
             .flatten();
+        let thread_relations = if !takeover && !on_canvas {
+            self.render_thread_relation_controls(&theme, cx)
+        } else {
+            Vec::new()
+        };
         let inner = div()
             .size_full()
             .flex()
@@ -445,6 +733,7 @@ impl Shell {
                         }),
                 )
             })
+            .children(thread_relations)
             .child(div().flex_1())
             .children(actions)
             .children(trailing);

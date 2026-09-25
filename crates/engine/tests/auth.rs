@@ -816,8 +816,9 @@ async fn sign_out_invalidates_pending_and_in_flight_oauth_callbacks() {
 }
 
 #[tokio::test]
-async fn detect_probes_edge_dev_mode() {
-    // A stub that reports auth:"dev" forces dev mode even with a client id configured.
+async fn detect_keeps_workos_auth_when_edge_reports_dev_mode() {
+    // A dev-mode edge must not turn an explicitly configured WorkOS client into
+    // a development bearer.
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("addr").port();
     let task = tokio::spawn(async move {
@@ -834,7 +835,9 @@ async fn detect_probes_edge_dev_mode() {
     let mut config = workos_config(&format!("http://127.0.0.1:{port}"), dir.path());
     config.dev_user_id = "dev-w".into();
     let auth = Auth::detect(config).await;
-    assert!(!auth.workos_enabled(), "edge dev mode wins");
-    assert_eq!(auth.access_token().await.as_deref(), Ok("dev-w"));
+    assert!(auth.workos_enabled(), "explicit WorkOS auth must win");
+    assert_eq!(auth.state(), AuthState::SignedOut);
+    assert_eq!(auth.user_id(), None);
+    assert_eq!(auth.access_token().await, Err(TokenError::SignedOut));
     task.abort();
 }

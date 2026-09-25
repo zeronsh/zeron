@@ -4,9 +4,8 @@ name: release
 #   - Linux headless tarballs (x86_64 + aarch64) via scripts/package-linux.sh
 #   - macOS dmg (Apple silicon) via scripts/package-macos.sh
 #   - Windows portable zip (x86_64) via scripts/package-windows.ps1
-# then create a GitHub Release AND upload everything to the
-# `comet-native-releases` R2 bucket (served at zeron.sh/releases/* for
-# `curl -fsSL https://zeron.sh/install.sh | sh`), bumping latest.txt.
+# then create a GitHub Release. If a Glitch Flow Cloudflare account is
+# configured, also upload artifacts and the updater manifest to its R2 bucket.
 #
 # Trigger: push a tag `v<version>` matching the workspace version in
 # Cargo.toml (bump it in the same commit), or run manually via
@@ -20,11 +19,30 @@ on:
 permissions:
   contents: write
 
+env:
+  GLITCH_FLOW_EDGE_URL: ${{ vars.GLITCH_FLOW_EDGE_URL }}
+  GLITCH_FLOW_WORKOS_CLIENT_ID: ${{ vars.GLITCH_FLOW_WORKOS_CLIENT_ID }}
+
 jobs:
+  cloud-config:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require signed-in release configuration
+        run: |
+          case "$GLITCH_FLOW_EDGE_URL" in
+            https://*) ;;
+            *) echo "::error::Set GLITCH_FLOW_EDGE_URL to the Glitch Flow HTTPS Worker URL."; exit 1 ;;
+          esac
+          case "$GLITCH_FLOW_WORKOS_CLIENT_ID" in
+            client_*) ;;
+            *) echo "::error::Set GLITCH_FLOW_WORKOS_CLIENT_ID to the Glitch Flow WorkOS client ID."; exit 1 ;;
+          esac
+
   cursor-compatibility:
     uses: ./.github/workflows/cursor-compatibility.yml
 
   linux:
+    needs: cloud-config
     strategy:
       fail-fast: false
       matrix:
@@ -63,6 +81,7 @@ jobs:
   #     key (raw .p8 contents), for notarytool. All three present → the package
   #     script notarizes and staples the app + dmg (no Gatekeeper warning).
   macos:
+    needs: cloud-config
     runs-on: macos-latest # Apple silicon
     env:
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
@@ -115,6 +134,7 @@ jobs:
           if-no-files-found: error
 
   windows:
+    needs: cloud-config
     runs-on: windows-2022
     timeout-minutes: 90
     defaults:
@@ -149,7 +169,7 @@ jobs:
       # `secrets` is not a valid context in step `if:` expressions — surface
       # the token through job env and gate on that instead.
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: b57dde68ee5964dccc025437b5478a5b
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -162,7 +182,7 @@ jobs:
           for platform in linux-x86_64.tar.gz linux-aarch64.tar.gz \
               macos-arm64.dmg macos-arm64-app.tar.gz \
               windows-x86_64.zip windows-x86_64.exe; do
-            test -f "dist/zeron-$ver-$platform" \
+            test -f "dist/glitch-flow-$ver-$platform" \
               || { echo "missing artifact for tag v$ver: $platform — check builds and Cargo.toml version"; exit 1; }
           done
           echo "VERSION=$ver" >> "$GITHUB_ENV"
@@ -175,24 +195,31 @@ jobs:
               '.files[$name] = {sha256: $sha}' <<<"$manifest")
           done
           printf '%s' "$manifest" > manifest.json
+      - name: Verify Glitch Flow release storage
+        if: env.CLOUDFLARE_API_TOKEN != ''
+        run: |
+          if [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ "$CLOUDFLARE_ACCOUNT_ID" = "b57dde68ee5964dccc025437b5478a5b" ]; then
+            echo "::error::Set a Glitch Flow Cloudflare account before uploading releases."
+            exit 1
+          fi
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*
             manifest.json
           generate_release_notes: true
-      - name: upload to R2 (zeron.sh/releases/*)
+      - name: upload to Glitch Flow R2
         if: env.CLOUDFLARE_API_TOKEN != ''
         run: |
           for f in dist/*; do
-            npx wrangler@4 r2 object put "comet-native-releases/$(basename "$f")" \
+            npx wrangler@4 r2 object put "glitch-flow-releases/$(basename "$f")" \
               --file "$f" --remote
           done
           # manifest.json: version + per-artifact sha256 — the auto-updater
           # (crates/update) verifies downloads against it. Published before
           # latest.txt so no client ever sees a version without its checksums.
-          npx wrangler@4 r2 object put comet-native-releases/manifest.json \
+          npx wrangler@4 r2 object put glitch-flow-releases/manifest.json \
             --file manifest.json --remote
           printf '%s' "$VERSION" > latest.txt
-          npx wrangler@4 r2 object put comet-native-releases/latest.txt \
+          npx wrangler@4 r2 object put glitch-flow-releases/latest.txt \
             --file latest.txt --remote

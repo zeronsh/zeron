@@ -53,7 +53,9 @@ use zeron_proto::{
 };
 
 use crate::process::{Child, ChildStdin, Command, Stdio};
-use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
+use crate::{
+    Harness, HarnessError, NativeMcpContext, RunControls, Signal, send_signal, shutdown_child,
+};
 
 /// The pinned SDK (public beta 1.0.x line; inspected against 1.0.31's
 /// typings). Bump deliberately — see the module header.
@@ -294,6 +296,16 @@ impl Harness for CursorHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_with_context(request, controls, None).await
+    }
+
+    async fn run_with_context(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        mcp: Option<NativeMcpContext>,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let mcp_servers = mcp.as_ref().map(cursor_mcp_servers).transpose()?;
         let lease = if self.executable.is_none() {
             Some(state::Lease::acquire(&state::state_root(), request.resume.as_deref()).await?)
         } else {
@@ -353,6 +365,9 @@ impl Harness for CursorHarness {
             "modelOptions": request.model_options,
             "resume": request.resume,
             "storeDir": lease.as_ref().and_then(|lease| lease.store_dir.as_ref()),
+            // SDK inline servers are session-local and must be passed again
+            // on Agent.resume; the shim supplies them at both creation paths.
+            "mcpServers": mcp_servers,
         });
         let _ = stdin_tx.send(first.to_string());
 
@@ -376,6 +391,21 @@ impl Harness for CursorHarness {
         })
         .boxed())
     }
+}
+
+fn cursor_mcp_servers(mcp: &NativeMcpContext) -> Result<Value, HarnessError> {
+    let command = mcp.server_command()?;
+    let command = command.to_str().ok_or_else(|| {
+        HarnessError::Protocol("Glitch Flow executable path is not valid Unicode".into())
+    })?;
+    Ok(json!({
+        "glitch_flow_native": {
+            "type": "stdio",
+            "command": command,
+            "args": ["mcp"],
+            "env": mcp.server_env().into_iter().collect::<std::collections::BTreeMap<_, _>>(),
+        }
+    }))
 }
 
 /// `Cursor.models.list()` items → picker models. Item shape (1.0.28
@@ -974,6 +1004,22 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_mcp_is_an_inline_cursor_sdk_server() {
+        let config = cursor_mcp_servers(&NativeMcpContext {
+            chat_id: "chat-a".into(),
+            device_id: "device-b".into(),
+            ipc_port: 31001,
+        })
+        .unwrap();
+        let server = &config["glitch_flow_native"];
+        assert_eq!(server["type"], "stdio");
+        assert_eq!(server["args"], json!(["mcp"]));
+        assert_eq!(server["env"]["ZERON_CHAT_ID"], "chat-a");
+        assert_eq!(server["env"]["ZERON_DEVICE_ID"], "device-b");
+        assert_eq!(server["env"]["ZERON_IPC_PORT"], "31001");
+    }
 
     #[test]
     fn decodes_cursor_tool_vocabulary() {
