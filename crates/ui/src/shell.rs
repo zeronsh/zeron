@@ -2424,6 +2424,7 @@ impl Shell {
             if let Some((pct, img_path)) = spec.split_once(':')
                 && let Ok(pct) = pct.parse::<u64>()
                 && let Ok(att) = crate::attachments::stage_file(std::path::Path::new(img_path))
+                && let Some(image) = att.image()
             {
                 let pending_path = format!("pending/{}/{}", att.id, att.name);
                 let device_ids: Vec<String> = {
@@ -2440,7 +2441,7 @@ impl Shell {
                         device_id,
                         &pending_path,
                         &att.name,
-                        att.image.clone(),
+                        image.clone(),
                     );
                 }
                 let text = crate::attachments::with_attachments(
@@ -12407,7 +12408,16 @@ mod tests {
             let inner = width - 2.0 * Theme::SPACE_LG - 2.0;
             for (count, expected_height) in [(3, 68.0), (60, 1284.0), (120, 2564.0)] {
                 assert_eq!(
-                    crate::composer::attachment_strip_height(count, inner),
+                    crate::composer::attachment_strip_height(
+                        std::iter::repeat_n(
+                            gpui::size(
+                                px(crate::composer::STRIP_THUMB),
+                                px(crate::composer::STRIP_THUMB)
+                            ),
+                            count,
+                        ),
+                        inner,
+                    ),
                     expected_height
                 );
             }

@@ -18,7 +18,7 @@ use gpui::{
     DispatchPhase, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, GlobalElementId, KeyBinding, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, PaintQuad, PathPromptOptions, Pixels, Point, Role,
-    ScrollWheelEvent, SharedString, Style, StyledImage as _, Subscription, Task, TextRun,
+    ScrollWheelEvent, SharedString, Size, Style, StyledImage as _, Subscription, Task, TextRun,
     TextStyle, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, img, point,
     prelude::*, px, quad, relative, size,
 };
@@ -284,21 +284,64 @@ fn input_drag_scroll_delta(
 /// Staged-attachment strip metrics (zeron attachment-ui.tsx AttachmentStrip:
 /// `flex flex-wrap gap-2 px-4 pt-3`, `size-14` thumbs).
 pub const STRIP_THUMB: f32 = 56.0;
+pub const STRIP_FILE_HEIGHT: f32 = 36.0;
+pub const STRIP_FILE_MAX_WIDTH: f32 = 260.0;
 pub const STRIP_GAP: f32 = 8.0;
 pub const STRIP_PAD_TOP: f32 = 12.0;
 pub const STRIP_PAD_X: f32 = 16.0;
 
-/// Height the wrap strip adds to the pill for `count` staged thumbnails at an
-/// `inner_width` pill content width (0 when empty). Mirrors flex-wrap: as many
-/// 56px thumbs per row as fit with 8px gaps inside the 16px side insets.
-pub fn attachment_strip_height(count: usize, inner_width: f32) -> f32 {
-    if count == 0 {
-        return 0.0;
-    }
+/// Match flex-wrap, including the tallest attachment in each mixed file/image row.
+pub fn attachment_strip_height(
+    sizes: impl IntoIterator<Item = Size<Pixels>>,
+    inner_width: f32,
+) -> f32 {
     let usable = (inner_width - 2.0 * STRIP_PAD_X).max(STRIP_THUMB);
-    let per_row = (((usable + STRIP_GAP) / (STRIP_THUMB + STRIP_GAP)).floor() as usize).max(1);
-    let rows = count.div_ceil(per_row);
-    STRIP_PAD_TOP + rows as f32 * STRIP_THUMB + (rows - 1) as f32 * STRIP_GAP
+    let mut height = 0.0;
+    let mut row_width = 0.0;
+    let mut row_height: f32 = 0.0;
+    for dimensions in sizes {
+        let width = f32::from(dimensions.width).min(usable);
+        if row_height > 0.0 && row_width + STRIP_GAP + width > usable {
+            height += row_height + STRIP_GAP;
+            row_width = 0.0;
+            row_height = 0.0;
+        }
+        row_width += if row_width == 0.0 {
+            width
+        } else {
+            STRIP_GAP + width
+        };
+        row_height = row_height.max(f32::from(dimensions.height));
+    }
+    if row_height == 0.0 {
+        0.0
+    } else {
+        STRIP_PAD_TOP + height + row_height
+    }
+}
+
+fn attachment_size(att: &StagedAttachment, theme: &Theme, window: &Window) -> Size<Pixels> {
+    if att.image().is_some() {
+        return size(px(STRIP_THUMB), px(STRIP_THUMB));
+    }
+    let line = window.text_system().shape_line(
+        att.name.clone().into(),
+        px(13.0),
+        &[TextRun {
+            len: att.name.len(),
+            font: gpui::font(theme.font_sans.clone()),
+            color: theme.text,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    );
+    // Icon + gap + padding + inset remove button + borders, rounded up for layout.
+    size(
+        px((f32::from(line.width()).ceil() + 78.0).min(STRIP_FILE_MAX_WIDTH)),
+        px(STRIP_FILE_HEIGHT),
+    )
 }
 
 pub fn comment_strip_height(count: usize) -> f32 {
@@ -529,9 +572,9 @@ pub const APPSHOT_IMAGE_MAX_WIDTH: f32 = 320.0;
 pub const APPSHOT_IMAGE_MAX_HEIGHT: f32 = 132.0;
 pub const APPSHOT_TILE_HEIGHT: f32 = 192.0;
 
-struct AppshotActionTooltip(SharedString);
+struct ComposerActionTooltip(SharedString);
 
-impl Render for AppshotActionTooltip {
+impl Render for ComposerActionTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
         div()
@@ -5617,11 +5660,9 @@ impl Composer {
                 .collect();
             if std::env::var("ZERON_ATTACH_PREVIEW").is_ok_and(|v| v == "1")
                 && let Some(first) = staged.first()
+                && let Some(image) = first.image()
             {
-                composer.preview = Some(attachments::PreviewImage::new(
-                    first.name.clone(),
-                    first.image.clone(),
-                ));
+                composer.preview = Some(attachments::PreviewImage::new(first.name.clone(), image));
                 composer.preview_focus_pending = true;
             }
             if !staged.is_empty() {
@@ -5769,15 +5810,11 @@ impl Composer {
         cx.notify();
     }
 
-    /// Stage image files (picker / drop / pasted paths). Non-images are
-    /// skipped silently (matching the original's `image/*` filter); read
-    /// failures and oversize files surface in the failure notice.
+    /// Stage regular files from the picker, drops, and pasted paths. Report
+    /// read failures and oversize files through the failure notice.
     pub(crate) fn add_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let mut staged = Vec::new();
         for path in &paths {
-            if attachments::format_by_extension(path).is_none() {
-                continue;
-            }
             match attachments::stage_file(path) {
                 Ok(att) => staged.push(att),
                 Err(message) => {
@@ -5904,7 +5941,12 @@ impl Composer {
     /// The staged-thumbnail strip (attachment-ui.tsx AttachmentStrip):
     /// `flex flex-wrap gap-2 px-4 pt-3`, 56px rounded thumbs, a remove button
     /// revealed on hover, click opens the full-size preview.
-    fn render_attachment_strip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+    fn render_attachment_strip(
+        &self,
+        theme: &Theme,
+        sizes: &[Size<Pixels>],
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
         let staged = self.staged();
         if staged.is_empty() {
             return None;
@@ -5915,35 +5957,57 @@ impl Composer {
             .flex()
             .flex_row()
             .flex_wrap()
+            .items_center()
             .gap(px(STRIP_GAP))
             .px(px(STRIP_PAD_X))
             .pt(px(STRIP_PAD_TOP));
         for (ix, att) in staged.iter().enumerate() {
             let group: SharedString = format!("composer-att-{}", att.id).into();
-            let preview = attachments::PreviewImage::new(att.name.clone(), att.image.clone());
+            let preview = att
+                .image()
+                .map(|image| attachments::PreviewImage::new(att.name.clone(), image));
             let remove_id = att.id.clone();
+            let is_file = att.image().is_none();
             strip = strip.child(
                 div()
                     .group(group.clone())
+                    .max_w_full()
                     .flex_none()
                     .relative()
                     .child(
                         div()
                             .id(("composer-att-thumb", ix))
-                            .size(px(STRIP_THUMB))
-                            .rounded(px(8.0))
+                            .debug_selector(move || format!("composer-att-thumb-{ix}"))
+                            .w(sizes[ix].width)
+                            .max_w_full()
+                            .h(sizes[ix].height)
+                            .rounded(px(if is_file {
+                                STRIP_FILE_HEIGHT / 2.0
+                            } else {
+                                8.0
+                            }))
+                            .when(is_file, |el| el.bg(crate::theme::ink(0.06)))
                             .overflow_hidden()
                             .border_1()
-                            .border_color(crate::theme::hairline(0.10))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                preview.viewer.reset();
-                                this.preview = Some(preview.clone());
-                                this.preview_focus_pending = true;
-                                cx.notify();
-                            }))
-                            .child(
-                                img(att.image.clone())
+                            .border_color(crate::theme::hairline(if is_file { 0.08 } else { 0.10 }))
+                            .tooltip({
+                                let name = att.name.clone();
+                                move |_, cx| {
+                                    cx.new(|_| ComposerActionTooltip(name.clone().into()))
+                                        .into()
+                                }
+                            })
+                            .when_some(preview, |el, preview| {
+                                el.cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        preview.viewer.reset();
+                                        this.preview = Some(preview.clone());
+                                        this.preview_focus_pending = true;
+                                        cx.notify();
+                                    }))
+                            })
+                            .child(match att.image() {
+                                Some(image) => img(image)
                                     // EXPLICIT dims, not size_full: img layout
                                     // honors the image's intrinsic aspect
                                     // ratio over a percent height (gpui
@@ -5957,8 +6021,14 @@ impl Composer {
                                     // Own radii — the frame's rounding only
                                     // clips rectangularly (7 = 8 - border).
                                     .rounded(px(7.0))
-                                    .object_fit(ObjectFit::Cover),
-                            ),
+                                    .object_fit(ObjectFit::Cover)
+                                    .into_any_element(),
+                                None => attachments::file_chip(&att.name, theme)
+                                    .size_full()
+                                    .pl(px(12.0))
+                                    .pr(px(36.0))
+                                    .into_any_element(),
+                            }),
                     )
                     // Own layer: inside the frosted pill everything shares one
                     // draw order and images render last, so without it the
@@ -5966,18 +6036,25 @@ impl Composer {
                     .child(crate::frost::layered(
                         div()
                             .id(("composer-att-remove", ix))
+                            .debug_selector(move || format!("composer-att-remove-{ix}"))
                             .absolute()
                             .top(px(-6.0))
                             .right(px(-6.0))
                             .size(px(18.0))
                             .rounded_full()
-                            .bg(theme.bg)
+                            .when(!is_file, |el| el.bg(theme.bg).shadow_sm().opacity(0.0))
+                            .when(is_file, |el| {
+                                el.top(px((STRIP_FILE_HEIGHT - 22.0) / 2.0))
+                                    .right(px(6.0))
+                                    .size(px(22.0))
+                                    .hover(|s| s.bg(crate::theme::ink(0.08)))
+                            })
+                            .role(Role::Button)
+                            .aria_label(format!("Remove {}", att.name))
                             .flex()
                             .items_center()
                             .justify_center()
                             .cursor_pointer()
-                            .shadow_sm()
-                            .opacity(0.0)
                             .group_hover(group, |s| s.opacity(1.0))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 // The button overhangs the thumbnail, whose
@@ -5987,9 +6064,13 @@ impl Composer {
                                 this.remove_attachment(&remove_id, cx);
                             }))
                             .child(
-                                crate::icons::icon(crate::icons::CLOSE_CIRCLE)
-                                    .size(px(14.0))
-                                    .text_color(theme.text_muted),
+                                crate::icons::icon(if is_file {
+                                    crate::icons::CLOSE
+                                } else {
+                                    crate::icons::CLOSE_CIRCLE
+                                })
+                                .size(px(if is_file { 12.0 } else { 14.0 }))
+                                .text_color(theme.text_muted),
                             ),
                     )),
             );
@@ -6024,7 +6105,7 @@ impl Composer {
             let group: SharedString = format!("composer-appshot-{}", appshot.id).into();
             let preview = crate::attachments::PreviewImage::new(
                 appshot.screenshot.name.clone(),
-                appshot.screenshot.image.clone(),
+                appshot.screenshot.image().expect("Appshot screenshot"),
             );
             let preview_on_key = preview.clone();
             let preview_on_a11y = preview.clone();
@@ -6062,7 +6143,7 @@ impl Composer {
                 .cursor_pointer()
                 .hover(|style| style.bg(crate::theme::ink(0.045)))
                 .tooltip(move |_, cx| {
-                    cx.new(|_| AppshotActionTooltip(preview_label.clone()))
+                    cx.new(|_| ComposerActionTooltip(preview_label.clone()))
                         .into()
                 })
                 .role(gpui::Role::Button)
@@ -6123,7 +6204,7 @@ impl Composer {
                                     44.0,
                                     false,
                                     true,
-                                    img(appshot.screenshot.image.clone())
+                                    img(appshot.screenshot.image().expect("Appshot screenshot"))
                                         .w(px(image_width))
                                         .h(px(image_height))
                                         .object_fit(ObjectFit::Contain),
@@ -6180,7 +6261,7 @@ impl Composer {
                     .opacity(0.0)
                     .group_hover(group, |style| style.opacity(1.0))
                     .tooltip(move |_, cx| {
-                        cx.new(|_| AppshotActionTooltip(remove_label.clone()))
+                        cx.new(|_| ComposerActionTooltip(remove_label.clone()))
                             .into()
                     })
                     .role(gpui::Role::Button)
@@ -6226,14 +6307,13 @@ impl Composer {
         Some(strip.into_any_element())
     }
 
-    /// Paperclip: the native image picker (the original's hidden
-    /// `<input type=file accept=image/* multiple>`).
+    /// Paperclip: select one or more regular files with the native picker.
     fn open_file_picker(&mut self, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: true,
-            prompt: Some("Attach".into()),
+            prompt: Some("Attach files".into()),
         });
         self.picker_task = Some(cx.spawn(async move |this, cx| {
             let result = rx.await;
@@ -7716,30 +7796,22 @@ impl Composer {
         // rewrite instead of blanking into a reload skeleton.
         if queued_flow {
             for (upload_id, att) in upload_ids.iter().zip(&staged) {
-                attachments::seed_attachment_alias(
-                    &device_id,
-                    upload_id,
-                    &att.name,
-                    att.image.clone(),
-                );
+                let Some(image) = att.image() else { continue };
+                attachments::seed_attachment_alias(&device_id, upload_id, &att.name, image.clone());
                 if let Some(local) = local_device_id.as_deref()
                     && local != device_id
                 {
-                    attachments::seed_attachment_alias(
-                        local,
-                        upload_id,
-                        &att.name,
-                        att.image.clone(),
-                    );
+                    attachments::seed_attachment_alias(local, upload_id, &att.name, image.clone());
                 }
             }
         }
         for (path, att) in echo_paths.iter().zip(&staged) {
-            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
+            let Some(image) = att.image() else { continue };
+            attachments::seed_attachment(&device_id, path, &att.name, image.clone());
             if let Some(local) = local_device_id.as_deref()
                 && local != device_id
             {
-                attachments::seed_attachment(local, path, &att.name, att.image.clone());
+                attachments::seed_attachment(local, path, &att.name, image.clone());
             }
         }
 
@@ -7892,9 +7964,10 @@ impl Composer {
                     // Attachment in the original send path).
                     let seed_device = host_device_id.clone().unwrap_or_else(|| device_id.clone());
                     for (path, att) in attachment_paths.iter().zip(&staged) {
-                        attachments::seed_attachment(&seed_device, path, &att.name, att.image.clone());
+                        let Some(image) = att.image() else { continue };
+                        attachments::seed_attachment(&seed_device, path, &att.name, image.clone());
                         if seed_device != device_id {
-                            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
+                            attachments::seed_attachment(&device_id, path, &att.name, image.clone());
                         }
                     }
                     let appshot_paths: HashMap<String, String> = staged
@@ -8068,7 +8141,7 @@ impl Composer {
                     let queue_text = if !clean_queue_attachment_text {
                         content.as_str()
                     } else if queue_body.trim().is_empty() && !attachment_paths.is_empty() {
-                        attachments::ATTACHMENT_ONLY_TEXT
+                        attachments::attachment_only_text(&attachment_paths)
                     } else {
                         queue_body.as_str()
                     };
@@ -9077,14 +9150,18 @@ impl Render for Composer {
         // `morph_t`) animates. Steady state renders exactly the target.
         // Staged attachments add the wrap strip's height to the pill in BOTH
         // modes (attachment-ui.tsx AttachmentStrip sits above the input row).
-        let staged_count = self.staged().len();
         // The input width excludes the inline controls in compact mode.
         // Wrap against the pill's content width in both modes, accounting
         // for the outer container padding and the pill's 1px borders.
         let strip_width_hint =
             self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH) - 2.0 * Theme::SPACE_LG - 2.0;
         let appshot_count = self.staged_appshots().len();
-        let strip_h = attachment_strip_height(staged_count, strip_width_hint);
+        let attachment_sizes: Vec<_> = self
+            .staged()
+            .iter()
+            .map(|att| attachment_size(att, &theme, window))
+            .collect();
+        let strip_h = attachment_strip_height(attachment_sizes.iter().copied(), strip_width_hint);
         let comment_strip_h = comment_strip_height(self.staged_comments(cx).len());
         let base_height = if self.dock_frame.is_some() {
             dock_layout.height(dock_amount)
@@ -9224,8 +9301,7 @@ impl Render for Composer {
         });
 
         let send_button = self.render_send_button(mode, cx);
-        // Attach button — opens the native image picker (the original's hidden
-        // `<input type=file accept="image/*" multiple>`); paste/drop also feed
+        // Attach button opens the native file picker; paste/drop also feed
         // the same strip. The leading utility group owns the spacing between
         // this button and the model picker.
         let attach = div()
@@ -9244,6 +9320,12 @@ impl Render for Composer {
                 crate::theme::ink(0.10),
             ))
             .on_hover(motion::hover_listener("composer-attach"))
+            .role(gpui::Role::Button)
+            .aria_label("Attach files")
+            .tooltip(|_, cx| {
+                cx.new(|_| ComposerActionTooltip("Attach files".into()))
+                    .into()
+            })
             .on_click(cx.listener(|this, _, _, cx| this.open_file_picker(cx)))
             .child(
                 crate::icons::icon(crate::icons::PAPERCLIP)
@@ -9255,7 +9337,7 @@ impl Render for Composer {
             );
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
         // the input inside the pill in both modes.
-        let strip = self.render_attachment_strip(&theme, cx);
+        let strip = self.render_attachment_strip(&theme, &attachment_sizes, cx);
         let appshot_strip = self.render_appshot_strip(&theme, window, cx);
         let comments_chip = self.render_comments_chip(&theme, cx);
 
@@ -9830,8 +9912,20 @@ mod tests {
             handle
                 .read_with(cx, |composer, cx| {
                     assert_eq!(composer.staged().len(), 10);
-                    assert_eq!(attachment_strip_height(10, 698.0 - 34.0), 68.0);
-                    assert_eq!(attachment_strip_height(10, 697.0 - 34.0), 132.0);
+                    assert_eq!(
+                        attachment_strip_height(
+                            [size(px(STRIP_THUMB), px(STRIP_THUMB)); 10],
+                            698.0 - 34.0
+                        ),
+                        68.0
+                    );
+                    assert_eq!(
+                        attachment_strip_height(
+                            [size(px(STRIP_THUMB), px(STRIP_THUMB)); 10],
+                            697.0 - 34.0
+                        ),
+                        132.0
+                    );
                     let surface = composer.surface_bounds.get().unwrap();
                     assert!(
                         (f32::from(surface.size.height) - before).abs() <= 1.0,
@@ -10038,6 +10132,98 @@ mod tests {
                 assert_eq!(input.read(cx).selected_range, 2..8);
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn file_pills_fit_their_remove_button_and_preserve_the_draft(cx: &mut gpui::TestAppContext) {
+        let (dir, handle) = composer_focus_window(cx);
+        let names = [
+            "notes.md",
+            "長い名前-with-a-very-long-document-filename.txt",
+        ];
+        let staged: Vec<_> = names
+            .iter()
+            .map(|name| {
+                let path = dir.path().join(name);
+                std::fs::write(&path, "fixture").unwrap();
+                attachments::stage_file(&path).unwrap()
+            })
+            .collect();
+        handle
+            .update(cx, |composer, _, cx| {
+                composer
+                    .attachments
+                    .insert(composer.current_key.clone(), staged);
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("Keep my draft", cx));
+                composer.set_available_width(320.0, cx);
+                composer.route_snap_until = Some(Instant::now() + Duration::from_secs(1));
+                cx.notify();
+            })
+            .unwrap();
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        visual.simulate_resize(size(px(320.0), px(700.0)));
+        visual.update(|window, cx| window.draw(cx).clear());
+        let first = visual.debug_bounds("composer-att-thumb-0").unwrap();
+        let second = visual.debug_bounds("composer-att-thumb-1").unwrap();
+        let remove = visual.debug_bounds("composer-att-remove-0").unwrap();
+        assert_eq!(f32::from(first.size.height), STRIP_FILE_HEIGHT);
+        assert!(
+            first.size.width < second.size.width,
+            "short names should not fill a fixed card"
+        );
+        assert!(first.contains(&remove.origin) && first.contains(&remove.bottom_right()));
+        assert!(second.top() >= first.bottom(), "narrow pills must wrap");
+        visual.simulate_click(remove.center(), gpui::Modifiers::default());
+        handle
+            .read_with(&visual, |composer, cx| {
+                assert_eq!(composer.staged().len(), 1);
+                assert_eq!(composer.staged()[0].name, names[1]);
+                assert_eq!(composer.input.read(cx).text(), "Keep my draft");
+                assert!(composer.preview.is_none());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn composer_file_picker_accepts_documents_and_mixed_files(cx: &mut gpui::TestAppContext) {
+        let (dir, handle) = composer_focus_window(cx);
+        let text_path = dir.path().join("notes.txt");
+        let image_path = dir.path().join("image.svg");
+        std::fs::write(&text_path, "attachment fixture").unwrap();
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/zeron-logo.svg"),
+            &image_path,
+        )
+        .unwrap();
+
+        for paths in [vec![text_path.clone()], vec![image_path, text_path]] {
+            handle
+                .update(cx, |composer, _, cx| {
+                    composer
+                        .input
+                        .update(cx, |input, cx| input.set_text("Keep my draft", cx));
+                    composer.attachments.clear();
+                    composer.open_file_picker(cx);
+                })
+                .unwrap();
+            let expected_files = paths.len();
+            cx.simulate_path_prompt_response(move |_| Some(paths));
+            cx.run_until_parked();
+            handle
+                .read_with(cx, |composer, cx| {
+                    assert_eq!(composer.staged().len(), expected_files);
+                    assert_eq!(
+                        composer.staged().last().unwrap().bytes(),
+                        b"attachment fixture"
+                    );
+                    assert!(composer.staged().last().unwrap().image().is_none());
+                    assert_eq!(composer.input.read(cx).text(), "Keep my draft");
+                    assert!(composer.failure.is_none());
+                })
+                .unwrap();
+        }
     }
 
     #[gpui::test]
@@ -12749,6 +12935,30 @@ mod tests {
         );
         // Zero lines still measures one.
         assert_eq!(input_content_height(0), INPUT_LINE_HEIGHT);
+    }
+
+    #[test]
+    fn attachment_strip_wraps_mixed_file_pills_and_images() {
+        let file = size(px(200.0), px(STRIP_FILE_HEIGHT));
+        let image = size(px(56.0), px(56.0));
+        assert_eq!(attachment_strip_height([], 400.0), 0.0);
+        assert_eq!(attachment_strip_height([image; 5], 400.0), 68.0);
+        assert_eq!(
+            attachment_strip_height([file, image, file], 400.0),
+            12.0 + 56.0 + 8.0 + STRIP_FILE_HEIGHT
+        );
+        assert_eq!(
+            attachment_strip_height([file, file], 440.0),
+            12.0 + STRIP_FILE_HEIGHT
+        );
+        assert_eq!(
+            attachment_strip_height([file, file], 439.0),
+            20.0 + 2.0 * STRIP_FILE_HEIGHT
+        );
+        assert_eq!(
+            attachment_strip_height([file, image], 180.0),
+            20.0 + STRIP_FILE_HEIGHT + 56.0
+        );
     }
 
     #[test]

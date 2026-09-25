@@ -556,7 +556,13 @@ mod tests {
         DockLayout {
             hero_height: crate::composer::COMPOSER_MIN_HEIGHT,
             thread_height: crate::composer::COMPACT_TOTAL_HEIGHT,
-            extra_height: crate::composer::attachment_strip_height(10, outer_width - 34.0),
+            extra_height: crate::composer::attachment_strip_height(
+                [gpui::size(
+                    px(crate::composer::STRIP_THUMB),
+                    px(crate::composer::STRIP_THUMB),
+                ); 10],
+                outer_width - 34.0,
+            ),
             compact: true,
         }
     }

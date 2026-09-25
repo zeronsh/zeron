@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::stream::BoxStream;
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
@@ -149,9 +151,23 @@ impl Harness for InstantHarness {
     }
     async fn run(
         &self,
-        _request: RunRequest,
+        request: RunRequest,
         _controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        assert!(!request.prompt.contains("pending://"));
+        if !request.attachments.is_empty() {
+            assert_eq!(request.attachments.len(), attachment_fixtures().len());
+        }
+        for (path, (_, expected)) in request.attachments.iter().zip(attachment_fixtures()) {
+            assert_eq!(
+                std::fs::read(path).expect("host file exists before run"),
+                expected
+            );
+            assert!(
+                request.prompt.contains(path),
+                "prompt names the host's file"
+            );
+        }
         Ok(futures::stream::iter([
             Ok(AgentEvent::SessionStarted {
                 harness: HarnessId::Mock,
@@ -200,6 +216,33 @@ fn complete_assistant_count(core: &EngineCore) -> usize {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
+    relay_delivery_roundtrip(Vec::new()).await;
+}
+
+fn attachment_fixtures() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        (
+            "notes with spaces.md",
+            b"# Markdown\nCross-device attachment.\n".to_vec(),
+        ),
+        ("data.json", br#"{"attached":true}"#.to_vec()),
+        ("document.pdf", b"%PDF-1.4\nfixture".to_vec()),
+        (
+            "archive.bin",
+            (0..1_100_003).map(|i| (i % 251) as u8).collect(),
+        ),
+        ("LICENSE", b"No extension".to_vec()),
+        ("empty.txt", Vec::new()),
+        ("image.png", b"image transfer fixture".to_vec()),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arbitrary_files_transfer_to_remote_host_before_run_and_read_back() {
+    relay_delivery_roundtrip(attachment_fixtures()).await;
+}
+
+async fn relay_delivery_roundtrip(files: Vec<(&str, Vec<u8>)>) {
     let (relay_url, _relay) = fake_device_room().await;
     let dirs = tempfile::tempdir().expect("tempdir");
 
@@ -240,11 +283,48 @@ async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
         .rename_chat(CHAT, "Pre-titled")
         .expect("pre-title on B (no auto-title harness run)");
 
+    let mut refs = Vec::new();
+    let mut transfers = Vec::new();
+    for (index, (name, bytes)) in files.iter().enumerate() {
+        let upload_id = format!("{index:08}-attachment");
+        client_a
+            .call(
+                methods::UPLOAD_CHUNK,
+                serde_json::json!({
+                    "uploadId": upload_id, "seq": 0, "data": BASE64.encode(bytes),
+                }),
+            )
+            .await
+            .expect("stage on sender");
+        client_a
+            .call(
+                methods::UPLOAD_COMMIT,
+                serde_json::json!({
+                    "uploadId": upload_id, "fileName": name,
+                }),
+            )
+            .await
+            .expect("commit on sender");
+        refs.push(zeron_engine::uploads::pending_ref(&upload_id, name));
+        transfers.push(serde_json::json!({"uploadId": upload_id, "fileName": name}));
+    }
+    let prompt = if refs.is_empty() {
+        "over the relay".into()
+    } else {
+        format!(
+            "Read the files\n\nAttached files (local files — open them to view):\n{}",
+            refs.iter()
+                .map(|path| format!("- {path}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+
     // The send: a durable local write on A. Rows go nowhere; the escort's
     // grace elapses; the entry crosses the peer link instead.
     let command = serde_json::to_value(SessionCommandPayload::Run {
         request: RunRequest {
-            prompt: "over the relay".into(),
+            prompt,
             harness: None,
             model: None,
             reasoning: None,
@@ -252,7 +332,7 @@ async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
             cwd: "~".into(),
             sandbox: SandboxLevel::WorkspaceWrite,
             auto_approve: true,
-            attachments: Vec::new(),
+            attachments: refs.clone(),
             worktree: None,
             resume: None,
         },
@@ -262,7 +342,7 @@ async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
     client_a
         .call(
             methods::QUEUE_COMMAND,
-            serde_json::json!({ "chatId": CHAT, "command": command }),
+            serde_json::json!({ "chatId": CHAT, "command": command, "transfers": transfers }),
         )
         .await
         .expect("queue on A");
@@ -292,6 +372,47 @@ async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
             .any(|e| e.id == "msg-relay-1" && e.role == MessageRole::User),
         "B persisted the user message under the client-minted id"
     );
+
+    for ((_, expected), reference) in files.iter().zip(&refs) {
+        let host_path = core_b
+            .uploads
+            .resolve_pending(reference)
+            .expect("file delivered to host");
+        let sender_path = core_a
+            .uploads
+            .resolve_pending(reference)
+            .expect("sender keeps original");
+        assert_ne!(host_path, sender_path, "separate device stores");
+        assert_eq!(std::fs::read(&host_path).unwrap(), *expected);
+        // Read back through A's routed RPC, as another device's queue editor does.
+        let mut offset = 0;
+        let mut actual = Vec::new();
+        loop {
+            let chunk = client_a
+                .call(
+                    methods::READ_ATTACHMENT_CHUNK,
+                    serde_json::json!({
+                        "targetDeviceId": "device-b", "path": host_path, "offset": offset,
+                    }),
+                )
+                .await
+                .expect("remote attachment readback");
+            assert_eq!(
+                chunk["name"].as_str().unwrap(),
+                std::path::Path::new(&host_path)
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            );
+            actual.extend(BASE64.decode(chunk["data"].as_str().unwrap()).unwrap());
+            if chunk["done"] == true {
+                break;
+            }
+            offset = chunk["nextOffset"].as_u64().unwrap();
+        }
+        assert_eq!(&actual, expected);
+    }
 
     // Exactly-once: the doc row "arrives" later over chat2 sync — simulate by
     // writing A's exact entry into B's doc, which kicks B's drain. The

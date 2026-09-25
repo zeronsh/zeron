@@ -454,10 +454,27 @@ fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
         .map(|path| format!("- {path}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let trailer = format!("\n\n{ATTACHMENT_PROMPT_HEADER}\n{refs}");
-    let body = text.strip_suffix(&trailer).unwrap_or(text);
+    let images_only = attachments
+        .iter()
+        .all(|path| crate::uploads::mime_by_ext(std::path::Path::new(path)).is_some());
+    let file_header = "Attached files (local files — open them to view):";
+    let header = if images_only {
+        ATTACHMENT_PROMPT_HEADER
+    } else {
+        file_header
+    };
+    let trailer = format!("\n\n{header}\n{refs}");
+    let legacy_trailer = format!("\n\n{ATTACHMENT_PROMPT_HEADER}\n{refs}");
+    let body = text
+        .strip_suffix(&trailer)
+        .or_else(|| text.strip_suffix(&legacy_trailer))
+        .unwrap_or(text);
     let body = if body.trim().is_empty() {
-        ATTACHMENT_ONLY_PROMPT
+        if images_only {
+            ATTACHMENT_ONLY_PROMPT
+        } else {
+            "See the attached file(s)."
+        }
     } else {
         body
     };
@@ -5919,6 +5936,20 @@ mod part_segment_tests {
 #[cfg(test)]
 mod queued_message_prompt_tests {
     use super::{ATTACHMENT_ONLY_PROMPT, ATTACHMENT_PROMPT_HEADER, queued_message_prompt};
+
+    #[test]
+    fn queued_documents_use_file_transport_and_do_not_duplicate_trailers() {
+        let paths = vec!["/uploads/notes.md".into(), "/uploads/image.png".into()];
+        let content = queued_message_prompt("", &paths);
+        assert!(content.starts_with("See the attached file(s)."));
+        assert!(content.contains("Attached files (local files"));
+        assert_eq!(queued_message_prompt(&content, &paths), content);
+        let legacy = "read this\n\nAttached images (local files — open them to view):\n- /uploads/notes.md\n- /uploads/image.png";
+        assert_eq!(
+            queued_message_prompt(legacy, &paths),
+            queued_message_prompt("read this", &paths)
+        );
+    }
 
     #[test]
     fn dispatch_adds_the_attachment_transport_to_visible_queue_text() {
