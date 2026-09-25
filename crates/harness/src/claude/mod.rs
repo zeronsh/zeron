@@ -755,6 +755,13 @@ async fn run_session(session: Session) {
     let mut interrupted = false;
     let mut interrupt_sent = false;
     let mut any_done = false;
+    // A turn end held back while steers wait for their replay. Rapid `now`
+    // steers each interrupt the turn the previous one started, and the CLI
+    // replays only the last (verified on 2.1.280; the earlier texts still
+    // reach the model). If nothing follows the held result, the steers were
+    // absorbed: release them and the turn end instead of spinning forever.
+    const HELD_DONE_SETTLE: Duration = Duration::from_secs(5);
+    let mut held_done: Option<(AgentEvent, tokio::time::Instant)> = None;
     let mut done_after_interrupt = false;
     let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -765,6 +772,11 @@ async fn run_session(session: Session) {
                     let line = line.trim();
                     if line.is_empty() {
                         continue;
+                    }
+                    // The CLI is still producing: whatever it is doing is not
+                    // the quiet end the held turn end waits for.
+                    if let Some((_, deadline)) = held_done.as_mut() {
+                        *deadline = tokio::time::Instant::now() + HELD_DONE_SETTLE;
                     }
                     let frame = match wire::parse_frame(line) {
                         Ok(frame) => frame,
@@ -787,12 +799,21 @@ async fn run_session(session: Session) {
                     // Only the CLI's replay confirms that a prompt joined its
                     // conversation. Writing stdin must not split ongoing text.
                     if let Frame::User(ref user) = frame {
-                        if user.parent_tool_use_id.is_none() && user.uuid.as_ref().is_some_and(|id| pending_steers.front() == Some(id)) {
-                            pending_steers.pop_front();
-                            let (prev, next) = norm.rotate_for_steer();
-                            if event_tx.send(Ok(AgentEvent::Steered {
-                                assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
-                            })).await.is_err() { break 'main; }
+                        // A replay confirms its steer and every earlier one:
+                        // superseded steers are never replayed themselves.
+                        if user.parent_tool_use_id.is_none()
+                            && let Some(at) = user
+                                .uuid
+                                .as_ref()
+                                .and_then(|id| pending_steers.iter().position(|p| p == id))
+                        {
+                            for _ in 0..=at {
+                                pending_steers.pop_front();
+                                let (prev, next) = norm.rotate_for_steer();
+                                if event_tx.send(Ok(AgentEvent::Steered {
+                                    assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
+                                })).await.is_err() { break 'main; }
+                            }
                         }
                     }
                     for ev in norm.normalize(frame, interrupted) {
@@ -811,7 +832,12 @@ async fn run_session(session: Session) {
                         // result frame; the steer continues the run, so that
                         // result is a steer boundary, not the end of the turn.
                         if is_done && !interrupted && !pending_steers.is_empty() {
+                            held_done =
+                                Some((ev, tokio::time::Instant::now() + HELD_DONE_SETTLE));
                             continue;
+                        }
+                        if is_done {
+                            held_done = None;
                         }
                         if event_tx.send(Ok(ev)).await.is_err() {
                             break 'main; // consumer gone — reap below
@@ -868,8 +894,33 @@ async fn run_session(session: Session) {
                 }
             },
 
+            _ = tokio::time::sleep_until(
+                held_done.as_ref().map_or_else(tokio::time::Instant::now, |(_, d)| *d)
+            ), if held_done.is_some() => {
+                // The steers were absorbed into the turn that just ended.
+                while pending_steers.pop_front().is_some() {
+                    let (prev, next) = norm.rotate_for_steer();
+                    if event_tx.send(Ok(AgentEvent::Steered {
+                        assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
+                    })).await.is_err() { break 'main; }
+                }
+                let (done, _) = held_done.take().expect("guarded by if");
+                if event_tx.send(Ok(done)).await.is_err() {
+                    break 'main;
+                }
+                any_done = true;
+            },
+
             _ = event_tx.closed() => break 'main,
         }
+    }
+
+    // A turn end still held when the CLI exited is the run's real end.
+    if let Some((done, _)) = held_done.take()
+        && !event_tx.is_closed()
+        && event_tx.send(Ok(done)).await.is_ok()
+    {
+        any_done = true;
     }
 
     // Terminal bookkeeping: never end the stream without a Done unless the

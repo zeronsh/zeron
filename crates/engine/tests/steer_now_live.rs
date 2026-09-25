@@ -168,7 +168,33 @@ async fn steer_now_interrupts_a_streaming_answer() {
     }
     let words_at_steer = assistant_text(&entries()).split_whitespace().count();
     let steer_at = Instant::now();
-    for i in 0..bursts {
+    // ZERON_TEST_CLICK_GAP_MS: the UI flow of queueing every message first
+    // (Enter while busy) and then pressing Steer on each row in turn.
+    if let Some(gap) = std::env::var("ZERON_TEST_CLICK_GAP_MS")
+        .ok()
+        .map(|g| Duration::from_millis(g.parse().unwrap()))
+    {
+        let rows: Vec<String> = (0..bursts)
+            .map(|i| {
+                core.doc_host
+                    .queue_message(
+                        CHAT,
+                        &if i == 0 {
+                            format!("Please pause the story here. Just reply with the word PINEAPPLE{i}.")
+                        } else {
+                            format!("Also include the word PINEAPPLE{i} in that reply.")
+                        },
+                        vec![],
+                    )
+                    .unwrap()
+            })
+            .collect();
+        for row in rows {
+            tokio::time::sleep(gap).await;
+            assert!(core.doc_host.steer_queued_now(CHAT, &row).await.unwrap());
+        }
+    }
+    for i in (0..bursts).filter(|_| std::env::var("ZERON_TEST_CLICK_GAP_MS").is_err()) {
         let word = format!("PINEAPPLE{i}");
         let row = core
             .doc_host

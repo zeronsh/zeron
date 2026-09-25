@@ -142,6 +142,9 @@ struct AcpAgentSpec {
     skill_dirs: fn() -> Vec<PathBuf>,
     /// advertised commands the picker leaves out.
     hidden_commands: &'static [&'static str],
+    /// A prompt cancelled before it produced anything vanishes from the
+    /// agent's history (Grok, verified live); preemption re-sends its text.
+    drops_unstarted_cancelled_prompt: bool,
 }
 
 fn identity_transform(_reasoning: Option<ReasoningLevel>, text: &str) -> String {
@@ -280,6 +283,7 @@ fn grok_spec() -> AcpAgentSpec {
         auth_method: None,
         skill_dirs: Vec::new,
         hidden_commands: &[],
+        drops_unstarted_cancelled_prompt: true,
     }
 }
 
@@ -356,6 +360,7 @@ fn devin_spec() -> AcpAgentSpec {
         auth_method: None,
         skill_dirs: Vec::new,
         hidden_commands: &[],
+        drops_unstarted_cancelled_prompt: false,
     }
 }
 
@@ -426,6 +431,7 @@ fn hermes_spec() -> AcpAgentSpec {
         auth_method: None,
         skill_dirs: Vec::new,
         hidden_commands: &[],
+        drops_unstarted_cancelled_prompt: false,
     }
 }
 
@@ -488,6 +494,7 @@ fn pi_spec() -> AcpAgentSpec {
         auth_method: None,
         skill_dirs: Vec::new,
         hidden_commands: &[],
+        drops_unstarted_cancelled_prompt: false,
     }
 }
 
@@ -787,6 +794,7 @@ fn antigravity_spec() -> AcpAgentSpec {
         auth_method: Some("oauth-personal"),
         skill_dirs: antigravity_skill_dirs,
         hidden_commands: &[],
+        drops_unstarted_cancelled_prompt: false,
     }
 }
 
@@ -1929,6 +1937,7 @@ impl Harness for AcpHarness {
             prompt_complete_extension: self.spec.prompt_complete_extension,
             preempt_steers: self.spec.steering_mode == SteeringMode::StepBoundary,
             devin_selection,
+            resend_unstarted: self.spec.drops_unstarted_cancelled_prompt,
             prompt_stall: self.spec.prompt_stall,
             stall_hint: self.spec.stall_hint,
             effort_in_model_id: self.spec.effort_in_model_id,
@@ -1971,6 +1980,8 @@ struct Session {
     preempt_steers: bool,
     /// Devin: the requested model's catalog group (see `devin_models`).
     devin_selection: Option<devin_models::Selection>,
+    /// See `AcpAgentSpec::drops_unstarted_cancelled_prompt`.
+    resend_unstarted: bool,
     prompt_stall: Option<Duration>,
     stall_hint: &'static str,
     effort_in_model_id: bool,
@@ -2942,6 +2953,7 @@ async fn run_session(session: Session) {
         prompt_complete_extension,
         preempt_steers,
         devin_selection,
+        resend_unstarted,
         prompt_stall,
         stall_hint,
         effort_in_model_id,
@@ -3310,11 +3322,14 @@ async fn run_session(session: Session) {
     };
     let mut prompt_stall_deadline: Option<tokio::time::Instant> =
         prompt_stall.map(|d| tokio::time::Instant::now() + d);
+    // The text of the prompt in flight (re-sent by a preempt when the agent
+    // drops an unstarted cancelled prompt).
+    let mut current_prompt_text = prompt_transform(request.reasoning, &request.prompt);
     let mut turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some({
         prompt_turn(
             client.clone(),
             session_id.clone(),
-            prompt_transform(request.reasoning, &request.prompt),
+            current_prompt_text.clone(),
             current_prompt_id.clone(),
         )
     });
@@ -3336,13 +3351,10 @@ async fn run_session(session: Session) {
     // steer's prompt in the same session, the way Codex `turn/steer` behaves.
     let mut preempt_pending = false;
     let mut preempt_sent = false;
-    // Cancel only while the current prompt is visibly generating (its latest
-    // update is text or thought): Grok drops a prompt cancelled before it
-    // produced anything from its history (verified live, grok-4.7), and a
-    // tool boundary is where agents are least ready for a cancel.
-    // `generating_seq` is the prompt (`prompt_seq`) whose latest update is a
-    // text/thought chunk.
-    let mut generating_seq: u64 = 0;
+    // The prompt (`prompt_seq`) that last showed progress (text, thought,
+    // tool or plan). Pi and Devin keep a prompt cancelled before that in
+    // their history; Grok drops it, so its preempt re-sends the text.
+    let mut progress_seq: u64 = 0;
     let mut interrupted = false;
     let mut interrupt_sent = false;
     let mut done_current = false;
@@ -3560,7 +3572,10 @@ async fn run_session(session: Session) {
                 // boundary; otherwise stay alive for the mailbox — the caller
                 // owns teardown (mirrors the codex harness).
                 if !queued_steers.is_empty() {
-                    let mut texts = Vec::with_capacity(queued_steers.len());
+                    let mut texts = Vec::with_capacity(queued_steers.len() + 1);
+                    if preempted && resend_unstarted && progress_seq != prompt_seq {
+                        texts.push(std::mem::take(&mut current_prompt_text));
+                    }
                     while let Some(text) = queued_steers.pop_front() {
                         let (prev, next) = rotate(&mut assistant_message_id);
                         if !send(
@@ -3584,10 +3599,11 @@ async fn run_session(session: Session) {
                         prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
                     prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
+                    current_prompt_text = texts.join("\n\n");
                     turn = Some(prompt_turn(
                         client.clone(),
                         session_id.clone(),
-                        texts.join("\n\n"),
+                        current_prompt_text.clone(),
                         current_prompt_id.clone(),
                     ));
                 } else if !steering_open {
@@ -3628,12 +3644,11 @@ async fn run_session(session: Session) {
                             .and_then(|u| u.get("sessionUpdate"))
                             .and_then(Value::as_str)
                         {
-                            Some("agent_message_chunk") | Some("agent_thought_chunk") => {
-                                generating_seq = prompt_seq;
-                            }
-                            Some("tool_call") | Some("tool_call_update") | Some("plan") => {
-                                generating_seq = 0;
-                            }
+                            Some("agent_message_chunk")
+                            | Some("agent_thought_chunk")
+                            | Some("tool_call")
+                            | Some("tool_call_update")
+                            | Some("plan") => progress_seq = prompt_seq,
                             _ => {}
                         }
                     }
@@ -3694,7 +3709,6 @@ async fn run_session(session: Session) {
                         && !preempt_sent
                         && turn.is_some()
                         && open_tools.is_empty()
-                        && generating_seq == prompt_seq
                     {
                         client.notify("session/cancel", Some(json!({ "sessionId": session_id })));
                         preempt_sent = true;
@@ -3896,6 +3910,7 @@ async fn run_session(session: Session) {
                         prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
                     prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
+                    current_prompt_text = text.clone();
                     turn = Some(prompt_turn(
                         client.clone(),
                         session_id.clone(),
@@ -3945,6 +3960,7 @@ async fn run_session(session: Session) {
                         prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
                     prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
+                    current_prompt_text = text.clone();
                     turn = Some(prompt_turn(
                         client.clone(),
                         session_id.clone(),
@@ -4017,6 +4033,7 @@ async fn run_session(session: Session) {
                         prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
                     prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
+                    current_prompt_text = text.clone();
                     turn = Some(prompt_turn(
                         client.clone(),
                         session_id.clone(),
@@ -4080,6 +4097,7 @@ async fn run_session(session: Session) {
                         prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
                     prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
+                    current_prompt_text = text.clone();
                     turn = Some(prompt_turn(
                         client.clone(),
                         session_id.clone(),
@@ -4105,7 +4123,6 @@ async fn run_session(session: Session) {
                         if preempt_pending
                             && !preempt_sent
                             && open_tools.is_empty()
-                            && generating_seq == prompt_seq
                         {
                             client.notify(
                                 "session/cancel",
