@@ -174,6 +174,18 @@ fn default_effort_values(
     }
 }
 
+/// Devin's `thought_level` also offers `none` ("No Thinking"), which the
+/// catalog maps to Zeron's lowest level.
+fn devin_effort_values(
+    reasoning: Option<ReasoningLevel>,
+    model: Option<&str>,
+) -> Vec<&'static str> {
+    match reasoning {
+        Some(ReasoningLevel::Minimal) => vec!["none", "minimal", "low"],
+        _ => default_effort_values(reasoning, model),
+    }
+}
+
 /// npm-global bin dirs for an adapter binary (`npm i -g` installs).
 fn npm_global_paths(exe: &'static str) -> fn() -> Vec<PathBuf> {
     // fn pointers can't capture; probe the fixed npm-global locations and
@@ -301,10 +313,8 @@ fn devin_spec() -> AcpAgentSpec {
              `curl -fsSL https://cli.devin.ai/install.sh | bash` or \
              `brew install --cask devin-cli`, then `devin auth login`; set \
              DEVIN_EXECUTABLE to override)",
-        // Legacy metadata only: discovery uses `devin models list` because
-        // session/new starts with a stale catalog. Effort is baked into ids.
-        // These ids were live-verified with CLI 3000.6.14; `swe-1-7-medium`
-        // is the session default the server reports.
+        // Fallback metadata only: discovery uses `devin models list`, grouped
+        // into one model per family with effort levels (see `devin_models`).
         models: || {
             vec![
                 Model {
@@ -333,11 +343,11 @@ fn devin_spec() -> AcpAgentSpec {
         // No `_session/steering` extension: a steer preempts the generation
         // (waiting out running tools) and continues the turn — immediate.
         steering_mode: SteeringMode::StepBoundary,
-        // Effort is encoded in Devin's advertised model ids, not a separate
-        // thought_level config option.
+        // Effort levels are per model (catalog groups, see `devin_models`)
+        // and applied through the session's `thought_level` option.
         reasoning_levels: &[],
         prompt_transform: identity_transform,
-        effort_values: default_effort_values,
+        effort_values: devin_effort_values,
         ladder_extras: &[],
         prompt_complete_extension: false,
         prompt_stall: None,
@@ -1895,6 +1905,15 @@ impl Harness for AcpHarness {
             .ok_or_else(|| HarnessError::Protocol("agent child has no stdout".into()))?;
         let (client, incoming) = RpcClient::new(stdin, stdout);
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
+        let devin_selection = match request.model.as_deref() {
+            Some(model) if self.spec.id == HarnessId::Devin => {
+                let (exe, _) = self.resolve_program(false).await?;
+                self.devin_models
+                    .selection(&exe, self.model_discovery_timeout, model)
+                    .await
+            }
+            _ => None,
+        };
         tokio::spawn(run_session(Session {
             child,
             scratch,
@@ -1909,6 +1928,7 @@ impl Harness for AcpHarness {
             effort_values: self.spec.effort_values,
             prompt_complete_extension: self.spec.prompt_complete_extension,
             preempt_steers: self.spec.steering_mode == SteeringMode::StepBoundary,
+            devin_selection,
             prompt_stall: self.spec.prompt_stall,
             stall_hint: self.spec.stall_hint,
             effort_in_model_id: self.spec.effort_in_model_id,
@@ -1949,6 +1969,8 @@ struct Session {
     prompt_complete_extension: bool,
     /// Steers preempt the generation (descriptor: mid-turn steering).
     preempt_steers: bool,
+    /// Devin: the requested model's catalog group (see `devin_models`).
+    devin_selection: Option<devin_models::Selection>,
     prompt_stall: Option<Duration>,
     stall_hint: &'static str,
     effort_in_model_id: bool,
@@ -2919,6 +2941,7 @@ async fn run_session(session: Session) {
         agent_name,
         prompt_complete_extension,
         preempt_steers,
+        devin_selection,
         prompt_stall,
         stall_hint,
         effort_in_model_id,
@@ -3008,17 +3031,32 @@ async fn run_session(session: Session) {
                 "session/new returned no sessionId".into(),
             ));
         }
+        // Devin selects one advertised member of the requested model's group;
+        // effort and speed baked into a saved id apply unless the run chose
+        // its own.
+        let mut request = request.clone();
         if harness == HarnessId::Devin
-            && let Some(model) = request.model.as_deref()
+            && let Some(model) = request.model.clone()
         {
-            devin_models::wait_for_model(
+            let selection = devin_selection.clone().unwrap_or_default();
+            let advertised = devin_models::wait_for_model(
                 &client,
                 &mut incoming,
                 &session_id,
                 &mut session_response,
-                model,
+                &model,
+                &selection.members,
             )
             .await?;
+            request.model = Some(advertised);
+            if request.reasoning.is_none() {
+                request.reasoning = selection.effort;
+            }
+            if selection.fast && !request.model_options.contains_key("speed") {
+                request
+                    .model_options
+                    .insert("speed".into(), Value::String("fast".into()));
+            }
         }
         // ACP has had two model-selection surfaces. Newer config-option agents
         // use category=model below; Grok Build currently advertises only the
@@ -3069,43 +3107,74 @@ async fn run_session(session: Session) {
         } else {
             session_commands
         };
-        let options_snapshot = session_response;
-        for (config_id, payload) in config_option_sets(
+        let mut options_snapshot = session_response;
+        let mut sets = config_option_sets(
             &options_snapshot,
             requested_model.as_deref(),
             &efforts,
             &request.model_options,
-        ) {
-            let mut params = serde_json::Map::new();
-            params.insert("sessionId".into(), session_id.clone().into());
-            params.insert("configId".into(), config_id.clone().into());
-            if let Some(payload) = payload.as_object() {
-                for (k, v) in payload {
-                    params.insert(k.clone(), v.clone());
+        );
+        // Devin's effort and speed choices depend on the selected model:
+        // switch the model first, then choose them from what it offers.
+        let deferred = harness == HarnessId::Devin
+            && sets
+                .iter()
+                .any(|(id, _)| is_model_config_option(&options_snapshot, id));
+        if deferred {
+            sets.retain(|(id, _)| is_model_config_option(&options_snapshot, id));
+        }
+        let mut pass = 0;
+        loop {
+            for (config_id, payload) in std::mem::take(&mut sets) {
+                let mut params = serde_json::Map::new();
+                params.insert("sessionId".into(), session_id.clone().into());
+                params.insert("configId".into(), config_id.clone().into());
+                if let Some(payload) = payload.as_object() {
+                    for (k, v) in payload {
+                        params.insert(k.clone(), v.clone());
+                    }
                 }
-            }
-            if let Err(e) = request_draining(
-                &client,
-                &mut incoming,
-                "session/set_config_option",
-                Value::Object(params),
-            )
-            .await
-            {
-                if matches!(harness, HarnessId::Antigravity | HarnessId::Devin)
-                    && requested_model.is_some()
-                    && is_model_config_option(&options_snapshot, &config_id)
+                match request_draining(
+                    &client,
+                    &mut incoming,
+                    "session/set_config_option",
+                    Value::Object(params),
+                )
+                .await
                 {
-                    return Err(HarnessError::Protocol(format!(
-                        "agent rejected requested model {}: {e}",
-                        requested_model.as_deref().unwrap_or_default()
-                    )));
+                    Ok(response) => {
+                        if let Some(options) = response.get("configOptions") {
+                            options_snapshot["configOptions"] = options.clone();
+                        }
+                    }
+                    Err(e) => {
+                        if matches!(harness, HarnessId::Antigravity | HarnessId::Devin)
+                            && requested_model.is_some()
+                            && is_model_config_option(&options_snapshot, &config_id)
+                        {
+                            return Err(HarnessError::Protocol(format!(
+                                "agent rejected requested model {}: {e}",
+                                requested_model.as_deref().unwrap_or_default()
+                            )));
+                        }
+                        tracing::debug!(
+                            target: "zeron_harness::acp",
+                            "session/set_config_option {config_id}={payload} rejected (agent default runs): {e}"
+                        );
+                    }
                 }
-                tracing::debug!(
-                    target: "zeron_harness::acp",
-                    "session/set_config_option {config_id}={payload} rejected (agent default runs): {e}"
-                );
             }
+            pass += 1;
+            if !deferred || pass > 1 {
+                break;
+            }
+            sets = config_option_sets(
+                &options_snapshot,
+                requested_model.as_deref(),
+                &efforts,
+                &request.model_options,
+            );
+            sets.retain(|(id, _)| !is_model_config_option(&options_snapshot, id));
         }
         Ok::<(String, bool, Vec<SlashCommand>), HarnessError>((
             session_id,
