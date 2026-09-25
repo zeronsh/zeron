@@ -26,6 +26,7 @@ mod image_preview;
 pub(crate) mod markdown_media;
 mod markdown_preview;
 pub mod model;
+mod pane;
 pub mod preview;
 pub mod search;
 mod sections;
@@ -34,6 +35,7 @@ pub mod watch;
 
 use client::{FilesRequestContext, WorkspaceFilesClient};
 use model::{DirectoryLoadState, FileTreeModel};
+pub(crate) use pane::ExplorerPage;
 use preview::FilePreviewState;
 use search::FileSearchState;
 
@@ -152,13 +154,14 @@ pub enum FilesEvent {
     ShowAllFilesChanged(bool),
     CloseReady,
     CloseCancelled,
-    /// A footer row: open this subagent's transcript in the right pane.
+    ExplorerPageChanged,
+    /// An activity row: open this subagent's transcript in the right pane.
     OpenSubagent {
         doc_id: String,
         title: String,
         frozen: bool,
     },
-    /// A footer row: open this side chat (by id) in the right pane.
+    /// An activity row: open this side chat (by id) in the right pane.
     OpenChildChat(String),
     ChildChatContextMenu {
         chat_id: String,
@@ -228,7 +231,8 @@ pub struct FilesSurface {
     loads: HashMap<(String, Option<String>), Task<()>>,
     error: Option<SharedString>,
     started: bool,
-    /// The Subagents / Chats footer under the tree.
+    /// The file tree and session activity share a horizontally paged pane.
+    pane: pane::ExplorerPane,
     sections: sections::ExplorerSections,
     _observe: Subscription,
     _search_events: Subscription,
@@ -241,38 +245,37 @@ impl Render for FilesSurface {
         }
         let theme = crate::theme::Theme::of(cx).clone();
         let is_editor = self.presentation.is_editor();
-        // Both presentations carry a secondary header of the same height
-        // directly under the titlebar: the editor's breadcrumb toolbar, or the
-        // explorer's search + visibility toolbar.
-        let header = if is_editor {
-            self.render_editor_header(&theme, cx)
-        } else {
-            Some(self.render_explorer_header(&theme, cx))
-        };
         let body = if is_editor {
-            self.render_preview(window, cx)
+            let header = self.render_editor_header(&theme, cx);
+            let preview = self.render_preview(window, cx);
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .children(header)
+                .child(div().flex_1().min_h_0().w_full().child(preview))
+                .into_any_element()
         } else {
-            self.render_explorer(&theme, cx).into_any_element()
+            self.render_explorer_pane(window, &theme, cx)
         };
         let editor_context_menu = self.render_editor_context_menu(&theme, cx);
-        // The explorer docks its Subagents / Chats sections under the tree;
-        // an editor surface has no footer.
-        let sections = (!is_editor).then(|| self.render_sections(&theme, cx));
         div()
             .id(SharedString::from(format!(
                 "files-surface-{}",
                 self.chat_id
             )))
             .role(gpui::Role::Group)
-            .aria_label("Workspace files")
+            .aria_label(if is_editor {
+                "Workspace files"
+            } else {
+                "Files and subagents"
+            })
             .size_full()
             .relative()
             .flex()
             .bg(crate::theme::ink(0.0))
             .flex_col()
-            .children(header)
             .child(div().flex_1().min_h_0().w_full().child(body))
-            .children(sections)
             .children(editor_context_menu)
     }
 }
@@ -562,6 +565,7 @@ impl FilesSurface {
             loads: HashMap::new(),
             error: None,
             started: false,
+            pane: pane::ExplorerPane::new(cx),
             sections: sections::ExplorerSections::default(),
             _observe: observe,
             _search_events: search_events,
@@ -787,7 +791,9 @@ impl FilesSurface {
     }
 
     pub(crate) fn focus_explorer(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let focus = if self.search_state.query.is_empty() {
+        let focus = if self.explorer_page() == ExplorerPage::Agents {
+            self.pane.focus.clone()
+        } else if self.search_state.query.is_empty() {
             self.tree_focus.clone()
         } else {
             use gpui::Focusable;
@@ -809,6 +815,7 @@ impl FilesSurface {
     }
 
     pub(crate) fn reveal_file_explicit(&mut self, path: String, cx: &mut Context<Self>) {
+        self.select_explorer_page(ExplorerPage::Files, cx);
         self.selected_editor_path = None;
         self.search.update(cx, |search, cx| search.set_text("", cx));
         self.reveal_file(path, cx);

@@ -1,6 +1,7 @@
 //! Session-owned explorer chrome, independent of the surface tab host.
 
 use super::*;
+use crate::files::ExplorerPage;
 use crate::settings::{FILES_PANEL_DEFAULT, FILES_PANEL_MAX, FILES_PANEL_MIN};
 
 pub(super) struct FilesPanelResize;
@@ -51,6 +52,31 @@ fn files_panel_layout(
 }
 
 impl Shell {
+    pub(super) fn explorer_page(&self, cx: &App) -> ExplorerPage {
+        self.files
+            .get(&self.panel_key(cx))
+            .map_or(ExplorerPage::Files, |files| files.read(cx).explorer_page())
+    }
+
+    pub(super) fn toggle_explorer_page(
+        &mut self,
+        page: ExplorerPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.files_panel_open(cx) && self.explorer_page(cx) == page {
+            self.toggle_files_panel(window, cx);
+        } else {
+            self.add_files_surface(window, cx);
+            if let Some(files) = self.files.get(&self.panel_key(cx)) {
+                files.update(cx, |files, cx| {
+                    files.select_explorer_page(page, cx);
+                    files.focus_explorer(window, cx);
+                });
+            }
+        }
+    }
+
     pub(super) fn files_panel_open(&self, cx: &App) -> bool {
         matches!(self.route, Route::Chat)
             && !self.active_chat.is_empty()
@@ -188,7 +214,7 @@ impl Shell {
                     FilesEvent::ShowAllFilesChanged(show_all) => {
                         this.set_files_show_all(*show_all, cx)
                     }
-                    // Footer rows land in the surface host beside the explorer,
+                    // Activity rows land in the surface host beside the explorer,
                     // through the same paths a spawn chip and a side-chat tab use.
                     FilesEvent::OpenSubagent {
                         doc_id,
@@ -491,6 +517,10 @@ mod tests {
                 assert!(shell.right_surface_rows(cx).is_empty());
                 shell.add_files_surface(window, cx);
                 assert_eq!(shell.files["first"].entity_id(), explorer);
+                shell.toggle_explorer_page(ExplorerPage::Agents, window, cx);
+                assert!(shell.files_panel_open(cx));
+                assert_eq!(shell.explorer_page(cx), ExplorerPage::Agents);
+                assert_eq!(shell.files["first"].entity_id(), explorer);
                 shell.add_file_surface("src/main.rs".into(), window, cx);
                 shell.add_file_surface("src/main.rs".into(), window, cx);
                 assert_eq!(shell.file_surfaces.len(), 1);
@@ -505,10 +535,26 @@ mod tests {
                 assert!(!shell.files_panel_open(cx));
                 shell.add_files_surface(window, cx);
                 assert_ne!(shell.files["second"].entity_id(), explorer);
+                assert_eq!(shell.explorer_page(cx), ExplorerPage::Files);
                 shell.active_chat = "first".into();
                 assert!(!shell.files_panel_open(cx));
                 shell.add_files_surface(window, cx);
                 assert_eq!(shell.files["first"].entity_id(), explorer);
+                assert_eq!(shell.explorer_page(cx), ExplorerPage::Agents);
+                shell.toggle_explorer_page(ExplorerPage::Files, window, cx);
+                assert!(
+                    shell.files_panel_open(cx),
+                    "switching pages keeps the pane open"
+                );
+                assert_eq!(shell.explorer_page(cx), ExplorerPage::Files);
+                shell.toggle_explorer_page(ExplorerPage::Files, window, cx);
+                assert!(
+                    !shell.files_panel_open(cx),
+                    "the active toggle closes the pane"
+                );
+                shell.toggle_explorer_page(ExplorerPage::Agents, window, cx);
+                assert!(shell.files_panel_open(cx));
+                assert_eq!(shell.explorer_page(cx), ExplorerPage::Agents);
                 shell.route = Route::Settings(SettingsSection::Files);
                 assert!(!shell.files_panel_open(cx));
                 assert_eq!(shell.files_reserved_width(cx), 0.0);

@@ -3064,7 +3064,8 @@ impl Shell {
                         this.add_files_surface(window, cx);
                         if let Some(files) = this.files.get(&this.panel_key(cx)).cloned() {
                             files.update(cx, |files, cx| {
-                                files.reveal_file_explicit(path.clone(), cx)
+                                files.reveal_file_explicit(path.clone(), cx);
+                                files.focus_explorer(window, cx);
                             });
                         }
                     }
@@ -3088,9 +3089,10 @@ impl Shell {
                     FilesEvent::CloseReady => {
                         this.on_file_close_ready(RightSurface::File(id), &event_panel_key, cx)
                     }
-                    // Footer rows exist on the explorer only; an editor
+                    // Activity rows exist on the explorer only; an editor
                     // surface never emits them.
                     FilesEvent::OpenSubagent { .. }
+                    | FilesEvent::ExplorerPageChanged
                     | FilesEvent::OpenChildChat(_)
                     | FilesEvent::ChildChatContextMenu { .. }
                     | FilesEvent::NewChildChat

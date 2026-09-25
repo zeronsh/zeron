@@ -1,4 +1,4 @@
-//! The explorer's footer: two collapsible sections docked under the file
+//! The explorer's activity page: two collapsible sections alongside the file
 //! tree — **Subagents** (the spawn chips of the active chat's transcript,
 //! with their live status) and **Chats** (the side chats hanging off the
 //! active chat: forks, and chats an agent spawned through the Zeron MCP
@@ -9,7 +9,7 @@
 //! and fork beside its caret; the section chrome animates with the same
 //! collapse motion as the sidebar's disclosures.
 //!
-//! The footer has a fixed height budget that the open sections share and
+//! The page has a viewport height budget that the open sections share and
 //! scroll inside, and like the sidebar's Archived shelf each shows ten rows
 //! before a "Show N more" row pages by ten.
 
@@ -53,13 +53,11 @@ const PAGE_ROWS: usize = 10;
 /// An open section never shrinks below this, so one or two rows still
 /// leave the section room to breathe.
 const MIN_BODY_HEIGHT: f32 = 120.0;
-const FOOTER_PAD_TOP: f32 = 4.0;
-const FOOTER_PAD_BOTTOM: f32 = 6.0;
-/// The footer's height budget; shorter content shrinks the footer to fit.
-const FOOTER_HEIGHT: f32 = 510.0;
+const PAGE_PAD_TOP: f32 = 4.0;
+const PAGE_PAD_BOTTOM: f32 = 6.0;
 const TWEEN_GRACE: std::time::Duration = std::time::Duration::from_millis(120);
 
-/// Which footer section a motion or toggle addresses.
+/// Which page section a motion or toggle addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum Section {
     Subagents,
@@ -109,7 +107,7 @@ impl DisclosureMotion {
     }
 }
 
-/// Footer state on the explorer surface.
+/// Activity state on the explorer surface.
 #[derive(Debug)]
 pub(super) struct ExplorerSections {
     open: HashMap<Section, bool>,
@@ -119,7 +117,7 @@ pub(super) struct ExplorerSections {
     /// One scroll handle per section list, so the edge fades can read
     /// overflow at paint time.
     scroll: HashMap<Section, ScrollHandle>,
-    /// Hash of what the footer would draw, so the state observer only
+    /// Hash of what the page would draw, so the state observer only
     /// re-renders the explorer when a section's contents actually changed —
     /// not on every streamed transcript delta.
     fingerprint: u64,
@@ -189,7 +187,7 @@ impl ExplorerSections {
     }
 }
 
-/// A spawn chip of the active transcript, as the footer lists it.
+/// A spawn chip of the active transcript, as the page lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SubagentRow {
     pub doc_id: String,
@@ -260,7 +258,7 @@ pub(super) fn subagent_rows(state: &AppState, chat_id: &str) -> Vec<SubagentRow>
     rows
 }
 
-/// A side chat of the active chat, as the footer lists it.
+/// A side chat of the active chat, as the page lists it.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ChildChatRow {
     pub chat_id: String,
@@ -308,7 +306,7 @@ pub(super) fn child_chat_title(chat: &Chat) -> String {
         .unwrap_or_else(|| "New side chat".into())
 }
 
-/// What the footer would draw for `chat_id`, hashed. Cheap enough to run on
+/// What the page would draw for `chat_id`, hashed. Cheap enough to run on
 /// every state notification.
 pub(super) fn fingerprint(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -354,7 +352,7 @@ fn content_height_unfloored(section: Section, count: usize, shown: usize) -> f32
     SECTION_BODY_INSET + slots as f32 * ROW_HEIGHT + slots.saturating_sub(1) as f32 * ROW_GAP
 }
 
-/// Split the footer's body budget between two open sections: each may take
+/// Split the page's body budget between two open sections: each may take
 /// what it wants, and a short one hands its slack to the other. Closed
 /// sections get 0. Pure.
 pub(super) fn body_budget(budget: f32, wants: [f32; 2], open: [bool; 2]) -> [f32; 2] {
@@ -370,13 +368,20 @@ pub(super) fn body_budget(budget: f32, wants: [f32; 2], open: [bool; 2]) -> [f32
     [first, second]
 }
 
-/// The footer's chrome outside the bodies: padding and the two headers.
+/// The page's chrome outside the bodies: padding and the two headers.
 fn chrome_height() -> f32 {
-    FOOTER_PAD_TOP + FOOTER_PAD_BOTTOM + 2.0 * SECTION_HEADER_HEIGHT
+    PAGE_PAD_TOP + PAGE_PAD_BOTTOM + 2.0 * SECTION_HEADER_HEIGHT
 }
 
 impl FilesSurface {
-    /// Re-render only when the footer's contents changed.
+    fn section_body_budget(&self) -> f32 {
+        (f32::from(self.pane.viewport.height)
+            - crate::surface_chrome::HEADER_HEIGHT
+            - chrome_height())
+        .max(0.0)
+    }
+
+    /// Re-render only when the page's contents changed.
     pub(super) fn refresh_sections(&mut self, cx: &mut Context<Self>) {
         let fingerprint = fingerprint(self.state.read(cx), &self.chat_id, Utc::now());
         if fingerprint != self.sections.fingerprint {
@@ -411,7 +416,7 @@ impl FilesSurface {
             self.sections.is_open(Section::Subagents),
             self.sections.is_open(Section::Chats),
         ];
-        let budget = FOOTER_HEIGHT - chrome_height();
+        let budget = self.section_body_budget();
         let heights = body_budget(budget, wants, open);
         let view = cx.entity_id();
         let subagent_body = self.render_subagent_rows(&subagents, view, theme, cx);
@@ -425,8 +430,8 @@ impl FilesSurface {
             .flex()
             .flex_col()
             .px(px(6.0))
-            .pt(px(FOOTER_PAD_TOP))
-            .pb(px(FOOTER_PAD_BOTTOM))
+            .pt(px(PAGE_PAD_TOP))
+            .pb(px(PAGE_PAD_BOTTOM))
             .child(self.render_section(
                 Section::Subagents,
                 subagents.len(),
@@ -515,7 +520,7 @@ impl FilesSurface {
         let full = if open {
             height
         } else {
-            wanted.min(FOOTER_HEIGHT - chrome_height()).max(0.0)
+            wanted.min(self.section_body_budget()).max(0.0)
         };
         let header = div()
             .id(SharedString::from(format!(
@@ -1029,6 +1034,7 @@ fn status_glyph(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{AppContext, TestAppContext};
     use zeron_doc::{MessageRole, MessageStatus, SessionMessageEntry};
     use zeron_proto::ToolCall;
 
@@ -1148,6 +1154,72 @@ mod tests {
         assert_eq!(rows[0].status, ChatIndicator::Idle);
     }
 
+    #[gpui::test]
+    fn activity_lists_keep_vertical_scroll_when_pages_change(cx: &mut TestAppContext) {
+        use super::super::ExplorerPage;
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            motion::set_reduced_motion(cx, true);
+        });
+        let (files, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.apply_chats(
+                    (0..20)
+                        .map(|i| chat(&format!("child-{i}"), Some("main"), i))
+                        .collect(),
+                );
+                state
+            });
+            let mut files = FilesSurface::new_explorer(state, "main".into(), false, cx);
+            files.select_explorer_page(ExplorerPage::Agents, cx);
+            files
+        });
+        cx.simulate_resize(gpui::size(px(286.0), px(360.0)));
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let scroll = files.read_with(cx, |files, _| files.sections.scroll(Section::Chats));
+        assert!(scroll.max_offset().y > px(0.0));
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: scroll.bounds().center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-60.0))),
+            touch_phase: gpui::TouchPhase::Started,
+            ..Default::default()
+        });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: scroll.bounds().center(),
+            touch_phase: gpui::TouchPhase::Ended,
+            ..Default::default()
+        });
+        let offset = scroll.offset();
+        assert!(
+            offset.y < px(0.0),
+            "vertical wheel scrolls the activity list"
+        );
+        // A horizontal mouse wheel has no Ended event; Shift + wheel must
+        // settle on its idle timer without also moving the vertical list.
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: scroll.bounds().center(),
+            delta: gpui::ScrollDelta::Lines(gpui::point(0.0, -3.0)),
+            modifiers: gpui::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+        files.update(cx, |files, cx| {
+            assert_eq!(files.explorer_page(), ExplorerPage::Files);
+            files.select_explorer_page(ExplorerPage::Agents, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert_eq!(scroll.offset(), offset);
+        assert!(scroll.bounds().bottom() <= px(360.0));
+    }
+
     #[test]
     fn fingerprint_tracks_membership_and_status() {
         let mut state = AppState::new();
@@ -1185,7 +1257,7 @@ mod tests {
     }
 
     #[test]
-    fn body_budget_shares_the_footer_and_hands_slack_across() {
+    fn body_budget_shares_the_page_and_hands_slack_across() {
         // Both fit: each takes what it wants.
         assert_eq!(
             body_budget(300.0, [100.0, 100.0], [true, true]),

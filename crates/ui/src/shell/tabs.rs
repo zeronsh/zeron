@@ -5,6 +5,7 @@
 //! selected. `UiSettings.open_tabs` is legacy — no longer read or written.
 
 use super::*;
+use crate::files::ExplorerPage;
 
 /// The chat one step from `selected` in the sidebar `order`, wrapping at both
 /// ends. Pure.
@@ -48,11 +49,10 @@ struct PanelTitlebarWidths {
 /// row gap they cost the project-actions control.
 const SESSION_CONTROLS_WIDTH: f32 = 28.0 * 2.0 + 2.0 + 8.0;
 
-/// The two fixed right-edge anchors: the explorer toggle and the pane toggle
-/// (28px each) with the same 4px gap the surface strip keeps between its
-/// controls, so the two never render as one fused block.
+/// Separate surface-pane, Subagents, and Files buttons in the titlebar.
 const PANEL_TOGGLE_GAP: f32 = 4.0;
-const PANEL_TOGGLE_SLOTS: f32 = 28.0 * 2.0 + PANEL_TOGGLE_GAP;
+const EXPLORER_BUTTONS_WIDTH: f32 = 60.0;
+const PANEL_TOGGLE_SLOTS: f32 = EXPLORER_BUTTONS_WIDTH + 28.0 + PANEL_TOGGLE_GAP;
 
 fn panel_titlebar_widths(
     surfaces_visible: f32,
@@ -72,6 +72,72 @@ fn panel_titlebar_widths(
 }
 
 impl Shell {
+    fn render_explorer_buttons(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.files_panel_open(cx);
+        let page = self.explorer_page(cx);
+        div()
+            .id("explorer-page-buttons")
+            .debug_selector(|| "explorer-page-buttons".into())
+            .role(gpui::Role::Group)
+            .aria_label("Subagents and files")
+            .w(px(EXPLORER_BUTTONS_WIDTH))
+            .h(px(28.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(PANEL_TOGGLE_GAP))
+            .children(
+                [
+                    (
+                        ExplorerPage::Agents,
+                        "toggle-agents-panel",
+                        icons::BOT,
+                        "Subagents & sidechats",
+                    ),
+                    (
+                        ExplorerPage::Files,
+                        "toggle-files-panel",
+                        icons::FILE_TREE,
+                        "Files",
+                    ),
+                ]
+                .map(|(target, id, glyph, label)| {
+                    let selected = open && page == target;
+                    let tooltip: SharedString =
+                        format!("{label} · scroll horizontally to switch").into();
+                    header_icon_button(
+                        id,
+                        glyph,
+                        theme,
+                        cx.listener(move |this, _, window, cx| {
+                            this.toggle_explorer_page(target, window, cx);
+                        }),
+                    )
+                    .debug_selector(move || id.into())
+                    .role(gpui::Role::Button)
+                    .aria_label(SharedString::from(format!(
+                        "{} {label}",
+                        if selected { "Hide" } else { "Show" }
+                    )))
+                    .aria_selected(selected)
+                    // Selection must snap independently of the shared header
+                    // button's hover fade, including on the button we just left.
+                    .bg(crate::theme::wash(if selected { 0.09 } else { 0.0 }))
+                    .hover(move |style| {
+                        style.bg(crate::theme::wash(if selected { 0.09 } else { 0.04 }))
+                    })
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| SurfaceTabTooltip {
+                            text: tooltip.clone(),
+                        })
+                        .into()
+                    })
+                    .tooltip_show_delay(std::time::Duration::from_millis(350))
+                }),
+            )
+            .into_any_element()
+    }
+
     /// Navigation requests focus once the destination composer renders.
     pub(super) fn focus_composer(&mut self, cx: &mut Context<Self>) {
         self.composer.update(cx, |composer, cx| {
@@ -270,8 +336,8 @@ impl Shell {
             self.viewport_width - row_left - right_pad - gap_budget,
             right_pad,
         );
-        // The trailing strip always carries the explorer slot with its two
-        // toggles; the surface tabs reveal to their left only while the surface
+        // The trailing strip always carries the explorer buttons and pane
+        // toggle; the surface tabs reveal to their left only while the surface
         // host is open.
         let trailing_width = if on_canvas {
             0.0
@@ -341,8 +407,8 @@ impl Shell {
                 );
             }
             // The explorer slot sits over the explorer column and carries the
-            // two fixed right-edge anchors — the explorer toggle and,
-            // outermost, the pane toggle — which stay mounted at one position
+            // two fixed right-edge anchors — the pane toggle followed by the
+            // explorer buttons — which stay mounted at one position
             // while the surface tabs reveal to their left. The explorer's own
             // search and visibility controls live in its secondary header.
             Some(
@@ -362,31 +428,13 @@ impl Shell {
                             // second one on the slot stacked on the same
                             // pixels and read lighter than the seam beneath
                             // it (user report).
-                            .child(
-                                header_icon_button(
-                                    "toggle-files-panel",
-                                    icons::FILE_TREE,
-                                    &theme,
-                                    cx.listener(|this, _, window, cx| {
-                                        this.toggle_files_panel(window, cx)
-                                    }),
-                                )
-                                .role(gpui::Role::Button)
-                                .aria_label(if self.files_panel_open(cx) {
-                                    "Hide files panel"
-                                } else {
-                                    "Show files panel"
-                                })
-                                .when(self.files_panel_open(cx), |button| {
-                                    button.bg(crate::theme::wash(0.09))
-                                }),
-                            )
                             .child(header_icon_button(
                                 "toggle-changes",
                                 icons::SIDEBAR_MINIMALISTIC,
                                 &theme,
                                 cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
-                            )),
+                            ))
+                            .child(self.render_explorer_buttons(&theme, cx)),
                     )
                     .into_any_element(),
             )
