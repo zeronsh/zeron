@@ -4,7 +4,7 @@
 use std::sync::OnceLock;
 
 use icu_properties::CodePointMapData;
-use icu_properties::props::LineBreak;
+use icu_properties::props::{GeneralCategory, LineBreak, Script};
 use icu_segmenter::LineSegmenter;
 use icu_segmenter::options::LineBreakOptions;
 use unicode_segmentation::GraphemeCursor;
@@ -16,6 +16,10 @@ use crate::{Span, WhiteSpace};
 pub(crate) const BRK_MANDATORY: u8 = 0;
 pub(crate) const BRK_ALLOWED: u8 = 1;
 pub(crate) const BRK_SOFT_HYPHEN: u8 = 2;
+/// Whitespace inside a UAX #14 segment (`( x`, `a !`, `} //`): not a break opportunity, but
+/// CoreText still ends the line after it when the line overflows *within* the whitespace —
+/// whitespace always hangs.
+pub(crate) const BRK_HANG_ONLY: u8 = 3;
 
 /// A run of text between two break opportunities:
 /// `[start, content_end)` visible content, `[content_end, ws_end)` trailing collapsible
@@ -230,12 +234,32 @@ fn stand_in(c: char) -> Option<char> {
     match c {
         '\u{2018}' | '\u{201C}' => Some('\u{2045}'), // ⁅ LEFT SQUARE BRACKET WITH QUILL (OP)
         '\u{201D}' => Some('\u{2046}'),              // ⁆ RIGHT SQUARE BRACKET WITH QUILL (CL)
-        _ if is_sa(c) => Some(if c.len_utf8() == 3 {
-            '\u{2C00}' // GLAGOLITIC CAPITAL LETTER AZU (AL)
-        } else {
-            '\u{10400}' // DESERET CAPITAL LETTER LONG I (AL)
-        }),
+        _ if is_sa(c) => Some(
+            match (
+                c.len_utf8() == 3,
+                matches!(
+                    CodePointMapData::<GeneralCategory>::new().get(c),
+                    GeneralCategory::NonspacingMark | GeneralCategory::SpacingMark
+                ),
+            ) {
+                (true, false) => '\u{2C00}',  // GLAGOLITIC CAPITAL LETTER AZU (AL)
+                (false, false) => '\u{10400}', // DESERET CAPITAL LETTER LONG I (AL)
+                (true, true) => '\u{20D0}',   // COMBINING LEFT HARPOON ABOVE (CM)
+                (false, true) => '\u{1D167}', // MUSICAL SYMBOL COMBINING TREMOLO-1 (CM)
+            },
+        ),
         _ => None,
+    }
+}
+
+/// Which SA script a Line_Break=SA char belongs to (dictionaries are per script; CoreText does
+/// not break where one SA script meets another).
+fn sa_script(c: char) -> u32 {
+    match c as u32 {
+        u @ 0x0E00..=0x0EFF => u >> 7, // Thai, Lao
+        0x1000..=0x109F | 0xA9E0..=0xA9FF | 0xAA60..=0xAA7F => 1, // Myanmar
+        0x1780..=0x17FF | 0x19E0..=0x19FF => 2,                   // Khmer
+        u => u >> 5,
     }
 }
 
@@ -272,7 +296,11 @@ fn linebreaks(text: &str, out: &mut Vec<(u32, bool)>) {
         }
         let before = text[..p].chars().next_back();
         let after = text[p..].chars().next();
-        if before.is_some_and(is_sa) && after.is_some_and(is_sa) {
+        if let (Some(b), Some(a)) = (before, after)
+            && is_sa(b)
+            && is_sa(a)
+            && sa_script(b) == sa_script(a)
+        {
             out.push((p as u32, false));
         }
     }
@@ -359,10 +387,21 @@ pub(crate) fn break_opportunities(
 
 /// Cuts the text at `breaks` into segments, splitting off hanging whitespace and folding
 /// whitespace-only segments into the previous segment's hang.
-pub(crate) fn segments(text: &str, breaks: &[(u32, bool)], mode: WhiteSpace, out: &mut Vec<RawSeg>) {
+pub(crate) fn segments(
+    text: &str,
+    spans: &[Span],
+    breaks: &[(u32, bool)],
+    mode: WhiteSpace,
+    out: &mut Vec<RawSeg>,
+) {
     out.clear();
     let bytes = text.as_bytes();
-    let hang_tabs = mode == WhiteSpace::PreWrap;
+    let is_ws = |b: u8| b == b' ' || (mode == WhiteSpace::PreWrap && b == b'\t');
+    let in_atomic = |p: usize| {
+        spans
+            .iter()
+            .any(|s| s.atomic && s.range.start < p && p < s.range.end)
+    };
     let hangs = mode != WhiteSpace::Pre;
     let mut prev = 0u32;
     for &(end, mandatory) in breaks {
@@ -380,24 +419,57 @@ pub(crate) fn segments(text: &str, breaks: &[(u32, bool)], mode: WhiteSpace, out
         if hangs {
             while content_end > prev {
                 let b = bytes[content_end as usize - 1];
-                if b == b' ' || (hang_tabs && b == b'\t') {
+                if is_ws(b) {
                     content_end -= 1;
                 } else {
                     break;
                 }
             }
         }
+        let mut cur = prev;
+        if hangs {
+            // Internal whitespace runs (after content, before more content) become hang-only
+            // boundaries.
+            let mut i = cur as usize + 1;
+            while i < content_end as usize {
+                if !is_ws(bytes[i]) || is_ws(bytes[i - 1]) {
+                    i += 1;
+                    continue;
+                }
+                let s = i;
+                while i < content_end as usize && is_ws(bytes[i]) {
+                    i += 1;
+                }
+                if i < content_end as usize
+                    && !in_atomic(s)
+                    && !in_atomic(i)
+                    && (bytes[i] < 0x80
+                        || GraphemeCursor::new(i, text.len(), true)
+                            .is_boundary(text, 0)
+                            .unwrap_or(false))
+                {
+                    out.push(RawSeg {
+                        start: cur,
+                        content_end: s as u32,
+                        ws_end: i as u32,
+                        end: i as u32,
+                        brk: BRK_HANG_ONLY,
+                    });
+                    cur = i as u32;
+                }
+            }
+        }
         let brk = if mandatory {
             BRK_MANDATORY
         } else if content_end == end
-            && content_end > prev
+            && content_end > cur
             && text[..content_end as usize].ends_with(SOFT_HYPHEN)
         {
             BRK_SOFT_HYPHEN
         } else {
             BRK_ALLOWED
         };
-        if content_end == prev
+        if content_end == cur
             && let Some(last) = out.last_mut()
             && last.brk != BRK_MANDATORY
         {
@@ -408,7 +480,7 @@ pub(crate) fn segments(text: &str, breaks: &[(u32, bool)], mode: WhiteSpace, out
             last.brk = brk;
         } else {
             out.push(RawSeg {
-                start: prev,
+                start: cur,
                 content_end,
                 ws_end,
                 end,
@@ -416,5 +488,104 @@ pub(crate) fn segments(text: &str, breaks: &[(u32, bool)], mode: WhiteSpace, out
             });
         }
         prev = end;
+    }
+}
+
+/// ICU's paired punctuation (`uscript` run resolution): a closing mark takes the script of its
+/// opening mark. Opening marks sit at even indices.
+const PAIRED: [char; 34] = [
+    '(', ')', '<', '>', '[', ']', '{', '}', '\u{AB}', '\u{BB}', '\u{2018}', '\u{2019}',
+    '\u{201C}', '\u{201D}', '\u{2039}', '\u{203A}', '\u{3008}', '\u{3009}', '\u{300A}',
+    '\u{300B}', '\u{300C}', '\u{300D}', '\u{300E}', '\u{300F}', '\u{3010}', '\u{3011}',
+    '\u{3014}', '\u{3015}', '\u{3016}', '\u{3017}', '\u{3018}', '\u{3019}', '\u{301A}',
+    '\u{301B}',
+];
+
+/// Byte offsets where the text's script run changes, resolved like ICU's `UScriptRun` (which is
+/// how CoreText itemizes before shaping): Common and Inherited characters join the current run
+/// (leading ones join the first real script), and a closing bracket takes its opening bracket's
+/// script. Empty unless at least two real scripts occur. Shaping never crosses these offsets.
+///
+/// Itemization happens per font run, so characters drawn by a fallback font (`foreign(byte, c)`)
+/// end the current run: neutrals after them start fresh (CoreText sets `ηνικά "q` as Helvetica
+/// then one Geist run ` "q`, kerning `"q`; but `λ, "q` all in Geist as Greek `λ, "` + Latin `q`).
+pub(crate) fn script_breaks(
+    text: &str,
+    foreign: impl Fn(usize, char) -> bool,
+    out: &mut Vec<u32>,
+) {
+    out.clear();
+    if text.is_ascii() {
+        return;
+    }
+    let map = CodePointMapData::<Script>::new();
+    let neutral = |sc: Script| sc == Script::Common || sc == Script::Inherited;
+    // Cheap pre-check: at most one real script among the face's own characters means a single
+    // run.
+    let mut first = None;
+    let mixed = text.char_indices().any(|(i, c)| {
+        if c.is_ascii() && !c.is_ascii_alphabetic() {
+            return false;
+        }
+        if !c.is_ascii() && foreign(i, c) {
+            return false;
+        }
+        let sc = map.get(c);
+        if neutral(sc) {
+            return false;
+        }
+        match first {
+            None => {
+                first = Some(sc);
+                false
+            }
+            Some(f) => f != sc,
+        }
+    });
+    if !mixed {
+        return;
+    }
+    let mut run = Script::Common;
+    // Open brackets: (pair index, script when opened).
+    let mut stack: Vec<(usize, Script)> = Vec::new();
+    for (i, c) in text.char_indices() {
+        if !c.is_ascii() && foreign(i, c) {
+            run = Script::Common;
+            stack.clear();
+            continue;
+        }
+        let mut sc = map.get(c);
+        let mut close = false;
+        if let Some(k) = PAIRED.iter().position(|&p| p == c) {
+            if k % 2 == 0 {
+                stack.push((k, run));
+            } else {
+                // Pop to the matching opener, if any.
+                if let Some(at) = stack.iter().rposition(|&(o, _)| o == k - 1) {
+                    stack.truncate(at + 1);
+                    sc = stack[at].1;
+                    close = true;
+                }
+            }
+        }
+        if neutral(sc) || neutral(run) || sc == run {
+            if neutral(run) && !neutral(sc) {
+                run = sc;
+                for e in stack.iter_mut() {
+                    if neutral(e.1) {
+                        e.1 = sc;
+                    }
+                }
+            }
+            if close {
+                stack.pop();
+            }
+        } else {
+            out.push(i as u32);
+            run = sc;
+            if close {
+                stack.pop();
+            }
+        }
     }
 }

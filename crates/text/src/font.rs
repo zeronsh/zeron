@@ -88,6 +88,23 @@ impl FontMetrics {
 pub trait FallbackMeasurer: Send + Sync {
     /// Advance width of `text` set in `style`, in points.
     fn measure(&self, style: StyleId, text: &str) -> f32;
+
+    /// Optional (recommended): lays `text` — a maximal run of characters the style's face can't
+    /// draw, e.g. a whole CJK sentence — out as one line in `style` and appends one advance per
+    /// `char` of `text` (in `chars()` order) to `advances`: each glyph's advance, in points and
+    /// without letter spacing, attributed to the character it came from (a multi-char cluster
+    /// on its first char, zero on the rest). Returns `false` (the default) when unsupported.
+    ///
+    /// Platform engines pick fallback fonts and kern per run (CoreText sets `テキスト` in
+    /// Hiragino with kana kerning, and a `。` between kana and Han in either Hiragino or
+    /// PingFang depending on its neighbors), so widths measured piece by piece drift from what
+    /// the engine draws. With run advances, every piece inside the run gets its in-context
+    /// width. With CoreText: build a `CTLine` from the run and read each `CTRun`'s
+    /// `CTRunGetAdvances` + `CTRunGetStringIndices` (UTF-16 indices; map them to chars).
+    fn measure_run(&self, style: StyleId, text: &str, advances: &mut Vec<f32>) -> bool {
+        let _ = (style, text, advances);
+        false
+    }
 }
 
 /// Errors from [`FontBook::add_face`].

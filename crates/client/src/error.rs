@@ -26,7 +26,7 @@ pub enum ClientError {
     Auth(String),
     #[error("storage: {0}")]
     Storage(String),
-    /// A live-network path that is not wired yet (phase-2 surface).
+    /// A path this build doesn't support yet.
     #[error("not implemented yet: {0}")]
     NotImplemented(String),
     /// The client was shut down (signed out) while the call was in flight.

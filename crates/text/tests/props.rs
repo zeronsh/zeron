@@ -298,7 +298,12 @@ fn line_count_is_monotone_without_tabs_or_negative_spacing() {
         let mut w = 0.0;
         while w < 500.0 {
             let n = p.line_count(w);
-            assert!(n <= prev, "case {case} {text:?} {opts:?}: {prev} -> {n} at {w}");
+            assert!(
+                n <= prev,
+                "case {case} {text:?} {opts:?}: {prev} -> {n} at {w}\n{:?}\n{:?}",
+                line_texts(&p, w - 3.7),
+                line_texts(&p, w)
+            );
             prev = n;
             w += 3.7;
         }

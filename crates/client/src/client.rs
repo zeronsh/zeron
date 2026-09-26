@@ -81,6 +81,13 @@ pub(crate) struct ClientInner {
     harness_catalogs: Mutex<HashMap<String, Vec<HarnessInfo>>>,
 }
 
+impl Drop for ClientInner {
+    fn drop(&mut self) {
+        // Released without `shutdown()`: stop every background task.
+        self.cancel.cancel();
+    }
+}
+
 impl ClientInner {
     pub(crate) fn backend(&self) -> &Backend {
         self.backend.get().expect("backend initialized")
@@ -790,7 +797,13 @@ impl Client {
     /// Remove the chat row (the doc itself stays on the edge).
     pub fn delete_session(&self, chat_id: &str) -> Result<()> {
         self.chat_write(chat_id, |doc| doc.delete_chat(chat_id))?;
-        lock(&self.inner.sessions).remove(chat_id);
+        let core = lock(&self.inner.sessions).remove(chat_id);
+        drop(core);
+        if let Some(live) = self.inner.live()
+            && let Err(err) = live.store.delete_snapshot(chat_id)
+        {
+            tracing::debug!(error = %err, "local chat snapshot delete failed");
+        }
         Ok(())
     }
 

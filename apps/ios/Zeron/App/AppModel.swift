@@ -233,7 +233,7 @@ final class AppModel {
             ProjectVM(
                 id: p.id,
                 name: p.name,
-                device: p.deviceName ?? p.deviceId,
+                device: (p.deviceName ?? p.deviceId) + (p.deviceOnline ? "" : " · offline"),
                 colorIndex: Int(p.colorIndex),
                 status: Self.status(p.indicator),
                 unseen: Int(p.unseenCount),

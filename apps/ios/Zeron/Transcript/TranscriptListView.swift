@@ -172,7 +172,13 @@ final class TranscriptListView: UIScrollView, RowViewDelegate {
                 if view.superview !== self { addSubview(view) }
                 view.isHidden = false
             }
-            if view.model == nil || view.version != p.version || view.model?.display.width != width || view.key != p.key {
+            let stale = view.model == nil || view.version != p.version || view.model?.display.width != width || view.key != p.key
+            if stale, view.key == p.key, view.model?.display.width == width,
+               cache[ModelKey(key: p.key, version: p.version, width: width)] == nil {
+                // Same row, new content (a streaming tail): keep painting the
+                // current model and build the new one off the main thread.
+                upgradeAsync(p, frame: frame)
+            } else if stale {
                 view.configure(model(for: p, frame: frame), kind: p.kind)
                 if !knownKeys.contains(p.key) {
                     knownKeys.insert(p.key)
@@ -210,6 +216,27 @@ final class TranscriptListView: UIScrollView, RowViewDelegate {
         if cacheOrder.count > 500 {
             for old in cacheOrder.prefix(100) { cache[old] = nil }
             cacheOrder.removeFirst(100)
+        }
+    }
+
+    private func upgradeAsync(_ p: RowPlacement, frame: LayoutFrame) {
+        let k = ModelKey(key: p.key, version: p.version, width: frame.width())
+        guard !inflight.contains(k) else { return }
+        inflight.insert(k)
+        let fonts = self.fonts
+        prefetchQueue.async { [weak self] in
+            guard let d = frame.display(index: p.index) else { return }
+            let model = RowModel(display: d, fonts: fonts)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.inflight.remove(k)
+                self.store(model, for: k)
+                // Apply only if this is still the newest version on screen.
+                if let view = self.visible[p.key], let current = self.current,
+                   let i = current.indexOf(key: p.key), current.placement(index: i)?.version == p.version {
+                    view.configure(model, kind: p.kind)
+                }
+            }
         }
     }
 

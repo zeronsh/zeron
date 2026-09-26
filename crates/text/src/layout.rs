@@ -6,11 +6,14 @@ use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::analysis::{BRK_ALLOWED, BRK_MANDATORY, BRK_SOFT_HYPHEN};
-use crate::prepare::{F_BREAKABLE, F_DYN_H, F_DYN_W, Hot, P_TAB, Piece, Prepared, utf16_len};
+use crate::analysis::{BRK_ALLOWED, BRK_HANG_ONLY, BRK_MANDATORY, BRK_SOFT_HYPHEN};
+use crate::prepare::{
+    F_BREAKABLE, F_DYN_H, F_DYN_W, F_LEAD, Hot, P_TAB, Piece, Prepared, utf16_len,
+};
 
-/// Slack allowed when testing whether content fits, absorbing float noise from summing widths.
-pub const LINE_FIT_EPSILON: f32 = 0.005;
+/// Slack allowed when testing whether content fits: CoreText lets a line exceed its width by
+/// exactly this much (measured with CTFramesetter), which also absorbs float noise.
+pub const LINE_FIT_EPSILON: f32 = 0.0002;
 
 const NONE: u32 = u32::MAX;
 
@@ -118,11 +121,11 @@ struct Step {
 }
 
 #[inline]
-fn fit_limit(max_width: f32) -> f32 {
+fn fit_limit(max_width: f32) -> f64 {
     if max_width.is_nan() {
-        f32::INFINITY
+        f64::INFINITY
     } else {
-        max_width.max(0.0) + LINE_FIT_EPSILON
+        max_width.max(0.0) as f64 + LINE_FIT_EPSILON as f64
     }
 }
 
@@ -172,29 +175,27 @@ impl Prepared {
         x - x0
     }
 
-    /// Places units of breakable segment `i` from `from` onto an empty line; always places at
-    /// least one. Returns the split point if the rest doesn't fit.
-    fn place_units(&self, i: usize, from: u32, x: &mut f32, fit: f32) -> Option<u32> {
+    /// Places the units of breakable segment `i` from unit `from` onto a line whose content so
+    /// far ends at `x0`, while they fit within `fit`. With `force_first` the first unit is placed
+    /// even if it doesn't fit (a line must make progress). Returns the new line end and, when
+    /// the segment doesn't fit entirely, the unit to resume from.
+    fn fit_units(&self, i: usize, from: u32, x0: f64, fit: f64, force_first: bool) -> (f64, Option<u32>) {
         let c = &self.cold[i];
+        let mut x = x0;
+        let mut placed = !force_first;
         if self.hot[i].flags & F_DYN_W == 0 {
             let us = &self.units[c.units as usize..(c.units + c.n_units) as usize];
-            let mut u = from as usize;
-            let mut w = us[u];
-            u += 1;
-            while u < us.len() {
-                let nw = w + us[u];
-                if nw > fit {
-                    *x = w;
-                    return Some(u as u32);
+            for (k, &u) in us.iter().enumerate().skip(from as usize) {
+                let nx = x + u as f64;
+                // Zero-advance units (ligature tails, invisible graphemes) stay with the unit
+                // before them.
+                if placed && nx > fit && u != 0.0 {
+                    return (x, Some(k as u32));
                 }
-                w = nw;
-                u += 1;
+                x = nx;
+                placed = true;
             }
-            *x = w;
-            None
         } else {
-            let mut w = 0.0f32;
-            let mut placed = false;
             let run = self.content_run(i);
             for p in run.as_slice() {
                 if p.unit0 + p.n_units <= from {
@@ -202,25 +203,29 @@ impl Prepared {
                 }
                 for k in from.max(p.unit0)..p.unit0 + p.n_units {
                     let a = if p.kind == P_TAB {
-                        tab_advance(p.width, w, self.tab_size)
+                        tab_advance(p.width, x as f32, self.tab_size) as f64
                     } else {
-                        self.units[(c.units + k) as usize]
+                        self.units[(c.units + k) as usize] as f64
                     };
-                    if placed && w + a > fit {
-                        *x = w;
-                        return Some(k);
+                    if placed && x + a > fit && a != 0.0 {
+                        return (x, Some(k));
                     }
-                    w += a;
+                    x += a;
                     placed = true;
                 }
             }
-            *x = w;
-            None
         }
+        (x, None)
     }
 
     /// Lays out one line starting at `start`. `None` once the text is exhausted.
-    fn step(&self, start: Pos, fit: f32) -> Option<Step> {
+    ///
+    /// Mirrors CoreText's greedy fit: advances accumulate in `f64`; a line fits when its visible
+    /// advance is within `fit` (`max_width + LINE_FIT_EPSILON`); whitespace hangs, and when the
+    /// line overflows *inside* whitespace it ends right after that whitespace even where
+    /// UAX #14 has no opportunity (`BRK_HANG_ONLY`); otherwise it ends at the last opportunity
+    /// that fits, or — with none on the line — at the overflowing grapheme.
+    fn step(&self, start: Pos, fit: f64) -> Option<Step> {
         let hot = self.hot.as_slice();
         let n = hot.len();
         let mut i = start.seg as usize;
@@ -229,86 +234,107 @@ impl Prepared {
         }
         let wrap = self.wrap;
         let mut unit = start.unit;
-        let mut x = 0.0f32;
+        let mut x = 0.0f64;
         let mut last = usize::MAX;
         // Latest break opportunity on this line that fits: (segment, line width if broken there).
         let mut brk = usize::MAX;
-        let mut brk_w = 0.0f32;
+        let mut brk_w = 0.0f64;
         let mut brk_hy = false;
+        // A line starting where glyphs were substituted across the boundary (`a-|>b`) is shaped
+        // anew by CoreText: its last glyph gets no kerning with the next line.
+        let reshaped = unit == 0 && hot[i].flags & F_LEAD != 0;
+        let tail = |k: usize| {
+            if reshaped {
+                self.cold[k].tail as f64
+            } else {
+                0.0
+            }
+        };
+        let end_after = |seg: usize, width: f64, hyphenated: bool| Step {
+            next: Pos {
+                seg: seg as u32 + 1,
+                unit: 0,
+            },
+            width: width as f32,
+            hyphenated,
+            end_seg: seg as u32,
+        };
+        let end_inside = |seg: usize, unit: u32, width: f64| Step {
+            next: Pos {
+                seg: seg as u32,
+                unit,
+            },
+            width: width as f32,
+            hyphenated: false,
+            end_seg: NONE,
+        };
         loop {
             let h = hot[i];
             if last == usize::MAX {
                 let split = unit > 0
-                    || (wrap && h.flags & F_BREAKABLE != 0 && self.content_adv(i, h, 0.0) > fit);
+                    || (wrap
+                        && h.flags & F_BREAKABLE != 0
+                        && self.content_adv(i, h, 0.0) as f64 - tail(i) > fit);
                 if split {
-                    if let Some(u) = self.place_units(i, unit, &mut x, fit) {
-                        return Some(Step {
-                            next: Pos {
-                                seg: i as u32,
-                                unit: u,
-                            },
-                            width: x,
-                            hyphenated: false,
-                            end_seg: NONE,
-                        });
+                    let (nx, rest) = self.fit_units(i, unit, 0.0, fit, true);
+                    if let Some(u) = rest {
+                        return Some(end_inside(i, u, nx));
                     }
+                    x = nx;
                     unit = 0;
                 } else {
-                    x = self.content_adv(i, h, 0.0);
+                    x = self.content_adv(i, h, 0.0) as f64;
                 }
             } else {
-                let base = x + self.hang_adv(last, x);
-                let cand = base + self.content_adv(i, h, base);
-                if wrap && cand > fit {
+                let mut base = x + self.hang_adv(last, x as f32) as f64;
+                if h.flags & F_LEAD != 0 {
+                    base += self.cold[i].lead as f64;
+                }
+                let cand = base + self.content_adv(i, h, base as f32) as f64;
+                if wrap && cand - tail(i) > fit {
                     if brk != usize::MAX {
-                        return Some(Step {
-                            next: Pos {
-                                seg: brk as u32 + 1,
-                                unit: 0,
-                            },
-                            width: brk_w,
-                            hyphenated: brk_hy,
-                            end_seg: brk as u32,
-                        });
+                        return Some(end_after(brk, brk_w, brk_hy));
                     }
-                    // No opportunity fits: break after the last segment anyway. At a soft hyphen
-                    // whose hyphen doesn't fit, overflow-wrap: anywhere may break there as a
-                    // plain grapheme boundary instead (no hyphen) when the content itself fits.
-                    let hy = hot[last].brk == BRK_SOFT_HYPHEN && !(self.anywhere && x <= fit);
-                    return Some(Step {
-                        next: Pos {
-                            seg: last as u32 + 1,
-                            unit: 0,
-                        },
-                        width: if hy { x + self.cold[last].hyphen } else { x },
-                        hyphenated: hy,
-                        end_seg: last as u32,
-                    });
+                    // No opportunity on the line fits.
+                    if hot[last].brk == BRK_SOFT_HYPHEN {
+                        // Break at the soft hyphen anyway; under overflow-wrap: anywhere, when
+                        // only the hyphen overflows, break there as a plain grapheme boundary.
+                        let x = x - tail(last);
+                        let hy = !(self.anywhere && x <= fit);
+                        let w = if hy { x + self.cold[last].hyphen as f64 } else { x };
+                        return Some(end_after(last, w, hy));
+                    }
+                    if self.anywhere && h.flags & F_BREAKABLE != 0 && x <= fit {
+                        // Everything so far fits but has no opportunity: break at the
+                        // overflowing grapheme, like CoreText's character wrapping.
+                        if let (nx, Some(u)) = self.fit_units(i, 0, base, fit, false)
+                            && u > 0
+                        {
+                            return Some(end_inside(i, u, nx));
+                        }
+                    }
+                    return Some(end_after(last, x - tail(last), false));
                 }
                 x = cand;
             }
             last = i;
+            let xe = x - tail(i);
             match h.brk {
-                BRK_MANDATORY => {
-                    return Some(Step {
-                        next: Pos {
-                            seg: i as u32 + 1,
-                            unit: 0,
-                        },
-                        width: x,
-                        hyphenated: false,
-                        end_seg: i as u32,
-                    });
-                }
+                BRK_MANDATORY => return Some(end_after(i, xe, false)),
                 BRK_ALLOWED => {
-                    if x <= fit {
+                    if xe <= fit {
                         brk = i;
-                        brk_w = x;
+                        brk_w = xe;
                         brk_hy = false;
                     }
                 }
+                BRK_HANG_ONLY => {
+                    if wrap && xe <= fit && x + self.hang_adv(i, x as f32) as f64 > fit {
+                        return Some(end_after(i, xe, false));
+                    }
+                }
                 _ => {
-                    let w = x + self.cold[i].hyphen;
+                    let w = xe + self.cold[i].hyphen as f64;
                     if w <= fit {
                         brk = i;
                         brk_w = w;
@@ -324,7 +350,7 @@ impl Prepared {
                         seg: n as u32,
                         unit: 0,
                     },
-                    width: x,
+                    width: x as f32,
                     hyphenated: false,
                     end_seg: last as u32,
                 });
@@ -497,6 +523,7 @@ impl Prepared {
         } else {
             (s.next.seg as usize, Some(s.next.unit))
         };
+        let reshaped = start.unit == 0 && self.hot[start.seg as usize].flags & F_LEAD != 0;
         for seg in start.seg as usize..=last {
             let c = &self.cold[seg];
             let from = if seg == start.seg as usize {
@@ -505,10 +532,27 @@ impl Prepared {
                 0
             };
             let to = if seg == last { split } else { None };
+            // The reshaped line's last glyph has no kerning with the next line.
+            let mut tail = if reshaped && seg == last && to.is_none() {
+                c.tail
+            } else {
+                0.0
+            };
             let run = self.content_run(seg);
+            // A segment continuing the line carries the right half of the pair context.
+            let mut lead = if seg != start.seg as usize && self.hot[seg].flags & F_LEAD != 0 {
+                c.lead
+            } else {
+                0.0
+            };
             if from == 0 && to.is_none() {
-                for piece in run.as_slice() {
-                    fb.piece(piece.span, piece.start as usize, piece.end as usize, piece.width, piece.kind);
+                let pieces = run.as_slice();
+                for (k, piece) in pieces.iter().enumerate() {
+                    let mut w = piece.width + std::mem::take(&mut lead);
+                    if k + 1 == pieces.len() {
+                        w -= std::mem::take(&mut tail);
+                    }
+                    fb.piece(piece.span, piece.start as usize, piece.end as usize, w, piece.kind);
                 }
             } else {
                 // Partial segment (split by overflow-wrap): clip pieces to the line's bytes and
@@ -537,7 +581,7 @@ impl Prepared {
                             .iter()
                             .sum()
                     };
-                    fb.piece(piece.span, a, b, width, piece.kind);
+                    fb.piece(piece.span, a, b, width + std::mem::take(&mut lead), piece.kind);
                 }
             }
             if seg != last {

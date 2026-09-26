@@ -73,12 +73,54 @@ fn ct_line_starts(text: &str, font: &CTFont, width: f64) -> Vec<u32> {
         .collect()
 }
 
-struct CtFallback(Arc<CtFonts>);
+#[link(name = "CoreText", kind = "framework")]
+unsafe extern "C" {
+    fn CTRunGetAdvances(
+        run: core_text::run::CTRunRef,
+        range: CFRange,
+        buffer: *mut CGSize,
+    );
+}
+
+/// Per-char advances of `text` laid out as one CTLine: each glyph's advance attributed to the
+/// char its string index points into.
+fn ct_run_advances(text: &str, font: &CTFont, ligatures: bool, out: &mut Vec<f32>) {
+    let s = attributed(text, font, Some(ligatures));
+    let line = CTLine::new_with_attributed_string(s.as_concrete_TypeRef());
+    // UTF-16 index -> char index
+    let mut char_of = Vec::new();
+    for (ci, c) in text.chars().enumerate() {
+        for _ in 0..c.len_utf16() {
+            char_of.push(ci);
+        }
+    }
+    let base = out.len();
+    out.resize(base + text.chars().count(), 0.0);
+    for run in line.glyph_runs().iter() {
+        let n = run.glyph_count();
+        let mut adv = vec![CGSize::new(0.0, 0.0); n as usize];
+        unsafe { CTRunGetAdvances(run.as_concrete_TypeRef(), CFRange::init(0, 0), adv.as_mut_ptr()) };
+        for (g, &si) in run.string_indices().iter().enumerate() {
+            out[base + char_of[si as usize]] += adv[g].width as f32;
+        }
+    }
+}
+
+struct CtFallback(Arc<CtFonts>, bool);
 
 impl FallbackMeasurer for CtFallback {
     fn measure(&self, style: StyleId, text: &str) -> f32 {
         let (font, lig) = &self.0.fonts[style.0 as usize];
         ct_width(text, font, *lig) as f32
+    }
+
+    fn measure_run(&self, style: StyleId, text: &str, advances: &mut Vec<f32>) -> bool {
+        if !self.1 {
+            return false;
+        }
+        let (font, lig) = &self.0.fonts[style.0 as usize];
+        ct_run_advances(text, font, *lig, advances);
+        true
     }
 }
 
@@ -119,7 +161,8 @@ impl Harness {
             }
         }
         let fonts = Arc::new(CtFonts { fonts });
-        book.set_fallback(Arc::new(CtFallback(fonts.clone())));
+        let runs = std::env::var("ZT_CT_NO_RUNS").is_err();
+        book.set_fallback(Arc::new(CtFallback(fonts.clone(), runs)));
         Self {
             book,
             cache: WidthCache::new(),
@@ -284,7 +327,7 @@ fn run(h: &mut Harness, corpus: &[String], verbose: usize) -> Tally {
                     let rw: Vec<String> =
                         p.lines(w).iter().map(|l| format!("{:.3}", l.width)).collect();
                     t.report.push(format!(
-                        "{label} w={w}: rust {rust:?} vs ct {ct:?}\n    rust widths {rw:?}:\n{}\n    ct:\n{}",
+                        "{label} w={w}: rust {rust:?} vs ct {ct:?}\n    rust widths {rw:?}:\n{}\n    ct:\n{}\n    text {text:?}",
                         show(&rust),
                         show(&ct)
                     ));
@@ -310,6 +353,58 @@ fn print(name: &str, t: &Tally) {
     }
 }
 
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+    fn pick<'a>(&mut self, xs: &[&'a str]) -> &'a str {
+        xs[self.below(xs.len())]
+    }
+}
+
+const WORDS: &[&str] = &[
+    "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog", "a", "I", "layout",
+    "measurement", "virtualization", "don't", "naïve", "café", "hello,", "world.", "(parens)",
+    "\"quoted\"", "“smart”", "‘single’", "—", "-", "–", "foo-bar", "$500", "50%", "7:00-9:00",
+    "x\u{A0}y", "WWWWWWWWWW", "supercalifragilisticexpialidocious",
+    "https://example.com/a/b?c=d&e=f", "crates/text/src/layout.rs", "snake_case_identifier",
+    "camelCaseName", "fn(x)", "a->b", "x != y", "i++;", "{ key: value }", "[1, 2, 3]",
+    "中文", "测试。", "日本語のテキスト", "「かっこ」", "한국어", "문장도", "😀", "👨\u{200D}👩\u{200D}👧",
+    "🇯🇵", "1\u{FE0F}\u{20E3}", "👍🏾", "مرحبا", "שלום", "!", "?", "…", "#tag", "@user",
+    "e.g.", "i.e.,", "3.14", "1,000", "10×", "2026-09-26", "AVATAR", "Toffee", "office", "fluffy",
+    "V.A.T.", "ﬁne", "ภาษาไทย", "Ünïcödé", "ÅÄÖ", "Straße", "œuvre", "Ελληνικά", "русский",
+];
+
+/// Random chat-like paragraphs (held out: not used to tune any rule).
+fn random_corpus(seed: u64, n: usize) -> Vec<String> {
+    let mut rng = Rng(seed);
+    (0..n)
+        .map(|_| {
+            let words = 3 + rng.below(40);
+            let mut s = String::new();
+            for i in 0..words {
+                if i > 0 {
+                    s.push_str(match rng.below(20) {
+                        0 => "",
+                        1 => "  ",
+                        _ => " ",
+                    });
+                }
+                s.push_str(rng.pick(WORDS));
+            }
+            s
+        })
+        .collect()
+}
+
 #[test]
 fn line_breaks_match_coretext() {
     let verbose = std::env::var("ZT_CT_VERBOSE")
@@ -321,6 +416,16 @@ fn line_breaks_match_coretext() {
     print("swift corpus", &swift);
     let broad = run(&mut h, &broad_corpus(), verbose);
     print("broad corpus", &broad);
+    let seed = std::env::var("ZT_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(7);
+    let n = std::env::var("ZT_N").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
+    let random = run(&mut h, &random_corpus(seed, n), verbose);
+    print("random corpus", &random);
+    for (name, t) in [("swift", &swift), ("broad", &broad), ("random", &random)] {
+        let exact = t.exact as f64 / t.cases as f64;
+        let lines = 1.0 - t.count_diff as f64 / t.cases as f64;
+        assert!(exact >= 0.99, "{name}: exact {exact}");
+        assert!(lines >= 0.999, "{name}: line count agreement {lines}");
+    }
 }
 
 // ---------------------------------------------------------------- PROBE (temporary)
@@ -478,6 +583,7 @@ fn probe_breaks() {
     let mut h = Harness::new();
     let mut corpus = swift_corpus();
     corpus.extend(broad_corpus());
+    corpus.extend(random_corpus(7, 120));
     if let Ok(extra) = std::env::var("ZT_TEXT") {
         corpus = vec![extra];
     }
@@ -598,5 +704,177 @@ fn probe_cf() {
             s
         };
         println!("CF   {:?}\nRUST {:?}", show(&cf_breaks(t)), show(&rust_breaks(&mut h, t)));
+    }
+}
+
+#[test]
+#[ignore]
+fn probe_hang() {
+    let f = probe_font("Geist.ttf", 14.0);
+    let list = std::env::var("ZT_LIST").unwrap_or_default();
+    for t in list.split(";;") {
+        // widths at which each prefix ending before a space fits
+        let u: Vec<u16> = t.encode_utf16().collect();
+        let mut ws = Vec::new();
+        for i in 1..=u.len() {
+            ws.push(ct_width(&String::from_utf16_lossy(&u[..i]), &f, true));
+        }
+        println!("{t:?} cf={:?}", cf_breaks(t));
+        let mut last = Vec::new();
+        let mut w = 5.0;
+        while w < ws[ws.len() - 1] + 5.0 {
+            let l = probe_lines(t, &f, w);
+            if l != last {
+                println!("  w={w:>6.2}: {l:?}");
+                last = l;
+            }
+            w += 0.25;
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn probe_line() {
+    let mut h = Harness::new();
+    let t = std::env::var("ZT_TEXT").unwrap();
+    let si: usize = std::env::var("ZT_STYLE").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let w: f32 = std::env::var("ZT_W").unwrap().parse().unwrap();
+    let style = h.styles[si].1;
+    let (p, starts) = h.rust_lines(&t, style, w);
+    let font = h.fonts.fonts[style.0 as usize].0.clone();
+    println!("rust {starts:?} ct {:?}", ct_line_starts(&t, &font, w as f64));
+    for l in p.lines(w) {
+        println!("  {:?} w={:.3} frags={:?}", &p.text()[l.range.clone()], l.width, l.fragments.iter().map(|f| (f.range.clone(), f.x, f.width)).collect::<Vec<_>>());
+    }
+    for (c, hg, _) in p.segment_ranges() {
+        let lw = p.lines(1e9);
+        let _ = lw;
+        println!("  seg {:?} hang {:?}", &p.text()[c.clone()], &p.text()[hg.clone()]);
+    }
+}
+
+#[test]
+#[ignore]
+fn probe_slack() {
+    for (file, size) in [("Geist.ttf", 14.0), ("Geist.ttf", 16.5), ("GeistMono.ttf", 19.0)] {
+        let f = probe_font(file, size);
+        for first in ["xx long ", "the quick brown fox ", "a much longer line of text that goes on and on ", "Wa ", "i ", "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm "] {
+            let t = format!("{first}zz");
+            let th = threshold(&t, &f, first);
+            let sw = ct_width(first.trim_end(), &f, true);
+            println!("{file} {size} {first:?}: width {sw:.6} threshold {th:.6} slack {:.6}", sw - th);
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn probe_widths() {
+    let mut h = Harness::new();
+    let list = std::env::var("ZT_LIST").unwrap_or_default();
+    let si: usize = std::env::var("ZT_STYLE").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let style = h.styles[si].1;
+    let (font, lig) = h.fonts.fonts[style.0 as usize].clone();
+    for t in list.split(";;") {
+        let spans = [Span::new(0..t.len(), style)];
+        let p = prepare(&h.book, &mut h.cache, t, &spans, &PrepareOptions { white_space: WhiteSpace::Pre, ..Default::default() });
+        println!("{t:?}: rust {:.4} ct {:.4}", p.max_content_width(), ct_width(t, &font, lig));
+    }
+}
+
+#[test]
+#[ignore]
+fn probe_itemize() {
+    let f = probe_font("Geist.ttf", 16.5);
+    let list = std::env::var("ZT_LIST").unwrap_or_default();
+    for t in list.split(";;") {
+        // t contains a '|' marking the neutral char position: "Ελ |\"|q"
+        let parts: Vec<&str> = t.split('|').collect();
+        let (a, n, b) = (parts[0], parts[1], parts[2]);
+        let full = format!("{a}{n}{b}");
+        let actual = ct_width(&full, &f, true);
+        let before = ct_width(a, &f, true) + ct_width(&format!("{n}{b}"), &f, true);
+        let after = ct_width(&format!("{a}{n}"), &f, true) + ct_width(b, &f, true);
+        let tag = if (actual - before).abs() < 1e-3 && (actual - after).abs() < 1e-3 {
+            "either"
+        } else if (actual - before).abs() < 1e-3 {
+            "neutral joins FOLLOWING"
+        } else if (actual - after).abs() < 1e-3 {
+            "neutral joins PRECEDING"
+        } else {
+            "neither"
+        };
+        println!("{full:?}: {tag} (actual {actual:.3} before {before:.3} after {after:.3})");
+    }
+}
+
+#[test]
+#[ignore]
+fn probe_runs() {
+    let f = probe_font("Geist.ttf", 16.5);
+    let list = std::env::var("ZT_LIST").unwrap_or_default();
+    for t in list.split(";;") {
+        let a = attributed(t, &f, None);
+        let line = CTLine::new_with_attributed_string(a.as_concrete_TypeRef());
+        let u: Vec<u16> = t.encode_utf16().collect();
+        let mut desc = Vec::new();
+        for r in line.glyph_runs().iter() {
+            let attrs = r.attributes().unwrap();
+            let font = attrs
+                .find(CFString::from_static_string("NSFont"))
+                .map(|v| unsafe { CTFont::wrap_under_get_rule(v.as_CFTypeRef() as _) });
+            let idx = r.string_indices();
+            let lo = *idx.iter().min().unwrap_or(&0) as usize;
+            let hi = *idx.iter().max().unwrap_or(&0) as usize;
+            desc.push(format!(
+                "{:?}:{}",
+                String::from_utf16_lossy(&u[lo..=hi]),
+                font.map(|f| f.postscript_name()).unwrap_or_default()
+            ));
+        }
+        println!("{t:?} => {}", desc.join(" | "));
+    }
+}
+
+mod ts {
+    use core_foundation::base::CFIndex;
+    use core_foundation::attributed_string::CFAttributedStringRef;
+    pub type CTTypesetterRef = *const std::ffi::c_void;
+    #[link(name = "CoreText", kind = "framework")]
+    unsafe extern "C" {
+        pub fn CTTypesetterCreateWithAttributedString(s: CFAttributedStringRef) -> CTTypesetterRef;
+        pub fn CTTypesetterSuggestLineBreak(ts: CTTypesetterRef, start: CFIndex, width: f64) -> CFIndex;
+    }
+}
+
+/// Smallest width at which a line starting at UTF-16 `start` extends to at least `end`.
+fn ts_threshold(text: &str, f: &CTFont, start: isize, end: isize) -> f64 {
+    let a = attributed(text, f, None);
+    let t = unsafe { ts::CTTypesetterCreateWithAttributedString(a.as_concrete_TypeRef()) };
+    let (mut lo, mut hi) = (0.0f64, 2000.0f64);
+    for _ in 0..60 {
+        let m = (lo + hi) / 2.0;
+        let n = unsafe { ts::CTTypesetterSuggestLineBreak(t, start, m) };
+        if start + n >= end { hi = m } else { lo = m }
+    }
+    unsafe { tok::CFRelease(t as _) };
+    hi
+}
+
+#[test]
+#[ignore]
+fn probe_ts() {
+    let f = probe_font("Geist.ttf", 19.0);
+    let list = std::env::var("ZT_LIST").unwrap_or_default();
+    for t in list.split(";;") {
+        // "prefix|line|rest": threshold for a line starting after prefix to include `line`
+        let parts: Vec<&str> = t.split('|').collect();
+        let full = parts.concat();
+        let s = parts[0].encode_utf16().count() as isize;
+        let e = s + parts[1].encode_utf16().count() as isize;
+        let th = ts_threshold(&full, &f, s, e);
+        let line = parts[1].trim_end();
+        println!("{t:?}: threshold {th:.4} standalone {:.4} with-rest-first {:.4}", ct_width(line, &f, true), ct_width(&format!("{line}{}", parts[2].chars().next().unwrap_or(' ')), &f, true) - ct_width(&parts[2].chars().next().unwrap_or(' ').to_string(), &f, true));
     }
 }

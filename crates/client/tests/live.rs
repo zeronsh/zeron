@@ -761,3 +761,55 @@ async fn host_rpcs_ride_the_device_relay() {
     assert!(service.spaces.lock().unwrap().contains(&space_id));
     client.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn phone_born_sessions_reach_the_host_before_their_first_command() {
+    let edge = MockEdge::start().await;
+    let host = HostRegistry::start(&edge).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    let start = Instant::now();
+    while !client.workspace().synced || client.workspace().project(SPACE).is_none() {
+        assert!(start.elapsed() < Duration::from_secs(10), "sync");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let chat_id = client
+        .create_session(zeron_client::NewSession {
+            target: zeron_client::SessionTarget::Project {
+                space_id: SPACE.into(),
+            },
+            config: None,
+            branch: None,
+            cwd: None,
+            title: None,
+        })
+        .unwrap();
+    let session = client.open_session(&chat_id).unwrap();
+    session.send(SendRequest::text("first words")).unwrap();
+    // The host learns about the chat (born on chat2) …
+    let start = Instant::now();
+    loop {
+        let row = host.doc.lock().unwrap().chat(&chat_id).unwrap();
+        if let Some(row) = row {
+            assert_eq!(row.room_gen, Some(2));
+            assert_eq!(row.device_id, HOST);
+            assert_eq!(row.cwd.as_deref(), Some("/Users/dev/live"));
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "chat row never reached the host"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // … and the first command lands in its chat2 room.
+    let start = Instant::now();
+    while edge.rows(&chat_id).is_empty() {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "command never reached the room"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    client.shutdown();
+}

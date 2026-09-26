@@ -281,6 +281,12 @@ impl SessionCore {
             return;
         };
         if chat.room_gen.unwrap_or(1) < 2 {
+            // A retired legacy (s2) room: nothing to dial. Show what's local
+            // instead of an endless loader.
+            let newly = !std::mem::replace(&mut lock(&self.state).hydrated, true);
+            if newly {
+                self.schedule_refresh();
+            }
             return;
         }
         let core = Arc::downgrade(self);

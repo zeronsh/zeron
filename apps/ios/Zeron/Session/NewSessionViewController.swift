@@ -98,6 +98,10 @@ final class NewSessionViewController: UIViewController {
             composer.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -8),
         ])
         if draft.projectId == nil, draft.hostId == nil { draft.projectId = app.projectOptions.first?.id }
+        if draft.projectId == nil, draft.hostId == nil {
+            // No projects yet: run on the first reachable host.
+            draft.hostId = app.hostOptions.first(where: \.online)?.id ?? app.hostOptions.first?.id
+        }
         refreshChips()
         Task { [weak self] in
             guard let self else { return }

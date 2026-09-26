@@ -127,7 +127,7 @@ fn segments_split_hang_and_classify_breaks() {
     let mut br = Vec::new();
     break_opportunities(text, &[span(0..text.len(), 0)], WhiteSpace::PreWrap, &mut br);
     let mut segs = Vec::new();
-    segments(text, &br, WhiteSpace::PreWrap, &mut segs);
+    segments(text, &[span(0..text.len(), 0)], &br, WhiteSpace::PreWrap, &mut segs);
     let shy_end = text.find('b').unwrap() as u32;
     let nl = text.find('\n').unwrap() as u32;
     assert_eq!(

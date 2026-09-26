@@ -38,6 +38,9 @@ struct Entry {
     len: u32,
     style: u16,
     fallback: bool,
+    /// A fallback *run* (per-grapheme in-context advances from
+    /// [`crate::FallbackMeasurer::measure_run`]) rather than a piece.
+    run: bool,
     /// Final width in points, letter spacing included.
     width: f32,
     /// Per-grapheme advances live at `units[units_off..units_off + units_len]` when
@@ -59,6 +62,7 @@ struct Plan {
 #[derive(Default)]
 pub(crate) struct Scratch {
     pub breaks: Vec<(u32, bool)>,
+    pub scripts: Vec<u32>,
     pub segs: Vec<RawSeg>,
     pub pieces: Vec<Piece>,
     pub units: Vec<f32>,
@@ -79,11 +83,14 @@ pub struct WidthCache {
     space: Vec<f32>,
     hyphen: Vec<f32>,
     plans: Vec<Plan>,
-    /// Pair kerning between printable-ASCII graphemes, per style: `[(a - 0x20) * 96 + (b - 0x20)]`,
+    /// Pair context `(Δa, Δb)` between printable-ASCII graphemes, per style: `[(a - 0x20) * 96 + (b - 0x20)]`,
     /// NaN until computed.
-    kern_ascii: Vec<Option<Box<[f32]>>>,
-    /// Pair kerning between other single-char graphemes.
-    kern_chars: HashMap<(u16, char, char), f32, FxBuildHasher>,
+    kern_ascii: Vec<Option<Box<[PairContext]>>>,
+    /// Pair context between other single-char graphemes.
+    kern_chars: HashMap<(u16, char, char), PairContext, FxBuildHasher>,
+    /// The fallback measurer declined [`crate::FallbackMeasurer::measure_run`]; don't ask again.
+    pub(crate) runs_unsupported: bool,
+    run_scratch: Vec<f32>,
     buffer: Option<UnicodeBuffer>,
     clusters: Vec<(u32, i32)>,
     starts: Vec<u32>,
@@ -107,8 +114,13 @@ impl std::fmt::Debug for WidthCache {
 
 #[inline]
 fn key_hash(style: StyleId, text: &str) -> u64 {
+    key_hash_kind(style, text, false)
+}
+
+#[inline]
+fn key_hash_kind(style: StyleId, text: &str, run: bool) -> u64 {
     let mut h = FxHasher::default();
-    h.write_u16(style.0);
+    h.write_u16(style.0 | ((run as u16) << 15));
     h.write(text.as_bytes());
     h.write_usize(text.len());
     h.finish()
@@ -121,7 +133,7 @@ fn sanitize(w: f32) -> f32 {
 
 /// Whether `text` needs the host measurer: some visible char has no glyph in the face, or the
 /// text requests emoji presentation.
-fn needs_fallback(face: &FaceData, text: &str) -> bool {
+pub(crate) fn needs_fallback(face: &FaceData, text: &str) -> bool {
     text.chars().any(|c| {
         if forces_emoji(c) {
             return true;
@@ -155,6 +167,8 @@ impl WidthCache {
             plans: Vec::new(),
             kern_ascii: Vec::new(),
             kern_chars: HashMap::default(),
+            runs_unsupported: false,
+            run_scratch: Vec::new(),
             buffer: None,
             clusters: Vec::new(),
             starts: Vec::new(),
@@ -174,6 +188,7 @@ impl WidthCache {
         self.plans.clear();
         self.kern_ascii.clear();
         self.kern_chars.clear();
+        self.runs_unsupported = false;
         self.stats = CacheStats::default();
     }
 
@@ -218,6 +233,7 @@ impl WidthCache {
             let e = &entries[i as usize];
             e.hash == hash
                 && e.style == style.0
+                && !e.run
                 && &arena[e.off as usize..(e.off + e.len) as usize] == text
         });
         if let Some(&idx) = found {
@@ -282,6 +298,83 @@ impl WidthCache {
         w
     }
 
+    /// In-context advances of each grapheme of `run` (a maximal run of text the face can't
+    /// draw), without letter spacing, from the host's
+    /// [`crate::FallbackMeasurer::measure_run`]. `None` when there is no fallback measurer or it
+    /// doesn't measure runs (remembered), or its answer was malformed.
+    pub(crate) fn run_advances(&mut self, book: &FontBook, style: StyleId, run: &str) -> Option<&[f32]> {
+        if self.runs_unsupported {
+            return None;
+        }
+        let m = book.fallback()?;
+        let hash = key_hash_kind(style, run, true);
+        let entries = &self.entries;
+        let arena = &self.arena;
+        let found = self.table.find(hash, |&i| {
+            let e = &entries[i as usize];
+            e.hash == hash
+                && e.style == style.0
+                && e.run
+                && &arena[e.off as usize..(e.off + e.len) as usize] == run
+        });
+        let idx = if let Some(&idx) = found {
+            self.stats.hits += 1;
+            idx
+        } else {
+            self.stats.misses += 1;
+            self.stats.fallback_calls += 1;
+            let mut per_char = std::mem::take(&mut self.run_scratch);
+            per_char.clear();
+            let ok = m.measure_run(style, run, &mut per_char);
+            if !ok {
+                self.runs_unsupported = true;
+                self.run_scratch = per_char;
+                return None;
+            }
+            let units_off = self.units.len() as u32;
+            let valid = per_char.len() == run.chars().count();
+            if valid {
+                let mut k = 0;
+                for g in run.graphemes(true) {
+                    let mut w = 0.0;
+                    for _ in g.chars() {
+                        w += sanitize(per_char[k]);
+                        k += 1;
+                    }
+                    self.units.push(w);
+                }
+            }
+            self.run_scratch = per_char;
+            let units_len = if valid {
+                self.units.len() as u32 - units_off
+            } else {
+                UNKNOWN
+            };
+            let width = self.units[units_off as usize..].iter().sum();
+            let off = self.arena.len() as u32;
+            self.arena.push_str(run);
+            let idx = self.entries.len() as u32;
+            self.entries.push(Entry {
+                hash,
+                off,
+                len: run.len() as u32,
+                style: style.0,
+                fallback: true,
+                run: true,
+                width,
+                units_off,
+                units_len,
+            });
+            let entries = &self.entries;
+            self.table
+                .insert_unique(hash, idx, |&i| entries[i as usize].hash);
+            idx
+        };
+        let e = &self.entries[idx as usize];
+        (e.units_len != UNKNOWN)
+            .then(|| &self.units[e.units_off as usize..(e.units_off + e.units_len) as usize])
+    }
+
     /// Whether `grapheme` in `style` is shaped with the style's face (as opposed to going to the
     /// host fallback measurer, i.e. a different font).
     pub(crate) fn is_shaped(&self, book: &FontBook, style: StyleId, grapheme: &str) -> bool {
@@ -292,26 +385,42 @@ impl WidthCache {
         !needs_fallback(face, grapheme)
     }
 
-    /// Advance change from shaping two adjacent graphemes together rather than apart:
-    /// `shape(a + b) − shape(a) − shape(b)`, in points. This is the pair kerning (and any other
-    /// two-glyph context effect) that a paragraph-level shaper applies across a segment
-    /// boundary; like GPOS pair adjustment it belongs to the advance of `a`. Both graphemes must
-    /// be shaped by the style's face (see [`WidthCache::is_shaped`]).
-    pub(crate) fn pair_kern(&mut self, book: &FontBook, style: StyleId, a: &str, b: &str) -> f32 {
+    /// Advance changes from shaping two adjacent graphemes together rather than apart, split by
+    /// side: `(Δa, Δb)` in points, where `Δa = adv_in_pair(a) − shape(a)` and likewise for `b`
+    /// (glyphs are attributed to a side by their cluster). This is what a paragraph-level shaper
+    /// applies across a segment boundary: pair kerning lands on `a` (GPOS adjusts the first
+    /// glyph's advance); a ligature or contextual form spanning both (Geist's `->` arrow) puts
+    /// its whole advance on `a` and leaves `b` with `−shape(b)`. Both graphemes must be shaped
+    /// by the style's face (see [`WidthCache::is_shaped`]).
+    pub(crate) fn pair_context(
+        &mut self,
+        book: &FontBook,
+        style: StyleId,
+        a: &str,
+        b: &str,
+    ) -> PairContext {
         let ab = a.as_bytes();
         let bb = b.as_bytes();
-        if ab.len() == 1 && bb.len() == 1 && (0x20..0x80).contains(&ab[0]) && (0x20..0x80).contains(&bb[0]) {
+        if ab.len() == 1
+            && bb.len() == 1
+            && (0x20..0x80).contains(&ab[0])
+            && (0x20..0x80).contains(&bb[0])
+        {
             let i = style.0 as usize;
             if self.kern_ascii.len() <= i {
                 self.kern_ascii.resize_with(i + 1, || None);
             }
             let k = (ab[0] as usize - 0x20) * 96 + (bb[0] as usize - 0x20);
-            let cached = self.kern_ascii[i].as_ref().map_or(f32::NAN, |t| t[k]);
-            if !cached.is_nan() {
+            let cached = self.kern_ascii[i]
+                .as_ref()
+                .map_or(PairContext::UNKNOWN, |t| t[k]);
+            if !cached.left.is_nan() {
                 return cached;
             }
-            let v = self.compute_pair_kern(book, style, a, b);
-            self.kern_ascii[i].get_or_insert_with(|| vec![f32::NAN; 96 * 96].into_boxed_slice())[k] = v;
+            let v = self.compute_pair_context(book, style, a, b);
+            self.kern_ascii[i]
+                .get_or_insert_with(|| vec![PairContext::UNKNOWN; 96 * 96].into_boxed_slice())[k] =
+                v;
             return v;
         }
         let mut ca = a.chars();
@@ -320,27 +429,47 @@ impl WidthCache {
             if let Some(&v) = self.kern_chars.get(&(style.0, x, y)) {
                 return v;
             }
-            let v = self.compute_pair_kern(book, style, a, b);
+            let v = self.compute_pair_context(book, style, a, b);
             self.kern_chars.insert((style.0, x, y), v);
             return v;
         }
-        self.compute_pair_kern(book, style, a, b)
+        self.compute_pair_context(book, style, a, b)
     }
 
-    fn compute_pair_kern(&mut self, book: &FontBook, style: StyleId, a: &str, b: &str) -> f32 {
+    fn compute_pair_context(&mut self, book: &FontBook, style: StyleId, a: &str, b: &str) -> PairContext {
         let sd = book.style_data(style);
         let face = book.face_data(sd.style.face);
         let mut pair = String::with_capacity(a.len() + b.len());
         pair.push_str(a);
         pair.push_str(b);
-        let units = self.shape_units(sd, face, &pair)
-            - self.shape_units(sd, face, a)
-            - self.shape_units(sd, face, b);
-        units as f32 * sd.scale
+        let (mut in_a, mut in_b) = (0i64, 0i64);
+        let mut ids: Vec<u32> = Vec::new();
+        let glyphs = self.shape_glyphs(sd, face, &pair);
+        for (info, pos) in glyphs.glyph_infos().iter().zip(glyphs.glyph_positions()) {
+            ids.push(info.glyph_id);
+            if (info.cluster as usize) < a.len() {
+                in_a += pos.x_advance as i64;
+            } else {
+                in_b += pos.x_advance as i64;
+            }
+        }
+        self.buffer = Some(glyphs.clear());
+        let mut apart: Vec<u32> = Vec::new();
+        let mut units = [0i64; 2];
+        for (k, t) in [a, b].into_iter().enumerate() {
+            let glyphs = self.shape_glyphs(sd, face, t);
+            apart.extend(glyphs.glyph_infos().iter().map(|g| g.glyph_id));
+            units[k] = glyphs.glyph_positions().iter().map(|p| p.x_advance as i64).sum();
+            self.buffer = Some(glyphs.clear());
+        }
+        PairContext {
+            left: (in_a - units[0]) as f32 * sd.scale,
+            right: (in_b - units[1]) as f32 * sd.scale,
+            substituted: ids != apart,
+        }
     }
 
-    /// Total advance of `text` in font units.
-    fn shape_units(&mut self, sd: &StyleData, face: &FaceData, text: &str) -> i64 {
+    fn shape_glyphs(&mut self, sd: &StyleData, face: &FaceData, text: &str) -> rustybuzz::GlyphBuffer {
         let mut buf = self.buffer.take().unwrap_or_default();
         buf.push_str(text);
         buf.guess_segment_properties();
@@ -348,10 +477,7 @@ impl WidthCache {
         let script = buf.script();
         let script = (script != rustybuzz::script::UNKNOWN).then_some(script);
         let plan = self.plan(sd, face, direction, script);
-        let glyphs = rustybuzz::shape_with_plan(&face.hb, &self.plans[plan].plan, buf);
-        let total = glyphs.glyph_positions().iter().map(|p| p.x_advance as i64).sum();
-        self.buffer = Some(glyphs.clear());
-        total
+        rustybuzz::shape_with_plan(&face.hb, &self.plans[plan].plan, buf)
     }
 
     fn insert(
@@ -406,6 +532,7 @@ impl WidthCache {
             len: text.len() as u32,
             style: style.0,
             fallback: fallback.is_some(),
+            run: false,
             width,
             units_off,
             units_len,
@@ -522,9 +649,9 @@ impl WidthCache {
         self.plans.len() - 1
     }
 
-    /// Distributes glyph advances onto extended grapheme clusters: each shaping cluster's advance
-    /// is split evenly across the graphemes that start inside it (ligatures spanning graphemes),
-    /// and a cluster starting mid-grapheme folds into that grapheme. Sums exactly to the run.
+    /// Distributes glyph advances onto extended grapheme clusters: a shaping cluster's advance
+    /// goes to the first grapheme starting inside it (the others in a ligature get zero), and a
+    /// cluster starting mid-grapheme folds into that grapheme. Sums exactly to the run.
     fn cluster_units(
         &mut self,
         text: &str,
@@ -576,18 +703,18 @@ impl WidthCache {
             while g < n && starts[g] < c_end {
                 g += 1;
             }
-            let count = g - first;
-            if count == 0 {
+            if g == first {
                 // Cluster begins inside a grapheme: fold it into that grapheme.
                 let into = first.saturating_sub(1).min(n.saturating_sub(1));
                 if n > 0 {
                     out[into] += adv;
                 }
             } else {
-                let each = adv / count as f32;
-                for u in &mut out[first..g] {
-                    *u += each;
-                }
+                // A cluster spanning several graphemes (a ligature like `fi`) is one glyph:
+                // CoreText never breaks inside it, so its whole advance sits on its first
+                // grapheme and the rest are zero-advance units the line walker never splits
+                // before.
+                out[first] += adv;
             }
         }
         if ls != 0.0 {
@@ -597,6 +724,33 @@ impl WidthCache {
         }
         n as u32
     }
+}
+
+/// How shaping two adjacent graphemes together differs from shaping them apart (see
+/// [`WidthCache::pair_context`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct PairContext {
+    /// Advance change on the left grapheme (kerning; a ligature's whole advance), points.
+    pub left: f32,
+    /// Advance change on the right grapheme (e.g. minus its advance when absorbed by a
+    /// ligature), points.
+    pub right: f32,
+    /// Glyphs were substituted across the boundary (a ligature or contextual form): a line
+    /// starting here must be shaped anew, as CoreText does.
+    pub substituted: bool,
+}
+
+impl PairContext {
+    const UNKNOWN: Self = Self {
+        left: f32::NAN,
+        right: 0.0,
+        substituted: false,
+    };
+    pub(crate) const NONE: Self = Self {
+        left: 0.0,
+        right: 0.0,
+        substituted: false,
+    };
 }
 
 /// Borrowed per-grapheme advances of a cache entry.
