@@ -243,6 +243,10 @@ pub fn traits_summary(
             if option.id == "serviceTier" && matches!(choice_id, "default" | "standard") {
                 continue;
             }
+            // Off-position toggles carry no information on the chip.
+            if choice_id == "off" {
+                continue;
+            }
             if let Some(choice) = option.choices.iter().find(|c| c.id == choice_id) {
                 parts.push(choice.label.clone());
             }
