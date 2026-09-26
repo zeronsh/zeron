@@ -3778,6 +3778,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let was_active = self.resolved_right_active(cx) == surface;
+        let restore_focus = was_active && self.navigation_focus.in_right(window, cx);
+        self.navigation_focus.remember(&self.shortcut_focus, window, cx);
         let key = self.panel_key(cx);
         let files = match surface {
             RightSurface::File(id) => self.file_surfaces.get(&id).cloned(),
@@ -3787,6 +3789,9 @@ impl Shell {
             match files.update(cx, |files, cx| files.prepare_close(cx)) {
                 FilesCloseDisposition::Allow => {
                     self.complete_file_close(surface, &key, cx);
+                    if restore_focus {
+                        self.restore_right_focus_after_close(window, cx);
+                    }
                 }
                 FilesCloseDisposition::Pending | FilesCloseDisposition::Blocked => {
                     self.pending_file_closes.insert(surface);
@@ -3805,9 +3810,6 @@ impl Shell {
                     browser.update(cx, |browser, cx| browser.close(cx));
                 }
                 self.browser_subs.remove(&id);
-                if was_active {
-                    window.focus(&self.composer.focus_handle(cx), cx);
-                }
             }
             RightSurface::Diff(id) => {
                 // Dropping the entity tears down its diff watch.
@@ -3826,9 +3828,6 @@ impl Shell {
                     side.state.read(cx).side_chat_unsaved() || !side.composer.read(cx).has_draft(cx)
                 }) {
                     self.side_chats.remove(&id);
-                }
-                if was_active {
-                    window.focus(&self.composer.focus_handle(cx), cx);
                 }
             }
             RightSurface::Subagent(id) => {
@@ -3854,6 +3853,9 @@ impl Shell {
             }
         });
         self.collapse_surfaces_if_empty(&key, cx);
+        if restore_focus {
+            self.restore_right_focus_after_close(window, cx);
+        }
         cx.notify();
     }
 
@@ -10438,8 +10440,7 @@ impl Shell {
                 })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
-                    this.set_right_active(surface, cx);
-                    this.focus_right_file_editor(surface, window, cx);
+                    this.activate_right_surface(surface, window, cx);
                 }))
                 .on_mouse_down(
                     MouseButton::Right,
@@ -11806,10 +11807,12 @@ impl Render for Shell {
             // Native Settings menu item and the platform convention (Cmd+, on
             // macOS, Ctrl+, elsewhere) toggle the modal from any section.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
-            // Chat-scoped, unlike new-session — `cycle_session` holds the guard
-            // and says why.
-            .on_action(cx.listener(|this, _: &NextSession, _, cx| this.cycle_session(true, cx)))
-            .on_action(cx.listener(|this, _: &PrevSession, _, cx| this.cycle_session(false, cx)))
+            .on_action(cx.listener(|this, _: &NextSession, window, cx| {
+                this.cycle_navigation(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PrevSession, window, cx| {
+                this.cycle_navigation(false, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ToggleChanges, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.toggle_right_pane(cx);

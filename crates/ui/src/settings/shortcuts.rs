@@ -303,7 +303,12 @@ impl ShortcutsPage {
                     .min_w(px(160.0))
                     .flex()
                     .flex_col()
-                    .child(widgets::row_title(theme, id.label())),
+                    .child(widgets::row_title(theme, id.label()))
+                    .when(matches!(id, ShortcutId::NextSession | ShortcutId::PrevSession), |row| {
+                        row.child(widgets::meta_line(theme, vec![
+                            div().child("Navigate within the focused pane.").into_any_element(),
+                        ]))
+                    }),
             )
             .child(self.render_binding_control(id, ix, recording, theme, cx))
     }
