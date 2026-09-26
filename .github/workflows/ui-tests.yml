@@ -67,6 +67,10 @@ jobs:
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Cursor compatibility restores this cache; only main saves it.
+          shared-key: linux-debug
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: OpenCode protocol and permission regressions
         run: |
           cargo test --locked -p zeron-harness --lib opencode::
@@ -80,6 +84,11 @@ jobs:
   ui-tests:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      # Test binaries never ship, so skip the release profile's cross-crate
+      # LTO: it re-optimizes every dependency at each test binary's link.
+      # Debug jobs omit this; rust-cache keys include CARGO_* variables.
+      CARGO_PROFILE_RELEASE_LTO: 'off'
     steps:
       - uses: actions/checkout@v4
       - name: GPUI system dependencies
@@ -94,30 +103,27 @@ jobs:
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Shares dependencies with linux-browser, which saves them.
+          shared-key: linux-gpui
+          save-if: false
       - name: UI and headless layout regressions
         run: cargo test --release --locked -p zeron-ui --lib -- --test-threads=1
 
-  macos-frame-recovery:
+  macos-ui:
     runs-on: macos-latest
     timeout-minutes: 45
+    env:
+      CARGO_PROFILE_RELEASE_LTO: 'off'
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - name: Check out pinned GPUI for native frame-source tests
-        shell: bash
-        run: |
-          rev=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["dependencies"]["gpui"]["rev"])')
-          git init frame-source-tests
-          git -C frame-source-tests remote add origin https://github.com/zeronsh/zui
-          git -C frame-source-tests fetch --depth=1 origin "$rev"
-          git -C frame-source-tests checkout --detach FETCH_HEAD
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
-          workspaces: |
-            .
-            frame-source-tests
+          # Shares dependencies with macos-browser, which saves them.
+          shared-key: macos-gpui
+          save-if: false
       - name: Check macOS application
         run: cargo check --release --locked -p zeron
       - name: Native diff font geometry regression
@@ -125,6 +131,21 @@ jobs:
       - name: Native notification click regressions
         run: |
           cargo test --release --locked -p zeron-ui --lib notify::tests:: -- --test-threads=1
+
+  macos-browser:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_RELEASE_LTO: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: macos-gpui
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build native browser fixture
         run: cargo build --release --locked -p zeron-ui --example browser-fixture --example preview-fixture --features browser-fixture
       - name: Native browser regression and screenshots
@@ -160,6 +181,29 @@ jobs:
           name: preview-macos-captures
           path: ${{ runner.temp }}/preview-captures
           if-no-files-found: ignore
+
+  macos-frame-recovery:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_RELEASE_LTO: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Check out pinned GPUI for native frame-source tests
+        shell: bash
+        run: |
+          rev=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["dependencies"]["gpui"]["rev"])')
+          git init frame-source-tests
+          git -C frame-source-tests remote add origin https://github.com/zeronsh/zui
+          git -C frame-source-tests fetch --depth=1 origin "$rev"
+          git -C frame-source-tests checkout --detach FETCH_HEAD
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: frame-source-tests
       - name: Native frame-source recovery regression
         working-directory: frame-source-tests
         run: cargo test --release --locked -p gpui_macos --test frame_source_recovery
@@ -201,6 +245,8 @@ jobs:
   linux-browser:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      CARGO_PROFILE_RELEASE_LTO: 'off'
     steps:
       - uses: actions/checkout@v4
       - name: Native browser and GPUI dependencies
@@ -216,6 +262,9 @@ jobs:
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-gpui
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build browser fixture
         run: cargo build --release --locked -p zeron-ui --example browser-fixture --features browser-fixture
       - name: X11 and Wayland browser regressions
