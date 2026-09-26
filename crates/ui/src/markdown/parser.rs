@@ -31,6 +31,16 @@ pub struct InlineStyle {
     pub link: Option<String>,
     pub image: Option<InlineImage>,
     pub task: Option<TaskMarker>,
+    pub math: Option<InlineMath>,
+}
+
+/// A TeX formula (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`). The run's text keeps the
+/// delimited source, which is what copying yields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineMath {
+    pub tex: String,
+    /// `$$…$$` and `\[…\]`: display style, set on a centered line of its own.
+    pub display: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,7 +136,10 @@ impl BlockTree {
 // ---------------------------------------------------------------------------
 
 fn options() -> Options {
-    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
+    Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_MATH
 }
 
 /// Parse a whole source into a [`BlockTree`].
@@ -135,13 +148,18 @@ pub fn parse_full(source: &str) -> BlockTree {
 }
 
 fn parse_at(source: &str, offset: usize) -> BlockTree {
-    let events: Vec<(Event, Range<usize>)> = Parser::new_ext(source, options())
+    // `\(…\)`/`\[…\]` become `$$…$$` byte for byte, so ranges still index
+    // `source`, whose delimiters tell inline and display math apart.
+    let normalized = super::math::normalize_delimiters(source);
+    let events: Vec<(Event, Range<usize>)> = Parser::new_ext(&normalized, options())
         .into_offset_iter()
         .map(|(event, range)| (event, range.start + offset..range.end + offset))
         .collect();
     let mut cur = Cursor {
         events: &events,
         ix: 0,
+        source,
+        offset,
     };
     let mut blocks = Vec::new();
     while let Some((event, range)) = cur.peek() {
@@ -172,9 +190,17 @@ fn parse_at(source: &str, offset: usize) -> BlockTree {
 struct Cursor<'a, 'e> {
     events: &'a [(Event<'e>, Range<usize>)],
     ix: usize,
+    /// The text being parsed, before delimiter normalization; event ranges
+    /// are offset by `offset` into it.
+    source: &'a str,
+    offset: usize,
 }
 
 impl<'a, 'e> Cursor<'a, 'e> {
+    /// Original source text of an event range.
+    fn original(&self, range: &Range<usize>) -> &'a str {
+        &self.source[range.start - self.offset..range.end - self.offset]
+    }
     fn peek(&self) -> Option<&(Event<'e>, Range<usize>)> {
         self.events.get(self.ix)
     }
@@ -443,6 +469,8 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
             );
         }
         Event::FootnoteReference(t) => push(runs, format!("[{t}]"), style.clone()),
+        Event::InlineMath(tex) => push_math(cur, runs, style, range, &tex, false),
+        Event::DisplayMath(tex) => push_math(cur, runs, style, range, &tex, true),
         Event::Start(tag) => {
             let mut inner = style.clone();
             match tag {
@@ -481,6 +509,49 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
     }
 }
 
+/// A math span. `display_event` is pulldown's `$$` form, which also carries
+/// the normalized `\(…\)` and `\[…\]`; the original delimiter decides.
+fn push_math(
+    cur: &Cursor,
+    runs: &mut Vec<InlineRun>,
+    style: &InlineStyle,
+    range: Option<Range<usize>>,
+    tex: &str,
+    display_event: bool,
+) {
+    let Some(range) = range else {
+        return;
+    };
+    let source = cur.original(&range);
+    let bracket = source.starts_with('\\');
+    let display = display_event && !source.starts_with("\\(");
+    // Pandoc's rule: a closing `$` right before a digit ends a price, not a
+    // formula (`$5-$10`), so the span stays text.
+    let after = cur.source[range.end - cur.offset..].chars().next();
+    if !display_event && after.is_some_and(|c| c.is_ascii_digit()) {
+        runs.push(InlineRun {
+            text: source.to_owned(),
+            style: style.clone(),
+        });
+        return;
+    }
+    let (open, close) = match (bracket, display) {
+        (true, false) => ("\\(", "\\)"),
+        (true, true) => ("\\[", "\\]"),
+        (false, true) => ("$$", "$$"),
+        (false, false) => ("$", "$"),
+    };
+    let mut math = style.clone();
+    math.math = Some(InlineMath {
+        tex: tex.to_owned(),
+        display,
+    });
+    runs.push(InlineRun {
+        text: format!("{open}{tex}{close}"),
+        style: math,
+    });
+}
+
 /// Promote bare `http(s)://` URLs into link runs — GFM's autolink extension,
 /// which pulldown-cmark has no option for (agents paste naked PR/issue URLs
 /// constantly; user report: the link isn't clickable). Runs already inside a
@@ -489,7 +560,7 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
 fn autolink_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     let mut out = Vec::with_capacity(runs.len());
     for run in runs {
-        if run.style.link.is_some() || run.style.code {
+        if run.style.link.is_some() || run.style.code || run.style.math.is_some() {
             out.push(run);
         } else {
             push_text_autolinked(&mut out, &run.text, &run.style);
@@ -581,7 +652,11 @@ fn merge_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     let mut out: Vec<InlineRun> = Vec::with_capacity(runs.len());
     for run in runs {
         match out.last_mut() {
-            Some(last) if last.style == run.style && run.style.image.is_none() => {
+            Some(last)
+                if last.style == run.style
+                    && run.style.image.is_none()
+                    && run.style.math.is_none() =>
+            {
                 last.text.push_str(&run.text)
             }
             _ => out.push(run),
@@ -882,6 +957,9 @@ mod tests {
         "    indented code line one\n    line two\n\npara\n",
         "para with <span>inline html</span> inside\n\n<div>\nblock html\n</div>\n",
         "###### deep heading\n\n#### h4\n",
+        "Energy $E = mc^2$ and \\(a_1 * b_1\\) inline.\n\n$$\n\\frac{a}{b}\n$$\n\ntail\n",
+        "- item \\(x\\)\n- \\[\n  y^2\n  \\]\n\n> $$z$$\n\nprices $5-$10 stay text\n",
+        "intro\n\\[\n\\begin{aligned} a &= 1 \\\\ b &= 2 \\end{aligned}\n\\]\nouter `\\(code\\)` $x$\n",
     ];
 
     #[test]
@@ -1324,5 +1402,93 @@ mod image_model_tests {
         assert_eq!(images[1].source, "b.png");
         assert!(images[1].alt.is_empty());
         assert_eq!(runs.first().unwrap().text, "Before ");
+    }
+}
+
+#[cfg(test)]
+mod math_model_tests {
+    use super::*;
+
+    fn paragraph_runs(source: &str) -> Vec<InlineRun> {
+        let tree = parse_full(source);
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("paragraph: {source:?}");
+        };
+        runs.clone()
+    }
+
+    fn formulas(runs: &[InlineRun]) -> Vec<(&str, &str, bool)> {
+        runs.iter()
+            .filter_map(|run| {
+                let math = run.style.math.as_ref()?;
+                Some((run.text.as_str(), math.tex.as_str(), math.display))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_delimiter_form_becomes_a_formula_that_copies_as_its_source() {
+        let runs = paragraph_runs("A $x^2$, \\(y_1\\), $$z$$ and \\[w\\] end.");
+        assert_eq!(
+            formulas(&runs),
+            [
+                ("$x^2$", "x^2", false),
+                ("\\(y_1\\)", "y_1", false),
+                ("$$z$$", "z", true),
+                ("\\[w\\]", "w", true),
+            ]
+        );
+        let text: String = runs.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(text, "A $x^2$, \\(y_1\\), $$z$$ and \\[w\\] end.");
+    }
+
+    #[test]
+    fn display_blocks_span_lines_inside_containers() {
+        let tree = parse_full("> $$\n> \\frac{a}{b}\n> $$\n\n- \\[\n  x\n  \\]\n");
+        let Block::BlockQuote { children } = &tree.blocks[0].block else {
+            panic!("quote");
+        };
+        let Block::Paragraph { runs } = &children[0] else {
+            panic!("quoted paragraph");
+        };
+        assert_eq!(
+            formulas(runs),
+            [("$$\n\\frac{a}{b}\n$$", "\n\\frac{a}{b}\n", true)]
+        );
+        let Block::List { items, .. } = &tree.blocks[1].block else {
+            panic!("list");
+        };
+        let Block::Paragraph { runs } = &items[0][0] else {
+            panic!("item paragraph");
+        };
+        assert_eq!(formulas(runs), [("\\[\nx\n\\]", "\nx\n", true)]);
+    }
+
+    #[test]
+    fn prices_code_and_escapes_are_not_math() {
+        for source in [
+            "from $5 to $10",
+            "a range $5-$10 or US$5/US$6",
+            "code `$x$` and `\\(y\\)`",
+            "escaped \\$x\\$ and \\\\(z\\\\)",
+            "spaced $ x $ is text",
+        ] {
+            let runs = paragraph_runs(source);
+            assert!(formulas(&runs).is_empty(), "{source:?}");
+            let text: String = runs.iter().map(|run| run.text.as_str()).collect();
+            assert!(
+                !text.contains("$$"),
+                "no rewritten delimiter leaks: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tex_is_raw_inside_math() {
+        let runs = paragraph_runs("$a*b*c$ and $\\{x\\}$ and https://x.dev/$y$");
+        let math = formulas(&runs);
+        assert_eq!(math[0].1, "a*b*c");
+        assert_eq!(math[1].1, "\\{x\\}");
+        assert!(runs.iter().all(|run| !(run.style.italic)));
     }
 }

@@ -12,18 +12,24 @@
 //! - hanging inline markers (`**bold`, `[link](url…`) are auto-closed in the
 //!   streaming *display* parse only ([`mend`]), so closing markers never
 //!   reflow already-painted text; the canonical parse settles honestly on
-//!   completion.
+//!   completion;
+//! - LaTeX math is typeset by RaTeX and painted as tinted SVG sprites over
+//!   placeholder text ([`math`]), so formulas wrap, select and copy (as TeX)
+//!   like the text around them.
 
 mod link_destination;
 mod link_interaction;
 mod link_presentation;
 pub mod links;
+pub mod math;
 pub mod mend;
 pub mod parser;
 pub mod render;
 pub mod selection;
 pub mod veil;
 
-pub use parser::{Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full};
+pub use parser::{
+    Block, BlockTree, IncrementalParser, InlineMath, InlineRun, InlineStyle, parse_full,
+};
 
 pub mod mermaid;

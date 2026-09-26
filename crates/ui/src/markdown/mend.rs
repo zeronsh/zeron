@@ -75,6 +75,16 @@ pub fn close_hanging(text: &str) -> Option<String> {
     let mut i = 0;
     while i < n {
         let c = cs[i].1;
+        // A closed math span is TeX, not markdown: `$a*b$` and `\(x_1\)`
+        // open no emphasis. An unclosed one is still streaming and stays
+        // literal, as the parser keeps it until its closer arrives.
+        if code.is_none()
+            && let Some(end) = math_span_end(&cs, i)
+        {
+            last_content = Some(end - 1);
+            i = end;
+            continue;
+        }
         if code.is_none() && c == '\\' {
             // Escaped char: both literal; the escapee still counts as content.
             if i + 1 < n {
@@ -208,6 +218,36 @@ pub fn close_hanging(text: &str) -> Option<String> {
 fn run_len(cs: &[(usize, char)], i: usize) -> usize {
     let c = cs[i].1;
     cs[i..].iter().take_while(|&&(_, x)| x == c).count()
+}
+
+/// Char index just past the math span opening at `i` (`$…$`, `$$…$$`,
+/// `\(…\)`, `\[…\]`), if it is already closed. Mirrors the parser's rules
+/// closely enough for display: `$` opens before non-space and closes after
+/// non-space, `\(` closes on its line, and nothing crosses a blank line.
+fn math_span_end(cs: &[(usize, char)], i: usize) -> Option<usize> {
+    let at = |k: usize| cs.get(k).map(|&(_, c)| c);
+    let (close, mut j): (&[char], usize) = match (at(i)?, at(i + 1)) {
+        ('\\', Some('(')) => (&['\\', ')'], i + 2),
+        ('\\', Some('[')) => (&['\\', ']'], i + 2),
+        ('$', Some('$')) => (&['$', '$'], i + 2),
+        ('$', Some(next)) if !next.is_whitespace() => (&['$'], i + 1),
+        _ => return None,
+    };
+    while j < cs.len() {
+        let c = cs[j].1;
+        if c == '\n' && (close == ['\\', ')'] || at(j + 1) == Some('\n')) {
+            return None;
+        }
+        if close.len() == 2 && c == close[0] && at(j + 1) == Some(close[1]) {
+            return Some(j + 2);
+        }
+        if close == ['$'] && c == '$' && !cs[j - 1].1.is_whitespace() {
+            return Some(j + 1);
+        }
+        // `\\`, `\$` and other escapes pass as a pair.
+        j += if c == '\\' { 2 } else { 1 };
+    }
+    None
 }
 
 /// Match or open one delimiter run. Closes against the innermost same-char
@@ -409,5 +449,16 @@ mod tests {
         stays("-"); // no line above
         stays("\n-"); // empty line above
         mends("**b\n-", "**b**\n-\u{200B}"); // closers go above the underline
+    }
+
+    #[test]
+    fn closed_math_is_tex_not_emphasis() {
+        stays("area $a*b$ and $x_1 + y_1$ done");
+        stays("inline \\(a*b\\) and display $$a_1 *b$$");
+        stays("\\[\n\\sum_i a_i * b_i\n\\]");
+        // Markers outside a formula still mend.
+        mends("$a*b$ then **bold", "$a*b$ then **bold**");
+        // A formula still streaming is literal text until it closes.
+        mends("price $5 and **bold", "price $5 and **bold**");
     }
 }
