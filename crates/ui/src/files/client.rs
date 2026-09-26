@@ -22,6 +22,40 @@ pub struct FilesRequestContext {
 }
 
 impl FilesRequestContext {
+    /// Join a wire-format relative path using the owning host's path syntax.
+    /// `PathBuf` and canonicalization would use the viewport's OS/filesystem,
+    /// which may be different from the device serving this workspace.
+    pub(super) fn absolute_file_path(&self, path: &str) -> Option<String> {
+        if path.is_empty()
+            || path.contains(['\0', '\\', ':'])
+            || path.split('/').any(|part| matches!(part, "" | "." | ".."))
+            || self.cwd.contains('\0')
+        {
+            return None;
+        }
+        let root = self.cwd.as_bytes();
+        let windows_drive = root.len() >= 3
+            && root[0].is_ascii_alphabetic()
+            && root[1] == b':'
+            && matches!(root[2], b'/' | b'\\');
+        let windows_unc = self
+            .cwd
+            .strip_prefix("\\\\")
+            .is_some_and(|rest| rest.split('\\').filter(|part| !part.is_empty()).count() >= 2);
+        if windows_drive || windows_unc {
+            let root = self.cwd.replace('/', "\\");
+            Some(format!(
+                "{}\\{}",
+                root.trim_end_matches('\\'),
+                path.replace('/', "\\")
+            ))
+        } else if self.cwd.starts_with('/') {
+            Some(format!("{}/{path}", self.cwd.trim_end_matches('/')))
+        } else {
+            None
+        }
+    }
+
     pub fn for_chat(state: &AppState, chat_id: &str) -> Option<Self> {
         let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
         let cwd = chat
@@ -304,6 +338,59 @@ mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
     use super::*;
+
+    #[test]
+    fn absolute_file_paths_use_host_syntax_without_local_resolution() {
+        for (root, expected) in [
+            ("/only/on/remote", "/only/on/remote/src/área nueva.rs"),
+            ("/remote/worktree/", "/remote/worktree/src/área nueva.rs"),
+            ("/", "/src/área nueva.rs"),
+            (
+                r"C:\remote\worktree",
+                r"C:\remote\worktree\src\área nueva.rs",
+            ),
+            (
+                "C:/remote/worktree/",
+                r"C:\remote\worktree\src\área nueva.rs",
+            ),
+            (r"C:\", r"C:\src\área nueva.rs"),
+            (r"\\server\share\", r"\\server\share\src\área nueva.rs"),
+            (r"\\?\C:\worktree", r"\\?\C:\worktree\src\área nueva.rs"),
+        ] {
+            let context = FilesRequestContext {
+                target: target(),
+                target_device_id: Some("remote-host".into()),
+                cwd: root.into(),
+                checkout_id: None,
+            };
+            assert_eq!(
+                context.absolute_file_path("src/área nueva.rs").as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn absolute_file_paths_require_a_known_root_and_relative_file() {
+        let mut context = FilesRequestContext {
+            target: target(),
+            target_device_id: None,
+            cwd: "/repo".into(),
+            checkout_id: None,
+        };
+        for path in [
+            "", "/tmp/a", "../a", "src/../a", "./a", "a\0b", r"C:\a", "src\\a",
+        ] {
+            assert!(context.absolute_file_path(path).is_none(), "{path:?}");
+        }
+        for root in ["", "repo", "~/repo", "C:repo", "\\server", "/repo\0"] {
+            context.cwd = root.into();
+            assert!(
+                context.absolute_file_path("src/main.rs").is_none(),
+                "{root:?}"
+            );
+        }
+    }
 
     #[derive(Default)]
     struct DeterministicTransport {

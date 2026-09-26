@@ -823,6 +823,12 @@ impl FilesSurface {
         self.editor_path.as_deref()
     }
 
+    /// Use the editor's retained workspace context, including while dirty
+    /// buffers prevent a pending checkout change from being applied.
+    pub(crate) fn absolute_file_path(&self, path: &str) -> Option<String> {
+        self.request_context.as_ref()?.absolute_file_path(path)
+    }
+
     pub(super) fn open_tree_file(&mut self, path: String, cx: &mut Context<Self>) {
         cx.emit(FilesEvent::OpenFile(path));
     }

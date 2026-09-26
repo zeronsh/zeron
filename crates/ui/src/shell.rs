@@ -63,6 +63,7 @@ mod actions_ui;
 mod command_palette;
 mod files_panel;
 mod project_icon;
+mod right_tab_menu;
 mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
@@ -1727,6 +1728,7 @@ pub struct Shell {
     right_terminal: Option<Entity<TerminalPanel>>,
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
+    right_tab_menu: popover::Popup<right_tab_menu::RightTabMenuState>,
     /// Host-owned project Actions cached per (device, space).
     project_actions: crate::project_actions::ProjectActionsController,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
@@ -1746,6 +1748,7 @@ pub struct Shell {
     file_surface_subs: std::collections::HashMap<u64, Subscription>,
     file_surface_seq: u64,
     pending_file_closes: std::collections::HashSet<RightSurface>,
+    right_tab_close_batch: Option<right_tab_menu::RightTabCloseBatch>,
     pending_exit: Option<PendingExit>,
     /// Event hookups for [`Self::diffs`] (History rows opening commit tabs).
     diff_subs: std::collections::HashMap<u64, Subscription>,
@@ -2178,6 +2181,7 @@ impl Shell {
             terminal: None,
             right_terminal: None,
             right_plus: popover::Popup::default(),
+            right_tab_menu: popover::Popup::default(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
@@ -2188,6 +2192,7 @@ impl Shell {
             file_surface_subs: std::collections::HashMap::new(),
             file_surface_seq: 0,
             pending_file_closes: std::collections::HashSet::new(),
+            right_tab_close_batch: None,
             pending_exit: None,
             diff_subs: std::collections::HashMap::new(),
             diff_seq: 0,
@@ -2657,6 +2662,8 @@ impl Shell {
             self.last_appshot_chat = Some(selected.clone());
         }
         if selected != self.active_chat {
+            self.close_right_tab_menu(cx);
+            self.right_tab_close_batch = None;
             self.suspend_file_images(cx);
             self.active_chat = selected;
             // Route history: a chat switch is a navigation. The very first
@@ -2839,6 +2846,7 @@ impl Shell {
         let key = self.panel_key(cx);
         self.panels.update(&key, |p| p.changes_open = open);
         if !open {
+            self.close_right_tab_menu(cx);
             self.suspend_file_images(cx);
             // Closing always leaves takeover mode — reopening at full bleed
             // with the conversation gone read as a broken chat.
@@ -3410,9 +3418,12 @@ impl Shell {
                     FilesEvent::ShowAllFilesChanged(show_all_files) => {
                         this.set_files_show_all(*show_all_files, cx)
                     }
-                    FilesEvent::CloseReady => {
-                        this.on_file_close_ready(RightSurface::File(id), &event_panel_key, cx)
-                    }
+                    FilesEvent::CloseReady => this.on_file_close_ready(
+                        RightSurface::File(id),
+                        &event_panel_key,
+                        window,
+                        cx,
+                    ),
                     // Footer rows exist on the explorer only; an editor
                     // surface never emits them.
                     FilesEvent::OpenSubagent { .. }
@@ -3774,6 +3785,13 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .right_tab_close_batch
+            .as_ref()
+            .is_some_and(|batch| batch.target == surface)
+        {
+            self.right_tab_close_batch = None;
+        }
         let was_active = self.resolved_right_active(cx) == surface;
         let key = self.panel_key(cx);
         let files = match surface {
@@ -3784,6 +3802,7 @@ impl Shell {
             match files.update(cx, |files, cx| files.prepare_close(cx)) {
                 FilesCloseDisposition::Allow => {
                     self.complete_file_close(surface, &key, cx);
+                    self.resume_right_tab_close(surface, &key, window, cx);
                 }
                 FilesCloseDisposition::Pending | FilesCloseDisposition::Blocked => {
                     self.pending_file_closes.insert(surface);
@@ -3859,10 +3878,12 @@ impl Shell {
         &mut self,
         surface: RightSurface,
         panel_key: &str,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.pending_file_closes.contains(&surface) {
             self.complete_file_close(surface, panel_key, cx);
+            self.resume_right_tab_close(surface, panel_key, window, cx);
         } else {
             if self.pending_exit.is_some() {
                 self.reveal_unsaved_file(cx);
@@ -3872,6 +3893,13 @@ impl Shell {
     }
 
     fn cancel_file_close(&mut self, surface: RightSurface, cx: &mut Context<Self>) {
+        if self
+            .right_tab_close_batch
+            .as_ref()
+            .is_some_and(|batch| batch.waiting == Some(surface))
+        {
+            self.right_tab_close_batch = None;
+        }
         self.pending_file_closes.remove(&surface);
         self.pending_exit = None;
         cx.notify();
@@ -3916,6 +3944,7 @@ impl Shell {
     }
 
     fn prepare_exit(&mut self, action: PendingExit, cx: &mut Context<Self>) -> bool {
+        self.right_tab_close_batch = None;
         let surfaces = self.file_surfaces.values().cloned().collect::<Vec<_>>();
         if surfaces
             .iter()
@@ -4971,7 +5000,8 @@ impl Shell {
     /// so an unguarded jump would switch sessions UNDER the open popover,
     /// stranding it over a session the user never picked.
     pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
-        self.command_palette.is_some()
+        self.right_tab_menu.get().is_some()
+            || self.command_palette.is_some()
             || self.section_dialog.is_some()
             || self.section_menu.is_some()
             || matches!(self.route, Route::Settings(_))
@@ -8611,6 +8641,10 @@ impl Shell {
     /// Resolve shell-owned Escape surfaces in capture phase, before focused
     /// descendants such as an integrated terminal can consume the key.
     fn capture_escape_surface(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.right_tab_menu.get().is_some() {
+            self.close_right_tab_menu(cx);
+            return true;
+        }
         // Modals and context menus sit above the rest of the shell. Preserve
         // their existing behavior: only surfaces that already have a Cancel
         // path close here; the others remain explicit blockers.
@@ -8763,6 +8797,7 @@ impl Shell {
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).for_popup();
         let mut overlays: Vec<AnyElement> = Vec::new();
+        overlays.extend(self.render_right_tab_menu(cx));
 
         if let Some(menu_state) = self.chat_menu.get().cloned() {
             let chat_id = menu_state.chat_id;
@@ -8980,7 +9015,9 @@ impl Shell {
                     (TabCloseAction::Left, "Close tabs to the left"),
                     (TabCloseAction::Right, "Close tabs to the right"),
                 ] {
-                    let enabled = !self.tabs_to_close(surface, action, cx).is_empty();
+                    let enabled = !self.tabs_to_close(surface, action, cx).is_empty()
+                        && (matches!(action, TabCloseAction::This)
+                            || self.can_start_right_tab_close());
                     let key = key.clone();
                     menu = menu.child(
                         popover::menu_row(&theme, false, label)
@@ -8992,8 +9029,31 @@ impl Shell {
                                 }
                                 this.close_chat_menu(cx);
                                 if this.panel_key(cx) == key {
-                                    for tab in this.tabs_to_close(surface, action, cx) {
-                                        this.close_right_surface(tab, window, cx);
+                                    match action {
+                                        TabCloseAction::This => {
+                                            this.close_right_surface(surface, window, cx)
+                                        }
+                                        TabCloseAction::Others => this.start_right_tab_close(
+                                            &key,
+                                            surface,
+                                            right_tab_menu::RightTabCloseMode::Others,
+                                            window,
+                                            cx,
+                                        ),
+                                        TabCloseAction::Left => this.start_right_tab_close(
+                                            &key,
+                                            surface,
+                                            right_tab_menu::RightTabCloseMode::Left,
+                                            window,
+                                            cx,
+                                        ),
+                                        TabCloseAction::Right => this.start_right_tab_close(
+                                            &key,
+                                            surface,
+                                            right_tab_menu::RightTabCloseMode::Right,
+                                            window,
+                                            cx,
+                                        ),
                                     }
                                 }
                             }))
@@ -10396,15 +10456,18 @@ impl Shell {
                 .cursor_pointer()
                 .role(gpui::Role::Button)
                 .aria_label(accessible_label)
-                .when_some(detail, |chip, detail| {
-                    chip.tooltip(move |_, cx| {
-                        cx.new(|_| SurfaceTabTooltip {
-                            text: detail.clone(),
+                .when_some(
+                    detail.filter(|_| self.right_tab_menu.get().is_none()),
+                    |chip, detail| {
+                        chip.tooltip(move |_, cx| {
+                            cx.new(|_| SurfaceTabTooltip {
+                                text: detail.clone(),
+                            })
+                            .into()
                         })
-                        .into()
-                    })
-                    .tooltip_show_delay(Duration::from_millis(350))
-                })
+                        .tooltip_show_delay(Duration::from_millis(350))
+                    },
+                )
                 // The old session-tab strip's solved carve-out: NOT
                 // `.occlude()` — a BlockMouse hitbox ends the hit test,
                 // so the scroll container behind the tabs never saw
@@ -10426,23 +10489,27 @@ impl Shell {
                     this.focus_right_file_editor(surface, window, cx);
                 }))
                 .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                        let chat_id = match surface {
-                            RightSurface::SideChat(id) => this
+                    gpui::MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        if let RightSurface::SideChat(id) = surface {
+                            this.close_right_tab_menu(cx);
+                            let chat_id = this
                                 .side_chats
                                 .get(&id)
                                 .and_then(|tab| tab.state.read(cx).selected_chat.clone())
-                                .unwrap_or_default(),
-                            _ => String::new(),
-                        };
-                        this.chat_menu.open(ChatMenuState {
-                            chat_id,
-                            tab: Some((this.panel_key(cx), surface)),
-                            position: event.position,
-                            page: ChatMenuPage::Root,
-                        });
-                        cx.notify();
+                                .unwrap_or_default();
+                            this.chat_menu.open(ChatMenuState {
+                                chat_id,
+                                tab: Some((this.panel_key(cx), surface)),
+                                position: event.position,
+                                page: ChatMenuPage::Root,
+                            });
+                            cx.notify();
+                        } else {
+                            this.open_right_tab_menu(surface, event.position, cx);
+                        }
                     }),
                 )
                 // Middle-click closes, like every tab strip.
@@ -10647,6 +10714,7 @@ impl Shell {
                 if this.right_plus.take_press_was_open() {
                     this.close_right_plus(cx);
                 } else {
+                    this.close_right_tab_menu(cx);
                     this.right_plus.open(());
                     cx.notify();
                 }
@@ -14756,11 +14824,18 @@ mod right_tab_mouse_regressions {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.shell.update(cx, |shell, cx| {
                 let tabs = shell.render_right_tab_strip(cx);
-                shell.titlebar_drag_region(
+                let menu = shell.render_right_tab_menu(cx);
+                let bar = shell.titlebar_drag_region(
                     "right-tab-test-titlebar",
                     div().w(px(400.)).h(px(40.)).child(tabs),
                     cx,
-                )
+                );
+                div()
+                    .size_full()
+                    .track_focus(&shell.shortcut_focus)
+                    .capture_key_down(cx.listener(Shell::on_key_down_capture))
+                    .child(bar)
+                    .children(menu)
             })
         }
     }
@@ -14774,7 +14849,11 @@ mod right_tab_mouse_regressions {
         });
         let (host, cx) = cx.add_window_view(|_, cx| {
             let shell = cx.new(|cx| {
-                let state = cx.new(|_| AppState::new());
+                let state = cx.new(|_| {
+                    let mut state = AppState::new();
+                    state.selected_chat = Some("parent".into());
+                    state
+                });
                 let mut shell = Shell::new(
                     state,
                     EngineBootConfig {
@@ -14802,6 +14881,194 @@ mod right_tab_mouse_regressions {
         let shell = host.read_with(cx, |host, _| host.shell.clone());
         cx.update(|window, cx| window.draw(cx).clear());
         (shell, cx)
+    }
+
+    fn open_menu(shell: &Entity<Shell>, cx: &mut VisualTestContext, index: usize) {
+        // Previous actions leave an occluding exit animation. Remove that
+        // layer between scenarios; wall-clock animation timing is not under test.
+        shell.update(cx, |shell, _| {
+            if shell.right_tab_menu.is_closing() {
+                shell.right_tab_menu = popover::Popup::default();
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let position = cx
+            .debug_bounds(
+                [
+                    "right-surface-tab-0",
+                    "right-surface-tab-1",
+                    "right-surface-tab-2",
+                ][index],
+            )
+            .unwrap()
+            .center();
+        cx.simulate_mouse_down(position, MouseButton::Right, gpui::Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Right, gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.right_tab_menu.is_open());
+            assert!(!cx.has_active_drag());
+        });
+        assert!(cx.debug_bounds("right-tab-context-menu").is_some());
+    }
+
+    #[gpui::test]
+    fn context_menu_uses_clicked_tab_and_dispatches_all_three_actions(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        for (action, expected) in [
+            (
+                "right-tab-close-left",
+                vec![RightSurface::Subagent(2), RightSurface::Subagent(3)],
+            ),
+            ("right-tab-close-right", vec![RightSurface::Subagent(2)]),
+        ] {
+            if action == "right-tab-close-left" {
+                shell.update(cx, |shell, cx| {
+                    shell.add_subagent_surface(
+                        "parent".into(),
+                        "third".into(),
+                        "third".into(),
+                        false,
+                        cx,
+                    );
+                });
+            }
+            let index = if action == "right-tab-close-left" {
+                1
+            } else {
+                0
+            };
+            open_menu(&shell, cx, index);
+            shell.read_with(cx, |shell, cx| {
+                assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(3));
+            });
+            let position = cx.debug_bounds(action).unwrap().center();
+            cx.simulate_click(position, gpui::Modifiers::default());
+            shell.read_with(cx, |shell, cx| {
+                assert_eq!(
+                    shell
+                        .right_surface_rows(cx)
+                        .iter()
+                        .map(|row| row.0)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                assert!(!shell.right_tab_menu.is_open());
+            });
+        }
+        shell.update(cx, |shell, cx| {
+            shell.add_subagent_surface(
+                "parent".into(),
+                "fourth".into(),
+                "fourth".into(),
+                false,
+                cx,
+            );
+        });
+        open_menu(&shell, cx, 0);
+        let position = cx.debug_bounds("right-tab-close-others").unwrap().center();
+        cx.simulate_click(position, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.right_surface_rows(cx).len(), 1);
+            assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(2));
+        });
+    }
+
+    #[gpui::test]
+    fn context_menu_disabled_actions_escape_and_outside_click(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.close_right_surface(RightSurface::Subagent(2), window, cx);
+                window.focus(&shell.shortcut_focus, cx);
+            });
+        });
+        open_menu(&shell, cx, 0);
+        for action in [
+            "right-tab-close-left",
+            "right-tab-close-right",
+            "right-tab-close-others",
+        ] {
+            let position = cx.debug_bounds(action).unwrap().center();
+            cx.simulate_click(position, gpui::Modifiers::default());
+            shell.read_with(cx, |shell, cx| {
+                assert!(shell.right_tab_menu.is_open());
+                assert_eq!(shell.right_surface_rows(cx).len(), 1);
+            });
+        }
+        cx.simulate_keystrokes("escape");
+        shell.read_with(cx, |shell, cx| {
+            assert!(!shell.right_tab_menu.is_open());
+            assert!(
+                shell.overlay_owns_keyboard(cx),
+                "closing menu still blocks shortcuts"
+            );
+        });
+        open_menu(&shell, cx, 0);
+        cx.simulate_click(gpui::point(px(380.), px(350.)), gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| assert!(!shell.right_tab_menu.is_open()));
+    }
+
+    #[gpui::test]
+    fn context_menu_invalidates_when_its_target_disappears_or_pane_hides(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        open_menu(&shell, cx, 0);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.close_right_surface(RightSurface::Subagent(1), window, cx);
+            })
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        shell.read_with(cx, |shell, _| assert!(!shell.right_tab_menu.is_open()));
+        assert!(cx.debug_bounds("right-tab-context-menu").is_none());
+        open_menu(&shell, cx, 0);
+        shell.update(cx, |shell, cx| shell.set_surfaces_open(false, cx));
+        shell.read_with(cx, |shell, _| assert!(!shell.right_tab_menu.is_open()));
+    }
+
+    #[gpui::test]
+    fn file_context_menu_copies_renamed_path_without_selecting_the_file(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        open_menu(&shell, cx, 0);
+        assert!(cx.debug_bounds("right-tab-copy-path").is_none());
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.close_right_tab_menu(cx);
+                shell.state.update(cx, |state, _| {
+                    state.local_device_id = Some("viewer-host".into());
+                    state.chats.push(
+                        serde_json::from_value(serde_json::json!({
+                            "id": "parent", "deviceId": "remote-host", "archived": false,
+                            "cwd": "/only/on/remote", "createdAt": "2026-09-23T00:00:00Z"
+                        }))
+                        .unwrap(),
+                    );
+                });
+                shell.add_file_surface("src/old.rs".into(), window, cx);
+                shell.set_right_active(RightSurface::Subagent(2), cx);
+            })
+        });
+        open_menu(&shell, cx, 2);
+        shell.update(cx, |shell, cx| {
+            shell.rename_file_surface(
+                shell.file_surface_seq,
+                "parent",
+                "src/old.rs",
+                "src/archivo ñ.rs",
+                cx,
+            );
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let position = cx.debug_bounds("right-tab-copy-path").unwrap().center();
+        cx.simulate_click(position, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some("/only/on/remote/src/archivo ñ.rs")
+            );
+            assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(2));
+            assert!(!shell.right_tab_menu.is_open());
+        });
     }
 
     #[gpui::test]

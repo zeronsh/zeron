@@ -6296,7 +6296,7 @@ impl Shell {
 
     // ---- space context menu / rename / delete overlays ----
 
-    fn close_space_menu(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn close_space_menu(&mut self, cx: &mut Context<Self>) {
         if self.space_menu.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.space_menu);
             cx.notify();

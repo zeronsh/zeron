@@ -3694,6 +3694,32 @@ mod tests {
 
 #[cfg(test)]
 impl FilesSurface {
+    /// Simulate a successful engine write (including a retried failed write),
+    /// then run the same lifecycle completion used by the RPC callback.
+    pub(crate) fn finish_test_file_save(&mut self, cx: &mut Context<Self>) {
+        let document = self.preview.documents.get_mut("test.rs").unwrap();
+        let revision = document.revision;
+        document.pending_save = Some(super::document::PendingSave {
+            revision,
+            text: String::new(),
+            expected_content_hash: "old".into(),
+            expected_checkout_id: "checkout".into(),
+            encoding: zeron_proto::WorkspaceWritableEncoding::Utf8,
+            line_ending: zeron_proto::WorkspaceWritableLineEnding::Lf,
+        });
+        assert!(document.finish_save(revision, "saved".into()));
+        self.finish_pending_lifecycle(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn resolve_test_file_close(&mut self, keep_open: bool, cx: &mut Context<Self>) {
+        if keep_open {
+            self.keep_open(cx);
+        } else {
+            self.discard_changes_and_close(cx);
+        }
+    }
+
     pub(crate) fn test_document_text(&self, path: &str) -> Option<String> {
         self.preview
             .documents
