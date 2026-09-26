@@ -724,6 +724,8 @@ pub struct ChatPanels {
 #[derive(Debug, Default)]
 pub struct SessionPanels {
     map: std::collections::HashMap<String, ChatPanels>,
+    /// Unique surface visits, oldest first, independent of the strip order.
+    right_tab_history: std::collections::HashMap<String, Vec<RightSurface>>,
 }
 
 impl SessionPanels {
@@ -747,7 +749,46 @@ impl SessionPanels {
 
     /// Mutate `key`'s flags in place (right-pane surface bookkeeping).
     pub fn update(&mut self, key: &str, f: impl FnOnce(&mut ChatPanels)) {
-        f(self.map.entry(key.to_string()).or_default());
+        let panel = self.map.entry(key.to_string()).or_default();
+        let previous = panel.right_active;
+        f(panel);
+        let surface = panel.right_active;
+        if surface != previous && surface != RightSurface::Picker {
+            let history = self.right_tab_history.entry(key.to_string()).or_default();
+            history.retain(|visited| *visited != surface);
+            history.push(surface);
+        }
+    }
+
+    fn forget_right_surface(&mut self, key: &str, surface: RightSurface) {
+        if let Some(history) = self.right_tab_history.get_mut(key) {
+            history.retain(|visited| *visited != surface);
+            if history.is_empty() {
+                self.right_tab_history.remove(key);
+            }
+        }
+    }
+
+    /// Resolve against live surfaces so stale terminal/entity ids are skipped.
+    /// The strip's first tab remains the fallback for surfaces never visited.
+    fn right_surface_fallback(
+        &self,
+        key: &str,
+        mut available: impl Iterator<Item = RightSurface>,
+    ) -> RightSurface {
+        let Some(first) = available.next() else {
+            return RightSurface::Picker;
+        };
+        let Some(history) = self.right_tab_history.get(key) else {
+            return first;
+        };
+        let live: std::collections::HashSet<_> = std::iter::once(first).chain(available).collect();
+        history
+            .iter()
+            .rev()
+            .find(|surface| live.contains(surface))
+            .copied()
+            .unwrap_or(first)
     }
 }
 
@@ -3008,8 +3049,8 @@ impl Shell {
     }
 
     /// The surface that actually renders: the stored pick when it still
-    /// exists, else the first remaining tab, else the picker. Terminal keys
-    /// go stale when their tab closes/exits — never render a dead surface.
+    /// exists, else the most recently visited live tab, else the picker.
+    /// Terminal keys go stale when their tab closes/exits — never render a dead surface.
     fn resolved_right_active(&self, cx: &App) -> RightSurface {
         let picked = self.panels.get(&self.panel_key(cx)).right_active;
         let rows = self.right_surface_rows(cx);
@@ -3020,9 +3061,10 @@ impl Shell {
         if exists {
             picked
         } else {
-            rows.first()
-                .map(|(s, _, _, _)| *s)
-                .unwrap_or(RightSurface::Picker)
+            self.panels.right_surface_fallback(
+                &self.panel_key(cx),
+                rows.iter().map(|(surface, _, _, _)| *surface),
+            )
         }
     }
 
@@ -3843,12 +3885,11 @@ impl Shell {
             RightSurface::Picker => {}
         }
         self.close_empty_right_pane(&key, cx);
-        let fallback = self
-            .right_tabs
-            .get(&key)
-            .and_then(|tabs| tabs.first())
-            .copied()
-            .unwrap_or_default();
+        self.panels.forget_right_surface(&key, surface);
+        let fallback = self.panels.right_surface_fallback(
+            &key,
+            self.right_tabs.get(&key).into_iter().flatten().copied(),
+        );
         self.panels.update(&key, |p| {
             if p.right_active == surface {
                 p.right_active = fallback;
@@ -3993,12 +4034,15 @@ impl Shell {
         }
         self.pending_file_closes.remove(&surface);
         self.close_empty_right_pane(panel_key, cx);
-        let fallback = self
-            .right_tabs
-            .get(panel_key)
-            .and_then(|tabs| tabs.first())
-            .copied()
-            .unwrap_or_default();
+        self.panels.forget_right_surface(panel_key, surface);
+        let fallback = self.panels.right_surface_fallback(
+            panel_key,
+            self.right_tabs
+                .get(panel_key)
+                .into_iter()
+                .flatten()
+                .copied(),
+        );
         self.panels.update(panel_key, |panel| {
             if panel.right_active == surface {
                 panel.right_active = fallback;
@@ -13264,6 +13308,131 @@ mod tests {
         assert_eq!(panels.get("a").right_active, RightSurface::Terminal(7));
         panels.update("a", |p| p.right_active = RightSurface::File(0));
         assert_eq!(panels.get("a").right_active, RightSurface::File(0));
+    }
+
+    #[test]
+    fn session_panels_right_history_tracks_visits_without_duplicates() {
+        let mut panels = SessionPanels::default();
+        let [a, b, c, d] = [1, 2, 3, 4].map(RightSurface::Browser);
+        for surface in [a, b, c, d, c, b, d, d] {
+            panels.update("chat", |p| p.right_active = surface);
+        }
+        assert_eq!(panels.right_tab_history["chat"], vec![a, c, b, d]);
+        panels.forget_right_surface("chat", d);
+        let next = panels.right_surface_fallback("chat", [a, b, c].into_iter());
+        assert_eq!(next, b);
+        panels.update("chat", |p| p.right_active = next);
+        panels.forget_right_surface("chat", b);
+        assert_eq!(panels.right_surface_fallback("chat", [a, c].into_iter()), c);
+        // Dragging the strip into another order cannot change recency.
+        assert_eq!(panels.right_surface_fallback("chat", [c, a].into_iter()), c);
+    }
+
+    #[test]
+    fn session_panels_right_history_is_scoped_and_skips_stale_surfaces() {
+        let mut panels = SessionPanels::default();
+        let a = RightSurface::File(1);
+        let b = RightSurface::SideChat(2);
+        let stale = RightSurface::Terminal(3);
+        for surface in [a, b, stale] {
+            panels.update("first", |p| p.right_active = surface);
+        }
+        for surface in [b, a] {
+            panels.update("second", |p| p.right_active = surface);
+        }
+        assert_eq!(
+            panels.right_surface_fallback("first", [a, b].into_iter()),
+            b
+        );
+        assert_eq!(
+            panels.right_surface_fallback("second", [a, b].into_iter()),
+            a
+        );
+        assert_eq!(panels.right_surface_fallback("new", [a, b].into_iter()), a);
+        assert_eq!(
+            panels.right_surface_fallback("first", [].into_iter()),
+            RightSurface::Picker
+        );
+        // Changing visibility or showing the picker is not a surface visit.
+        panels.update("first", |p| p.changes_open = true);
+        panels.update("first", |p| p.right_active = RightSurface::Picker);
+        assert_eq!(panels.right_tab_history["first"], vec![a, b, stale]);
+        for surface in [a, b, stale] {
+            panels.forget_right_surface("first", surface);
+        }
+        assert!(!panels.right_tab_history.contains_key("first"));
+        assert_eq!(panels.right_tab_history["second"], vec![b, a]);
+    }
+
+    #[gpui::test]
+    fn right_tabs_close_in_visit_order_across_surface_types(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "owner".into();
+                let mut tabs = Vec::new();
+                for _ in 0..4 {
+                    shell.add_browser_surface(None, window, cx);
+                    tabs.push(RightSurface::Browser(shell.browser_seq));
+                }
+                let [a, b, c, d] = <[_; 4]>::try_from(tabs).unwrap();
+                for surface in [c, b, d] {
+                    shell.set_right_active(surface, cx);
+                }
+                shell.reorder_right_tabs(2, 0, cx);
+                shell.close_right_surface(d, window, cx);
+                assert_eq!(shell.resolved_right_active(cx), b);
+                shell.close_right_surface(a, window, cx);
+                assert_eq!(shell.resolved_right_active(cx), b, "inactive close");
+                shell.close_right_surface(b, window, cx);
+                assert_eq!(shell.resolved_right_active(cx), c);
+
+                shell.add_browser_surface(None, window, cx);
+                let recent = RightSurface::Browser(shell.browser_seq);
+                shell.add_file_surface("README.md".into(), window, cx);
+                let file = RightSurface::File(shell.file_surface_seq);
+                shell.close_right_surface(file, window, cx);
+                assert_eq!(shell.resolved_right_active(cx), recent);
+
+                // A save may complete after switching to another session.
+                shell.add_file_surface("README.md".into(), window, cx);
+                let file = RightSurface::File(shell.file_surface_seq);
+                let owner = shell.panel_key(cx);
+                shell.active_chat = "other".into();
+                shell.add_browser_surface(None, window, cx);
+                let other = RightSurface::Browser(shell.browser_seq);
+                shell.complete_file_close(file, &owner, cx);
+                assert_eq!(shell.resolved_right_active(cx), other);
+                shell.active_chat = "owner".into();
+                assert_eq!(shell.resolved_right_active(cx), recent);
+                shell.close_right_surface(recent, window, cx);
+                shell.close_right_surface(c, window, cx);
+                assert_eq!(shell.resolved_right_active(cx), RightSurface::Picker);
+                assert!(!shell.panels.right_tab_history.contains_key(&owner));
+                assert!(!shell.right_pane_open(cx));
+            })
+            .unwrap();
     }
 
     #[test]
