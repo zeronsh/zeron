@@ -1,7 +1,8 @@
 //! The composer: a hand-rolled multiline text input (adapted from gpui's
 //! `examples/input.rs`), the compact↔expanded flip, the Send/Queue/Stop morph,
-//! optimistic send with failure recovery, per-chat drafts, and the question
-//! wizard that replaces the composer while a run awaits input.
+//! optimistic send with failure recovery, per-chat drafts (persisted in
+//! `ui-settings.json`, so a restart restores what you were typing), and the
+//! question wizard that replaces the composer while a run awaits input.
 //!
 //! Pure decision logic (flip, auto-grow math, button morph, wizard reducer,
 //! pending-input detection) lives in free functions/structs with unit tests;
@@ -5242,7 +5243,10 @@ pub struct Composer {
     /// Composer actions row plus the new-session floating target tab
     /// ([`Pickers::render_new_thread_target_selectors`]).
     pickers: Entity<Pickers>,
-    /// Draft text per chat key ("" = new-chat canvas), surviving navigation.
+    /// Draft text per chat key ("" = new-chat canvas), surviving navigation
+    /// and restarts: the map is the composer's own copy of
+    /// `UiSettings::drafts`, and [`Self::publish_drafts`] keeps the two from
+    /// drifting.
     drafts: HashMap<String, String>,
     /// Staged-but-unsent attachments per chat key (use-attachments.ts `stash`):
     /// navigating away and back restores them; memory-only, like the original.
@@ -5473,9 +5477,11 @@ impl Composer {
         let input_events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Submitted => this.on_submit(cx),
             ComposerInputEvent::ModifiedSubmitted => this.on_modified_submit(cx),
-            ComposerInputEvent::Edited | ComposerInputEvent::CursorMoved => {
-                this.on_input_edited(cx)
+            ComposerInputEvent::Edited => {
+                this.on_input_edited(cx);
+                this.sync_draft(cx);
             }
+            ComposerInputEvent::CursorMoved => this.on_input_edited(cx),
             ComposerInputEvent::ViewportChanged => cx.notify(),
             // The slash popup and the mention popup share the input's
             // completion key routing; they are mutually exclusive by token
@@ -5518,12 +5524,16 @@ impl Composer {
         })
         .detach();
         let current_key = state.read(cx).selected_chat.clone().unwrap_or_default();
+        // Every persisted draft (ui-settings.json) loads up front: the
+        // boot-time selection's text lands in the pill below, every other
+        // chat's text waits in the map for the navigation swap.
+        let drafts = crate::settings::current(cx).drafts;
         let mut composer = Self {
             state,
             input,
             queue_edit_draft: None,
             pickers,
-            drafts: HashMap::new(),
+            drafts,
             attachments: HashMap::new(),
             appshots: HashMap::new(),
             appshot_entrances: HashMap::new(),
@@ -5598,6 +5608,15 @@ impl Composer {
             _picker_focus: picker_focus,
             _input_events: input_events,
         };
+        // Restore the persisted draft for the boot-time selection ("" = the
+        // new-session canvas); every other chat restores through the
+        // navigation swap. Deliberately AFTER the subscriptions exist: the
+        // input's Edited event then goes down the normal sync_draft path —
+        // idempotent here (same text, same key) — so no construction-order
+        // invariant has to hold.
+        if let Some(draft) = composer.drafts.get(&composer.current_key).cloned() {
+            composer.input.update(cx, |input, cx| input.set_text(draft, cx));
+        }
         // Dev knob: pre-stage attachments (drop/paste can't be synthesized on
         // a rig) — `ZERON_ATTACH=/path/a.png[,/path/b.png]`, and
         // `ZERON_ATTACH_PREVIEW=1` boots with the first one's lightbox open.
@@ -6491,6 +6510,56 @@ impl Composer {
         .detach();
     }
 
+    /// The single sanctioned mutator of `drafts`: every mutation publishes,
+    /// so the settings store can never silently drift from the map. (One
+    /// exception: the navigation swap stashes mid-way and publishes via its
+    /// trailing `sync_draft` — publishing mid-swap would write a
+    /// half-swapped state.)
+    fn edit_drafts(
+        &mut self,
+        edit: impl FnOnce(&mut HashMap<String, String>),
+        cx: &mut Context<Self>,
+    ) {
+        edit(&mut self.drafts);
+        self.publish_drafts(cx);
+    }
+
+    /// Publish this viewport's draft map to the device-local store
+    /// (`ui-settings.json`). Debounced like every other settings write — the
+    /// store coalesces and flushes on quit — and a no-op when the map is
+    /// unchanged, so the boot restore's own re-publish costs nothing.
+    fn publish_drafts(&mut self, cx: &mut Context<Self>) {
+        let drafts = self.drafts.clone();
+        crate::settings::update(crate::settings::SavePolicy::Debounced, cx, move |settings| {
+            settings.drafts = drafts;
+        });
+    }
+
+    /// Mirror the input's text into the current chat's draft and publish it.
+    /// The input is the single source of truth for the chat on screen, so this
+    /// runs on every edit. Two inputs are NOT that draft and early-return: a
+    /// queued row being edited in the composer (its text carries attachment
+    /// refs, and the displaced draft lives in `queue_edit_draft`), and the
+    /// question wizard's free-text override — persisting either would publish
+    /// it over the real draft.
+    fn sync_draft(&mut self, cx: &mut Context<Self>) {
+        if self.editing_queued.is_some() || self.wizard.is_some() {
+            return;
+        }
+        let text = self.input.read(cx).text().to_string();
+        let key = self.current_key.clone();
+        self.edit_drafts(
+            move |drafts| {
+                if text.is_empty() {
+                    drafts.remove(&key);
+                } else {
+                    drafts.insert(key, text);
+                }
+            },
+            cx,
+        );
+    }
+
     fn on_input_edited(&mut self, cx: &mut Context<Self>) {
         if self.wizard.is_some() {
             if self.mention.token.is_some() || self.mention_task.is_some() {
@@ -7278,6 +7347,8 @@ impl Composer {
             let returning_to_new_thread = !self.current_key.is_empty() && key.is_empty();
             self.launching_new_chat = false;
             let old_text = self.input.read(cx).text().to_string();
+            // Raw mutation on purpose — `sync_draft` below publishes the
+            // finished swap.
             if old_text.is_empty() {
                 self.drafts.remove(&self.current_key);
             } else {
@@ -7323,6 +7394,11 @@ impl Composer {
                 self.route_snap_until = Some(Instant::now() + Duration::from_millis(ROUTE_SNAP_MS));
             }
             self.input.update(cx, |input, cx| input.set_text(draft, cx));
+            // Publishes the stash above plus the incoming chat's own text, in
+            // one write. It has to happen here rather than at the end of this
+            // function: a question mounting in the same flush would make
+            // `sync_draft` (and the input's own Edited) skip the wizard.
+            self.sync_draft(cx);
         }
 
         // A pending agent question must not take over an active queue edit.
@@ -7779,7 +7855,19 @@ impl Composer {
         });
 
         self.input.update(cx, |input, cx| input.set_text("", cx));
-        self.drafts.remove(&self.current_key);
+        // Both keys, not just the live one: a blank-canvas send mints its chat
+        // and selects it above, but whether that selection has flushed into
+        // `current_key` by now depends on observer timing — and the draft
+        // belongs to whichever key the input was keyed under when it was
+        // typed. This deliberately doesn't bet on it.
+        let sent_key = self.current_key.clone();
+        self.edit_drafts(
+            move |drafts| {
+                drafts.remove(&key);
+                drafts.remove(&sent_key);
+            },
+            cx,
+        );
         self.failure = None;
         self.sending = true;
         // A queued row is represented by the queue panel, not the transcript.
@@ -8260,7 +8348,13 @@ impl Composer {
                         // select_chat(None) above); it loads this draft into
                         // the input on flush — setting the input directly
                         // here would be clobbered by that same swap.
-                        composer.drafts.insert(restore_key.clone(), restore_text.clone());
+                        let key = restore_key.clone();
+                        composer.edit_drafts(
+                            move |drafts| {
+                                drafts.insert(key, restore_text);
+                            },
+                            cx,
+                        );
                     } else {
                         // Already keyed to the restore target (either an
                         // existing chat, or the deleted row's watch event
@@ -8286,6 +8380,10 @@ impl Composer {
                         composer.attachments.insert(restore_key.clone(), merged);
                     }
                     composer.restore_failed_appshots(&staged_appshots, &err_chat_id, &restore_key);
+                    // Input-side mirror of the branch above: the restored
+                    // prose is durable in the same turn, whether it landed in
+                    // the input directly or in the map for a pending swap.
+                    composer.sync_draft(cx);
                 }
                 cx.notify();
             })

@@ -699,6 +699,15 @@ pub struct UiSettings {
     /// written by a pre-tabs build; seeded once from the last space's sessions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub open_tabs: Option<Vec<String>>,
+    /// Composer drafts per chat key ("" = the new-session canvas), so what you
+    /// typed survives a restart the way the selected session does. Device-local
+    /// like the tab strip: the prose belongs to this viewport, and only text is
+    /// stored — staged attachments and Appshots stay in their own maps. The
+    /// composer is the only writer (its `publish_drafts`); the shell copies the
+    /// live map into its working copy before its full-store publish, so a
+    /// geometry save cannot restore a stale draft.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub drafts: std::collections::HashMap<String, String>,
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
@@ -838,6 +847,7 @@ impl Default for UiSettings {
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
+            drafts: std::collections::HashMap::new(),
             space_filter: None,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
             sidebar_sections_by_profile: HashMap::new(),
