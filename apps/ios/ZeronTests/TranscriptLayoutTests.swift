@@ -481,45 +481,37 @@ final class TranscriptLayoutTests: XCTestCase {
         let baseline = hiddenPosition - (try XCTUnwrap(TranscriptLayoutProbe.presentedFrame(for: tailKey))).maxY
         var samples: [GeometrySample] = []
         var events: [String] = []
-        var toggle = 0
-        var showing = false
-        var legStart = hiddenPosition
-        var stableFrames = 0
+        var driver = KeyboardReversalDriver(hiddenPosition: hiddenPosition)
         let completed = await DisplaySampler.observe("Keyboard reverses in flight and finishes hidden") { [self] link in
             let sample = geometrySample(link,
                 position: TranscriptLayoutProbe.presentedFrame(for: key)?.maxY,
-                modelPosition: nil, tailKey: tailKey)
+                modelPosition: TranscriptLayoutProbe.viewports[key]?.maxY, tailKey: tailKey)
             samples.append(sample)
             guard let position = sample.position, let target = sample.modelViewport?.maxY else { return false }
-            if toggle == 0 {
-                toggle = 1
-                showing = true
-                editor.becomeFirstResponder()
-                events.append("show timestamp=\(link.timestamp) position=\(position)")
-                return false
+            let previousPhase = driver.phase
+            let action = driver.observe(position: position, target: target, isFirstResponder: editor.isFirstResponder)
+            if action != nil || driver.phase != previousPhase {
+                events.append("timestamp=\(link.timestamp) position=\(position) target=\(target) \(driver.diagnostic) action=\(String(describing: action))")
             }
-            if toggle == 6 {
-                let hidden = abs(position - hiddenPosition) <= 1 && abs(target - hiddenPosition) <= 1
-                stableFrames = hidden && !editor.isFirstResponder ? stableFrames + 1 : 0
-                return stableFrames == 3
+            switch action {
+            case .setShowing(let showing):
+                if showing { editor.becomeFirstResponder() } else { editor.resignFirstResponder() }
+            case .finished:
+                return true
+            case nil:
+                break
             }
-            // The model viewport supplies the requested endpoint; the presentation
-            // must travel toward it before we reverse. Scheduler wake-ups do not
-            // establish that the keyboard is still moving.
-            guard showing ? target < legStart - 1 : target > legStart + 1 else { return false }
-            let progress = (position - legStart) / (target - legStart)
-            guard progress >= 0.45, progress < 1, abs(position - target) > 1 else { return false }
-            events.append("reverse toggle=\(toggle) timestamp=\(link.timestamp) position=\(position) target=\(target)")
-            legStart = position
-            toggle += 1
-            showing.toggle()
-            if showing { editor.becomeFirstResponder() } else { editor.resignFirstResponder() }
             return false
         }
+        let outcome = "samplerCompleted=\(completed) \(driver.diagnostic)"
+        events.append(outcome)
+        print("interrupted-keyboard-motion: \(outcome)")
         try attachMotion("interrupted-keyboard-motion", samples: samples, events: events)
         let gaps = samples.compactMap(\.gap)
-        XCTAssertTrue(completed, "Keyboard did not complete five observed in-flight reversals")
-        XCTAssertEqual(toggle, 6)
+        XCTAssertTrue(completed && driver.phase == .complete,
+                      "Keyboard did not complete five observed in-flight reversals: \(outcome)")
+        XCTAssertEqual(driver.reversals, 5)
+        XCTAssertFalse(editor.isFirstResponder)
         XCTAssertGreaterThan(samples.count, 1)
         XCTAssertEqual(gaps.count, samples.count, "Viewport and tail must remain presented")
         XCTAssertLessThan(gaps.map { abs($0 - baseline) }.max() ?? .infinity, 4)
