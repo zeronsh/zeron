@@ -213,19 +213,20 @@ final class ComposerBar: UIView, UITextViewDelegate {
         suggestions.isHidden = true
         suggestions.translatesAutoresizingMaskIntoConstraints = false
         suggestions.onPick = { [weak self] file in self?.insertMention(file) }
-        addSubview(suggestions)
+        refreshAction()
+    }
+
+    /// Suggestions float above the bar, outside its bounds — so they live in
+    /// the screen's root view (ancestors would otherwise swallow their taps).
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard let root = findViewController()?.view, suggestions.superview !== root else { return }
+        root.addSubview(suggestions)
         NSLayoutConstraint.activate([
             suggestions.leadingAnchor.constraint(equalTo: leadingAnchor),
             suggestions.trailingAnchor.constraint(equalTo: trailingAnchor),
             suggestions.bottomAnchor.constraint(equalTo: glass.topAnchor, constant: -8),
         ])
-        refreshAction()
-    }
-
-    /// Suggestions float above the bar; let them take touches.
-    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        if !suggestions.isHidden, suggestions.frame.contains(point) { return true }
-        return super.point(inside: point, with: event)
     }
 
     // MARK: Mentions
