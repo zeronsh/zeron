@@ -2791,9 +2791,11 @@ impl ComposerInput {
                 text.clone(),
                 serde_json::json!({ "zeronComposerV1": raw, "text": text }),
             ));
-        } else if let Some(text) = crate::markdown::selection::selected_text() {
-            // The composer keeps focus while the user reads the transcript —
-            // Cmd+C with no input selection copies the markdown selection.
+        } else if self.key_context == MESSAGE_COMPOSER_CONTEXT
+            && let Some(text) = crate::markdown::selection::selected_text()
+        {
+            // Only the message composer keeps focus while reading the transcript.
+            // Generic inputs in dialogs and palettes copy their own selection.
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -9651,6 +9653,9 @@ impl Render for Composer {
 }
 
 #[cfg(test)]
+mod modal_selection_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -11028,6 +11033,24 @@ mod tests {
                 original,
                 "stale discovery cannot change a restored draft"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn message_composer_still_copies_transcript_selection(cx: &mut gpui::TestAppContext) {
+        let _selection = crate::markdown::selection::test_state_lock();
+        with_composer_input(cx, |input, window, cx| {
+            let key = "message-composer-copy-test";
+            let text = "Selected transcript text";
+            input.set_text("Unselected draft", cx);
+            assert_eq!(input.key_context, MESSAGE_COMPOSER_CONTEXT);
+            assert!(input.selected_range.is_empty());
+            crate::markdown::selection::begin_with_span(key, text, 0..text.len());
+            crate::markdown::selection::end_active_drag();
+            input.copy(&Copy, window, cx);
+            let copied = cx.read_from_clipboard().and_then(|item| item.text());
+            crate::markdown::selection::clear_if_owner(key);
+            assert_eq!(copied.as_deref(), Some(text));
         });
     }
 

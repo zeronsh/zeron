@@ -1131,8 +1131,8 @@ pub(super) fn flat_text_presented_element(
     let wash = inline_code_wash(theme);
     let sel_wash = selection_wash(theme);
     let underlay = canvas(
-        |_, _, _| (),
-        move |_, _, window, _| {
+        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |_, hitbox, window, _| {
             for range in &code_ranges {
                 for rect in range_rects(&layout, range, INLINE_CODE_PAD_X, INLINE_CODE_INSET_Y) {
                     window.paint_quad(quad(
@@ -1171,7 +1171,14 @@ pub(super) fn flat_text_presented_element(
                     offsets: offsets.clone(),
                 })
             });
-            register_selection_listeners(window, &sel_key, &flat_text, &layout, offsets.clone());
+            register_selection_listeners(
+                window,
+                hitbox,
+                &sel_key,
+                &flat_text,
+                &layout,
+                offsets.clone(),
+            );
         },
     )
     .absolute()
@@ -1227,19 +1234,22 @@ fn selection_wash(theme: &Theme) -> Hsla {
 /// bubble. Paints the selection wash under the glyphs, registers the element
 /// into the frame's document-ordered registry (so drags span into adjacent
 /// markdown rows and Cmd+C joins in order), and re-registers the mouse
-/// listeners. Call from a paint-phase canvas that sits UNDER the text.
+/// listeners. Call from a paint-phase canvas that sits UNDER the text, passing
+/// the hitbox inserted in that canvas's prepaint phase.
 pub(crate) fn paint_text_selection(
     window: &mut Window,
+    hitbox: gpui::Hitbox,
     key: &std::sync::Arc<str>,
     text: &SharedString,
     layout: &gpui::TextLayout,
     theme: &Theme,
 ) {
-    paint_text_selection_with_wash(window, key, text, layout, selection_wash(theme));
+    paint_text_selection_with_wash(window, hitbox, key, text, layout, selection_wash(theme));
 }
 
 fn paint_text_selection_with_wash(
     window: &mut Window,
+    hitbox: gpui::Hitbox,
     key: &std::sync::Arc<str>,
     text: &SharedString,
     layout: &gpui::TextLayout,
@@ -1265,7 +1275,7 @@ fn paint_text_selection_with_wash(
             offsets: None,
         })
     });
-    register_selection_listeners(window, key, text, layout, None);
+    register_selection_listeners(window, hitbox, key, text, layout, None);
 }
 
 /// The wrapping div shared by every selectable text region: markdown
@@ -1288,9 +1298,9 @@ fn selectable_text_element(
     let styled = StyledText::new(text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
     let underlay = canvas(
-        |_, _, _| (),
-        move |_, _, window, _| {
-            paint_text_selection_with_wash(window, &key, &text, &layout, wash);
+        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |_, hitbox, window, _| {
+            paint_text_selection_with_wash(window, hitbox, &key, &text, &layout, wash);
         },
     )
     .absolute()
@@ -1478,6 +1488,7 @@ pub(crate) fn update_drag_at(position: gpui::Point<gpui::Pixels>) -> bool {
 /// outside the element's bounds; frame-scoped, so paint re-registers).
 fn register_selection_listeners(
     window: &mut Window,
+    hitbox: gpui::Hitbox,
     key: &std::sync::Arc<str>,
     text: &SharedString,
     layout: &gpui::TextLayout,
@@ -1490,7 +1501,10 @@ fn register_selection_listeners(
             if phase != DispatchPhase::Bubble || e.button != MouseButton::Left {
                 return;
             }
-            if layout.bounds().contains(&e.position) {
+            // Geometry alone includes text hidden behind popups or clipping.
+            // Only start a selection when this surface receives the press;
+            // subsequent drag events stay window-wide to span text blocks.
+            if hitbox.is_hovered(window) && layout.bounds().contains(&e.position) {
                 let ix = match layout.index_for_position(e.position) {
                     Ok(ix) | Err(ix) => ix,
                 };
@@ -2390,7 +2404,10 @@ mod tests {
     use crate::markdown::parser::{InlineStyle, parse_full};
     use gpui::TestAppContext;
 
-    struct CodeSelectionHarness;
+    #[derive(Default)]
+    struct CodeSelectionHarness {
+        occluded: bool,
+    }
 
     impl Render for CodeSelectionHarness {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2436,6 +2453,9 @@ mod tests {
                     &opts,
                     &theme,
                 ))
+                .when(self.occluded, |root| {
+                    root.child(div().absolute().inset_0().occlude())
+                })
         }
     }
 
@@ -2443,7 +2463,7 @@ mod tests {
     fn code_block_lines_participate_in_text_selection(cx: &mut TestAppContext) {
         let _selection = super::super::selection::test_state_lock();
         cx.update(|cx| cx.set_global(Theme::dark()));
-        let (_, cx) = cx.add_window_view(|_, _| CodeSelectionHarness);
+        let (_, cx) = cx.add_window_view(|_, _| CodeSelectionHarness::default());
         cx.simulate_resize(size(px(640.0), px(240.0)));
         cx.update(|window, cx| {
             window.refresh();
@@ -2509,6 +2529,54 @@ mod tests {
         super::super::selection::clear_if_owner(before_key);
         assert!(before_bounds.top() < first_bounds.top());
         assert!(second_bounds.bottom() < after_bounds.bottom());
+    }
+
+    #[gpui::test]
+    fn occluded_text_ignores_double_and_triple_clicks(cx: &mut TestAppContext) {
+        let _selection = super::super::selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (view, cx) = cx.add_window_view(|_, _| CodeSelectionHarness { occluded: true });
+        cx.simulate_resize(size(px(640.0), px(240.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let key = "code-selection-test-code1-line0";
+        let position = selection_test_bounds(key).origin + point(px(5.0), px(9.0));
+        for click_count in [2, 3] {
+            cx.simulate_event(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                click_count,
+                ..Default::default()
+            });
+            let dragging = super::super::selection::is_dragging();
+            let selected = super::super::selection::selected_text();
+            cx.simulate_event(gpui::MouseUpEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                ..Default::default()
+            });
+            super::super::selection::clear_if_owner(key);
+            assert_eq!((dragging, selected), (false, None));
+        }
+        view.update(cx, |view, cx| {
+            view.occluded = false;
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        cx.simulate_event(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position,
+            click_count: 2,
+            ..Default::default()
+        });
+        let selected = super::super::selection::selected_text();
+        super::super::selection::clear_if_owner(key);
+        assert_eq!(selected.as_deref(), Some("selectable"));
     }
 
     /// Markdown code blocks are the surface the shared setting's default was

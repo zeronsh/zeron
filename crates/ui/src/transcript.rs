@@ -7603,8 +7603,8 @@ fn user_bubble_text(
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
     let sel_theme = theme.clone();
     let underlay = canvas(
-        |_, _, _| (),
-        move |_, _, window, cx| {
+        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |_, hitbox, window, cx| {
             for span in mentions.iter() {
                 for rect in render::range_rects(&layout, &span.range, 0.0, 2.0) {
                     window.paint_quad(quad(
@@ -7617,7 +7617,7 @@ fn user_bubble_text(
                     ));
                 }
             }
-            render::paint_text_selection(window, &sel_key, &text, &layout, &sel_theme);
+            render::paint_text_selection(window, hitbox, &sel_key, &text, &layout, &sel_theme);
             // Passive geometry cache only: no entity update and no notify.
             // `bounds().height` can be the collapsed clip height, so derive
             // the full text height from the wrapped line layouts instead. The
