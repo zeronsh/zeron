@@ -19,12 +19,12 @@ fn row(
                 .min_w(px(160.0))
                 .flex()
                 .flex_col()
-                .gap(px(4.0))
+                .gap(px(2.0))
                 .child(widgets::row_title(theme, title.to_string()))
                 .child(
                     div()
                         .text_size(crate::typography::ui_rems(12.0))
-                        .line_height(px(18.0))
+                        .line_height(crate::typography::ui_rems(16.0))
                         .text_color(theme.text_muted)
                         .child(SharedString::from(description.to_string())),
                 ),
@@ -33,12 +33,16 @@ fn row(
 }
 
 impl ShortcutsPage {
-    pub(super) fn render_appshots(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = Theme::of(cx).clone();
+    pub(super) fn render_appshots(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = Theme::of(cx).for_settings_surface();
         let accent = theme.accent;
         let capabilities = self.appshot_capabilities;
         let toggle = |id: &'static str, label: &'static str, enabled: bool| {
-            widgets::toggle_switch(&theme, enabled)
+            widgets::toggle_switch(&theme, enabled, id)
                 .id(id)
                 .role(gpui::Role::Switch)
                 .aria_label(label)
@@ -70,51 +74,28 @@ impl ShortcutsPage {
             this.commit_appshots(cx);
             cx.notify();
         }));
-        let destinations = AppshotDestination::ALL
-            .into_iter()
-            .enumerate()
-            .map(|(ix, destination)| {
-                let selected = self.appshot_destination == destination;
-                div()
-                    .id(("appshot-destination", ix))
-                    .role(gpui::Role::Button)
-                    .aria_label(destination.label())
-                    .aria_toggled(if selected {
-                        gpui::Toggled::True
-                    } else {
-                        gpui::Toggled::False
-                    })
-                    .tab_index(0)
-                    .focus_visible(move |style| style.border_2().border_color(accent))
-                    .px(px(10.0))
-                    .py(px(7.0))
-                    .rounded(px(7.0))
-                    .border_1()
-                    .border_color(if selected {
-                        theme.text.opacity(0.24)
-                    } else {
-                        theme.border
-                    })
-                    .bg(if selected {
-                        crate::theme::ink(0.09)
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .text_size(px(11.0))
-                    .text_color(if selected {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.appshot_destination = destination;
-                        this.commit_appshots(cx);
-                        cx.notify();
-                    }))
-                    .child(destination.label())
-            })
-            .collect::<Vec<_>>();
+        let destination = widgets::select(
+            "appshot-destination",
+            "Destination",
+            &theme,
+            |page: &mut Self| &mut page.destination_select,
+        )
+        .options(
+            AppshotDestination::ALL
+                .into_iter()
+                .map(|destination| widgets::SelectOption::new(destination.label())),
+            AppshotDestination::ALL
+                .into_iter()
+                .position(|destination| destination == self.appshot_destination)
+                .unwrap_or_default(),
+        )
+        .width(148.0)
+        .on_select(|page, ix, _, cx| {
+            page.appshot_destination = AppshotDestination::ALL[ix];
+            page.commit_appshots(cx);
+            cx.notify();
+        })
+        .render(&self.destination_select, cx);
         let destination_description = match self.appshot_destination {
             AppshotDestination::Automatic => {
                 "Use the open session, or the new-session composer when no session is open."
@@ -239,12 +220,7 @@ impl ShortcutsPage {
                 false,
                 "Destination",
                 destination_description,
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(6.0))
-                    .children(destinations)
-                    .into_any_element(),
+                destination.into_any_element(),
             ))
             .child(row(
                 &theme,
@@ -279,7 +255,7 @@ impl ShortcutsPage {
             .on_hover(cx.listener(Self::on_scroll_hovered))
             .on_drag_move(cx.listener(Self::on_bar_drag_move))
             .child(
-                div()
+                crate::edge_fade::edge_faded(16.0, true, true, div()
                     .id("appshots-settings-page")
                     .size_full()
                     .overflow_y_scroll()
@@ -315,6 +291,7 @@ impl ShortcutsPage {
                                 div()
                                     .min_h(px(20.0))
                                     .mt(px(8.0))
+                                    .px(px(8.0))
                                     .text_size(px(12.0))
                                     .text_color(theme.text_muted)
                                     .child(helper),
@@ -322,6 +299,7 @@ impl ShortcutsPage {
                             .child(
                                 div()
                                     .mt(px(12.0))
+                                    .pl(px(8.0))
                                     .flex()
                                     .flex_wrap()
                                     .items_center()
@@ -337,7 +315,7 @@ impl ShortcutsPage {
                                     )
                                     .child(refresh),
                             ),
-                    ),
+                    )).fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
             .into_any_element()

@@ -1,13 +1,18 @@
 # Windows development
 
-Windows supports native x64 source builds and portable release ZIPs. Release
-packages offer in-app updates through GitHub; keep `zeron-update.json` beside
-`zeron.exe`. Installers and background services are not supported yet.
+Windows supports native x64 and ARM64 source builds and portable release ZIPs.
+Release packages offer in-app updates through GitHub; keep `zeron-update.json`
+beside `zeron.exe`. Artifact names use Rust's architecture token (`x86_64` or
+`aarch64`) so the updater can find the matching executable; published
+releases currently include x64 only. Installers and background services are
+not supported yet.
 
 ## Build and run
 
 Install stable MSVC Rust, Visual Studio C++ build tools, Windows SDK, CMake,
-and Git for Windows, then run:
+and Git for Windows. On ARM64 also install LLVM so `clang` is on PATH —
+`ring` compiles its crypto with Clang on `aarch64-pc-windows-msvc`, and MSVC
+alone is not enough. Then run:
 
 ```powershell
 cargo run --locked -p zeron

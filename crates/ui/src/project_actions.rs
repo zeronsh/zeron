@@ -128,8 +128,8 @@ impl ProjectActionsController {
             .and_then(ProjectActionsStatus::snapshot)
     }
 
-    /// Snapshot used to keep the control recoverable when the first request
-    /// fails before any host state has been cached.
+    /// Keep a surface for the active project while its first request is pending
+    /// or has failed, without borrowing another project's cached actions.
     pub fn visible_snapshot(&self) -> Option<ProjectActionsSnapshot> {
         let key = self.active.as_ref()?;
         match self.active_status()? {
@@ -139,7 +139,9 @@ impl ProjectActionsController {
                 snapshot: Some(snapshot),
                 ..
             } => Some(snapshot.clone()),
-            ProjectActionsStatus::Unavailable { snapshot: None, .. } => {
+            ProjectActionsStatus::Idle
+            | ProjectActionsStatus::Loading
+            | ProjectActionsStatus::Unavailable { snapshot: None, .. } => {
                 Some(ProjectActionsSnapshot {
                     space_id: key.space_id.clone(),
                     actions: Vec::new(),
@@ -147,20 +149,21 @@ impl ProjectActionsController {
                     project_file_issue: None,
                 })
             }
-            ProjectActionsStatus::Idle
-            | ProjectActionsStatus::Loading
-            | ProjectActionsStatus::Unsupported => None,
+            ProjectActionsStatus::Unsupported => None,
         }
     }
 
     pub fn begin_load(&mut self, key: &ProjectActionsKey) -> u64 {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
-        if self
-            .cache
-            .get(key)
-            .and_then(ProjectActionsStatus::snapshot)
-            .is_none()
+        // Revalidation must not flash a loading control for a host already
+        // known not to support actions.
+        if !matches!(self.cache.get(key), Some(ProjectActionsStatus::Unsupported))
+            && self
+                .cache
+                .get(key)
+                .and_then(ProjectActionsStatus::snapshot)
+                .is_none()
         {
             self.cache
                 .insert(key.clone(), ProjectActionsStatus::Loading);
@@ -284,6 +287,85 @@ mod tests {
     }
 
     #[test]
+    fn first_load_keeps_an_empty_disabled_surface_until_the_response() {
+        for actions in [vec![], vec![action("dev", false)]] {
+            let mut controller = ProjectActionsController::default();
+            let key = ProjectActionsKey {
+                device_id: "local".into(),
+                space_id: "project".into(),
+            };
+            controller.activate(Some(key.clone()));
+            controller
+                .cache
+                .insert(key.clone(), ProjectActionsStatus::Idle);
+            assert!(controller.visible_snapshot().unwrap().actions.is_empty());
+            assert!(!controller.active_status().unwrap().can_run());
+
+            let generation = controller.begin_load(&key);
+            // Rendering while the response is delayed must keep the surface
+            // without making any action available or restarting the request.
+            for _ in 0..3 {
+                assert!(!controller.activate(Some(key.clone())));
+                let visible = controller.visible_snapshot().unwrap();
+                assert_eq!(visible.space_id, key.space_id);
+                assert!(visible.actions.is_empty());
+                assert!(!controller.active_status().unwrap().can_run());
+                assert_eq!(controller.generation, generation);
+            }
+            assert!(controller.accept_load(
+                &key,
+                generation,
+                Ok(ProjectActionsSnapshot {
+                    space_id: key.space_id.clone(),
+                    actions: actions.clone(),
+                    importable_actions: Vec::new(),
+                    project_file_issue: None,
+                }),
+            ));
+            assert_eq!(controller.visible_snapshot().unwrap().actions, actions);
+            assert!(controller.active_status().unwrap().can_run());
+        }
+    }
+
+    #[test]
+    fn switching_projects_isolates_actions_and_returning_keeps_the_cache() {
+        let mut controller = ProjectActionsController::default();
+        let first = ProjectActionsKey {
+            device_id: "a".into(),
+            space_id: "project".into(),
+        };
+        let second = ProjectActionsKey {
+            device_id: "b".into(),
+            space_id: "project".into(),
+        };
+        let snapshot = ProjectActionsSnapshot {
+            space_id: first.space_id.clone(),
+            actions: vec![action("dev", false)],
+            importable_actions: Vec::new(),
+            project_file_issue: None,
+        };
+        controller.activate(Some(first.clone()));
+        let initial = controller.begin_load(&first);
+        assert!(controller.accept_load(&first, initial, Ok(snapshot.clone())));
+        let refresh = controller.begin_load(&first);
+        assert_eq!(controller.visible_snapshot(), Some(snapshot.clone()));
+
+        controller.activate(Some(second.clone()));
+        let second_generation = controller.begin_load(&second);
+        assert!(controller.visible_snapshot().unwrap().actions.is_empty());
+        assert!(!controller.active_status().unwrap().can_run());
+        assert!(!controller.accept_load(&first, refresh, Ok(snapshot.clone())));
+
+        controller.activate(Some(first.clone()));
+        let current = controller.begin_load(&first);
+        assert_eq!(controller.visible_snapshot(), Some(snapshot.clone()));
+        assert!(controller.active_status().unwrap().can_run());
+        assert!(!controller.accept_load(&second, second_generation, Ok(snapshot.clone())));
+        assert!(!controller.accept_load(&first, refresh, Ok(snapshot.clone())));
+        assert!(controller.accept_load(&first, current, Ok(snapshot)));
+    }
+
+    #[test]
     fn late_response_cannot_replace_the_active_project() {
         let mut controller = ProjectActionsController::default();
         let first = ProjectActionsKey {
@@ -329,6 +411,9 @@ mod tests {
             controller.active_status(),
             Some(ProjectActionsStatus::Unsupported)
         ));
+        controller.begin_load(&key);
+        assert!(controller.visible_snapshot().is_none());
+        assert!(!controller.active_status().unwrap().can_run());
 
         let snapshot = ProjectActionsSnapshot {
             space_id: key.space_id.clone(),

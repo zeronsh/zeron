@@ -81,6 +81,17 @@ pub(crate) fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// `~` / `~/…` → this host's home directory. Anything else passes through.
+pub(crate) fn expand_home(cwd: &str) -> String {
+    match cwd.strip_prefix('~') {
+        Some("") => home_dir().to_string_lossy().into_owned(),
+        Some(rest) if rest.starts_with('/') => {
+            home_dir().join(&rest[1..]).to_string_lossy().into_owned()
+        }
+        _ => cwd.to_string(),
+    }
+}
+
 /// Where new worktrees live. Deliberately NOT under the backend data dir —
 /// worktrees are user-facing working checkouts. `ZERON_WORKTREES_DIR` overrides
 /// (test isolation); empty reads as unset.
@@ -2180,6 +2191,15 @@ mod tests {
             nucleo_matcher::Utf32String::from(candidate).slice(..),
             &mut matcher,
         )
+    }
+
+    #[test]
+    fn expand_home_rewrites_tilde_and_leaves_other_paths() {
+        let home = home_dir();
+        assert_eq!(expand_home("~"), home.to_string_lossy());
+        assert_eq!(expand_home("~/proj"), home.join("proj").to_string_lossy());
+        assert_eq!(expand_home("/abs/path"), "/abs/path");
+        assert_eq!(expand_home("~nope"), "~nope");
     }
 
     #[test]

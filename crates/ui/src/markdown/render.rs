@@ -15,9 +15,9 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, BorderStyle, Bounds, Context, FontStyle, FontWeight, Hsla, Render, SharedString,
-    StyledText, TextRun, UnderlineStyle, Window, canvas, div, font, point, prelude::*, px, quad,
-    size,
+    AnyElement, BorderStyle, Bounds, Context, CursorStyle, Div, FontStyle, FontWeight, Hsla,
+    Render, SharedString, StyledText, TextRun, UnderlineStyle, Window, canvas, div, font, point,
+    prelude::*, px, quad, size,
 };
 use zeron_syntax::{HighlightKind, HighlightSpan, HighlightedDocument};
 
@@ -1176,8 +1176,7 @@ pub(super) fn flat_text_presented_element(
     )
     .absolute()
     .size_full();
-    let child = div()
-        .relative()
+    let child = selectable_text_wrap()
         .child(underlay)
         .child(text_el)
         .into_any_element();
@@ -1269,6 +1268,17 @@ fn paint_text_selection_with_wash(
     register_selection_listeners(window, key, text, layout, None);
 }
 
+/// The wrapping div shared by every selectable text region: markdown
+/// paragraphs (and their table/list/quote kin), code lines, and the
+/// transcript's user bubbles. `relative` so the selection underlay can
+/// paint beneath the text, I-beam so hovering the region reads as text.
+/// Link hitboxes overlay the wrapper with `.cursor_pointer()` and the
+/// topmost hitbox under the mouse wins, so links inside keep the hand
+/// cursor.
+pub(crate) fn selectable_text_wrap() -> Div {
+    div().relative().cursor(CursorStyle::IBeam)
+}
+
 fn selectable_text_element(
     key: std::sync::Arc<str>,
     text: SharedString,
@@ -1285,8 +1295,7 @@ fn selectable_text_element(
     )
     .absolute()
     .size_full();
-    div()
-        .relative()
+    selectable_text_wrap()
         .child(underlay)
         .child(styled)
         .into_any_element()
@@ -2257,6 +2266,7 @@ fn render_code_block_source_with_actions(
                     .right(px(0.0))
                     .bottom(px(0.0))
                     .h(px(CODE_SCROLLBAR_HIT_HEIGHT))
+                    .cursor(CursorStyle::Arrow)
                     .on_hover(move |hovered, window, cx| hover(*hovered, window, cx))
                     .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
                         press(event.position.x, window, cx);
@@ -2983,6 +2993,16 @@ mod tests {
         cache.retain_rows(&std::collections::HashSet::new());
         assert!(cache.flats.is_empty());
         assert!(cache.code.is_empty());
+    }
+
+    #[test]
+    fn selectable_text_wrap_is_ibeam_cursor() {
+        // The wrapper shared by every selectable text region (paragraphs,
+        // code lines, user bubbles) must hover with the text cursor. Links
+        // and code action buttons paint their own `.cursor_pointer()`
+        // hitboxes above this wrapper, so they keep the hand cursor.
+        let mut wrap = selectable_text_wrap();
+        assert_eq!(wrap.style().mouse_cursor, Some(CursorStyle::IBeam));
     }
 
     #[test]

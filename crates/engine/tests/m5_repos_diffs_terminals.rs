@@ -5,13 +5,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStringExt;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
 use zeron_engine::{
     EngineCore, HarnessRegistry, Repos, Terminals, capture_commit_diff, capture_diff,
-    capture_diff_against, capture_turn_diff, merge_base, read_diff_file_text, snapshot_tree,
-    working_diff_base,
+    capture_diff_against, capture_turn_diff, discard_working_tree, merge_base, read_diff_file_text,
+    snapshot_tree, working_diff_base,
 };
 use zeron_proto::{
     CreateWorktreeOutcome, GitHistoryRefKind, ProjectActionDraft, ProjectActionIcon,
@@ -569,6 +572,299 @@ async fn diff_capture_tracked_untracked_and_checksum() {
         .await
         .expect("changed capture");
     assert_ne!(snapshot.checksum, changed.checksum);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn diff_capture_marks_non_utf8_paths_partial_and_discard_refuses_them() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tmp.path().join("repo");
+    init_repo(&repo_dir).await;
+    let repos = test_repos(&tmp.path().join("data"));
+
+    let invalid_name = std::ffi::OsString::from_vec(b"untracked-\xff.txt".to_vec());
+    let invalid_path = repo_dir.join(&invalid_name);
+    std::fs::write(&invalid_path, "must survive\n").expect("invalid UTF-8 path");
+
+    let snapshot = capture_diff(&repos, &repo_dir).await.expect("snapshot");
+    assert!(snapshot.truncated, "path cannot be represented losslessly");
+    let error = discard_working_tree(&repos, &repo_dir, &snapshot.checksum)
+        .await
+        .expect_err("partial snapshot must not be discarded");
+    assert!(error.to_string().contains("partial diff"), "{error}");
+    assert!(invalid_path.exists());
+}
+
+#[tokio::test]
+async fn discard_working_tree_restores_tracked_staged_and_untracked_only() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tmp.path().join("repo");
+    init_repo(&repo_dir).await;
+    let repos = test_repos(&tmp.path().join("data"));
+
+    std::fs::write(repo_dir.join(".gitignore"), "ignored.log\n").expect("gitignore");
+    std::fs::write(repo_dir.join("deleted.txt"), "delete me\n").expect("deleted fixture");
+    std::fs::write(repo_dir.join("old.txt"), "rename me\n").expect("rename fixture");
+    git(&repo_dir, &["add", ".gitignore", "deleted.txt", "old.txt"]).await;
+    git(&repo_dir, &["commit", "-m", "fixtures"]).await;
+
+    let other_worktree = tmp.path().join("other-worktree");
+    git(
+        &repo_dir,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "other",
+            other_worktree.to_str().unwrap(),
+        ],
+    )
+    .await;
+    std::fs::write(other_worktree.join("a.txt"), "other worktree edit\n")
+        .expect("other worktree edit");
+
+    std::fs::write(repo_dir.join("a.txt"), "staged\n").expect("staged edit");
+    git(&repo_dir, &["add", "a.txt"]).await;
+    std::fs::write(repo_dir.join("a.txt"), "staged then unstaged\n").expect("unstaged edit");
+    std::fs::remove_file(repo_dir.join("deleted.txt")).expect("delete tracked");
+    git(&repo_dir, &["mv", "old.txt", "new.txt"]).await;
+    std::fs::write(repo_dir.join("new.txt"), "renamed and edited\n").expect("edit rename");
+    std::fs::write(repo_dir.join("staged-new.txt"), "staged new\n").expect("staged new");
+    git(&repo_dir, &["add", "staged-new.txt"]).await;
+    std::fs::write(repo_dir.join("untracked.txt"), "untracked\n").expect("untracked");
+    std::fs::create_dir(repo_dir.join("untracked-dir")).expect("untracked dir");
+    std::fs::write(repo_dir.join("untracked-dir/file.txt"), "nested\n").expect("nested file");
+    std::fs::write(repo_dir.join(":(glob)*"), "literal pathspec\n").expect("magic path");
+    std::fs::write(repo_dir.join("ignored.log"), "keep me\n").expect("ignored");
+
+    let head_before = git_stdout(&repo_dir, &["rev-parse", "HEAD"]).await;
+    let snapshot = capture_diff(&repos, &repo_dir)
+        .await
+        .expect("dirty snapshot");
+    let clean = discard_working_tree(&repos, &repo_dir, &snapshot.checksum)
+        .await
+        .expect("discard succeeds");
+
+    assert!(clean.files.is_empty());
+    assert!(clean.patch.is_empty());
+    assert_eq!(
+        git_stdout(&repo_dir, &["rev-parse", "HEAD"]).await,
+        head_before
+    );
+    assert!(
+        git_stdout(&repo_dir, &["status", "--porcelain=v1"])
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo_dir.join("a.txt")).unwrap(),
+        "one\ntwo\n"
+    );
+    assert!(repo_dir.join("deleted.txt").exists());
+    assert!(repo_dir.join("old.txt").exists());
+    assert!(!repo_dir.join("new.txt").exists());
+    assert!(!repo_dir.join("staged-new.txt").exists());
+    assert!(!repo_dir.join("untracked.txt").exists());
+    assert!(!repo_dir.join("untracked-dir").exists());
+    assert!(!repo_dir.join(":(glob)*").exists());
+    assert_eq!(
+        std::fs::read_to_string(repo_dir.join("ignored.log")).unwrap(),
+        "keep me\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(other_worktree.join("a.txt")).unwrap(),
+        "other worktree edit\n"
+    );
+}
+
+#[tokio::test]
+async fn discard_working_tree_rejects_stale_snapshot_without_mutating_files() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tmp.path().join("repo");
+    init_repo(&repo_dir).await;
+    let repos = test_repos(&tmp.path().join("data"));
+
+    std::fs::write(repo_dir.join("a.txt"), "first edit\n").expect("first edit");
+    let snapshot = capture_diff(&repos, &repo_dir).await.expect("snapshot");
+    std::fs::write(repo_dir.join("a.txt"), "external edit\n").expect("external edit");
+    std::fs::write(repo_dir.join("new.txt"), "external file\n").expect("external file");
+
+    let error = discard_working_tree(&repos, &repo_dir, &snapshot.checksum)
+        .await
+        .expect_err("stale snapshot rejected");
+    assert!(error.to_string().contains("changed since"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(repo_dir.join("a.txt")).unwrap(),
+        "external edit\n"
+    );
+    assert!(repo_dir.join("new.txt").exists());
+}
+
+#[tokio::test]
+async fn discard_working_tree_rejects_repository_without_a_commit() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tmp.path().join("repo");
+    std::fs::create_dir(&repo_dir).expect("repo");
+    git(&repo_dir, &["init", "-b", "main"]).await;
+    std::fs::write(repo_dir.join("new.txt"), "keep\n").expect("untracked");
+    let repos = test_repos(&tmp.path().join("data"));
+    let snapshot = capture_diff(&repos, &repo_dir).await.expect("snapshot");
+
+    let error = discard_working_tree(&repos, &repo_dir, &snapshot.checksum)
+        .await
+        .expect_err("unborn HEAD rejected");
+    assert!(error.to_string().contains("first commit"), "{error}");
+    assert!(repo_dir.join("new.txt").exists());
+}
+
+#[tokio::test]
+async fn discard_working_tree_never_removes_an_untracked_nested_repository() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tmp.path().join("repo");
+    init_repo(&repo_dir).await;
+    let nested = repo_dir.join("nested");
+    std::fs::create_dir(&nested).expect("nested dir");
+    git(&nested, &["init", "-b", "main"]).await;
+    std::fs::write(nested.join("keep.txt"), "nested data\n").expect("nested file");
+    let repos = test_repos(&tmp.path().join("data"));
+    let snapshot = capture_diff(&repos, &repo_dir).await.expect("snapshot");
+
+    let error = discard_working_tree(&repos, &repo_dir, &snapshot.checksum)
+        .await
+        .expect_err("nested repository is retained");
+    assert!(error.to_string().contains("nested repository"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(nested.join("keep.txt")).unwrap(),
+        "nested data\n"
+    );
+    assert!(nested.join(".git").exists());
+}
+
+#[tokio::test]
+async fn discard_working_tree_refuses_a_dirty_submodule_before_mutating() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let upstream = tmp.path().join("upstream");
+    init_repo(&upstream).await;
+    let repo_dir = tmp.path().join("repo");
+    init_repo(&repo_dir).await;
+    git(
+        &repo_dir,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            upstream.to_str().unwrap(),
+            "sub",
+        ],
+    )
+    .await;
+    git(&repo_dir, &["commit", "-m", "submodule"]).await;
+    std::fs::write(repo_dir.join("sub/a.txt"), "submodule edit\n").expect("submodule edit");
+    std::fs::write(repo_dir.join("a.txt"), "parent edit\n").expect("parent edit");
+    std::fs::write(repo_dir.join("untracked.txt"), "untracked\n").expect("untracked");
+    let repos = test_repos(&tmp.path().join("data"));
+    let snapshot = capture_diff(&repos, &repo_dir).await.expect("snapshot");
+
+    let error = discard_working_tree(&repos, &repo_dir, &snapshot.checksum)
+        .await
+        .expect_err("dirty submodule is refused");
+    assert!(error.to_string().contains("submodule"), "{error}");
+    // All-or-nothing: nothing else was discarded either.
+    assert_eq!(
+        std::fs::read_to_string(repo_dir.join("sub/a.txt")).unwrap(),
+        "submodule edit\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo_dir.join("a.txt")).unwrap(),
+        "parent edit\n"
+    );
+    assert!(repo_dir.join("untracked.txt").exists());
+}
+
+#[tokio::test]
+async fn discard_working_tree_refuses_a_tracked_file_replaced_by_a_directory() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tmp.path().join("repo");
+    init_repo(&repo_dir).await;
+    std::fs::write(repo_dir.join(".gitignore"), "*.log\n").expect("gitignore");
+    std::fs::write(repo_dir.join("tracked"), "file\n").expect("tracked");
+    git(&repo_dir, &["add", ".gitignore", "tracked"]).await;
+    git(&repo_dir, &["commit", "-m", "fixtures"]).await;
+    // Only an ignored file lives in the replacing directory, so status reports
+    // just ` D tracked`; restoring it would delete the ignored file.
+    std::fs::remove_file(repo_dir.join("tracked")).expect("remove tracked");
+    std::fs::create_dir(repo_dir.join("tracked")).expect("replacing dir");
+    std::fs::write(repo_dir.join("tracked/keep.log"), "keep me\n").expect("ignored");
+    let repos = test_repos(&tmp.path().join("data"));
+    let snapshot = capture_diff(&repos, &repo_dir).await.expect("snapshot");
+
+    let error = discard_working_tree(&repos, &repo_dir, &snapshot.checksum)
+        .await
+        .expect_err("directory replacement is refused");
+    assert!(error.to_string().contains("directory"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(repo_dir.join("tracked/keep.log")).unwrap(),
+        "keep me\n"
+    );
+}
+
+#[tokio::test]
+async fn discard_working_tree_handles_more_paths_than_one_command_line() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tmp.path().join("repo");
+    init_repo(&repo_dir).await;
+    // ~40 KiB of path arguments: several git invocations per step.
+    std::fs::create_dir(repo_dir.join("generated")).expect("generated dir");
+    for index in 0..800 {
+        std::fs::write(
+            repo_dir.join(format!(
+                "generated/untracked-file-with-a-long-name-{index:04}.txt"
+            )),
+            "x\n",
+        )
+        .expect("untracked file");
+    }
+    std::fs::write(repo_dir.join("a.txt"), "edited\n").expect("tracked edit");
+    let repos = test_repos(&tmp.path().join("data"));
+    let snapshot = capture_diff(&repos, &repo_dir).await.expect("snapshot");
+    assert!(!snapshot.truncated);
+
+    let clean = discard_working_tree(&repos, &repo_dir, &snapshot.checksum)
+        .await
+        .expect("discard succeeds");
+    assert!(clean.files.is_empty());
+    assert!(!repo_dir.join("generated").exists());
+    assert_eq!(
+        std::fs::read_to_string(repo_dir.join("a.txt")).unwrap(),
+        "one\ntwo\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn discard_working_tree_removes_untracked_symlinks_without_following_them() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tmp.path().join("repo");
+    init_repo(&repo_dir).await;
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir(&outside).expect("outside dir");
+    std::fs::write(outside.join("precious.txt"), "outside\n").expect("outside file");
+    std::os::unix::fs::symlink(&outside, repo_dir.join("dir-link")).expect("dir symlink");
+    std::os::unix::fs::symlink(outside.join("precious.txt"), repo_dir.join("file-link"))
+        .expect("file symlink");
+    let repos = test_repos(&tmp.path().join("data"));
+    let snapshot = capture_diff(&repos, &repo_dir).await.expect("snapshot");
+
+    discard_working_tree(&repos, &repo_dir, &snapshot.checksum)
+        .await
+        .expect("discard succeeds");
+    assert!(std::fs::symlink_metadata(repo_dir.join("dir-link")).is_err());
+    assert!(std::fs::symlink_metadata(repo_dir.join("file-link")).is_err());
+    assert_eq!(
+        std::fs::read_to_string(outside.join("precious.txt")).unwrap(),
+        "outside\n"
+    );
 }
 
 #[tokio::test]
@@ -1948,6 +2244,53 @@ async fn rpc_dispatch_for_m5_methods() {
         .expect("stream alive");
     assert!(first.is_array());
 
+    // DiscardWorkingTree resolves the path from the chat, rejects stale UI
+    // state, then clears tracked and untracked changes without changing HEAD.
+    std::fs::write(repo_dir.join("file.txt"), "edited\n").expect("tracked edit");
+    std::fs::write(repo_dir.join("untracked.txt"), "new\n").expect("untracked");
+    core.diff_sync.reconcile_now().await;
+    let identity = core
+        .repos
+        .checkout_identity(&repo_dir)
+        .await
+        .expect("checkout identity");
+    let dirty = capture_diff(&core.repos, &repo_dir)
+        .await
+        .expect("dirty diff");
+    let checkout_id = identity.id;
+    assert!(
+        client
+            .call(
+                methods::DISCARD_WORKING_TREE,
+                serde_json::json!({
+                    "chatId": "search-chat",
+                    "checkoutId": checkout_id.clone(),
+                    "expectedChecksum": "stale"
+                }),
+            )
+            .await
+            .is_err(),
+        "stale checksum must be rejected"
+    );
+    assert!(repo_dir.join("untracked.txt").exists());
+    let discarded = client
+        .call(
+            methods::DISCARD_WORKING_TREE,
+            serde_json::json!({
+                "chatId": "search-chat",
+                "checkoutId": checkout_id,
+                "expectedChecksum": dirty.checksum
+            }),
+        )
+        .await
+        .expect("DiscardWorkingTree");
+    assert_eq!(discarded["ok"], true);
+    assert!(
+        git_stdout(&repo_dir, &["status", "--porcelain=v1"])
+            .await
+            .is_empty()
+    );
+
     // Terminals: the chat's cwd (via its space) becomes the PTY cwd.
     client
         .call(
@@ -1982,6 +2325,48 @@ async fn rpc_dispatch_for_m5_methods() {
         .expect("OpenTerminal");
     let terminal_id = session["id"].as_str().expect("terminal id").to_string();
     assert_eq!(session["cwd"], repo_path);
+
+    // New-chat canvas: no chat row. The space id in chatId is enough even
+    // when the UI still sends `~` (spaces watch not landed) or omits cwd.
+    let canvas = client
+        .call(
+            methods::OPEN_TERMINAL,
+            serde_json::json!({
+                "chatId": "space-canvas:space-term",
+                "cols": 80,
+                "rows": 24,
+                "cwd": "~",
+            }),
+        )
+        .await
+        .expect("OpenTerminal on canvas");
+    assert_eq!(canvas["cwd"], repo_path);
+    client
+        .call(
+            methods::CLOSE_TERMINAL,
+            serde_json::json!({ "terminalId": canvas["id"] }),
+        )
+        .await
+        .expect("CloseTerminal canvas");
+    let inferred = client
+        .call(
+            methods::OPEN_TERMINAL,
+            serde_json::json!({
+                "chatId": "space-canvas:space-term",
+                "cols": 80,
+                "rows": 24,
+            }),
+        )
+        .await
+        .expect("OpenTerminal on canvas without cwd");
+    assert_eq!(inferred["cwd"], repo_path);
+    client
+        .call(
+            methods::CLOSE_TERMINAL,
+            serde_json::json!({ "terminalId": inferred["id"] }),
+        )
+        .await
+        .expect("CloseTerminal inferred canvas");
 
     let mut stream = client
         .subscribe(

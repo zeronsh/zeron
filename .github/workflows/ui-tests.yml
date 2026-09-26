@@ -34,6 +34,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: read
+    outputs:
+      ios: ${{ steps.filter.outputs.result }}
+    steps:
+      - uses: actions/github-script@v8
+        id: filter
+        with:
+          script: |
+            // Preserve iOS coverage for main pushes and manual runs.
+            if (context.eventName !== 'pull_request') return true;
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              ...context.repo,
+              pull_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+            // Run conservatively if the API did not return the full diff.
+            if (files.length < context.payload.pull_request.changed_files) return true;
+            const affectsIOS = path => path?.startsWith('apps/ios/')
+              || path === '.github/workflows/ui-tests.yml';
+            return files.some(file => affectsIOS(file.filename)
+              || affectsIOS(file.previous_filename));
+
   session-sync-regressions:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -140,6 +165,8 @@ jobs:
         run: cargo test --release --locked -p gpui_macos --test frame_source_recovery
 
   ios-tests:
+    needs: changes
+    if: needs.changes.outputs.ios == 'true'
     runs-on: macos-latest
     timeout-minutes: 30
     steps:

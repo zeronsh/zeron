@@ -953,6 +953,11 @@ impl MarkdownPreview {
     }
 
     #[cfg(test)]
+    pub(super) fn test_suspended(&self) -> bool {
+        self.suspended
+    }
+
+    #[cfg(test)]
     pub(super) fn test_block_bounds(&self, ix: usize) -> gpui::Bounds<gpui::Pixels> {
         let mut bounds = self.list.bounds_for_item(ix).unwrap();
         // GPUI's bounds_for_item omits the list padding applied during paint.

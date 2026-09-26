@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.83"
+version = "0.2.91"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -68,15 +68,15 @@ loro-protocol = "0.3"
 # Linux — the Metal path's snapshot/blur/composite, ported).
 # Paint-time rounded image masks (#9), bounded Windows backdrop blur and
 # translucent compositing, plus blur-aware scene batching (#10).
-gpui = { git = "https://github.com/zeronsh/zui", rev = "c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add" }
-gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add", features = [
+gpui = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda" }
+gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add" }
-gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "03cd9947a6aa07921cb284ad66c87fd6735e55b0" }
+gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda" }
+gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "103f13da91ff2c7c52941bdc2b1910f29716dc19" }
 
 # diffs
 similar = "2"
@@ -129,7 +129,9 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 fontdb = "0.23"
 ttf-parser = "0.25.1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+# Packaged GUI apps do not inherit shell proxy variables; honor the macOS and
+# Windows system proxy for provider usage probes and other HTTP clients.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "system-proxy"] }
 ignore = "0.4"
 nucleo-matcher = "0.3"
 
@@ -145,11 +147,3 @@ opt-level = 0
 
 [profile.dev.package."*"]
 opt-level = 2
-
-# Temporary renderer override for the companion per-pixel text fade PR.
-# Replace with an upstream revision once it merges.
-[patch."https://github.com/zeronsh/zui"]
-gpui = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }
-gpui_macros = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }
-gpui_platform = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }
-gpui_tokio = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }

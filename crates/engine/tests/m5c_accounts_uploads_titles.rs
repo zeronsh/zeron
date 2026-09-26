@@ -12,6 +12,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL;
+use sha2::{Digest as _, Sha256};
 
 use zeron_engine::{
     AgentAccounts, AgentAccountsConfig, EngineCore, HarnessRegistry, Repos, Uploads,
@@ -36,6 +37,12 @@ fn test_accounts(root: &Path) -> (AgentAccounts, AgentAccountsConfig) {
         claude_config_file: root.join("claude.json"),
         codex_home: root.join("codex"),
         cursor_sdk_auth_file: root.join("cursor-sdk").join("auth.json"),
+        // File-only: a temp config must never reach the real Keychain login.
+        claude_keychain_service: None,
+        antigravity_home: Some(root.join("gemini")),
+        antigravity_keychain: false,
+        // Grok / Devin / OpenCode / Pi / Hermes: temp homes too.
+        ..AgentAccountsConfig::isolated(root)
     };
     (AgentAccounts::new(config.clone()), config)
 }
@@ -91,6 +98,23 @@ fn fake_id_token(email: &str, account_id: &str, plan: &str) -> String {
     format!("{header}.{payload}.x")
 }
 
+fn fake_team_id_token(email: &str, user_id: &str, workspace_id: &str) -> String {
+    let header = BASE64_URL.encode(br#"{"alg":"none"}"#);
+    let payload = BASE64_URL.encode(
+        serde_json::json!({
+            "email": email,
+            "name": "Codex Team User",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": workspace_id,
+                "chatgpt_user_id": user_id,
+                "chatgpt_plan_type": "team",
+            },
+        })
+        .to_string(),
+    );
+    format!("{header}.{payload}.x")
+}
+
 fn write_codex_login(config: &AgentAccountsConfig, email: &str, account_id: &str) {
     std::fs::create_dir_all(&config.codex_home).expect("codex home");
     std::fs::write(
@@ -105,6 +129,27 @@ fn write_codex_login(config: &AgentAccountsConfig, email: &str, account_id: &str
         .to_string(),
     )
     .expect("codex auth");
+}
+
+fn write_codex_team_login(
+    config: &AgentAccountsConfig,
+    email: &str,
+    user_id: &str,
+    workspace_id: &str,
+) {
+    std::fs::create_dir_all(&config.codex_home).expect("codex home");
+    std::fs::write(
+        config.codex_home.join("auth.json"),
+        serde_json::json!({
+            "tokens": {
+                "id_token": fake_team_id_token(email, user_id, workspace_id),
+                "access_token": format!("at-{user_id}"),
+                "account_id": workspace_id,
+            }
+        })
+        .to_string(),
+    )
+    .expect("codex team auth");
 }
 
 fn account_emails(snapshot: &AgentAccountsSnapshot, harness: HarnessId) -> Vec<(String, bool)> {
@@ -437,6 +482,54 @@ async fn codex_slot_swap_and_api_key_detection() {
 }
 
 #[tokio::test]
+async fn codex_team_seats_are_distinct_and_legacy_slots_are_migrated() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (accounts, config) = test_accounts(tmp.path());
+    write_codex_team_login(&config, "erin@team.com", "user-erin", "ws-team");
+    let snapshot = accounts.list(false).await.expect("list erin");
+    let erin_id = snapshot
+        .accounts
+        .iter()
+        .find(|a| a.email.as_deref() == Some("erin@team.com"))
+        .expect("erin")
+        .id
+        .clone();
+
+    // Simulate the workspace-only slot format written by older versions.
+    let slots = config.data_dir.join("agent-accounts").join("codex");
+    let mut legacy: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(slots.join(format!("{erin_id}.json"))).expect("erin slot"),
+    )
+    .expect("slot json");
+    let digest = Sha256::digest(b"codex:ws-team");
+    let legacy_id = digest[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    legacy["id"] = serde_json::json!(legacy_id);
+    legacy["accountKey"] = serde_json::json!("ws-team");
+    std::fs::write(slots.join(format!("{legacy_id}.json")), legacy.to_string())
+        .expect("legacy slot");
+    std::fs::remove_file(slots.join(format!("{erin_id}.json"))).expect("remove new slot");
+
+    // Another teammate in the same workspace must get a separate slot, and
+    // migration must preserve Erin's credentials under her stable new id.
+    write_codex_team_login(&config, "finn@team.com", "user-finn", "ws-team");
+    let snapshot = accounts.list(false).await.expect("list finn");
+    let mut emails = account_emails(&snapshot, HarnessId::Codex);
+    emails.sort();
+    assert_eq!(
+        emails,
+        vec![
+            ("erin@team.com".to_string(), false),
+            ("finn@team.com".to_string(), true),
+        ]
+    );
+    assert!(!slots.join(format!("{legacy_id}.json")).exists());
+    assert!(slots.join(format!("{erin_id}.json")).exists());
+}
+
+#[tokio::test]
 async fn forget_guards_and_removes_slots() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (accounts, config) = test_accounts(tmp.path());
@@ -457,14 +550,6 @@ async fn forget_guards_and_removes_slots() {
             .await
             .is_err()
     );
-    // The live login can't be forgotten (it would just be re-detected).
-    assert!(
-        accounts
-            .forget(HarnessId::ClaudeCode, &alice_id)
-            .await
-            .is_err()
-    );
-
     // A non-active slot forgets cleanly.
     write_claude_login(&config, "bob@example.com", "uuid-bob", "token-bob");
     accounts.list(false).await.expect("list bob");
@@ -476,6 +561,191 @@ async fn forget_guards_and_removes_slots() {
         account_emails(&snapshot, HarnessId::ClaudeCode),
         vec![("bob@example.com".to_string(), true)]
     );
+
+    // The live (and only) login forgets too — by signing the CLI out, so it
+    // isn't re-detected; the rest of ~/.claude.json survives.
+    let bob_id = snapshot.accounts[0].id.clone();
+    let snapshot = accounts
+        .forget(HarnessId::ClaudeCode, &bob_id)
+        .await
+        .expect("forget live bob");
+    assert!(account_emails(&snapshot, HarnessId::ClaudeCode).is_empty());
+    let cfg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config.claude_config_file).unwrap())
+            .unwrap();
+    assert!(cfg.get("oauthAccount").is_none());
+    assert!(cfg["projects"].get("/keep/me").is_some());
+    let creds: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(config.claude_config_dir.join(".credentials.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(creds.get("claudeAiOauth").is_none());
+}
+
+/// Grok, Devin, OpenCode and Pi through the public API: each live login is
+/// snapshotted, a second login is kept beside it, and switching rewrites
+/// exactly that agent's store (for OpenCode/Pi: exactly that provider's
+/// entry) at 0600.
+#[tokio::test]
+async fn grok_devin_opencode_and_pi_logins_swap_round_trip() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (accounts, config) = test_accounts(tmp.path());
+    let write = |path: &Path, contents: String| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    };
+    let grok = |user: &str| {
+        serde_json::json!({ "https://auth.x.ai::c": {
+            "key": format!("key-{user}"), "refresh_token": "r", "oidc_issuer": "https://auth.x.ai",
+            "oidc_client_id": "c", "user_id": user, "email": format!("{user}@x.ai"),
+        }})
+        .to_string()
+    };
+    let devin = |key: &str| format!("windsurf_api_key = \"{key}\"\n");
+    let chatgpt = |account: &str| {
+        let claims = serde_json::json!({
+            "https://api.openai.com/auth": { "chatgpt_account_id": account, "chatgpt_plan_type": "plus" },
+            "https://api.openai.com/profile": { "email": format!("{account}@example.com") },
+        });
+        serde_json::json!({
+            "type": "oauth",
+            "access": format!("e30.{}.sig", BASE64_URL.encode(claims.to_string())),
+            "refresh": format!("refresh-{account}"),
+            "expires": 1,
+            "accountId": account,
+        })
+    };
+    let grok_file = config.grok_home.join("auth.json");
+    let opencode_file = config.opencode_auth_file.clone();
+    let pi_file = config.pi_agent_dir.join("auth.json");
+    let opencode = |account: &str| {
+        serde_json::json!({ "openai": chatgpt(account), "openrouter": { "type": "api", "key": "keep" } })
+            .to_string()
+    };
+    let pi = |account: &str| serde_json::json!({ "openai-codex": chatgpt(account) }).to_string();
+
+    write(&grok_file, grok("ann"));
+    write(&config.devin_credentials_file, devin("devin-ann"));
+    write(&opencode_file, opencode("ann"));
+    write(&pi_file, pi("ann"));
+    let first = accounts.list(false).await.expect("list");
+    let id_of = |snapshot: &AgentAccountsSnapshot, harness| {
+        snapshot
+            .accounts
+            .iter()
+            .find(|a| a.harness == harness && a.active)
+            .map(|a| a.id.clone())
+            .expect("live login listed")
+    };
+    let ann: Vec<(HarnessId, String)> = [
+        HarnessId::Grok,
+        HarnessId::Devin,
+        HarnessId::Opencode,
+        HarnessId::Pi,
+    ]
+    .into_iter()
+    .map(|h| (h, id_of(&first, h)))
+    .collect();
+
+    write(&grok_file, grok("bob"));
+    write(&config.devin_credentials_file, devin("devin-bob"));
+    write(&opencode_file, opencode("bob"));
+    write(&pi_file, pi("bob"));
+    let second = accounts.list(false).await.expect("list");
+    for (harness, _) in &ann {
+        let rows: Vec<_> = second
+            .accounts
+            .iter()
+            .filter(|a| a.harness == *harness)
+            .collect();
+        assert_eq!(rows.len(), 2, "{harness:?} keeps both logins");
+        assert_eq!(rows.iter().filter(|a| a.active).count(), 1);
+        assert!(rows.iter().all(|a| a.switchable));
+    }
+    for (harness, id) in &ann {
+        let snapshot = accounts.activate(*harness, id).await.expect("switch");
+        assert!(snapshot.accounts.iter().any(|a| a.id == *id && a.active));
+    }
+    assert!(
+        std::fs::read_to_string(&grok_file)
+            .unwrap()
+            .contains("key-ann")
+    );
+    assert!(
+        std::fs::read_to_string(&config.devin_credentials_file)
+            .unwrap()
+            .contains("devin-ann")
+    );
+    let opencode_live: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&opencode_file).unwrap()).unwrap();
+    assert_eq!(opencode_live["openai"]["accountId"], "ann");
+    assert_eq!(opencode_live["openrouter"]["key"], "keep");
+    let pi_live: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&pi_file).unwrap()).unwrap();
+    assert_eq!(pi_live["openai-codex"]["accountId"], "ann");
+    #[cfg(unix)]
+    for file in [
+        &grok_file,
+        &config.devin_credentials_file,
+        &opencode_file,
+        &pi_file,
+    ] {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{}", file.display());
+    }
+    // OpenCode / Pi rows name the provider they belong to.
+    let snapshot = accounts.list(false).await.expect("list");
+    assert!(
+        snapshot
+            .accounts
+            .iter()
+            .filter(|a| matches!(a.harness, HarnessId::Opencode | HarnessId::Pi))
+            .all(|a| a.provider.is_some())
+    );
+}
+
+/// Hermes keeps every account in its own pool: listed as-is, the active
+/// provider's first entry in use, never switched or forgotten from zeron.
+#[tokio::test]
+async fn hermes_credential_pool_is_listed_read_only() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (accounts, config) = test_accounts(tmp.path());
+    let file = config.hermes_home.join("auth.json");
+    std::fs::create_dir_all(&config.hermes_home).unwrap();
+    let pool = serde_json::json!({
+        "active_provider": "nous",
+        "credential_pool": { "nous": [
+            { "id": "b", "label": "second@nous.ai", "auth_type": "oauth", "priority": 1, "access_token": "t2" },
+            { "id": "a", "label": "first@nous.ai", "auth_type": "oauth", "priority": 0, "access_token": "t1" },
+        ]}
+    })
+    .to_string();
+    std::fs::write(&file, &pool).unwrap();
+    let snapshot = accounts.list(false).await.expect("list");
+    let hermes: Vec<_> = snapshot
+        .accounts
+        .iter()
+        .filter(|a| a.harness == HarnessId::Hermes)
+        .collect();
+    assert_eq!(hermes.len(), 2);
+    assert_eq!(hermes[0].email.as_deref(), Some("first@nous.ai"));
+    assert!(hermes[0].active && !hermes[1].active);
+    assert!(hermes.iter().all(|a| !a.switchable));
+    assert_eq!(hermes[0].provider.as_deref(), Some("nous"));
+    assert!(
+        accounts
+            .activate(HarnessId::Hermes, &hermes[1].id)
+            .await
+            .is_err()
+    );
+    assert!(
+        accounts
+            .forget(HarnessId::Hermes, &hermes[1].id)
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), pool);
 }
 
 #[test]
@@ -486,29 +756,30 @@ fn snapshot_wire_shape() {
 }
 
 #[tokio::test]
-async fn claude_login_flow_is_pkce_paste_code() {
+async fn claude_login_flow_is_the_clis_loopback_pkce() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (accounts, _) = test_accounts(tmp.path());
     let start = accounts
         .start_login(HarnessId::ClaudeCode)
         .await
         .expect("start");
+    // Claude Code's own automatic login: claude.ai authorize, PKCE, and a
+    // redirect to the loopback port the start reply names.
+    let port = start.callback_port.expect("a loopback callback port");
     assert!(
         start
             .url
-            .starts_with("https://claude.ai/oauth/authorize?code=true")
+            .starts_with("https://claude.com/cai/oauth/authorize?code=true")
     );
     assert!(start.url.contains("code_challenge_method=S256"));
-    assert!(
-        start
-            .url
-            .contains("redirect_uri=https%3A%2F%2Fconsole.anthropic.com")
-    );
+    assert!(start.url.contains(&format!(
+        "redirect_uri=http%3A%2F%2Flocalhost%3A{port}%2Fcallback"
+    )));
     let mode = serde_json::to_value(start.mode).expect("mode");
-    assert_eq!(mode, serde_json::json!("paste-code"));
+    assert_eq!(mode, serde_json::json!("browser"));
 
-    // Claude flows poll as pending (paste-code completes them); cancel drops the
-    // flow so the next poll reports it expired.
+    // Pending until the browser lands; cancel drops the flow (and closes its
+    // listener) so the next poll reports it expired.
     let poll = accounts.poll_login(&start.login_id).await.expect("poll");
     assert_eq!(
         serde_json::to_value(poll.status).expect("status"),
@@ -524,6 +795,13 @@ async fn claude_login_flow_is_pkce_paste_code() {
             .complete_login(&start.login_id, "code#state")
             .await
             .is_err()
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_err(),
+        "a cancelled login stops listening"
     );
 }
 
@@ -876,7 +1154,19 @@ async fn rpc_dispatch_for_m5c_methods() {
     assert!(snapshot["accounts"].is_array());
     assert!(snapshot["warnings"].is_array());
 
-    // Login lifecycle: start (paste-code) → poll pending → cancel → gone.
+    // The provider param reaches the engine: Pi's Claude login is refused
+    // with its reason (no port bound, no network).
+    let refused = client
+        .call(
+            methods::START_AGENT_LOGIN,
+            serde_json::json!({ "harness": "pi", "provider": "anthropic" }),
+        )
+        .await
+        .expect_err("pi claude login is not offered");
+    assert!(refused.to_string().contains("/login"), "{refused}");
+
+    // Login lifecycle: start (loopback browser flow, like the CLI's own
+    // automatic login) → poll pending → cancel → gone.
     let start = client
         .call(
             methods::START_AGENT_LOGIN,
@@ -884,12 +1174,13 @@ async fn rpc_dispatch_for_m5c_methods() {
         )
         .await
         .expect("StartAgentLogin");
-    assert_eq!(start["mode"], "paste-code");
+    assert_eq!(start["mode"], "browser");
+    assert!(start["callbackPort"].as_u64().is_some());
     assert!(
         start["url"]
             .as_str()
             .expect("url")
-            .contains("claude.ai/oauth/authorize")
+            .contains("claude.com/cai/oauth/authorize")
     );
     let login_id = start["loginId"].as_str().expect("loginId").to_string();
     let poll = client
@@ -1077,17 +1368,7 @@ exit 0
         "https://cursor.com/loginDeepControl?challenge=fake"
     );
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        let poll = accounts.poll_login(&start.login_id).await.expect("poll");
-        match poll.status {
-            AgentLoginStatus::Done => break,
-            AgentLoginStatus::Pending => {}
-            AgentLoginStatus::Error => panic!("login errored: {:?}", poll.message),
-        }
-        assert!(tokio::time::Instant::now() < deadline, "login never landed");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    poll_until_done(&accounts, &start.login_id).await;
 
     // First connect on a device with no live login: the minted key was
     // auto-activated, so runs work immediately.
@@ -1099,5 +1380,155 @@ exit 0
     assert_eq!(
         account_emails(&snapshot, HarnessId::Cursor),
         vec![("grace@example.com".to_string(), true)]
+    );
+
+    // Re-connecting the LIVE account (still usable, older key) replaces the
+    // live key — it is not re-snapshotted back over the fresh one.
+    write_cursor_login(&config, "grace@example.com", 60_000);
+    accounts.list(false).await.expect("list old key");
+    login_until_done(&accounts, HarnessId::Cursor).await;
+    assert_eq!(
+        read_json_file(&config.cursor_sdk_auth_file)["apiKey"],
+        "key-minted"
+    );
+    let snapshot = accounts.list(false).await.expect("list");
+    let slot = snapshot
+        .accounts
+        .iter()
+        .find(|a| a.harness == HarnessId::Cursor)
+        .unwrap();
+    assert!(slot.active);
+
+    // Connecting while ANOTHER usable account is live leaves it live.
+    write_cursor_login(&config, "hopper@example.com", 60_000);
+    accounts.list(false).await.expect("list hopper");
+    login_until_done(&accounts, HarnessId::Cursor).await;
+    assert_eq!(
+        read_json_file(&config.cursor_sdk_auth_file)["email"],
+        "hopper@example.com"
+    );
+
+    // The live login is removable: the SDK store goes, so it isn't re-detected.
+    let snapshot = accounts.list(false).await.expect("list");
+    let hopper = snapshot
+        .accounts
+        .iter()
+        .find(|a| a.email.as_deref() == Some("hopper@example.com"))
+        .unwrap();
+    let snapshot = accounts
+        .forget(HarnessId::Cursor, &hopper.id)
+        .await
+        .expect("forget live hopper");
+    assert!(!config.cursor_sdk_auth_file.exists());
+    assert_eq!(
+        account_emails(&snapshot, HarnessId::Cursor),
+        vec![("grace@example.com".to_string(), false)]
+    );
+}
+
+fn read_json_file(path: &Path) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+async fn poll_until_done(accounts: &AgentAccounts, login_id: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let poll = accounts.poll_login(login_id).await.expect("poll");
+        match poll.status {
+            AgentLoginStatus::Done => break,
+            AgentLoginStatus::Pending => {}
+            AgentLoginStatus::Error => panic!("login errored: {:?}", poll.message),
+        }
+        assert!(tokio::time::Instant::now() < deadline, "login never landed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn login_until_done(accounts: &AgentAccounts, harness: HarnessId) {
+    let start = accounts.start_login(harness).await.expect("start");
+    poll_until_done(accounts, &start.login_id).await;
+}
+
+/// Codex's `codex login` against a fake CLI that writes whatever
+/// `next-auth.json` holds into the throwaway `CODEX_HOME`.
+#[tokio::test]
+async fn codex_relogin_revives_the_live_account_and_live_is_removable() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let (accounts, config) = test_accounts(dir.path());
+    let codex = dir.path().join("fake-codex.sh");
+    let next_auth = dir.path().join("next-auth.json");
+    std::fs::write(
+        &codex,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = \"login\" ] || exit 1\ncp '{}' \"$CODEX_HOME/auth.json\"\nexit 0\n",
+            next_auth.display()
+        ),
+    )
+    .expect("fake codex");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    unsafe { std::env::set_var("CODEX_EXECUTABLE", &codex) };
+    let fresh_auth = |email: &str, account_id: &str| {
+        serde_json::json!({
+            "tokens": {
+                "id_token": fake_id_token(email, account_id, "plus"),
+                "access_token": format!("fresh-{account_id}"),
+                "account_id": account_id,
+            }
+        })
+        .to_string()
+    };
+
+    // Live ada with dead tokens; signing ada in again makes the fresh ones live.
+    write_codex_login(&config, "ada@example.com", "acct-ada");
+    accounts.list(false).await.expect("list ada");
+    std::fs::write(&next_auth, fresh_auth("ada@example.com", "acct-ada")).unwrap();
+    login_until_done(&accounts, HarnessId::Codex).await;
+    let live_file = config.codex_home.join("auth.json");
+    assert_eq!(
+        read_json_file(&live_file)["tokens"]["access_token"],
+        "fresh-acct-ada"
+    );
+    let snapshot = accounts.list(false).await.expect("list");
+    assert_eq!(
+        account_emails(&snapshot, HarnessId::Codex),
+        vec![("ada@example.com".to_string(), true)]
+    );
+
+    // Another account signs in as a spare — ada stays live.
+    std::fs::write(&next_auth, fresh_auth("bea@example.com", "acct-bea")).unwrap();
+    login_until_done(&accounts, HarnessId::Codex).await;
+    assert_eq!(
+        read_json_file(&live_file)["tokens"]["access_token"],
+        "fresh-acct-ada"
+    );
+
+    // Removing live ada signs codex out; bea remains as a saved login.
+    let snapshot = accounts.list(false).await.expect("list");
+    let ada = snapshot
+        .accounts
+        .iter()
+        .find(|a| a.email.as_deref() == Some("ada@example.com"))
+        .unwrap();
+    let snapshot = accounts
+        .forget(HarnessId::Codex, &ada.id)
+        .await
+        .expect("forget live ada");
+    assert!(!live_file.exists());
+    assert_eq!(
+        account_emails(&snapshot, HarnessId::Codex),
+        vec![("bea@example.com".to_string(), false)]
+    );
+
+    // With nothing live, a sign-in goes live at once.
+    std::fs::write(&next_auth, fresh_auth("bea@example.com", "acct-bea")).unwrap();
+    login_until_done(&accounts, HarnessId::Codex).await;
+    let snapshot = accounts.list(false).await.expect("list");
+    assert_eq!(
+        account_emails(&snapshot, HarnessId::Codex),
+        vec![("bea@example.com".to_string(), true)]
     );
 }

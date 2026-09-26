@@ -12,14 +12,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 use zeron_doc::{
     SessionCommandPayload, SessionMessageEntry, TranscriptFrame, apply_transcript_frame,
 };
 use zeron_proto::{
     Chat, Device, HarnessId, Model, ReasoningLevel, Session, SessionStatus, Space, SteeringMode,
 };
-use zeron_rpc::{RpcClient, RpcError, connect_ws, methods};
+use zeron_rpc::{RpcClient, RpcError, RpcSubscription, connect_ws, methods};
 
 /// First-item wait for a watch snapshot. Localhost; the engine answers
 /// watch attaches in milliseconds unless it is still assembling stores.
@@ -175,18 +175,14 @@ impl Zeron {
     }
 
     /// Open a watch stream (reconnecting once if the socket is gone).
-    pub async fn subscribe(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> anyhow::Result<mpsc::Receiver<Value>> {
+    pub async fn subscribe(&self, method: &str, params: Value) -> anyhow::Result<RpcSubscription> {
         let client = self.client().await?;
-        match client.subscribe(method, params.clone()).await {
+        match client.subscribe_scoped(method, params.clone()).await {
             Err(RpcError::Closed) => {
                 self.forget_client().await;
                 let client = self.client().await?;
                 client
-                    .subscribe(method, params)
+                    .subscribe_scoped(method, params)
                     .await
                     .map_err(|e| anyhow!("{method}: {e}"))
             }
@@ -584,6 +580,59 @@ pub fn short(id: &str) -> &str {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[tokio::test]
+    async fn one_shot_reads_release_quiet_watches() {
+        use futures::StreamExt;
+        struct Service(tokio::sync::watch::Sender<()>);
+        #[async_trait::async_trait]
+        impl zeron_rpc::RpcService for Service {
+            async fn handle(
+                &self,
+                method: &str,
+                _: Value,
+            ) -> Result<zeron_rpc::RpcReply, RpcError> {
+                let first = if method == methods::WATCH_DOC_MESSAGES {
+                    json!({"reset":[]})
+                } else {
+                    json!([])
+                };
+                let rx = self.0.subscribe();
+                Ok(zeron_rpc::RpcReply::Stream(
+                    futures::stream::unfold((Some(first), rx), |(first, mut rx)| async move {
+                        if let Some(item) = first {
+                            return Some((item, (None, rx)));
+                        }
+                        rx.changed().await.ok()?;
+                        Some((json!([]), (None, rx)))
+                    })
+                    .boxed(),
+                ))
+            }
+        }
+        let (watched, _) = tokio::sync::watch::channel(());
+        let rpc = zeron_rpc::memory_client(Arc::new(Service(watched.clone())));
+        let client = Zeron::with_client(rpc, Origin::default());
+        for _ in 0..16 {
+            assert!(client.transcript("quiet").await.unwrap().is_empty());
+            client
+                .snapshot(methods::WATCH_CHATS, json!({}))
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while watched.receiver_count() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("one-shot watch cancelled without another event");
+        }
+        // Keep the RPC connection alive throughout: disconnect must not be the cleanup.
+        client
+            .snapshot(methods::WATCH_DEVICES, json!({}))
+            .await
+            .unwrap();
+    }
 
     fn chat(id: &str, title: Option<&str>) -> Chat {
         Chat {

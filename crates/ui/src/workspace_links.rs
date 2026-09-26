@@ -91,10 +91,12 @@ fn split_line_fragment(target: &str) -> (&str, Option<u32>) {
     let Some((path, fragment)) = target.rsplit_once('#') else {
         return (target, None);
     };
-    let line = fragment
-        .strip_prefix('L')
-        .and_then(|line| line.parse::<u32>().ok())
-        .filter(|line| *line > 0);
+    let line = fragment.strip_prefix('L').and_then(|lines| {
+        // GitHub-style ranges (`#L10-L20`) open at their first line.
+        let (start, end) = lines.split_once('-').unwrap_or((lines, "1"));
+        positive_number(end.strip_prefix('L').unwrap_or(end))?;
+        positive_number(start)
+    });
     if line.is_some() {
         (path, line)
     } else {
@@ -185,6 +187,34 @@ mod tests {
                 column: None,
             })
         );
+    }
+
+    #[test]
+    fn line_ranges_open_at_their_first_line() {
+        let root = "/work/comet";
+        for target in ["src/lib.rs#L10-L20", "src/lib.rs#L10-20"] {
+            assert_eq!(
+                resolve_workspace_file_link(target, root),
+                Some(WorkspaceFileLink {
+                    path: "src/lib.rs".into(),
+                    line: Some(10),
+                    column: None,
+                }),
+                "{target}"
+            );
+        }
+        for target in [
+            "src/lib.rs#L10-",
+            "src/lib.rs#L10-Lx",
+            "src/lib.rs#L0-L2",
+            "src/lib.rs#L99999999999",
+        ] {
+            assert_eq!(
+                resolve_workspace_file_link(target, root).and_then(|link| link.line),
+                None,
+                "{target}"
+            );
+        }
     }
 
     #[test]

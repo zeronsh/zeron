@@ -20,7 +20,7 @@ use gpui::{
     Subscription, Task, Window, div, prelude::*, px,
 };
 
-use zeron_engine::registry::HarnessDescriptor;
+use zeron_engine::registry::{HarnessDescriptor, TitleSettings};
 use zeron_proto::{
     ChatConfig, FolderListing, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel, Space,
 };
@@ -64,7 +64,7 @@ fn slow_catalog_delay() -> Option<std::time::Duration> {
 }
 
 // ---------------------------------------------------------------------------
-// Catalog invalidation (Settings → Agents toggles)
+// Catalog invalidation (Settings → Providers toggles)
 // ---------------------------------------------------------------------------
 
 /// Marker global: [`bump_harness_catalog`] pokes it whenever a Settings →
@@ -433,6 +433,12 @@ pub(crate) struct ReturnComposerFocus;
 
 impl gpui::EventEmitter<ReturnComposerFocus> for Pickers {}
 
+/// A model picked while bound to thread naming (see [`Pickers::new_for_titles`]);
+/// the owner persists it with `SetTitleSettings`.
+pub struct TitleModelPicked(pub TitleSettings);
+
+impl gpui::EventEmitter<TitleModelPicked> for Pickers {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ModelSetting {
     Reasoning,
@@ -500,6 +506,10 @@ struct SettingGroup {
 pub struct Pickers {
     state: Entity<AppState>,
     config: DraftConfig,
+    /// Thread-naming binding (Settings → General): the model picker reads and
+    /// emits the local device's title settings instead of a composer draft.
+    /// `config.harness` then only tracks the tab being browsed.
+    title: Option<TitleSettings>,
     /// Sticky last-used picks (zeron `zeron.composer.defaults:v1`): seeds the
     /// new-chat chips and is rewritten on every new-chat pick.
     defaults: ComposerDefaults,
@@ -594,6 +604,31 @@ pub struct Pickers {
 
 impl Pickers {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        Self::build(state, None, cx)
+    }
+
+    /// The model picker bound to thread naming: only title-capable agents,
+    /// no traits tray, and picks surface as [`TitleModelPicked`].
+    pub fn new_for_titles(
+        state: Entity<AppState>,
+        settings: TitleSettings,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(state, Some(settings), cx)
+    }
+
+    pub fn set_title_settings(&mut self, settings: TitleSettings, cx: &mut Context<Self>) {
+        self.config.harness = None;
+        self.title = Some(settings);
+        self.catalog_rev += 1;
+        cx.notify();
+    }
+
+    fn build(
+        state: Entity<AppState>,
+        title: Option<TitleSettings>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let search = cx.new(|cx| {
             ComposerInput::with_context("Search…", "PaletteSearch", cx)
                 .with_accessibility_role(gpui::Role::SearchInput)
@@ -673,7 +708,7 @@ impl Pickers {
             }
             cx.notify();
         });
-        // A Settings → Agents toggle changed some device's enabled set:
+        // A Settings → Providers toggle changed some device's enabled set:
         // force-refresh the cached catalog so the rail/chips follow without a
         // restart (stale rows stay visible while the reload runs).
         let catalog_observe = cx.observe_global::<HarnessCatalogChanged>(|this: &mut Self, cx| {
@@ -684,6 +719,7 @@ impl Pickers {
         // with that popover open — synthetic input can't reach the app on
         // headless compositors, so captures need a data-side path.
         let boot_open = match std::env::var("ZERON_OPEN_PICKER").ok().as_deref() {
+            _ if title.is_some() => None,
             Some("model") => Some(PickerKind::HarnessModel),
             Some("traits") => Some(PickerKind::HarnessModel),
             Some("branch") => Some(PickerKind::Branch),
@@ -704,7 +740,9 @@ impl Pickers {
             .map(ComposerDefaults::load)
             .unwrap_or_default();
         // Restore explicit opt-outs as well as project picks before the first frame.
-        state.update(cx, |s, _| s.restore_composer_target(&defaults));
+        if title.is_none() {
+            state.update(cx, |s, _| s.restore_composer_target(&defaults));
+        }
         let draft_owner = state.read(cx).selected_chat.clone();
         let space_owner = state.read(cx).selected_space.clone();
         let device_owner = state.read(cx).effective_device_id();
@@ -718,6 +756,7 @@ impl Pickers {
             open_model_width: None,
             open_model_height: model_menu_height(0),
             config: DraftConfig::default(),
+            title,
             defaults,
             data_dir,
             draft_owner,
@@ -765,6 +804,23 @@ impl Pickers {
 
     /// Persist the sticky defaults (best-effort; picks are rare and tiny).
     fn save_defaults(&self) {
+        // The title picker never writes run picks into the composer's memory.
+        if self.title.is_some() {
+            return;
+        }
+        self.persist_defaults();
+    }
+
+    /// Re-read the shared memory: the composer and the thread-naming picker
+    /// each hold a copy, and both write favorites.
+    fn reload_defaults(&mut self) {
+        if let Some(dir) = self.data_dir.as_deref() {
+            self.defaults = ComposerDefaults::load(dir);
+            self.catalog_rev += 1;
+        }
+    }
+
+    fn persist_defaults(&self) {
         if let Some(dir) = self.data_dir.as_deref()
             && let Err(err) = self.defaults.save(dir)
         {
@@ -778,7 +834,17 @@ impl Pickers {
 
     /// Harness is locked once the chat exists (feature-inventory §1.7).
     fn harness_locked(&self, cx: &App) -> bool {
-        self.state.read(cx).selected_chat.is_some()
+        self.title.is_none() && self.state.read(cx).selected_chat.is_some()
+    }
+
+    /// The harnesses this picker offers: runnable ones for the composer,
+    /// narrowed to title-capable agents when bound to thread naming.
+    fn offered(&self, list: &[HarnessDescriptor]) -> Vec<HarnessDescriptor> {
+        let mut offered = offered_harnesses(list);
+        if self.title.is_some() {
+            offered.retain(|d| zeron_harness::supports_titles(d.id) && d.id != HarnessId::Mock);
+        }
+        offered
     }
 
     fn engine(&self, cx: &App) -> Option<EngineHandle> {
@@ -791,6 +857,10 @@ impl Pickers {
     /// nor codex installed — user report: "can't load codex models/traits
     /// anywhere" from a Mac without codex).
     fn space_target(&self, cx: &App) -> Option<String> {
+        // Thread naming is this device's setting; so are its catalogs.
+        if self.title.is_some() {
+            return None;
+        }
         let state = self.state.read(cx);
         let device = state.effective_device_id()?;
         (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
@@ -800,6 +870,14 @@ impl Pickers {
     fn effective_harness(&self, cx: &App) -> Option<HarnessId> {
         if let Some(harness) = self.config.harness {
             return Some(harness);
+        }
+        if let Some(title) = &self.title {
+            // Browsing starts on the saved agent, else the first title-capable one.
+            return title.harness.or_else(|| {
+                self.harnesses
+                    .ready()
+                    .and_then(|list| self.offered(list).first().map(|d| d.id))
+            });
         }
         if let Some(config) = self
             .state
@@ -811,7 +889,7 @@ impl Pickers {
         }
         // New-chat canvas: the remembered last-used harness (sticky defaults),
         // when the loaded catalog still offers it (the device may have
-        // disabled it in Settings → Agents since).
+        // disabled it in Settings → Providers since).
         if let Some(harness) = self.defaults.harness {
             let offered = match self.harnesses.ready() {
                 Some(list) => offered_harnesses(list).iter().any(|d| d.id == harness),
@@ -833,6 +911,12 @@ impl Pickers {
     /// Effective model id: the draft pick, the selected chat's config, or (on
     /// the new-chat canvas) the remembered last-used model for the harness.
     fn effective_model_id<'a>(&'a self, cx: &'a App) -> Option<&'a str> {
+        if let Some(title) = &self.title {
+            // Only the saved agent's tab shows a selected row.
+            return title.model.as_deref().filter(|_| {
+                title.harness.is_some() && title.harness == self.effective_harness(cx)
+            });
+        }
         if let Some(id) = self.config.model.as_deref() {
             return Some(id);
         }
@@ -867,7 +951,12 @@ impl Pickers {
     fn selected_model<'a>(&'a self, cx: &'a App) -> Option<&'a Model> {
         let harness = self.effective_harness(cx)?;
         let models = self.models.get(&harness)?.ready()?;
-        selected_catalog_model(models, self.effective_model_id(cx))
+        let selected = self.effective_model_id(cx);
+        // An unset title model means "cheapest", not the catalog default.
+        if self.title.is_some() && selected.is_none() {
+            return None;
+        }
+        selected_catalog_model(models, selected)
     }
 
     fn selected_model_label(&self, cx: &App) -> Option<String> {
@@ -929,7 +1018,7 @@ impl Pickers {
     pub fn no_agents_available(&self) -> bool {
         self.harnesses
             .ready()
-            .is_some_and(|list| offered_harnesses(list).is_empty())
+            .is_some_and(|list| self.offered(list).is_empty())
     }
 
     pub(crate) fn steers_mid_turn(&self, cx: &App) -> bool {
@@ -1073,6 +1162,14 @@ impl Pickers {
         // t3 ModelPickerContent's initial selection — else the effective
         // harness. Locked chats stay on their own harness.
         if kind == PickerKind::HarnessModel {
+            // Favorites may have been starred from the other picker.
+            self.reload_defaults();
+        }
+        if kind == PickerKind::HarnessModel && self.title.is_some() {
+            // Each open browses from the saved agent's tab.
+            self.config.harness = None;
+            self.model_rail = ModelRail::Harness;
+        } else if kind == PickerKind::HarnessModel {
             self.model_rail = if !self.harness_locked(cx) && !self.defaults.favorites.is_empty() {
                 ModelRail::Favorites
             } else {
@@ -1139,7 +1236,7 @@ impl Pickers {
             // revalidates, keeping stale rows visible until fresh ones land.
             PickerKind::Branch | PickerKind::Checkout => self.ensure_refs(true, cx),
             PickerKind::HarnessModel => {
-                // Force: the enabled set moves under us (Settings → Agents,
+                // Force: the enabled set moves under us (Settings → Providers,
                 // possibly from another viewer) — every open revalidates,
                 // keeping current rows visible until the fresh catalog lands.
                 self.ensure_harnesses(true, cx);
@@ -1160,7 +1257,7 @@ impl Pickers {
         // Non-forced (the render loop's eager kick) only loads from Idle: an
         // Error that could re-trigger a load would flip back to Loading
         // before the retry row ever painted (and spam the engine); Retry
-        // resets to Idle. FORCED refreshes (a Settings → Agents toggle, a
+        // resets to Idle. FORCED refreshes (a Settings → Providers toggle, a
         // picker open) reload through Ready/Error too — the enabled set just
         // changed under the cache, which otherwise served the boot-time
         // catalog until restart (user report). Stale-while-revalidate: loaded
@@ -1223,7 +1320,7 @@ impl Pickers {
     /// its slot state, so re-running this every catalog load/render is free.
     fn prefetch_models(&mut self, force: bool, cx: &mut Context<Self>) {
         let mut targets: Vec<HarnessId> = match self.harnesses.ready() {
-            Some(list) => offered_harnesses(list).iter().map(|d| d.id).collect(),
+            Some(list) => self.offered(list).iter().map(|d| d.id).collect(),
             None => Vec::new(),
         };
         // The committed chat's harness may be outside the offered set (e.g.
@@ -1539,8 +1636,10 @@ impl Pickers {
             self.config.reasoning = None;
         }
         self.config.harness = Some(harness);
-        self.defaults.harness = Some(harness);
-        self.save_defaults();
+        if self.title.is_none() {
+            self.defaults.harness = Some(harness);
+            self.save_defaults();
+        }
         self.model_scroll_base().set_offset(gpui::Point::default());
         self.ensure_models(harness, false, cx);
         // Re-anchor the keyboard highlight onto the new harness's selected row.
@@ -1550,6 +1649,17 @@ impl Pickers {
 
     fn pick_model(&mut self, model_id: String, cx: &mut Context<Self>) {
         self.setting_menu = None;
+        if self.title.is_some() {
+            let settings = TitleSettings {
+                harness: self.effective_harness(cx),
+                model: Some(model_id),
+            };
+            self.title = Some(settings.clone());
+            self.catalog_rev += 1;
+            cx.emit(TitleModelPicked(settings));
+            self.close(cx);
+            return;
+        }
         // The card stays open on a pick (user request): model and traits
         // share one popover now, and adjusting the tray right after choosing
         // a model is the expected flow. Esc, click-out, or the chip close it.
@@ -1726,7 +1836,7 @@ impl Pickers {
         let Some(list) = self.harnesses.ready() else {
             return Vec::new();
         };
-        let mut descriptors = offered_harnesses(list);
+        let mut descriptors = self.offered(list);
         if let Some(effective) = self.effective_harness(cx)
             && !descriptors.iter().any(|d| d.id == effective)
             && let Some(descriptor) = list.iter().find(|d| d.id == effective && d.installed)
@@ -1893,8 +2003,9 @@ impl Pickers {
 
     /// Star/unstar a model and persist it with the sticky defaults.
     fn toggle_model_favorite(&mut self, harness: HarnessId, model: &str, cx: &mut Context<Self>) {
+        self.reload_defaults();
         self.defaults.toggle_favorite(harness, model);
-        self.save_defaults();
+        self.persist_defaults();
         self.catalog_rev += 1;
         // Starring REORDERS the list (stars float to the top / leave the
         // favorites view) — re-home the keyboard highlight onto the SELECTED
@@ -2502,7 +2613,7 @@ impl Pickers {
         let entity = cx.entity().downgrade();
         // New-thread model and workspace menus open down, matching the
         // centered composer's layout. In-thread menus retain adaptive placement.
-        let below = self.state.read(cx).selected_chat.is_none()
+        let below = (self.title.is_some() || self.state.read(cx).selected_chat.is_none())
             && matches!(
                 kind,
                 PickerKind::HarnessModel | PickerKind::Branch | PickerKind::Checkout
@@ -3518,7 +3629,7 @@ impl Pickers {
                         .text_color(theme.text_muted)
                         .text_center()
                         .child(SharedString::from(
-                            "Enable an installed agent in Settings → Agents, \
+                            "Enable an installed agent in Settings → Providers, \
                              or install an agent CLI.",
                         )),
                 )
@@ -3748,10 +3859,11 @@ impl Pickers {
         // ── traits tray: the reasoning ladder + model options PINNED under
         //    the list (the separate Traits popover folded in here — user
         //    request). Hidden entirely when the selected model has neither.
-        let has_tray = !self.trait_ladder(cx).is_empty()
-            || self
-                .selected_model(cx)
-                .is_some_and(|m| !m.options.is_empty());
+        let has_tray = self.title.is_none()
+            && (!self.trait_ladder(cx).is_empty()
+                || self
+                    .selected_model(cx)
+                    .is_some_and(|m| !m.options.is_empty()));
         let tray: Option<AnyElement> = has_tray.then(|| {
             let sections = self.render_traits_sections(cx);
             div()
@@ -3945,7 +4057,9 @@ impl Pickers {
             el = el.child(popover::kbd_hint(&theme, &format!("⌘{}", ix + 1)));
         }
         // A model configured in place opens its settings card on hover.
-        let configurable = configured_in_place(&row.model) && !row.selected_only;
+        // The title picker has no settings, so no card either.
+        let configurable =
+            self.title.is_none() && configured_in_place(&row.model) && !row.selected_only;
         let card_open = configurable && self.config_row == Some(ix);
         if configurable {
             let entity = cx.entity().downgrade();
@@ -4112,7 +4226,11 @@ impl Pickers {
                         cx.stop_propagation();
                     }))
                     .child(div().flex_1().child(label))
-                    .child(crate::settings::widgets::toggle_switch(&theme, on))
+                    .child(crate::settings::widgets::toggle_switch(
+                        &theme,
+                        on,
+                        format!("model-card-{i}"),
+                    ))
                     .into_any_element()
             })
             .collect();
@@ -4156,7 +4274,8 @@ impl Pickers {
     /// The tray's settings. A model configured in place keeps them in its
     /// hover card only.
     fn setting_groups(&self, cx: &App) -> Vec<SettingGroup> {
-        if self.selected_model(cx).is_some_and(configured_in_place) {
+        // Titles always run at minimal reasoning with no model options.
+        if self.title.is_some() || self.selected_model(cx).is_some_and(configured_in_place) {
             return Vec::new();
         }
         self.live_groups(cx)
@@ -4184,7 +4303,9 @@ impl Pickers {
     fn card_row(&self, cx: &App) -> Option<ModelRowData> {
         self.config_row
             .and_then(|ix| self.model_rows(cx).get(ix).cloned())
-            .filter(|row| !row.selected_only && configured_in_place(&row.model))
+            .filter(|row| {
+                self.title.is_none() && !row.selected_only && configured_in_place(&row.model)
+            })
     }
 
     fn row_is_selected(&self, row: &ModelRowData, cx: &App) -> bool {
@@ -4895,7 +5016,7 @@ fn empty_list_note(theme: &Theme, copy: &str) -> AnyElement {
 /// space's device may run any version): the `default` alias row drops when a
 /// real row exists, an orphan `<model>[1m]` variant presents as its base id
 /// with the Context Window trait pinned to 1M, and Claude rows adopt the
-/// curated catalog's labels so the version number always shows ("Opus 5",
+/// curated catalog's labels so the version number always shows ("Opus 5.5",
 /// not the wire's terse "Opus" alias — user request). Idempotent over
 /// already-clean lists. The send path recomposes the advertised id from the
 /// base + trait (`pick_model_value`), so a folded pick still runs.
@@ -5029,7 +5150,7 @@ fn visible_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<H
 }
 
 /// What the composer actually offers: [`visible_harnesses`] narrowed to the
-/// catalog device's enabled set AND installed CLIs (Settings → Agents is
+/// catalog device's enabled set AND installed CLIs (Settings → Providers is
 /// per-device state, so a space on another device follows THAT device's
 /// toggles; a default-enabled agent whose CLI is missing would only
 /// manufacture NotInstalled errors at send). The dev-rig mock opt-in
@@ -5208,7 +5329,22 @@ impl Render for Pickers {
         // loaded, so that's a conclusion, not a loading gap) — the chip says
         // so instead of wearing a brand mark for an agent that can't run.
         let no_agents = self.no_agents_available() && self.effective_harness(cx).is_none();
-        let model_label: SharedString = if no_agents {
+        let model_label: SharedString = if let Some(title) = &self.title {
+            // The saved choice, not the tab being browsed.
+            match (title.harness, title.model.as_deref()) {
+                (None, _) => "Session agent".into(),
+                (Some(_), None) => "Automatic".into(),
+                (Some(harness), Some(id)) => self
+                    .models
+                    .get(&harness)
+                    .and_then(Loadable::ready)
+                    .and_then(|models| models.iter().find(|m| m.id == id))
+                    .map(|m| m.label.clone())
+                    .or_else(|| self.defaults.label_for(id).map(str::to_owned))
+                    .unwrap_or_else(|| id.to_owned())
+                    .into(),
+            }
+        } else if no_agents {
             SharedString::from("No agents available")
         } else {
             let label = self.selected_model_label(cx);
@@ -5223,14 +5359,21 @@ impl Render for Pickers {
         });
         // Harness unknown while the catalog resolves: the pixel-glyph loader
         // instead of guessing a brand mark.
-        let chip_icon_loading =
-            self.effective_harness(cx).is_none() && !no_agents && catalog_loading;
+        let chip_icon_loading = self.title.is_none()
+            && self.effective_harness(cx).is_none()
+            && !no_agents
+            && catalog_loading;
         // Harness known but nothing names the model yet (fresh install, no
         // remembered pick): a ghost label instead of a bare icon.
         let chip_label_loading =
             !no_agents && model_label.is_empty() && (catalog_loading || models_loading);
-        let harness_icon: (&'static str, Option<gpui::Hsla>) = match self.effective_harness(cx) {
+        let chip_harness = match &self.title {
+            Some(title) => title.harness,
+            None => self.effective_harness(cx),
+        };
+        let harness_icon: (&'static str, Option<gpui::Hsla>) = match chip_harness {
             Some(harness) => harness_brand_icon(harness),
+            None if self.title.is_some() => (crate::icons::CHAT_ROUND_LINE, Some(theme.text_muted)),
             None if no_agents => (crate::icons::TERMINAL, Some(theme.text_muted)),
             None => (
                 crate::icons::CLAUDE_MARK,
@@ -5266,8 +5409,9 @@ impl Render for Pickers {
 
         // The composer places this model chip beside the attachment button:
         // brand icon + model name, then the effort as the chip's muted second
-        // tone. No suffix when the model has no reasoning ladder.
-        let chip_suffix = effort.map(|level| {
+        // tone. No suffix when the model has no reasoning ladder, nor for the
+        // title picker (titles always run at minimal reasoning).
+        let chip_suffix = effort.filter(|_| self.title.is_none()).map(|level| {
             (
                 SharedString::from(reasoning_label(level)),
                 effort_customized.then(|| theme.text.opacity(0.85)),
@@ -7122,7 +7266,7 @@ mod tests {
         );
         assert_eq!(
             models.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
-            vec!["Opus 5", "Fable 5", "Sonnet 5", "Haiku 4.5", "Nova 1"]
+            vec!["Opus 5.5", "Fable 5", "Sonnet 5", "Haiku 4.5", "Nova 1"]
         );
         assert_eq!(
             models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),

@@ -114,6 +114,117 @@ async fn projectless_chat_runs_from_home_and_mints_no_space() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn projectless_terminal_resolves_home_and_preserves_explicit_paths() {
+    use zeron_rpc::methods;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        &tmp.path().join("data"),
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .expect("engine core assembles");
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let home = std::env::var("HOME").expect("HOME set in test env");
+
+    for (chat_id, cwd, expected) in [
+        ("default-home", None, home.clone()),
+        ("home-slash", Some("~/".to_string()), home.clone()),
+        (
+            "home-relative",
+            Some("~/../".to_string()),
+            format!("{home}/../"),
+        ),
+        (
+            "explicit",
+            Some(tmp.path().to_string_lossy().into_owned()),
+            tmp.path().to_string_lossy().into_owned(),
+        ),
+    ] {
+        let mut params = serde_json::json!({
+            "op": "createChat", "chatId": chat_id, "deviceId": core.device_id,
+        });
+        if let Some(cwd) = &cwd {
+            params["cwd"] = serde_json::json!(cwd);
+        }
+        client.call(methods::MUTATE, params).await.unwrap();
+        let session = client
+            .call(
+                methods::OPEN_TERMINAL,
+                serde_json::json!({
+                    "chatId": chat_id, "cols": 80, "rows": 24,
+                }),
+            )
+            .await
+            .expect("open terminal");
+        // Compare paths to tolerate the trailing slash from joining ~/.
+        assert_eq!(
+            std::path::Path::new(session["cwd"].as_str().unwrap()),
+            std::path::Path::new(&expected)
+        );
+        client
+            .call(
+                methods::CLOSE_TERMINAL,
+                serde_json::json!({
+                    "terminalId": session["id"],
+                }),
+            )
+            .await
+            .expect("close terminal");
+        let chat = core.workspace.chat(chat_id).unwrap().unwrap();
+        assert_eq!(chat.cwd.as_deref(), Some(cwd.as_deref().unwrap_or("~")));
+        assert_eq!(chat.space_id, None);
+    }
+
+    // The existing fallback for a chat without metadata remains available.
+    let session = client
+        .call(
+            methods::OPEN_TERMINAL,
+            serde_json::json!({
+                "chatId": "missing-row", "cols": 80, "rows": 24,
+            }),
+        )
+        .await
+        .expect("home fallback");
+    assert_eq!(session["cwd"], home);
+    client
+        .call(
+            methods::CLOSE_TERMINAL,
+            serde_json::json!({
+                "terminalId": session["id"],
+            }),
+        )
+        .await
+        .unwrap();
+
+    core.workspace
+        .create_chat(
+            "invalid",
+            None,
+            Some(&core.device_id),
+            None,
+            Some(tmp.path().join("missing").to_string_lossy().into_owned()),
+        )
+        .unwrap();
+    let err = client
+        .call(
+            methods::OPEN_TERMINAL,
+            serde_json::json!({
+                "chatId": "invalid", "cols": 80, "rows": 24,
+            }),
+        )
+        .await
+        .expect_err("explicit missing path must not fall back to home");
+    assert!(
+        err.to_string()
+            .contains("Session working directory is unavailable")
+    );
+    assert!(core.workspace.read_spaces().unwrap().is_empty());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn projectless_command_before_metadata_survives_restart_and_resume() {
     exercise_projectless(true).await;
 }

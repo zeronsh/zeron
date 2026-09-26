@@ -3,6 +3,7 @@
 //! transports preview requests or response bodies.
 pub mod catalog;
 pub mod discovery;
+pub mod login;
 pub mod mux;
 pub mod peer;
 pub mod proxy;

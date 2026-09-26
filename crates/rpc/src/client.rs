@@ -44,7 +44,7 @@ pub struct RpcClient {
     reader: tokio::task::JoinHandle<()>,
 }
 
-/// Checked stream receiver whose drop immediately cancels the server task.
+/// Owned stream receiver whose drop immediately cancels the server task.
 pub struct RpcSubscription {
     id: u64,
     items: mpsc::Receiver<serde_json::Value>,
@@ -170,9 +170,8 @@ impl RpcClient {
         serde_json::from_value(value).map_err(|e| RpcError::BadParams(e.to_string()))
     }
 
-    /// Streaming request: items arrive on the receiver; it closes when the server sends
-    /// `{done}` or `{err}`, or the connection drops. Dropping the receiver cancels the
-    /// stream server-side (the reader notices the dead channel and sends `{id, cancel}`).
+    /// Legacy streaming request. Cancellation on receiver drop is only detected
+    /// when another item arrives. Prefer `subscribe_scoped` for owned streams.
     pub async fn subscribe(
         &self,
         method: &str,
@@ -194,6 +193,34 @@ impl RpcClient {
         Ok(rx)
     }
 
+    /// A drop-cancelled stream without waiting for its first item. Unlike a
+    /// checked subscription this also works for legitimately silent streams.
+    pub async fn subscribe_scoped(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<RpcSubscription, RpcError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAP);
+        self.shared.lock().insert(id, Pending::Stream(tx));
+        // Own cancellation before the send, including cancellation while the
+        // outbound channel is backpressured.
+        let subscription = RpcSubscription {
+            id,
+            items: rx,
+            out: self.out.clone(),
+            shared: self.shared.clone(),
+        };
+        self.send(ClientFrame {
+            id,
+            method: Some(method.into()),
+            params,
+            cancel: false,
+        })
+        .await?;
+        Ok(subscription)
+    }
+
     /// Streaming request with a server acknowledgement before returning.
     ///
     /// Use this for optional/versioned stream methods: an older server's
@@ -213,6 +240,12 @@ impl RpcClient {
                 ready: Some(ready_tx),
             },
         );
+        let subscription = RpcSubscription {
+            id,
+            items: items_rx,
+            out: self.out.clone(),
+            shared: self.shared.clone(),
+        };
         self.send(ClientFrame {
             id,
             method: Some(method.into()),
@@ -223,12 +256,6 @@ impl RpcClient {
         .inspect_err(|_| {
             self.shared.lock().remove(&id);
         })?;
-        let subscription = RpcSubscription {
-            id,
-            items: items_rx,
-            out: self.out.clone(),
-            shared: self.shared.clone(),
-        };
         ready_rx.await.map_err(|_| RpcError::Closed)??;
         Ok(subscription)
     }

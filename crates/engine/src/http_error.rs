@@ -6,6 +6,7 @@ use std::error::Error;
 /// Retain that chain and the destination origin, excluding URL credentials,
 /// paths and queries that may contain tokens or other private values.
 pub(crate) fn describe_http_error(error: reqwest::Error) -> String {
+    zeron_sync::budget::shared().observe_error(&error);
     let origin = error.url().map(|url| url.origin().ascii_serialization());
     let error = error.without_url();
     let mut message = match origin {

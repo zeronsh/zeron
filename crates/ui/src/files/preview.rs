@@ -6,9 +6,9 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, Context, Entity, Focusable as _, HighlightStyle, ListAlignment,
+    AnyElement, App, Context, Entity, Focusable as _, HighlightStyle, ListAlignment, ListOffset,
     ListSizingBehavior, ListState, Render, ScrollHandle, SharedString, Subscription, Window, div,
-    font, list, prelude::*, px,
+    font, list, point, prelude::*, px,
 };
 use gpui_base::input::{RopeExt as _, TextDecoration, TextDecorationCollection};
 use zeron_proto::{
@@ -571,6 +571,170 @@ impl FilesSurface {
         let focus = editor.focus_handle(cx);
         // Tab activation remounts this surface after the click handler returns.
         window.defer(cx, move |window, cx| focus.focus(window, cx));
+    }
+
+    /// A chat link can arrive before the file and editor have finished loading.
+    pub(crate) fn navigate_to_line(
+        &mut self,
+        line: u32,
+        column: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        if line == 0 {
+            return;
+        }
+        self.line_navigation_generation = self.line_navigation_generation.wrapping_add(1);
+        self.pending_line_navigation = Some((line, column));
+        if let Some(document) = self
+            .editor_path
+            .as_ref()
+            .and_then(|path| self.preview.documents.get_mut(path))
+        {
+            // Source line numbers do not map to the rendered Markdown blocks.
+            if document.show_markdown {
+                document.show_markdown = false;
+                if let Some(view) = &document.markdown {
+                    view.update(cx, |view, cx| view.suspend(cx));
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn apply_line_navigation(
+        &mut self,
+        path: &str,
+        editor: Option<&Entity<super::editor::FileEditorState>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((line, column)) = self.pending_line_navigation else {
+            return;
+        };
+        let Some(document) = self.preview.documents.get(path) else {
+            return;
+        };
+        if document
+            .file
+            .as_ref()
+            .and_then(|file| file.text.as_ref())
+            .is_none()
+        {
+            if !matches!(document.phase, DocumentPhase::Loading) {
+                self.pending_line_navigation = None;
+            }
+            return;
+        }
+        if let Some(editor) = editor {
+            editor.update(cx, |state, cx| {
+                let row = (line - 1).min(state.text().lines_len().saturating_sub(1) as u32);
+                state.set_cursor_position(
+                    gpui_base::input::Position::new(row, column.unwrap_or(1).saturating_sub(1)),
+                    window,
+                    cx,
+                );
+            });
+        }
+        self.pending_line_navigation = None;
+        self.schedule_line_center(line, self.line_navigation_generation, 16, window, cx);
+    }
+
+    fn schedule_line_center(
+        &self,
+        line: u32,
+        generation: u64,
+        retries: u8,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let owner = cx.weak_entity();
+        window.on_next_frame(move |window, cx| {
+            let retry = owner
+                .update(cx, |surface, cx| {
+                    surface.line_navigation_generation == generation
+                        && !surface.center_active_line(line, window, cx)
+                })
+                .unwrap_or(false);
+            if retry && retries > 0 {
+                owner
+                    .update(cx, |surface, cx| {
+                        surface.schedule_line_center(line, generation, retries - 1, window, cx);
+                        cx.notify();
+                    })
+                    .ok();
+            }
+        });
+    }
+
+    fn center_active_line(
+        &mut self,
+        line: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(document) = self
+            .preview
+            .active
+            .as_deref()
+            .and_then(|path| self.preview.documents.get(path))
+        else {
+            return true;
+        };
+        if let Some(editor) = document.editor.clone() {
+            let target = {
+                let state = editor.read(cx);
+                let cursor = state.cursor();
+                let bounds = state.range_to_bounds(&(cursor..cursor));
+                let viewport = state.input_bounds();
+                bounds
+                    .filter(|_| viewport.size.height > px(0.0))
+                    .map(|bounds| {
+                        (
+                            state.scroll_offset(),
+                            viewport.origin.y + viewport.size.height / 2.0,
+                            bounds.origin.y + bounds.size.height / 2.0,
+                        )
+                    })
+            };
+            let Some((offset, target_y, line_y)) = target else {
+                // A newly mounted editor has no layout when the cursor is first
+                // placed. Repeat the move after layout so it can scroll there.
+                let position = editor.read(cx).cursor_position();
+                editor.update(cx, |state, cx| {
+                    state.set_cursor_position(position, window, cx);
+                });
+                return false;
+            };
+            // The editor paints this offset before clamping it, so a line near
+            // the top would briefly push the first line down the viewport.
+            let y = (offset.y + target_y - line_y).min(px(0.0));
+            editor.update(cx, |state, cx| {
+                state.set_scroll_offset(point(offset.x, y), cx);
+            });
+            return true;
+        }
+
+        // Large or read-only text files use the plain virtual list, not EditorState.
+        let viewport = self.preview.list.viewport_bounds();
+        if viewport.size.height <= px(0.0) {
+            return false;
+        }
+        let row = (line as usize)
+            .saturating_sub(1)
+            .min(document.lines.len().saturating_sub(1));
+        let Some(bounds) = self.preview.list.bounds_for_item(row) else {
+            self.preview.list.scroll_to(ListOffset {
+                item_ix: row,
+                offset_in_item: px(0.0),
+            });
+            cx.notify();
+            return false;
+        };
+        let viewport_center = viewport.origin.y + viewport.size.height / 2.0;
+        let row_center = bounds.origin.y + bounds.size.height / 2.0;
+        self.preview.list.scroll_by(row_center - viewport_center);
+        cx.notify();
+        true
     }
 
     fn toggle_word_wrap(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -2487,7 +2651,13 @@ impl FilesSurface {
             return view.into_any_element();
         }
         self.apply_pending_external_reload(path, window, cx);
+        if self.pending_line_navigation.is_some()
+            && let Some(document) = self.preview.documents.get_mut(path)
+        {
+            document.show_markdown = false;
+        }
         let editor = self.ensure_editor(path, theme, window, cx);
+        self.apply_line_navigation(path, editor.as_ref(), window, cx);
         if let Some(editor) = &editor {
             self.sync_editor_comment_anchors(path, editor, cx);
         }
@@ -3558,6 +3728,369 @@ impl FilesSurface {
 mod markdown_buffer_tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
+
+    #[gpui::test]
+    fn chat_line_link_opens_markdown_source_and_centers_the_requested_line(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let path = "README.md";
+        let source = (1..=180)
+            .map(|line| format!("line {line} content"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new_editor(
+                state,
+                "chat".into(),
+                path.into(),
+                false,
+                1000,
+                13.0,
+                false,
+                false,
+                cx,
+            )
+        });
+        window
+            .update(cx, |surface, _, cx| {
+                let document = FileDocument::loading(DocumentKey {
+                    chat_id: "chat".into(),
+                    checkout_id: Some("checkout".into()),
+                    path: path.into(),
+                });
+                assert!(document.show_markdown);
+                surface.navigate_to_line(20, Some(3), cx);
+                surface.navigate_to_line(90, Some(6), cx);
+                surface.preview.active = Some(path.into());
+                surface.preview.documents.insert(path.into(), document);
+            })
+            .unwrap();
+
+        cx.update_window(window.into(), |_, window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        })
+        .unwrap();
+        window
+            .update(cx, |surface, _, cx| {
+                assert_eq!(surface.pending_line_navigation, Some((90, Some(6))));
+                surface.preview.documents.get_mut(path).unwrap().set_loaded(
+                    zeron_proto::WorkspaceFileText {
+                        checkout_id: "checkout".into(),
+                        path: path.into(),
+                        text: Some(source.clone()),
+                        content_hash: Some("hash".into()),
+                        size: source.len() as u64,
+                        modified_at: None,
+                        encoding: zeron_proto::WorkspaceTextEncoding::Utf8,
+                        line_ending: Some(zeron_proto::WorkspaceLineEnding::Lf),
+                        read_only_reason: None,
+                        truncated: false,
+                    },
+                );
+                surface.sync_preview_list();
+                cx.notify();
+            })
+            .unwrap();
+
+        for _ in 0..5 {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+                window.simulate_next_frame(cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
+
+        window
+            .update(cx, |surface, _, cx| {
+                let document = &surface.preview.documents[path];
+                assert!(!document.show_markdown);
+                let editor = document.editor.as_ref().unwrap().read(cx);
+                assert_eq!(
+                    editor.cursor_position(),
+                    gpui_base::input::Position::new(89, 5)
+                );
+                let cursor = editor.cursor();
+                let line_bounds = editor.range_to_bounds(&(cursor..cursor)).unwrap_or_else(|| {
+                    panic!(
+                        "cursor outside layout: visible={:?} viewport={:?} scroll={:?} text={:?}",
+                        editor.visible_row_range(),
+                        editor.input_bounds(),
+                        editor.scroll_offset(),
+                        editor.text_bounds(),
+                    )
+                });
+                let viewport = editor.input_bounds();
+                let distance = f32::from(
+                    line_bounds.origin.y + line_bounds.size.height / 2.0
+                        - (viewport.origin.y + viewport.size.height / 2.0),
+                );
+                assert!(distance.abs() <= f32::from(line_bounds.size.height));
+            })
+            .unwrap();
+
+        window
+            .update(cx, |surface, _, cx| surface.navigate_to_line(180, None, cx))
+            .unwrap();
+        for _ in 0..5 {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+                window.simulate_next_frame(cx);
+            })
+            .unwrap();
+        }
+        window
+            .update(cx, |surface, _, cx| {
+                let editor = surface.preview.documents[path]
+                    .editor
+                    .as_ref()
+                    .unwrap()
+                    .read(cx);
+                assert_eq!(
+                    editor.cursor_position(),
+                    gpui_base::input::Position::new(179, 0)
+                );
+                let cursor = editor.cursor();
+                let line_bounds = editor.range_to_bounds(&(cursor..cursor)).unwrap();
+                let viewport = editor.input_bounds();
+                let distance = f32::from(
+                    line_bounds.origin.y + line_bounds.size.height / 2.0
+                        - (viewport.origin.y + viewport.size.height / 2.0),
+                );
+                assert!(distance.abs() <= f32::from(line_bounds.size.height));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn chat_line_link_near_the_top_never_scrolls_above_the_first_line(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let path = "src/lib.rs";
+        let source = (1..=180)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new_editor(
+                state,
+                "chat".into(),
+                path.into(),
+                false,
+                1000,
+                13.0,
+                false,
+                false,
+                cx,
+            )
+        });
+        window
+            .update(cx, |surface, _, _| {
+                let mut document = FileDocument::loading(DocumentKey {
+                    chat_id: "chat".into(),
+                    checkout_id: Some("checkout".into()),
+                    path: path.into(),
+                });
+                document.set_loaded(zeron_proto::WorkspaceFileText {
+                    checkout_id: "checkout".into(),
+                    path: path.into(),
+                    text: Some(source.clone()),
+                    content_hash: Some("hash".into()),
+                    size: source.len() as u64,
+                    modified_at: None,
+                    encoding: zeron_proto::WorkspaceTextEncoding::Utf8,
+                    line_ending: Some(zeron_proto::WorkspaceLineEnding::Lf),
+                    read_only_reason: None,
+                    truncated: false,
+                });
+                surface.preview.active = Some(path.into());
+                surface.preview.documents.insert(path.into(), document);
+                surface.sync_preview_list();
+            })
+            .unwrap();
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+                window.simulate_next_frame(cx);
+            })
+            .unwrap();
+        };
+        let first_line_top = |cx: &mut TestAppContext| {
+            window
+                .update(cx, |surface, _, cx| {
+                    let editor = surface.preview.documents[path].editor.as_ref()?.read(cx);
+                    editor.range_to_bounds(&(0..0)).map(|bounds| bounds.top())
+                })
+                .unwrap()
+        };
+        for _ in 0..3 {
+            draw(cx);
+        }
+        let resting_top = first_line_top(cx).expect("first line laid out");
+
+        window
+            .update(cx, |surface, _, cx| surface.navigate_to_line(3, None, cx))
+            .unwrap();
+        for _ in 0..5 {
+            draw(cx);
+            if let Some(top) = first_line_top(cx) {
+                assert!(top <= resting_top, "{top:?} painted below {resting_top:?}");
+            }
+        }
+        window
+            .update(cx, |surface, _, cx| {
+                let editor = surface.preview.documents[path]
+                    .editor
+                    .as_ref()
+                    .unwrap()
+                    .read(cx);
+                assert_eq!(
+                    editor.cursor_position(),
+                    gpui_base::input::Position::new(2, 0)
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn chat_line_link_suspends_an_open_markdown_preview(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let path = "README.md";
+        let source = "# Title\n\nBody\n";
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new_editor(
+                state,
+                "chat".into(),
+                path.into(),
+                false,
+                1000,
+                13.0,
+                false,
+                false,
+                cx,
+            )
+        });
+        window
+            .update(cx, |surface, _, cx| {
+                let mut document = FileDocument::loading(DocumentKey {
+                    chat_id: "chat".into(),
+                    checkout_id: Some("checkout".into()),
+                    path: path.into(),
+                });
+                document.set_loaded(zeron_proto::WorkspaceFileText {
+                    checkout_id: "checkout".into(),
+                    path: path.into(),
+                    text: Some(source.into()),
+                    content_hash: Some("hash".into()),
+                    size: source.len() as u64,
+                    modified_at: None,
+                    encoding: zeron_proto::WorkspaceTextEncoding::Utf8,
+                    line_ending: Some(zeron_proto::WorkspaceLineEnding::Lf),
+                    read_only_reason: None,
+                    truncated: false,
+                });
+                assert!(document.show_markdown);
+                surface.preview.active = Some(path.into());
+                surface.preview.documents.insert(path.into(), document);
+                let view = surface.prepare_markdown_preview(path, None, cx).unwrap();
+                assert!(!view.read(cx).test_suspended());
+
+                surface.navigate_to_line(2, None, cx);
+
+                assert!(!surface.preview.documents[path].show_markdown);
+                assert!(view.read(cx).test_suspended());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn chat_line_link_centers_read_only_text(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let path = "large.txt";
+        let source = (1..=180)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new_editor(
+                state,
+                "chat".into(),
+                path.into(),
+                false,
+                1000,
+                13.0,
+                false,
+                false,
+                cx,
+            )
+        });
+        window
+            .update(cx, |surface, _, cx| {
+                let mut document = FileDocument::loading(DocumentKey {
+                    chat_id: "chat".into(),
+                    checkout_id: Some("checkout".into()),
+                    path: path.into(),
+                });
+                document.set_loaded(zeron_proto::WorkspaceFileText {
+                    checkout_id: "checkout".into(),
+                    path: path.into(),
+                    text: Some(source.clone()),
+                    content_hash: Some("hash".into()),
+                    size: source.len() as u64,
+                    modified_at: None,
+                    encoding: zeron_proto::WorkspaceTextEncoding::Utf8,
+                    line_ending: Some(zeron_proto::WorkspaceLineEnding::Lf),
+                    read_only_reason: Some(WorkspaceReadOnlyReason::MixedLineEndings),
+                    truncated: false,
+                });
+                assert!(!document.is_editable());
+                surface.preview.active = Some(path.into());
+                surface.preview.documents.insert(path.into(), document);
+                surface.sync_preview_list();
+                surface.navigate_to_line(90, None, cx);
+            })
+            .unwrap();
+        for _ in 0..5 {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+                window.simulate_next_frame(cx);
+            })
+            .unwrap();
+        }
+        window
+            .update(cx, |surface, _, _| {
+                assert!(surface.preview.documents[path].editor.is_none());
+                let row = surface.preview.list.bounds_for_item(89).unwrap();
+                let viewport = surface.preview.list.viewport_bounds();
+                let distance = f32::from(
+                    row.origin.y + row.size.height / 2.0
+                        - (viewport.origin.y + viewport.size.height / 2.0),
+                );
+                assert!(distance.abs() <= f32::from(row.size.height));
+            })
+            .unwrap();
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

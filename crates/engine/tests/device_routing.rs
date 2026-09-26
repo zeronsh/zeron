@@ -526,7 +526,7 @@ async fn unsupported_remote_change_request_watch_keeps_the_shared_device_link() 
             Arc::new(StaticToken("test-user".into())),
         ),
         legacy.clone(),
-        Arc::new(|_| {}),
+        Arc::new(|_| true),
     );
 
     let core = assemble(&dirs.path().join("new"), "new-device");
@@ -798,7 +798,7 @@ async fn target_device_id_routes_over_the_relay() {
 
     // Streaming proxy: WatchDocMessages against B's doc from A's IPC surface.
     let mut stream = client
-        .subscribe(
+        .subscribe_scoped(
             methods::WATCH_DOC_MESSAGES,
             serde_json::json!({ "chatId": "chat-remote", "targetDeviceId": "device-b" }),
         )
@@ -816,6 +816,19 @@ async fn target_device_id_routes_over_the_relay() {
             break;
         }
     }
+
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while core_b.doc_host.sync_resources()["retainedBy"]["views"]
+            .as_u64()
+            .unwrap()
+            != 0
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("quiet remote transcript released its view");
 
     // Unary forward with side effects: QueueCommand lands (and executes) on B.
     let command = serde_json::to_value(SessionCommandPayload::Run {
@@ -1167,6 +1180,15 @@ async fn target_device_id_routes_over_the_relay() {
 /// unary calls and SubscribeTerminal proxies its stream through the relay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_stream_proxies_over_the_relay() {
+    exercise_terminal_relay(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn projectless_terminal_stream_proxies_over_the_relay() {
+    exercise_terminal_relay(true).await;
+}
+
+async fn exercise_terminal_relay(projectless: bool) {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64;
 
@@ -1175,26 +1197,54 @@ async fn terminal_stream_proxies_over_the_relay() {
     let cwd = dirs.path().join("work");
     std::fs::create_dir_all(&cwd).expect("cwd");
 
-    // Engine B hosts its device room; its chat row (via its space) pins the
-    // terminal cwd.
+    // Engine B hosts its device room and resolves the terminal cwd from its row.
     let core_b = assemble(&dirs.path().join("b"), "device-b");
+    if !projectless {
+        core_b
+            .workspace
+            .create_space(
+                "space-term",
+                "device-b",
+                &cwd.to_string_lossy(),
+                None,
+                false,
+            )
+            .expect("space row on B");
+    }
     core_b
         .workspace
-        .create_space(
-            "space-term",
-            "device-b",
-            &cwd.to_string_lossy(),
+        .create_chat(
+            "chat-term",
+            if projectless {
+                None
+            } else {
+                Some("space-term")
+            },
+            Some("device-b"),
             None,
-            false,
+            None,
         )
-        .expect("space row on B");
-    core_b
-        .workspace
-        .create_chat("chat-term", Some("space-term"), None, None, None)
         .expect("chat row on B");
     let _host = core_b.start_host_relay(&relay_url);
 
     let core_a = assemble(&dirs.path().join("a"), "device-a");
+    // A conflicting local row makes accidental local dispatch observable even
+    // though both engines in this test share the process's home directory.
+    core_a
+        .workspace
+        .create_chat(
+            "chat-term",
+            None,
+            Some("device-b"),
+            None,
+            Some(
+                dirs.path()
+                    .join("missing-on-a")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        )
+        .expect("decoy chat row on A");
     let mut link_config =
         LinkCacheConfig::new(relay_url.clone(), Arc::new(StaticToken("test-user".into())));
     link_config.probe_timeout = Duration::from_secs(5);
@@ -1227,11 +1277,22 @@ async fn terminal_stream_proxies_over_the_relay() {
         }
     };
     let terminal_id = session["id"].as_str().expect("terminal id").to_string();
+    let expected_cwd = if projectless {
+        std::env::var("HOME").expect("HOME set in test env")
+    } else {
+        cwd.to_string_lossy().into_owned()
+    };
     assert_eq!(
         session["cwd"].as_str(),
-        Some(&*cwd.to_string_lossy()),
+        Some(expected_cwd.as_str()),
         "cwd from B's chat row"
     );
+    if projectless {
+        let chat = core_b.workspace.chat("chat-term").unwrap().unwrap();
+        assert_eq!(chat.cwd.as_deref(), Some("~"));
+        assert_eq!(chat.space_id, None);
+        assert!(core_b.workspace.read_spaces().unwrap().is_empty());
+    }
 
     // SubscribeTerminal: the stream is proxied item-by-item through the relay.
     let mut stream = client
@@ -1272,11 +1333,34 @@ async fn terminal_stream_proxies_over_the_relay() {
 
     client
         .call(
+            methods::RESIZE_TERMINAL,
+            serde_json::json!({
+                "terminalId": terminal_id,
+                "cols": 132,
+                "rows": 40,
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("remote resize");
+    client
+        .call(
             methods::CLOSE_TERMINAL,
             serde_json::json!({ "terminalId": terminal_id, "targetDeviceId": "device-b" }),
         )
         .await
         .expect("remote close");
+    client
+        .call(
+            methods::WRITE_TERMINAL,
+            serde_json::json!({
+                "terminalId": terminal_id,
+                "data": BASE64.encode("x"),
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect_err("closed remote terminal rejects writes");
 
     core_a.shutdown().await;
     core_b.shutdown().await;

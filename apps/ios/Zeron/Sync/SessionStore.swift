@@ -495,13 +495,18 @@ final class SessionStore {
         }
     }
 
-    func stop() {
-        guard !stopped else { return }
+    /// Stops synchronously and returns the final persistence attempt, if dirty.
+    /// The task outlives the store; its result reports this attempt, not retries
+    /// or network shutdown. Repeated stops do not enqueue another write.
+    @discardableResult
+    func stop() -> Task<Bool, Never>? {
+        guard !stopped else { return nil }
         stopped = true
         started = false
         holdDial = false
         lifecycleGeneration &+= 1
         subscriptions.removeAll()
+        var persistence: Task<Bool, Never>?
         if let saver, saver.isDirty {
             let doc = self.doc
             let cursor = self.cursor
@@ -510,8 +515,8 @@ final class SessionStore {
             let outbox = self.outbox
             let chatId = self.chatId
             let leaseToken = self.leaseToken
-            Task { @MainActor [weak self, saver, doc] in
-                _ = await saver.commitAsync(
+            persistence = Task { @MainActor [weak self, saver, doc] in
+                await saver.commitAsync(
                     export: { try? doc.export(mode: .snapshot) },
                     write: { [weak self] snapshot in
                         guard SnapshotLease.isCurrent(chatId, leaseToken) else {
@@ -541,6 +546,7 @@ final class SessionStore {
         chatRoom = nil
         hostRelay = nil
         connected = false
+        return persistence
     }
 
     private func handle(_ event: ChatRoomEvent) {

@@ -236,14 +236,21 @@ impl ChatDocSink for EngineChatSink {
 /// the previous attempt died (the DO serves 206), which is the entire point
 /// of checkpoint-over-HTTP on the 1.2 Mbps links this design targets.
 pub struct EdgeCheckpointFetcher {
+    priority: zeron_sync::budget::Priority,
     http: reqwest::Client,
     edge: EdgeConfig,
     chat_id: String,
 }
 
 impl EdgeCheckpointFetcher {
+    pub fn with_priority(mut self, priority: zeron_sync::budget::Priority) -> Self {
+        self.priority = priority;
+        self
+    }
+
     pub fn new(http: reqwest::Client, edge: EdgeConfig, chat_id: impl Into<String>) -> Self {
         Self {
+            priority: zeron_sync::budget::Priority::Interactive,
             http,
             edge,
             chat_id: chat_id.into(),
@@ -253,6 +260,7 @@ impl EdgeCheckpointFetcher {
 
 impl CheckpointFetcher for EdgeCheckpointFetcher {
     fn fetch(&self) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        let priority = self.priority;
         let http = self.http.clone();
         let edge = self.edge.clone();
         let url = format!(
@@ -268,6 +276,7 @@ impl CheckpointFetcher for EdgeCheckpointFetcher {
             // the last one stopped. Attempt count bounds a flapping link;
             // the ChatClient's own deadline bounds wall clock.
             for _attempt in 0..4 {
+                let _permit = zeron_sync::budget::shared().http(priority).await?;
                 let bearer = edge.bearer().await.map_err(SyncError::from)?;
                 let mut req = http
                     .get(&url)
@@ -343,6 +352,7 @@ impl CheckpointFetcher for EdgeCheckpointFetcher {
 /// Plain-HTTPS chat pull/push (the airplane-wifi transport): GET/POST
 /// `/chat2/{id}/rows` with the same bearer auth the checkpoint fetcher uses.
 pub struct EdgeChatTransport {
+    priority: zeron_sync::budget::Priority,
     http: reqwest::Client,
     edge: EdgeConfig,
     chat_id: String,
@@ -350,6 +360,11 @@ pub struct EdgeChatTransport {
 }
 
 impl EdgeChatTransport {
+    pub fn with_priority(mut self, priority: zeron_sync::budget::Priority) -> Self {
+        self.priority = priority;
+        self
+    }
+
     pub fn new(
         http: reqwest::Client,
         edge: EdgeConfig,
@@ -357,6 +372,7 @@ impl EdgeChatTransport {
         device_id: impl Into<String>,
     ) -> Self {
         Self {
+            priority: zeron_sync::budget::Priority::Interactive,
             http,
             edge,
             chat_id: chat_id.into(),
@@ -375,11 +391,13 @@ impl EdgeChatTransport {
 
 impl zeron_sync::chat_client::ChatTransport for EdgeChatTransport {
     fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        let priority = self.priority;
         let http = self.http.clone();
         let edge = self.edge.clone();
         let url = self.rows_url();
         let device = self.device_id.clone();
         Box::pin(async move {
+            let _permit = zeron_sync::budget::shared().http(priority).await?;
             let bearer = edge.bearer().await.map_err(SyncError::from)?;
             let res = http
                 .get(&url)
@@ -407,11 +425,13 @@ impl zeron_sync::chat_client::ChatTransport for EdgeChatTransport {
         batch_id: String,
         bytes: Vec<u8>,
     ) -> BoxFuture<'static, Result<String, SyncError>> {
+        let priority = self.priority;
         let http = self.http.clone();
         let edge = self.edge.clone();
         let url = self.rows_url();
         let device = self.device_id.clone();
         Box::pin(async move {
+            let _permit = zeron_sync::budget::shared().http(priority).await?;
             let bearer = edge.bearer().await.map_err(SyncError::from)?;
             let res = http
                 .post(&url)

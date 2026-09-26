@@ -37,7 +37,7 @@ pub mod methods {
     pub const LIST_HARNESSES: &str = "ListHarnesses";
     pub const CANCEL_INSTALL: &str = "CancelInstall";
     pub const INSTALL_HARNESS: &str = "InstallHarness";
-    /// Flip a harness's enablement on the target device (Settings → Agents);
+    /// Flip a harness's enablement on the target device (Settings → Providers);
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
@@ -60,6 +60,9 @@ pub mod methods {
     pub const RETRY_DELIVERY: &str = "RetryDelivery";
     pub const FORK_SIDE_CHAT: &str = "ForkSideChat";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
+    /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
+    /// connection; automatic subscriptions and retries must not call it.
+    pub const FOCUS_CHAT: &str = "FocusChat";
     /// Messages typed while the agent was busy, held on the chat doc so every
     /// device sees the same queue. `{ chatId }` → `{ items: QueuedMessage[] }`.
     pub const WATCH_QUEUE: &str = "WatchQueue";
@@ -182,6 +185,9 @@ pub mod methods {
     /// Current pull request for one checkout, resolved on the checkout's host device.
     pub const WATCH_CHECKOUT_CHANGE_REQUEST: &str = "WatchCheckoutChangeRequest";
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
+    /// Permanently restore one chat-owned checkout to its current HEAD and
+    /// remove only its untracked, non-ignored paths.
+    pub const DISCARD_WORKING_TREE: &str = "DiscardWorkingTree";
     pub const GET_CHECKOUT_FILE_DIFF_TEXT: &str = "GetCheckoutFileDiffText";
     // Agent accounts (ControlRpc, relay-forwardable — CLI logins are per-device).
     pub const LIST_AGENT_ACCOUNTS: &str = "ListAgentAccounts";
@@ -315,7 +321,7 @@ mod tests {
             method: &str,
             _params: serde_json::Value,
         ) -> Result<RpcReply, RpcError> {
-            if method != methods::WATCH_CHECKOUT_CHANGE_REQUEST {
+            if method != methods::WATCH_CHECKOUT_CHANGE_REQUEST && method != "Silent" {
                 return Err(RpcError::UnknownMethod(method.into()));
             }
             let guard = DropSignal(self.dropped.lock().unwrap().take());
@@ -425,6 +431,30 @@ mod tests {
             .await
             .expect("server stream cancelled")
             .expect("drop signal");
+    }
+
+    #[tokio::test]
+    async fn scoped_subscription_returns_before_first_item_and_cancels_silence() {
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let service = Arc::new(CancelAwareService {
+            dropped: Mutex::new(Some(dropped_tx)),
+        });
+        let client = memory_client(service.clone());
+        let stream = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.subscribe_scoped("Silent", serde_json::Value::Null),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        while service.dropped.lock().unwrap().is_some() {
+            tokio::task::yield_now().await;
+        }
+        drop(stream);
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

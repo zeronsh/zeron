@@ -18,6 +18,12 @@
     font-display: swap;
   }
   @font-face {
+    font-family: "Instrument Serif";
+    src: url("/assets/instrument-serif-latin.woff2") format("woff2");
+    font-weight: 400;
+    font-display: swap;
+  }
+  @font-face {
     font-family: "Geist Mono";
     src: url("/assets/geist-mono-latin.woff2") format("woff2");
     font-weight: 100 900;
@@ -37,6 +43,9 @@
     --nav-control-height: 30px;
     --sans: "Geist", system-ui, -apple-system, sans-serif;
     --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --serif: "Instrument Serif", Georgia, serif;
+    --radius: 20px;
+    --sec: 120px;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html {
@@ -101,8 +110,6 @@
     gap: 16px;
     font-size: 13px;
   }
-  .navlink { color: var(--dim); padding: 6px 10px; transition: color .15s; }
-  .navlink:hover { color: var(--ink); }
   .gh-icon {
     display: inline-flex;
     align-items: center;
@@ -112,92 +119,142 @@
   }
   .gh-icon:hover { color: var(--ink); }
   .gh-icon svg { width: 18px; height: 18px; fill: currentColor; }
+  /* buttons: white primary, hairline ghost. 34px tall, 30px as .small */
   .btn {
     display: inline-flex;
     align-items: center;
-    gap: 9px;
+    justify-content: center;
+    gap: 8px;
+    height: 34px;
+    padding: 0 15px;
     font-size: 13.5px;
     font-weight: 500;
-    padding: 10px 18px;
-    background: var(--purple);
-    color: #fff;
-    border: 0;
-    border-radius: 8px;
+    white-space: nowrap;
+    background: #fff;
+    color: var(--bg);
+    border: 1px solid transparent;
+    border-radius: 9px;
     cursor: pointer;
-    transition: background .15s;
+    transition: background .15s, border-color .15s, color .15s;
   }
-  .btn:hover { background: var(--purple-hi); }
+  .btn:hover { background: #ddd6ea; }
   .btn.ghost {
     background: transparent;
-    color: var(--dim);
-    border: 1px solid var(--line);
+    color: var(--ink);
+    border-color: var(--line);
   }
-  .btn.ghost:hover { color: var(--ink); border-color: var(--faint); background: transparent; }
+  .btn.ghost:hover { background: rgba(236,231,247,0.05); border-color: #3a2f55; }
+  .text-link { font-size: 13.5px; font-weight: 500; color: var(--dim); transition: color .15s; }
+  .text-link:hover { color: var(--ink); }
+  .text-link .gh-stars { padding-left: 4px; border-left: 0; }
+  .gh-stars {
+    padding-left: 9px;
+    border-left: 1px solid var(--line);
+    font-variant-numeric: tabular-nums;
+  }
+  .gh-icon .gh-stars {
+    padding-left: 7px;
+    border-left: 0;
+    font-size: 12.5px;
+  }
   .btn.small {
     height: var(--nav-control-height);
-    padding: 0 13px;
-    font-size: 11.5px;
+    padding: 0 12px;
+    font-size: 12.5px;
+    border-radius: 8px;
   }
 
   /* ── hero ────────────────────────────────────────────── */
   .hero { position: relative; overflow: hidden; }
+  /* above the glyph field, which is prepended into .hero */
   .hero-grid {
-    display: grid;
-    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
-    align-items: center;
-    gap: 40px;
-    padding: 72px 32px 40px;
+    position: relative;
+    z-index: 1;
+    text-align: center;
+    padding: 88px 32px 56px;
   }
-  h1 {
-    font-size: clamp(38px, 4.8vw, 58px);
-    font-weight: 600;
-    letter-spacing: -0.035em;
-    line-height: 1.05;
+  .hero-copy { max-width: 600px; margin: 0 auto; }
+  /* one paragraph: the bold lead in --ink, the rest in --dim */
+  .hero h1 {
+    font-size: clamp(21px, 2.1vw, 25px);
+    font-weight: 500;
+    letter-spacing: -0.022em;
+    line-height: 1.38;
+    color: var(--dim);
     text-wrap: balance;
   }
-  .hero p.sub {
-    margin-top: 22px;
-    max-width: 460px;
-    font-size: 16px;
-    line-height: 1.65;
-    color: var(--dim);
-    text-wrap: pretty;
-  }
+  .hero h1 b { display: block; font-weight: 600; color: var(--ink); }
   .hero .cta-row {
-    margin-top: 36px;
+    margin-top: 28px;
     display: flex;
     align-items: center;
-    gap: 14px;
+    justify-content: center;
+    gap: 12px 20px;
     flex-wrap: wrap;
   }
   .cta-ver {
     font-family: var(--mono);
-    font-size: 12.5px;
+    font-size: 11.5px;
     color: var(--faint);
   }
-  .all-downloads { font-size: 13.5px; color: var(--dim); transition: color .15s; }
-  .all-downloads:hover { color: var(--ink); }
-  .hero-ascii {
-    justify-self: end;
-    font-family: var(--mono);
-    font-size: 7.6px;
-    font-weight: 400;
-    line-height: 1.25;
-    font-variant-ligatures: none;
-    font-feature-settings: "liga" 0, "calt" 0, "dlig" 0;
-    white-space: pre;
-    user-select: none;
-    pointer-events: none;
-    background: linear-gradient(165deg, #a986ff 0%, #8b5cf6 40%, #4b2b96 80%, #241548 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    -webkit-mask-image: radial-gradient(85% 85% at 55% 45%, #000 55%, transparent 96%);
-    mask-image: radial-gradient(85% 85% at 55% 45%, #000 55%, transparent 96%);
+  .used-by { margin-top: 44px; }
+  .used-by p { font-size: 12.5px; color: var(--faint); }
+  .used-by-logos {
+    margin-top: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 30px;
+    flex-wrap: wrap;
   }
+  /* at rest each logo is a --faint silhouette, like .agent-icon; hover
+     fades the real brand colors in */
+  .used-by-logos a { position: relative; display: inline-flex; }
+  .used-by-logos a::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-color: var(--faint);
+    -webkit-mask: var(--logo) no-repeat center / contain;
+    mask: var(--logo) no-repeat center / contain;
+    transition: opacity .2s;
+  }
+  .used-by-logos img { width: auto; opacity: 0; transition: opacity .2s; }
+  .used-by-logos a:hover::after { opacity: 0; }
+  .used-by-logos a:hover img { opacity: 1; }
   @media (max-width: 900px) {
-    .hero-grid { grid-template-columns: 1fr; padding-top: 48px; }
-    .hero-ascii { display: none; }
+    .hero-grid { padding-top: 56px; }
+  }
+
+  /* ── section heading ─────────────────────────────────── */
+  /* every full-width section opens the same way: a centered paragraph,
+     bold lead in --ink, the rest in --dim (the hero's voice, smaller) */
+  .sec-head { max-width: 560px; margin: 0 auto 48px; text-align: center; }
+  .sec-head p, .p-copy p {
+    font-size: clamp(19px, 1.9vw, 22px);
+    font-weight: 500;
+    line-height: 1.42;
+    letter-spacing: -0.02em;
+    color: var(--dim);
+    text-wrap: balance;
+  }
+  .sec-head b, .p-copy b { font-weight: 600; color: var(--ink); }
+
+  /* ── art plates ──────────────────────────────────────── */
+  .plate {
+    position: relative;
+    overflow: hidden;
+    border-radius: var(--radius);
+    background: #0a090c;
+    isolation: isolate;
+  }
+  .plate-img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    z-index: -1;
   }
 
   /* ── shot ────────────────────────────────────────────── */
@@ -215,7 +272,7 @@
     width: 100%;
     height: auto;
     border: 1px solid var(--line);
-    border-radius: 6px;
+    border-radius: 14px;
     box-shadow:
       0 30px 100px -30px rgba(0,0,0,0.8),
       0 0 90px -30px rgba(139,92,246,0.35);
@@ -225,8 +282,9 @@
   .agents {
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 26px;
-    margin-top: 40px;
+    margin-bottom: 32px;
     flex-wrap: wrap;
   }
   .agent-icon {
@@ -242,11 +300,8 @@
   /* ── panel (harnesses · gallery · devices) ───────────── */
   /* one bordered frame with corner ticks; cells divide with hairlines
      instead of floating in whitespace */
-  .panel-sect { padding-top: 110px; position: relative; z-index: 1; }
+  .panel-sect { padding-top: var(--sec); position: relative; z-index: 1; }
   .panel-sect > .wrap { position: relative; z-index: 1; }
-  /* transparent: the reach figures show through under the cells; the top
-     and bottom rules run the full page width, the side borders stay at
-     wrap width */
   .panel {
     position: relative;
   }
@@ -272,15 +327,15 @@
     width: 100%;
     height: auto;
     border: 1px solid var(--line-soft);
-    border-radius: 6px;
+    border-radius: 12px;
   }
   .p-gallery figcaption {
-    margin-top: 13px;
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.02em;
-    color: var(--faint);
+    margin-top: 14px;
+    font-size: 14px;
+    line-height: 1.45;
+    color: var(--dim);
   }
+  .p-gallery figcaption b { font-weight: 600; color: var(--ink); }
 
   .p-harness { display: grid; grid-template-columns: 1.08fr 1fr; }
   .p-diagram {
@@ -369,19 +424,7 @@
     justify-content: center;
     padding: 48px 0;
   }
-  .p-copy h2 {
-    font-size: clamp(21px, 2.4vw, 27px);
-    font-weight: 600;
-    letter-spacing: -0.025em;
-    text-wrap: balance;
-  }
-  .p-copy p {
-    margin-top: 14px;
-    max-width: 400px;
-    font-size: 14px;
-    line-height: 1.65;
-    color: var(--dim);
-  }
+  .p-copy p { max-width: 440px; }
   .p-copy .cta-row { margin-top: 26px; display: flex; gap: 14px; }
 
   /* ── devices flowchart ──────────────────────────────── */
@@ -454,318 +497,194 @@
     .spoke-line, .spoke-accent { animation: none; }
   }
 
-  /* ── reach ascii ─────────────────────────────────────── */
-  /* the reaching-figures relief, rendered through the same baked-density
-     glyph field as the closing hands */
-  /* the two figures flank the panel from the page edges, vertically
-     centered on it and layered underneath — the arms reach in behind
-     the panel like the hands behind the closing */
-  .reach-left, .reach-right {
-    position: absolute;
-    /* no-JS fallback; a script re-anchors this to the harness row's center
-       so the figures keep reaching toward it wherever the row sits */
-    top: calc(50% + 55px);
-    transform: translateY(-50%);
-    z-index: 0;
-    height: auto !important;
-    -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 84%, transparent 100%);
-    mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 84%, transparent 100%);
-  }
-  .reach-left { left: 0; width: min(540px, 44vw) !important; }
-  .reach-right { right: 0; width: min(516px, 42vw) !important; }
-
   /* ── tweets ──────────────────────────────────────────── */
-  /* z-index keeps the cards above the closing section's ascii hand,
-     which reaches up into this section's bottom rows */
-  .tweets { padding: 130px 0 0; position: relative; z-index: 1; overflow: hidden; }
-  .tweets h2 {
-    font-size: clamp(24px, 3vw, 32px);
-    font-weight: 600;
-    letter-spacing: -0.025em;
-    text-wrap: balance;
-  }
-  .tweets .sub {
-    margin-top: 14px;
-    max-width: 460px;
-    font-size: 14.5px;
-    line-height: 1.65;
-    color: var(--dim);
-  }
-  /* full-bleed marquee strip: flat cells split by hairlines (no floating
-     cards); each row holds its card group twice so translating -50% loops
-     seamlessly */
-  .tweet-marquee {
-    margin-top: 44px;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-  }
-  .tweet-row { overflow: hidden; }
-  .tweet-track {
-    display: flex;
-    width: max-content;
-    will-change: transform;
-    animation: tweet-marquee 117s linear infinite;
-  }
-  .tweet-row.is-reverse .tweet-track {
-    animation-duration: 126s;
-    animation-direction: reverse;
-  }
-  .tweet-marquee:hover .tweet-track,
-  .tweet-marquee:focus-within .tweet-track { animation-play-state: paused; }
-  @keyframes tweet-marquee {
-    from { transform: translateX(0); }
-    to { transform: translateX(-50%); }
-  }
-  .tweet-group { display: flex; gap: 14px; padding-right: 14px; }
-  .tweet {
-    position: relative;
-    display: block;
-    width: 348px;
-    flex: 0 0 auto;
-    border: 1px solid var(--line-soft);
-    border-radius: 10px;
-    overflow: hidden;
-    -webkit-backdrop-filter: blur(10px);
-    backdrop-filter: blur(10px);
-    transition: background .2s, border-color .2s;
-  }
-  .tweet:hover { background: rgba(139, 92, 246, 0.05); border-color: var(--line); }
-  .tweet::before {
+  /* a featured post on an art plate, then a wall of three columns
+     drifting in opposite directions (each holds its cards twice, cloned
+     by script, so translating 50% loops seamlessly) */
+  .tweets { padding-top: var(--sec); position: relative; z-index: 1; }
+  .plate-quote { aspect-ratio: 16 / 7; display: grid; place-items: center; }
+  .plate-quote::before {
     content: "";
     position: absolute;
-    left: 0;
-    top: 20px;
-    width: 2px;
-    height: 24px;
-    background: var(--purple);
-    transform: scaleX(0);
-    transform-origin: left;
-    transition: transform .2s;
+    inset: 0;
+    background: radial-gradient(60% 70% at 50% 45%, rgba(6,4,10,0.7), rgba(6,4,10,0.1));
   }
-  .tweet:hover::before { transform: scaleX(1); }
-  .tweet-head {
-    display: flex;
-    align-items: center;
-    gap: 11px;
-    padding: 14px 18px;
-    border-bottom: 1px solid var(--line-soft);
-  }
-  .tweet-head img {
-    width: 34px;
-    height: 34px;
-    border-radius: 50%;
-    flex: 0 0 auto;
-  }
-  .tweet-who { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
-  .tweet-name {
-    font-size: 13px;
-    font-weight: 600;
+  .plate-quote .glyph-field { z-index: 1 !important; mix-blend-mode: screen; }
+  .plate-quote blockquote { position: relative; z-index: 2; padding: 0 8%; text-align: center; }
+  .plate-quote p {
+    margin: 0 auto;
+    max-width: 24ch;
+    font-family: var(--serif);
+    font-size: clamp(26px, 3.2vw, 44px);
+    line-height: 1.12;
     letter-spacing: -0.01em;
-    white-space: nowrap;
+    color: var(--ink);
+    text-wrap: balance;
+  }
+  .plate-quote cite { display: block; margin-top: 22px; font-size: 13px; font-weight: 500; font-style: normal; }
+  .plate-quote cite a { display: inline-flex; align-items: center; gap: 8px; }
+  .plate-quote cite img { border-radius: 50%; }
+  .plate-quote cite span { color: var(--dim); font-weight: 450; }
+  .wall {
+    position: relative;
+    margin-top: 40px;
+    height: 600px;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
     overflow: hidden;
-    text-overflow: ellipsis;
+    -webkit-mask-image: linear-gradient(transparent, #000 12%, #000 88%, transparent);
+    mask-image: linear-gradient(transparent, #000 12%, #000 88%, transparent);
   }
-  .tweet-handle {
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--faint);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+  .wall-col { display: flex; flex-direction: column; gap: 16px; }
+  .wall.is-live .wall-col { animation: drift var(--dur, 70s) linear infinite; }
+  .wall.is-live .wall-col.up { animation-direction: reverse; }
+  .wall:hover .wall-col { animation-play-state: paused; }
+  @keyframes drift { from { transform: translate3d(0, -50%, 0); } to { transform: none; } }
+  .tweet {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 18px 18px 20px;
+    background: var(--bg-raise);
+    border: 1px solid var(--line-soft);
+    border-radius: 16px;
+    transition: border-color .25s;
   }
-  .tweet-arrow {
-    width: 17px;
-    height: 17px;
-    flex: 0 0 auto;
-    color: var(--purple-hi);
-    opacity: 0;
-    transform: translate(-3px, 3px);
-    transition: opacity .2s, transform .2s;
-  }
-  .tweet:hover .tweet-arrow { opacity: 1; transform: none; }
-  .tweet p {
-    padding: 14px 18px;
-    height: 118px;
+  .tweet:hover { border-color: rgba(139,92,246,0.35); }
+  .tweet-head { display: flex; align-items: center; gap: 10px; }
+  .tweet-head img { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; }
+  .tweet-who { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+  .tweet-name {
     font-size: 13.5px;
-    line-height: 1.58;
-    color: var(--dim);
-    white-space: pre-line;
-    overflow-wrap: break-word;
-    display: -webkit-box;
-    -webkit-line-clamp: 4;
-    -webkit-box-orient: vertical;
+    font-weight: 600;
+    line-height: 1.1;
+    white-space: nowrap;
     overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .tweet .hl { color: var(--purple-hi); font-style: normal; }
+  .tweet-handle { font-size: 12.5px; line-height: 1; color: var(--faint); }
+  .tweet-x { width: 14px; height: 14px; color: var(--faint); }
+  .tweet p { font-size: 15px; line-height: 1.5; color: rgba(236,231,247,0.82); text-wrap: pretty; }
+  .tweet .hl { font-style: normal; color: var(--purple-hi); }
+  @media (max-width: 900px) {
+    .plate-quote { aspect-ratio: 4 / 3; }
+    .wall { grid-template-columns: repeat(2, 1fr); }
+    .wall-col:nth-child(3) { display: none; }
+  }
   @media (prefers-reduced-motion: reduce) {
-    .tweet-track { animation: none; }
-    .tweet-row { overflow-x: auto; }
+    .wall.is-live .wall-col { animation: none; }
   }
 
   /* ── downloads ───────────────────────────────────────── */
-  /* centered lede, then hairline rows: a lead column (audience + sub) and
-     a list of builds with a button each. z-index keeps the rows above
-     the closing section's ascii hand, which reaches up into this section */
-  .downloads { padding: 130px 0 0; position: relative; z-index: 1; }
+  /* shared heading, then hairline rows: a lead column (audience + sub)
+     and a list of builds with a button each */
+  .downloads { padding-top: var(--sec); position: relative; z-index: 1; }
   .downloads .wrap { scroll-margin-top: 40px; }
-  .dl-lede { text-align: center; }
-  .dl-lede h2 {
-    font-size: clamp(24px, 3vw, 32px);
-    font-weight: 600;
-    letter-spacing: -0.025em;
-    text-wrap: balance;
-  }
-  .dl-lede .sub {
-    margin: 14px auto 0;
-    max-width: 460px;
-    font-size: 14.5px;
-    line-height: 1.65;
-    color: var(--dim);
-  }
-  .dl-rows { margin-top: 56px; border-bottom: 1px solid var(--line-soft); }
-  .dl-row {
+  .dl {
+    max-width: 880px;
+    margin: 0 auto;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
-    gap: 32px;
-    padding: 44px 0;
-    border-top: 1px solid var(--line-soft);
+    grid-template-columns: 1fr 1fr;
+    gap: 48px;
   }
-  .dl-lead h3 {
-    font-size: 19px;
-    font-weight: 600;
-    letter-spacing: -0.02em;
-  }
-  .dl-lead p { margin-top: 8px; font-size: 14.5px; line-height: 1.6; color: var(--faint); }
-  .dl-list { list-style: none; }
+  .dl h3 { margin-bottom: 12px; font-size: 14px; font-weight: 600; }
+  .dl-list { list-style: none; border-top: 1px solid var(--line-soft); }
   .dl-list li {
-    display: flex;
+    display: grid;
+    grid-template-columns: 84px 1fr auto;
     align-items: center;
-    gap: 14px;
-    padding: 9px 0;
+    gap: 12px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--line-soft);
+    font-size: 14px;
   }
-  .dl-list li + li { border-top: 1px solid var(--line-soft); }
-  .dl-name { font-size: 14px; font-weight: 500; }
-  /* build details in the same mono caption voice as the gallery */
-  .dl-meta {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.02em;
-    color: var(--faint);
-    white-space: nowrap;
-  }
-  .dl-list .btn { margin-left: auto; padding: 8px 14px; font-size: 13px; }
+  .dl-name { font-weight: 600; }
+  .dl-meta { font-size: 13px; color: var(--faint); white-space: nowrap; }
   .dl-list .btn.ghost[aria-disabled="true"] {
     opacity: .4;
     cursor: default;
     pointer-events: none;
   }
-  .dl-soon {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.02em;
-    color: var(--faint);
-  }
-  .download-foot {
-    margin-top: 24px;
-    display: flex;
-    align-items: center;
-    gap: 20px;
-    flex-wrap: wrap;
-    font-size: 12.5px;
-    color: var(--faint);
-  }
+  .download-foot { max-width: 880px; margin: 16px auto 0; font-size: 13px; }
   .download-foot a { color: var(--dim); transition: color .15s; }
   .download-foot a:hover { color: var(--ink); }
-  @media (max-width: 900px) {
-    .dl-row { grid-template-columns: 1fr; gap: 22px; padding: 34px 0; }
+  @media (max-width: 760px) {
+    .dl { grid-template-columns: 1fr; gap: 32px; }
   }
 
   /* ── closing ─────────────────────────────────────────── */
-  .closing {
-    margin: 140px 0 80px;
-    position: relative;
-  }
-  .closing .wrap { position: relative; z-index: 1; }
-  /* ascii hands: rendered like the edge railing — same cell grid, glyph
-     ramp, colour and top/bottom fade; the hand image is the density map */
-  .hand-ascii {
+  .closing { padding-top: var(--sec); }
+  .plate-closing { aspect-ratio: 16 / 8; display: grid; place-items: center; }
+  .plate-closing::before {
+    content: "";
     position: absolute;
-    z-index: 0;
-    pointer-events: none;
-    -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 20%, #000 80%, transparent 100%);
-    mask-image: linear-gradient(to bottom, transparent 0%, #000 20%, #000 80%, transparent 100%);
+    inset: 0;
+    background: radial-gradient(44% 56% at 50% 52%, rgba(6,4,10,0.82), rgba(6,4,10,0));
   }
-  .hand-ascii.hand-down { top: -320px; left: 0; }
-  .hand-ascii.hand-up { bottom: 0; right: 0; }
-  @media (max-width: 900px) { .hand-ascii { display: none; } }
-  .closing h2 {
-    font-size: clamp(28px, 3.8vw, 40px);
-    font-weight: 600;
-    letter-spacing: -0.03em;
-    text-wrap: balance;
+  .closing-copy { position: relative; z-index: 1; padding: 0 24px; text-align: center; }
+  .closing-copy h2 {
+    font-family: var(--serif);
+    font-size: clamp(34px, 4.4vw, 60px);
+    font-weight: 400;
+    line-height: 1.04;
+    letter-spacing: -0.012em;
   }
-  .closing p { margin: 16px 0 0; max-width: 440px; font-size: 15px; line-height: 1.65; color: var(--dim); }
-  .closing .cta-row { margin-top: 34px; display: flex; gap: 14px; flex-wrap: wrap; }
-
-  footer { padding: 28px 0 40px; position: relative; }
-  .footer-inner {
-    position: relative; /* keeps footer text above the ascii hand */
+  /* on art, secondary text stays near-white (the lab's light variants) */
+  .closing-copy p { margin: 14px auto 0; max-width: 40ch; font-size: 15px; line-height: 1.55; color: rgba(236,231,247,0.75); }
+  .closing-copy .text-link { color: var(--ink); }
+  .closing-copy .text-link:hover { color: #fff; }
+  .closing-copy .cta-row {
+    margin-top: 28px;
     display: flex;
     align-items: center;
-    gap: 20px;
-    font-size: 12.5px;
-    color: var(--faint);
+    justify-content: center;
+    gap: 12px 20px;
     flex-wrap: wrap;
   }
-  .footer-inner .right { margin-left: auto; display: flex; align-items: center; gap: 20px; }
-  .footer-inner .gh-icon { padding: 0; }
-  footer a:hover { color: var(--dim); }
+  @media (max-width: 900px) { .plate-closing { aspect-ratio: 4 / 3; } }
 
-  /* ── edge ascii (app preview only) ───────────────────── */
-  .shot .wrap { z-index: 1; }
-  .dither {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    width: 140px;
-    z-index: 0;
-    pointer-events: none;
-    -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 20%, #000 80%, transparent 100%);
-    mask-image: linear-gradient(to bottom, transparent 0%, #000 20%, #000 80%, transparent 100%);
+  /* ── footer ──────────────────────────────────────────── */
+  .foot {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 20px;
+    padding-top: 48px;
+    padding-bottom: 48px;
+    font-size: 13px;
+    color: var(--faint);
   }
-  .dither-left { left: 0; }
-  .dither-right { right: 0; }
-  .dither canvas { width: 100%; height: 100%; display: block; }
-  @media (max-width: 1440px) { .dither { display: none; } }
+  .foot .brand { font-size: 16px; font-weight: 600; letter-spacing: -0.02em; color: var(--ink); }
+  .foot-links { display: flex; gap: 22px; }
+  .foot-links a { color: var(--dim); transition: color .15s; }
+  .foot-links a:hover { color: var(--ink); }
+  .foot small { justify-self: end; font-size: inherit; }
 
   /* ── mobile ──────────────────────────────────────────── */
   @media (max-width: 640px) {
     .wrap { padding: 0 20px; }
     .nav-inner { height: 56px; }
-    .hero-grid { padding: 36px 20px 32px; gap: 44px; }
-    h1 { font-size: clamp(32px, 9vw, 38px); }
-    .hero p.sub { font-size: 15px; }
-    .hero .cta-row { margin-top: 28px; }
-    .agents { gap: 22px; margin-top: 30px; }
+    :root { --sec: 80px; --radius: 16px; }
+    .hero-grid { padding: 36px 20px 32px; }
+    .hero-grid { text-align: left; }
+    .hero-copy { margin: 0; }
+    .hero .agents, .hero .cta-row, .used-by-logos { justify-content: flex-start; }
+    .agents { gap: 22px; margin-bottom: 26px; }
     .agent-icon { width: 20px; height: 20px; }
     .shot { padding: 28px 0 0; }
-    .shot img { border-radius: 4px; }
-    .panel-sect { padding-top: 72px; }
-    .reach-left, .reach-right { display: none; }
-    .tweets { padding: 84px 0 0; }
-    .tweet-marquee { margin-top: 28px; }
-    .tweet-track { animation-duration: 56s; }
-    .tweet-row.is-reverse .tweet-track { animation-duration: 62s; }
-    .tweet { width: 300px; }
-    .downloads { padding: 84px 0 0; }
-    .dl-rows { margin-top: 36px; }
-    .dl-list li { flex-wrap: wrap; row-gap: 6px; }
-    .closing { margin: 80px 0 56px; }
-    .closing p { font-size: 14px; }
-    .closing .cta-row { margin-top: 28px; }
-    footer { padding: 20px 0 32px; }
-    .footer-inner { row-gap: 8px; }
+    .shot img { border-radius: 8px; }
+    .sec-head { margin-bottom: 32px; text-align: left; }
+    .sec-head p { font-size: 18px; }
+    .plate-quote { aspect-ratio: auto; padding: 56px 0; }
+    .plate-quote p { font-size: 26px; }
+    .wall { grid-template-columns: 1fr; height: 520px; }
+    .wall-col:nth-child(2) { display: none; }
+    .dl-list li { grid-template-columns: 70px 1fr auto; }
+    .plate-closing { aspect-ratio: auto; padding: 72px 0; }
+    /* restate the vertical padding: .wrap's phone padding resets it */
+    .foot { grid-template-columns: 1fr; justify-items: center; padding-top: 40px; padding-bottom: 40px; text-align: center; }
+    .foot small { justify-self: center; }
   }
   @media (max-width: 460px) {
     .cta-row .btn { flex: 0 0 auto; }
@@ -785,7 +704,7 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 0 0-4.8851-1.5152.0741.0741 0 0 0-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 0 0-.0785-.037 19.7363 19.7363 0 0 0-4.8852 1.515.0699.0699 0 0 0-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 0 0 .0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 0 0 .0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 0 0-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 0 1-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 0 1 .0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 0 1 .0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 0 1-.0066.1276 12.2986 12.2986 0 0 1-1.873.8914.0766.0766 0 0 0-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 0 0 .0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 0 0 .0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 0 0-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189z"/></svg>
         </a>
         <a class="gh-icon" href="https://github.com/zeronsh/comet" aria-label="GitHub">
-          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg><span class="gh-stars" hidden></span>
         </a>
         <a class="btn small" id="nav-download" href="#downloads">Download</a>
       </div>
@@ -794,17 +713,7 @@
 
   <header class="hero">
     <div class="wrap hero-grid">
-      <div>
-        <h1>Access your agents from any device.</h1>
-        <p class="sub">
-          Zeron runs Claude Code, Codex, Grok, Hermes and Pi on your
-          machines. You steer them from one window, on any device, live.
-        </p>
-        <div class="cta-row">
-          <a class="btn" id="hero-download" href="#downloads">Download</a>
-          <a class="all-downloads" href="#downloads">All downloads ↓</a>
-          <span class="cta-ver" id="ver">v0.2.66</span>
-        </div>
+      <div class="hero-copy">
         <div class="agents" aria-label="Supported agents">
           <span class="agent-icon" title="Claude Code" style="--icon: url('/assets/icons/claude-mark.svg')"></span>
           <span class="agent-icon" title="Codex" style="--icon: url('/assets/icons/openai-mark.svg')"></span>
@@ -815,67 +724,34 @@
           <span class="agent-icon" title="Devin" style="--icon: url('/assets/icons/devin-mark.svg')"></span>
           <span class="agent-icon" title="OpenCode" style="--icon: url('/assets/icons/opencode-mark.svg')"></span>
         </div>
+        <h1>
+          <b>Access your agents from any device.</b> Zeron runs Claude Code,
+          Codex, Grok, Hermes, Pi and more on your machines.
+        </h1>
+        <div class="cta-row">
+          <a class="btn" id="hero-download" href="#downloads">Download</a>
+          <a class="text-link" href="#downloads">All downloads ↓</a>
+          <span class="cta-ver" id="ver">v0.2.66</span>
+        </div>
+        <div class="used-by">
+          <p>Used by developers from</p>
+          <div class="used-by-logos">
+            <a href="https://cursor.com" target="_blank" rel="noopener" style="--logo: url('/assets/logos/cursor.svg')"><img src="/assets/logos/cursor.svg" alt="Cursor" height="20" /></a>
+            <a href="https://unsloth.ai" target="_blank" rel="noopener" style="--logo: url('/assets/logos/unsloth-mask.png')"><img src="/assets/logos/unsloth.png" alt="Unsloth" height="26" /></a>
+            <a href="https://www.thecontextcompany.com" target="_blank" rel="noopener" style="--logo: url('/assets/logos/thecontextcompany.png')"><img src="/assets/logos/thecontextcompany.png" alt="The Context Company" height="16" /></a>
+          </div>
+        </div>
       </div>
-      <pre class="hero-ascii" aria-hidden="true">++=========+=====+++++++++++******+++++++++++++++++++++*****#############%%######***#######*#%#######****#####
-..=+=====+=======++++++++++++++*****+++++++++++++++++*++****#############%####%%%@@@%%#*%#########***######***
-+===++++====++++++++++++++++++++********+++++++++***++*+*****###########%%%%%@@@@@@@@@@%#*####*##########*#**#
-***+++++++==+++++++++++++++**++++**#**##*+*+++++++*+++********#*#####%%%%@@@@@@@@@@@%%%%%%###*#%*=+#*****++###
-*****+++++++==++++++++**************#####*****************#*****##%%%%@%@@@@@%%%%%##%###%%##*++++*****######*#
-*********++++++++++++*************#######******%%###*******########%%%%%%@@%%%######%%#*+++++******###%%%%%##*
-**********++++++++***********#***###%@%*+#%###*%*:.-%##*##*#########%%%%%%###%%%%%%%#+++++++++****##%%%%%%####
-**********+++++***********###***###%@@@#**@@@*=+:  -**#@@@%#######%##########%%%%#%*++***++++++++*#%%%########
-****####***********###**##***###@+--*@#==#%#%@@%#:::=+#*++-:=+=###########%%%%%%#=*******+++++++++##%#########
-#**####***********#########%##%%@==::=.   :--=*@%%%%@@@@%#- .:+%%%######%%##******+****+**+++*******#######%##
-*####****#*********#####**+#%@@@@#*++=-=-- .-:=#%@@@@@@@@@#=.  .:-######****++*********************+**########
--+##+*###*#********####*%*=#@@#=++*%@%%##**%%##@@@@@@@@@@@@@%= .. =*#######*+******************#******##**####
-+===-=**###**#****##%%%#*..-*#-  :------*+-=*%@@@%*+==+***#@@@* .:.+*######**+++++******#***#####********###**
-+++++++++*#######%#***##++**#*-.     ..:-+=*##*-::::.     .=*%%*:-+***###****++++++++*****#*######****++******
-+++++**+=+##*#####+.=+*+==-:::+*- .::=. :+%%*-.  .-=:     .#%=.==+#**#####*****++++++*+*****#####*************
-++********###%#*#+- -..:-   .=*::+==+-.-*@@@%%##**+-=- .:=*#%@+  ::=+#######***+++++++*****++********#####****
-******###########= =.      ...-=+*=++-=#%%#%@@@@@@@%%%#%@@@@%@@*::  .=######***++********++++*****=+++#+*%####
-****++#%#########*--==+-::.    .:::   :=--+++***#%@@@@@@###*=--::.. :+*#####************++++*+++**++++=-=**+#%
-#++####%%%####*#+=+=-==-::..        .:...:=--:--+#%@@%%*#-       .-=+++**####***********++++***++++++++**++==*
-##*#####%%###*#+---.:                 :+**+=--=+*##%%@@@@%*+-  :::=+*+++***#**#######**********+++++*****+****
-*###*#########*=.       .. ...      .:=++***+*****#%@%+-==-:   +#..--++++++++*##########******+***************
-***###########+.      ..=::... .:--::=++####***++++**+++==+=-: :+- .=+++***+++****##########****************##
-#***#####*#####*:     ..       ..:. :--+**+++++++==--=##+:.  :.-+.:-+++*****++****###%%%#%#*****#######*#####*
-#**#*###########-                    :=+=--==++++=++*%%@@@@#+-.-=-==+++++*******#######%%%******#############%
-###**#######*****-..                 .:.  ..:..::------=----+%*+=+++=+++*****#***####%%%%%@%%%####%%%%###%%@@@
-######*##*#*++****- .             :::                       ..:==+++====++**+***#%@@%%@@@@@@@@%%%@*-+*#@@@@@@@
-*#*###*****+++++-....            .:-=:                         =+++=-=====++**#@@@@@@@@@%%%####%#+-*%%@@@@@@@@
-+*+**+###*++++++-:     ....      :=++=:                        -======+*###%@@@@@@@@@@@@@@@%@@*=*%**%%%@%@%##*
-+++++++*++*++++++-    ...       .-=+**=:                     :-----=+*#*#**#%#%%%%@%@@@@@@@@@@##%*-+##%%#+++=-
-+++++++-:-======= .:   .        .-=+*#*=:.:---==:            :--=====+=-==::::...:---++#%@@@@@@@%#*#%#+===-...
-+++++=+==--=----:               .-++*##*++===+===:          .:.:==*=+*#%@@%%%@%#*****+*+=+%%%@@@@%%%%%*=:.
-+++=+=+=-===------:.            .:===*##*==--::..          .:     .  .:---=+*#%@%@@@@@@@%##%@%%@@@@%%%%#=.
-+++++=====--::-----::.          .:---=+**+--:::    ... .:--::.:.      .-=::. ..:--*%@@@@@@@%@%##+#@@@%#**+:
-+++++++===--::--------          ::-----+**+--=-::::::-==+*+**=+*+=-=+-.:#@%*+*-:.::--=#%#*##**##*=+*#@@%#*+-
-=+++=+=--=------:::---:::       :-==----=++=::::...-***#%%%@%%%@@@@@@%%#**@@@@@*+-: ...-+=:-*#*++*=-:=+*%#*++:
-==-===---------:::::.::--:..::. :-=----:-+*=.  ..-=+**#@@@%@@@@@@@@@@@@@@@@@@@@@%%+.    .-=-:=**-:=- :--=**+=+
-=-::------:---:::::::::---:::...-==*=::--:+*:.:-***%*%@@@@@@@@@@@%@@@@@@@@=+**=-=+-.       --. -++---. ::-+**+
-===-::-:::::::::::::--=-.     ::-=*#+:-+=--+*-*%%%%%@@@@@@@@@@@@@@@@@@@@@@*:.     -..        .: .=*=--   .::+*
-:::---:.:::::::::=#++*-...::..-=-*%%++%@@#*#%@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@%#*=:   :-        :---*#+-.     ..
-:-:.....:::-*#**=*@#+-.-=+++=+#*#%@@%@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@%*=:            .    -*=.
--==-::-:::::*@@@%*=+#=*####%%%@@@%%%%@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@%%*-                  --.
-------=+#++=:-+***###%%%%#%%%%%%%@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@%#*+:                  .-:.
---:----+*++*##++*##%%@%%%@@%##%%@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@%%@%#*+=:                    ..:.
--=*##%@@@@@@#+%@%#**#%@@@%%%%%%%%%@@@@@@@@@@@@@@@@@%%@%%@@@@@@@@@@@@@@@@@@@@%%##**=-:                        .
-@@@@@@@@@@@@%#++%@##**%++%#%%%%%%@@@@@@@@@@@@@@@@%%#@@@@@@@@@@@@@@@@@@@@%%@%%#**++=-:
-%@@@@@@@@@@@@#+--=++::.-*##%%%@@@@@@@@@@@@@@@@@@@@@@%#%%@@@@@@@%%%%%%%###**---=+=---.                       ..</pre>
     </div>
   </header>
 
   <section class="shot">
-    <div class="dither dither-left" aria-hidden="true"><canvas></canvas></div>
-    <div class="dither dither-right" aria-hidden="true"><canvas></canvas></div>
     <div class="wrap">
       <img src="/assets/app-screenshot.jpg" alt="Zeron driving a Claude Code session with a live branch diff sidebar" />
     </div>
   </section>
 
-  <section class="panel-sect">
-    <canvas class="reach-left" aria-hidden="true"></canvas>
-    <canvas class="reach-right" aria-hidden="true"></canvas>
+  <section class="panel-sect" id="features">
     <div class="wrap">
     <div class="panel">
       <i class="pdot tl"></i><i class="pdot tr"></i><i class="pdot bl"></i><i class="pdot br"></i>
@@ -930,36 +806,33 @@
           </div>
         </div>
         <div class="p-copy">
-          <h2>Runs what you already use</h2>
-          <p>Zeron is not a new harness. It drives Claude Code, Codex, Cursor,
-             Grok, Hermes and Pi — the same sessions and tools you use each day,
-             in one fast native window on every device.</p>
+          <p><b>Runs what you already use.</b> Zeron is not a new harness. It
+             drives the agents, sessions and tools you use every day, in one
+             fast native window.</p>
           <div class="cta-row">
-            <a class="btn ghost" href="https://github.com/zeronsh/comet">Star on GitHub ↗</a>
+            <a class="btn ghost" href="https://github.com/zeronsh/comet">Star on GitHub ↗<span class="gh-stars" hidden></span></a>
           </div>
         </div>
       </div>
       <div class="panel-row p-gallery">
         <figure>
           <img src="/assets/shots/sessions.png" alt="Zeron session list showing agent sessions running on another machine" loading="lazy" width="907" height="627" />
-          <figcaption>Every machine's sessions, one list</figcaption>
+          <figcaption><b>Every machine's sessions,</b> one list.</figcaption>
         </figure>
         <figure>
           <img src="/assets/shots/diff.png" alt="Zeron branch diff view with added and removed lines across 299 changed files" loading="lazy" width="907" height="627" />
-          <figcaption>Branch diffs, live as agents work</figcaption>
+          <figcaption><b>Branch diffs,</b> live as agents work.</figcaption>
         </figure>
         <figure>
           <img src="/assets/shots/history.png" alt="Zeron commit history view with a branching commit graph" loading="lazy" width="907" height="627" />
-          <figcaption>Commit history for every workspace</figcaption>
+          <figcaption><b>Commit history</b> for every workspace.</figcaption>
         </figure>
       </div>
-      <div class="panel-row p-devices">
+      <div class="panel-row p-devices" id="devices">
         <div class="p-copy">
-          <h2>Three screens, one session</h2>
-          <p>Sessions live on your machines, every device you own can pilot
-             them. Start Claude Code at your desk, watch it from your phone,
-             approve the diff from the couch. Nothing to hand off, nothing
-             to re-open.</p>
+          <p><b>Three screens, one session.</b> Start Claude Code at your desk,
+             watch it from your phone, approve the diff from the couch. Nothing
+             to hand off.</p>
         </div>
         <div class="p-diagram">
           <div class="flow-wrap" aria-hidden="true">
@@ -1004,431 +877,145 @@
     </div>
   </section>
 
-  <section class="tweets">
+  <section class="tweets" id="people">
     <div class="wrap">
-      <h2>What are people saying</h2>
-      <p class="sub">See how people really feel about Zeron.</p>
+      <header class="sec-head">
+        <p><b>What are people saying.</b> See how people really feel about Zeron.</p>
+      </header>
+      <figure class="plate plate-quote">
+        <img class="plate-img" src="/assets/art/terraces.webp" alt="" loading="lazy" />
+        <blockquote>
+          <p>“Oh man, this is the best UI I’ve ever tried! For real. It feels really smooth. Typing, reading, everything. Really fast. Right now it’s my main UI for coding.”</p>
+          <cite><a href="https://x.com/FrancoE114696/status/2102551301871501508" target="_blank" rel="noopener"><img src="/assets/tweets/francoe114696.jpg" alt="" width="24" height="24" /> Fran Escob <span>@FrancoE114696</span></a></cite>
+        </blockquote>
+      </figure>
+      <div class="wall" aria-label="Posts about Zeron on X">
+        <div class="wall-col" style="--dur: 78s">
+          <a class="tweet" href="https://x.com/n3o773/status/2082902752150393102" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/n3o773.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">neo</span><span class="tweet-handle">@n3o773</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>Damn that UI is crisp!!</p>
+          </a>
+          <a class="tweet" href="https://x.com/zebassembly/status/2082935161793245227" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/zebassembly.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">zeb</span><span class="tweet-handle">@zebassembly</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>This looks absolutely fantastic, I can't think of a single example of <em class="hl">GPUI</em> looking this good.</p>
+          </a>
+          <a class="tweet" href="https://x.com/sahilcodex/status/2102602368512860598" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/sahilcodex.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">丂ﾑんﾉﾚ</span><span class="tweet-handle">@sahilcodex</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>one of the best app i have ever used</p>
+          </a>
+          <a class="tweet" href="https://x.com/0xwthw/status/2087320173522952320" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/0xwthw.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">wthw</span><span class="tweet-handle">@0xwthw</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>if i see another multi-agent terminal orchestrator app i'm gonna crash out</p>
+          </a>
+          <a class="tweet" href="https://x.com/MrBye32/status/2082906082234568787" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/mrbye32.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">Yuri - 1bye</span><span class="tweet-handle">@MrBye32</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>what a smooth animations on <em class="hl">gpui</em>, impressive!</p>
+          </a>
+          <a class="tweet" href="https://x.com/netflixoriginl/status/2082903481891934367" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/netflixoriginl.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">baily</span><span class="tweet-handle">@netflixoriginl</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>I need this, what is it? 😅</p>
+          </a>
+          <a class="tweet" href="https://x.com/mrlemoos/status/2083380138243453356" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/mrlemoos.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">Leo - mrlemoos.dev</span><span class="tweet-handle">@mrlemoos</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>Looks beautiful btw.</p>
+          </a>
+          <a class="tweet" href="https://x.com/stlaurentgod/status/2102509074097258904" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/stlaurentgod.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">seis dios ☽</span><span class="tweet-handle">@stlaurentgod</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>best thing to happen to my agents this past week ✨</p>
+          </a>
+        </div>
+        <div class="wall-col up" style="--dur: 92s">
+          <a class="tweet" href="https://x.com/FrancoE114696/status/2102551301871501508" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/francoe114696.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">Fran Escob</span><span class="tweet-handle">@FrancoE114696</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>Oh man, this is the best UI I've ever tried! For real. It feels really smooth. Typing, reading, everything. Really fast. Right now it's my main UI for coding.</p>
+          </a>
+          <a class="tweet" href="https://x.com/emanueledpt/status/2083105449608360297" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/emanueledpt.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">Emanuele Di Pietro</span><span class="tweet-handle">@emanueledpt</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>similar to synara and the name too gg this space is so crowded</p>
+          </a>
+          <a class="tweet" href="https://x.com/theCTO/status/2088337024868889064" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/thecto.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">adam</span><span class="tweet-handle">@theCTO</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>if <em class="hl">Zed &amp; Cursor</em> had a baby</p>
+          </a>
+          <a class="tweet" href="https://x.com/leanderriefel/status/2088396806396809544" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/leanderriefel.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">Leander</span><span class="tweet-handle">@leanderriefel</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>I'm getting emotional seeing a UI so buttery smooth in performance after using the Codex App on Windows all day.</p>
+          </a>
+          <a class="tweet" href="https://x.com/Purple_Orca7/status/2100314190732812553" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/purple_orca7.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">purple orca</span><span class="tweet-handle">@Purple_Orca7</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>Have been trying zeron for the last two days after a very bad experience with <em class="hl">t3code</em>. I'm hooked.</p>
+          </a>
+          <a class="tweet" href="https://x.com/localhost_5173/status/2088481357664313718" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/localhost_5173.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">EGOIST</span><span class="tweet-handle">@localhost_5173</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>Zeron looks really good</p>
+          </a>
+          <a class="tweet" href="https://x.com/joelmoss/status/2088559794378481922" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/joelmoss.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">Joel Moss</span><span class="tweet-handle">@joelmoss</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>Another one that looks exactly the same as the last 🤦</p>
+          </a>
+          <a class="tweet" href="https://x.com/hhamud_/status/2088814959014608939" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/hhamud_.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">Hamza hamud</span><span class="tweet-handle">@hhamud_</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>Played around with this. It's super light and the UI is amazing. Didn't know that Zed's rust UI library is this good.</p>
+          </a>
+        </div>
+        <div class="wall-col" style="--dur: 70s">
+          <a class="tweet" href="https://x.com/jv_nguyen518/status/2082897177001464251" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/jv_nguyen518.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">Justin Vu Nguyen</span><span class="tweet-handle">@jv_nguyen518</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>woah this is buttery af!!</p>
+          </a>
+          <a class="tweet" href="https://x.com/maxktz/status/2082956238153723904" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/maxktz.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">Max Katz</span><span class="tweet-handle">@maxktz</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>amazing!</p>
+          </a>
+          <a class="tweet" href="https://x.com/ahmadaccino/status/2088429847131423166" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/ahmadaccino.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">ahmadaccino</span><span class="tweet-handle">@ahmadaccino</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>one of the best looking <em class="hl">gpui</em> interfaces i've seen yet, great work</p>
+          </a>
+          <a class="tweet" href="https://x.com/dev_shekhawat/status/2102533565590462728" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/dev_shekhawat.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">Dev</span><span class="tweet-handle">@dev_shekhawat</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>This feels refreshing! already loving it</p>
+          </a>
+          <a class="tweet" href="https://x.com/dwhitedesign/status/2082636175831953730" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/dwhitedesign.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">Daniel White</span><span class="tweet-handle">@dwhitedesign</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>Yooo besides the question that UI &amp; UX is sexy man !!</p>
+          </a>
+          <a class="tweet" href="https://x.com/afOrtunado124/status/2102727775991869480" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/afortunado124.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">af0r</span><span class="tweet-handle">@afOrtunado124</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>bro i tested it all night, and it feels so good, congratulations i have a new daily driver, excelent taste</p>
+          </a>
+          <a class="tweet" href="https://x.com/RavTheMann/status/2083419265961754689" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/ravthemann.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">Aarav A</span><span class="tweet-handle">@RavTheMann</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>sick love the ui</p>
+          </a>
+          <a class="tweet" href="https://x.com/dipxsyy/status/2082889765603742123" target="_blank" rel="noopener">
+            <div class="tweet-head"><img src="/assets/tweets/dipxsyy.jpg" alt="" loading="lazy" width="32" height="32" /><div class="tweet-who"><span class="tweet-name">Deepanshu Mishra</span><span class="tweet-handle">@dipxsyy</span></div><svg class="tweet-x" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-7.4 8.5L23.3 22h-6.8l-5.3-6.9L5 22H1.9l7.9-9.1L1.4 2h7l4.8 6.3zm-1.2 18h1.9L7.4 3.9H5.4z"/></svg></div>
+            <p>clean af</p>
+          </a>
+        </div>
+      </div>
     </div>
-    <div class="tweet-marquee" aria-label="Posts about Zeron on X">
-      <div class="tweet-row">
-        <div class="tweet-track">
-          <div class="tweet-group">
-            <a class="tweet" href="https://x.com/n3o773/status/2082902752150393102" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/n3o773.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">neo</span><span class="tweet-handle">@n3o773</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Damn that UI is crisp!!</p>
-            </a>
-            <a class="tweet" href="https://x.com/jv_nguyen518/status/2082897177001464251" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/jv_nguyen518.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Justin Vu Nguyen</span><span class="tweet-handle">@jv_nguyen518</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>woah this is buttery af!!</p>
-            </a>
-            <a class="tweet" href="https://x.com/emanueledpt/status/2083105449608360297" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/emanueledpt.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Emanuele Di Pietro</span><span class="tweet-handle">@emanueledpt</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>similar to synara and the name too
-gg
-this space is so crowded</p>
-            </a>
-            <a class="tweet" href="https://x.com/zebassembly/status/2082935161793245227" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/zebassembly.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">zeb</span><span class="tweet-handle">@zebassembly</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>This looks absolutely fantastic, I can't think of a single example of <em class="hl">GPUI</em> looking this good.</p>
-            </a>
-            <a class="tweet" href="https://x.com/maxktz/status/2082956238153723904" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/maxktz.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Max Katz</span><span class="tweet-handle">@maxktz</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>amazing!</p>
-            </a>
-            <a class="tweet" href="https://x.com/dipxsyy/status/2082889765603742123" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/dipxsyy.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Deepanshu Mishra</span><span class="tweet-handle">@dipxsyy</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>clean af</p>
-            </a>
-            <a class="tweet" href="https://x.com/0xwthw/status/2087320173522952320" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/0xwthw.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">wthw</span><span class="tweet-handle">@0xwthw</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>if i see another multi-agent terminal orchestrator app i'm gonna crash out</p>
-            </a>
-            <a class="tweet" href="https://x.com/localhost_5173/status/2088481357664313718" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/localhost_5173.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">EGOIST</span><span class="tweet-handle">@localhost_5173</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Zeron looks really good</p>
-            </a>
-            <a class="tweet" href="https://x.com/theCTO/status/2088337024868889064" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/thecto.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">adam</span><span class="tweet-handle">@theCTO</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>if <em class="hl">Zed &amp; Cursor</em> had a baby</p>
-            </a>
-            <a class="tweet" href="https://x.com/ahmadaccino/status/2088429847131423166" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/ahmadaccino.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">ahmadaccino</span><span class="tweet-handle">@ahmadaccino</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>one of the best looking <em class="hl">gpui</em> interfaces i've seen yet, great work</p>
-            </a>
-            <a class="tweet" href="https://x.com/leanderriefel/status/2088396806396809544" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/leanderriefel.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Leander</span><span class="tweet-handle">@leanderriefel</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>I'm getting emotional seeing a UI so buttery smooth in performance after using the Codex App on Windows all day.</p>
-            </a>
-            <a class="tweet" href="https://x.com/swarajb/status/2088510531569405952" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/swarajb.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">swaraj</span><span class="tweet-handle">@swarajb</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>btw you can still have similar performance with electron + get way more features</p>
-            </a>
-          </div>
-          <div class="tweet-group" aria-hidden="true">
-            <a class="tweet" href="https://x.com/n3o773/status/2082902752150393102" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/n3o773.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">neo</span><span class="tweet-handle">@n3o773</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Damn that UI is crisp!!</p>
-            </a>
-            <a class="tweet" href="https://x.com/jv_nguyen518/status/2082897177001464251" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/jv_nguyen518.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Justin Vu Nguyen</span><span class="tweet-handle">@jv_nguyen518</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>woah this is buttery af!!</p>
-            </a>
-            <a class="tweet" href="https://x.com/emanueledpt/status/2083105449608360297" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/emanueledpt.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Emanuele Di Pietro</span><span class="tweet-handle">@emanueledpt</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>similar to synara and the name too
-gg
-this space is so crowded</p>
-            </a>
-            <a class="tweet" href="https://x.com/zebassembly/status/2082935161793245227" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/zebassembly.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">zeb</span><span class="tweet-handle">@zebassembly</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>This looks absolutely fantastic, I can't think of a single example of <em class="hl">GPUI</em> looking this good.</p>
-            </a>
-            <a class="tweet" href="https://x.com/maxktz/status/2082956238153723904" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/maxktz.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Max Katz</span><span class="tweet-handle">@maxktz</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>amazing!</p>
-            </a>
-            <a class="tweet" href="https://x.com/dipxsyy/status/2082889765603742123" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/dipxsyy.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Deepanshu Mishra</span><span class="tweet-handle">@dipxsyy</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>clean af</p>
-            </a>
-            <a class="tweet" href="https://x.com/0xwthw/status/2087320173522952320" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/0xwthw.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">wthw</span><span class="tweet-handle">@0xwthw</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>if i see another multi-agent terminal orchestrator app i'm gonna crash out</p>
-            </a>
-            <a class="tweet" href="https://x.com/localhost_5173/status/2088481357664313718" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/localhost_5173.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">EGOIST</span><span class="tweet-handle">@localhost_5173</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Zeron looks really good</p>
-            </a>
-            <a class="tweet" href="https://x.com/theCTO/status/2088337024868889064" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/thecto.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">adam</span><span class="tweet-handle">@theCTO</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>if <em class="hl">Zed &amp; Cursor</em> had a baby</p>
-            </a>
-            <a class="tweet" href="https://x.com/ahmadaccino/status/2088429847131423166" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/ahmadaccino.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">ahmadaccino</span><span class="tweet-handle">@ahmadaccino</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>one of the best looking <em class="hl">gpui</em> interfaces i've seen yet, great work</p>
-            </a>
-            <a class="tweet" href="https://x.com/leanderriefel/status/2088396806396809544" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/leanderriefel.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Leander</span><span class="tweet-handle">@leanderriefel</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>I'm getting emotional seeing a UI so buttery smooth in performance after using the Codex App on Windows all day.</p>
-            </a>
-            <a class="tweet" href="https://x.com/swarajb/status/2088510531569405952" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/swarajb.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">swaraj</span><span class="tweet-handle">@swarajb</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>btw you can still have similar performance with electron + get way more features</p>
-            </a>
-          </div>
-        </div>
-      </div>
-      <div class="tweet-row is-reverse">
-        <div class="tweet-track">
-          <div class="tweet-group">
-            <a class="tweet" href="https://x.com/MrBye32/status/2082906082234568787" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/mrbye32.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Yuri - 1bye</span><span class="tweet-handle">@MrBye32</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>what a smooth animations on <em class="hl">gpui</em>, impressive!</p>
-            </a>
-            <a class="tweet" href="https://x.com/dwhitedesign/status/2082636175831953730" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/dwhitedesign.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Daniel White</span><span class="tweet-handle">@dwhitedesign</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Yooo besides the question that UI &amp; UX is sexy man !!</p>
-            </a>
-            <a class="tweet" href="https://x.com/netflixoriginl/status/2082903481891934367" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/netflixoriginl.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">baily</span><span class="tweet-handle">@netflixoriginl</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>I need this, what is it? 😅</p>
-            </a>
-            <a class="tweet" href="https://x.com/mrlemoos/status/2083380138243453356" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/mrlemoos.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Leo - mrlemoos.dev</span><span class="tweet-handle">@mrlemoos</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Looks beautiful btw.</p>
-            </a>
-            <a class="tweet" href="https://x.com/RavTheMann/status/2083419265961754689" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/ravthemann.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Aarav A</span><span class="tweet-handle">@RavTheMann</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>sick
-love the ui</p>
-            </a>
-            <a class="tweet" href="https://x.com/sebuzdugan/status/2083000351599239677" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/sebuzdugan.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Sebastian Buzdugan</span><span class="tweet-handle">@sebuzdugan</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>native is nice, but stale claude sessions will hurt more than electron overhead</p>
-            </a>
-            <a class="tweet" href="https://x.com/lucianmarin/status/2083290898834637281" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/lucianmarin.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Lucian Marin</span><span class="tweet-handle">@lucianmarin</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p><em class="hl">@superdoteng</em> is working on exactly the same thing.</p>
-            </a>
-            <a class="tweet" href="https://x.com/hhamud_/status/2088814959014608939" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/hhamud_.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Hamza hamud</span><span class="tweet-handle">@hhamud_</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Played around with this. It's super light and the UI is amazing. Didn't know that Zed's rust UI library is this good.</p>
-            </a>
-            <a class="tweet" href="https://x.com/joelmoss/status/2088559794378481922" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/joelmoss.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Joel Moss</span><span class="tweet-handle">@joelmoss</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Another one that looks exactly the same as the last 🤦</p>
-            </a>
-            <a class="tweet" href="https://x.com/ivan_2j/status/2088628476857184291" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/ivan_2j.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">𝖎𝖛𝖆𝖓.・˚</span><span class="tweet-handle">@ivan_2j</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>all these agent control tools feel like making the perfect Notion setup when all you need is a notebook, but here with just using tmux and if you want remote add ssh</p>
-            </a>
-            <a class="tweet" href="https://x.com/crystlizedd/status/2088358572060975596" target="_blank" rel="noopener">
-              <div class="tweet-head">
-                <img src="/assets/tweets/crystlizedd.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">crystl :3</span><span class="tweet-handle">@crystlizedd</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Isn't this a fork of <em class="hl">T3 Code</em>?? If so, why didn't you disclose it?</p>
-            </a>
-          </div>
-          <div class="tweet-group" aria-hidden="true">
-            <a class="tweet" href="https://x.com/MrBye32/status/2082906082234568787" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/mrbye32.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Yuri - 1bye</span><span class="tweet-handle">@MrBye32</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>what a smooth animations on <em class="hl">gpui</em>, impressive!</p>
-            </a>
-            <a class="tweet" href="https://x.com/dwhitedesign/status/2082636175831953730" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/dwhitedesign.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Daniel White</span><span class="tweet-handle">@dwhitedesign</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Yooo besides the question that UI &amp; UX is sexy man !!</p>
-            </a>
-            <a class="tweet" href="https://x.com/netflixoriginl/status/2082903481891934367" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/netflixoriginl.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">baily</span><span class="tweet-handle">@netflixoriginl</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>I need this, what is it? 😅</p>
-            </a>
-            <a class="tweet" href="https://x.com/mrlemoos/status/2083380138243453356" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/mrlemoos.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Leo - mrlemoos.dev</span><span class="tweet-handle">@mrlemoos</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Looks beautiful btw.</p>
-            </a>
-            <a class="tweet" href="https://x.com/RavTheMann/status/2083419265961754689" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/ravthemann.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Aarav A</span><span class="tweet-handle">@RavTheMann</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>sick
-love the ui</p>
-            </a>
-            <a class="tweet" href="https://x.com/sebuzdugan/status/2083000351599239677" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/sebuzdugan.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Sebastian Buzdugan</span><span class="tweet-handle">@sebuzdugan</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>native is nice, but stale claude sessions will hurt more than electron overhead</p>
-            </a>
-            <a class="tweet" href="https://x.com/lucianmarin/status/2083290898834637281" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/lucianmarin.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Lucian Marin</span><span class="tweet-handle">@lucianmarin</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p><em class="hl">@superdoteng</em> is working on exactly the same thing.</p>
-            </a>
-            <a class="tweet" href="https://x.com/hhamud_/status/2088814959014608939" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/hhamud_.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Hamza hamud</span><span class="tweet-handle">@hhamud_</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Played around with this. It's super light and the UI is amazing. Didn't know that Zed's rust UI library is this good.</p>
-            </a>
-            <a class="tweet" href="https://x.com/joelmoss/status/2088559794378481922" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/joelmoss.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">Joel Moss</span><span class="tweet-handle">@joelmoss</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Another one that looks exactly the same as the last 🤦</p>
-            </a>
-            <a class="tweet" href="https://x.com/ivan_2j/status/2088628476857184291" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/ivan_2j.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">𝖎𝖛𝖆𝖓.・˚</span><span class="tweet-handle">@ivan_2j</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>all these agent control tools feel like making the perfect Notion setup when all you need is a notebook, but here with just using tmux and if you want remote add ssh</p>
-            </a>
-            <a class="tweet" href="https://x.com/crystlizedd/status/2088358572060975596" target="_blank" rel="noopener" tabindex="-1">
-              <div class="tweet-head">
-                <img src="/assets/tweets/crystlizedd.jpg" alt="" loading="lazy" width="200" height="200" />
-                <div class="tweet-who"><span class="tweet-name">crystl :3</span><span class="tweet-handle">@crystlizedd</span></div>
-                <svg class="tweet-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>
-              </div>
-              <p>Isn't this a fork of <em class="hl">T3 Code</em>?? If so, why didn't you disclose it?</p>
-            </a>
-          </div>
-        </div>
-      </div>
   </section>
 
 
   <section class="downloads" aria-labelledby="downloads-title">
     <div class="wrap" id="downloads">
-      <div class="dl-lede">
-        <h2 id="downloads-title">Download Zeron.</h2>
-        <p class="sub">Available for macOS, Windows and Linux. iOS is on the way.</p>
-      </div>
-      <div class="dl-rows">
-        <div class="dl-row">
-          <div class="dl-lead">
-            <h3>Zeron for desktop.</h3>
-            <p>macOS, Windows and Linux.</p>
-          </div>
+      <header class="sec-head">
+        <p id="downloads-title"><b>Download Zeron.</b> Available for macOS, Windows and Linux. iOS is on the way.</p>
+      </header>
+      <div class="dl">
+        <div>
+          <h3>Zeron for desktop</h3>
           <ul class="dl-list">
-            <li><span class="dl-name">macOS</span><span class="dl-meta">apple silicon · dmg</span><a class="btn ghost" data-platform-download="macos" href="https://zeron.sh/releases/zeron-0.2.66-macos-arm64.dmg">Download</a></li>
-            <li><span class="dl-name">Windows</span><span class="dl-meta">x64 · portable zip</span><a class="btn ghost" data-platform-download="windows" href="https://zeron.sh/releases/zeron-0.2.66-windows-x86_64.zip">Download</a></li>
-            <li><span class="dl-name">Linux</span><span class="dl-meta">x64 · tar.gz</span><a class="btn ghost" data-platform-download="linux" href="https://zeron.sh/releases/zeron-0.2.66-linux-x86_64.tar.gz">Download</a></li>
-            <li><span class="dl-name">Linux</span><span class="dl-meta">arm64 · tar.gz</span><a class="btn ghost" data-platform-download="linux-arm" href="https://zeron.sh/releases/zeron-0.2.66-linux-aarch64.tar.gz">Download</a></li>
+            <li><span class="dl-name">macOS</span><span class="dl-meta">Apple silicon · dmg</span><a class="btn ghost small" data-platform-download="macos" href="https://zeron.sh/releases/zeron-0.2.66-macos-arm64.dmg">Download</a></li>
+            <li><span class="dl-name">Windows</span><span class="dl-meta">x64 · portable zip</span><a class="btn ghost small" data-platform-download="windows" href="https://zeron.sh/releases/zeron-0.2.66-windows-x86_64.zip">Download</a></li>
+            <li><span class="dl-name">Linux</span><span class="dl-meta">x64 · tar.gz</span><a class="btn ghost small" data-platform-download="linux" href="https://zeron.sh/releases/zeron-0.2.66-linux-x86_64.tar.gz">Download</a></li>
+            <li><span class="dl-name">Linux</span><span class="dl-meta">arm64 · tar.gz</span><a class="btn ghost small" data-platform-download="linux-arm" href="https://zeron.sh/releases/zeron-0.2.66-linux-aarch64.tar.gz">Download</a></li>
           </ul>
         </div>
-        <div class="dl-row">
-          <div class="dl-lead">
-            <h3>Zeron for mobile.</h3>
-            <p>iPhone and iPad.</p>
-          </div>
+        <div>
+          <h3>Zeron for mobile</h3>
           <ul class="dl-list">
-            <li><span class="dl-name">iOS</span><span class="dl-soon">coming soon</span><span class="btn ghost" role="link" aria-disabled="true">App Store ↗</span></li>
+            <li><span class="dl-name">iOS</span><span class="dl-meta">Coming soon</span><span class="btn ghost small" role="link" aria-disabled="true">App Store ↗</span></li>
           </ul>
         </div>
       </div>
@@ -1439,367 +1026,101 @@ love the ui</p>
   </section>
 
   <section class="closing">
-    <canvas class="hand-ascii hand-down" aria-hidden="true"></canvas>
     <div class="wrap">
-      <h2>Bring your agents together.</h2>
-      <p>One window for every machine you own. Zeron is open source and MIT licensed.</p>
-      <div class="cta-row">
-        <a class="btn" id="closing-download" href="#downloads">Download</a>
-        <a class="btn ghost" href="https://github.com/zeronsh/comet">Star on GitHub ↗</a>
-      </div>
+      <figure class="plate plate-closing">
+        <img class="plate-img" src="/assets/art/mist.webp" alt="" loading="lazy" />
+        <div class="closing-copy">
+          <h2>Bring your agents together.</h2>
+          <p>One window for every machine you own. Zeron is open source and MIT licensed.</p>
+          <div class="cta-row">
+            <a class="btn" id="closing-download" href="#downloads">Download</a>
+            <a class="text-link" href="https://github.com/zeronsh/comet">Star on GitHub ↗<span class="gh-stars" hidden></span></a>
+          </div>
+        </div>
+      </figure>
     </div>
   </section>
 
-  <footer>
-    <canvas class="hand-ascii hand-up" aria-hidden="true"></canvas>
-    <div class="wrap footer-inner">
-      <span>Zeron</span>
-      <div class="right">
-        <a class="gh-icon" href="https://discord.gg/rnynTdgZ24" aria-label="Discord">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 0 0-4.8851-1.5152.0741.0741 0 0 0-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 0 0-.0785-.037 19.7363 19.7363 0 0 0-4.8852 1.515.0699.0699 0 0 0-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 0 0 .0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 0 0 .0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 0 0-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 0 1-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 0 1 .0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 0 1 .0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 0 1-.0066.1276 12.2986 12.2986 0 0 1-1.873.8914.0766.0766 0 0 0-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 0 0 .0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 0 0 .0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 0 0-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189z"/></svg>
-        </a>
-        <a class="gh-icon" href="https://github.com/zeronsh/comet" aria-label="GitHub">
-          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
-        </a>
-        <span>MIT © 2026</span>
-      </div>
-    </div>
+  <footer class="wrap foot">
+    <span class="brand">Zeron</span>
+    <nav class="foot-links" aria-label="Footer">
+      <a href="https://discord.gg/rnynTdgZ24">Discord</a>
+      <a href="https://github.com/zeronsh/comet">GitHub</a>
+      <a href="https://github.com/zeronsh/zeron/releases">Changelog</a>
+    </nav>
+    <small>MIT © 2026</small>
   </footer>
 
 <script defer src="/downloads.js"></script>
+<script type="module">
+  // Hero background: agent traces as a faint glyph field, a slow violet
+  // beam sweeping through it, and a violet afterglow under the pointer.
+  // The clear ellipse keeps the centered copy legible.
+  import { mountGlyphField } from "/glyph-field.js";
+  mountGlyphField(document.querySelector(".hero"), {
+    base: [156, 146, 181], // --dim
+    baseAlpha: [0.05, 0.13],
+    glow: [183, 157, 249], // --purple-hi
+    glowAlpha: 0.8,
+    clear: { x: 0.5, y: 0.5, rx: 0.36, ry: 0.44 },
+    beam: { angle: -38, width: 0.12, sweep: 26, alpha: 0.35 },
+  });
+  // and faintly inside the featured-post plate
+  mountGlyphField(document.querySelector(".plate-quote"), {
+    baseAlpha: [0.02, 0.05],
+    density: 0.42,
+    parallax: 1,
+    clear: { x: 0.5, y: 0.3, rx: 0.4, ry: 0.3 },
+    beam: { angle: -30, width: 0.14, sweep: 30, alpha: 0.25 },
+  });
+</script>
 <script>
-  // Edge ascii: a slow-warping noise field mapped through a glyph density
-  // ramp — organic clusters of characters hugging each page edge, dense at
-  // the outside and thinning toward the content. Freezes on reduced motion.
+  // Tweet wall: each column holds its cards twice so the drift loops;
+  // the copy is inert, and the drift only starts once it exists.
   (() => {
-    const CW = 12, CH = 14; // glyph cell
-    const RAMP = [" ", " ", " ", ".", ":", ">", "~", "×", "*", "#"];
-    const panes = [...document.querySelectorAll(".dither")].map((el, i) => ({
-      el,
-      cv: el.querySelector("canvas"),
-      ctx: el.querySelector("canvas").getContext("2d"),
-      right: el.classList.contains("dither-right"),
-      ox: i * 397, // decorrelate the two sides
-      cols: 0,
-      rows: 0,
-    }));
-    const dpr = Math.min(devicePixelRatio || 1, 2);
-    const resize = () => {
-      for (const p of panes) {
-        const w = p.el.clientWidth, h = p.el.clientHeight;
-        p.cv.width = w * dpr;
-        p.cv.height = h * dpr;
-        p.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        p.ctx.font = '10px "Geist Mono", monospace';
-        p.ctx.textBaseline = "top";
-        p.cols = Math.ceil(w / CW);
-        p.rows = Math.ceil(h / CH);
+    const wall = document.querySelector(".wall");
+    if (!wall) return;
+    for (const col of wall.querySelectorAll(".wall-col")) {
+      const dup = document.createElement("div");
+      dup.style.display = "contents";
+      dup.setAttribute("aria-hidden", "true");
+      for (const card of col.children) {
+        const c = card.cloneNode(true);
+        c.tabIndex = -1;
+        dup.append(c);
       }
-    };
-    const field = (x, y, t) => {
-      const a = x * 0.55, b = y * 0.35;
-      const v =
-        Math.sin(a + 2.1 * Math.sin(b * 0.9 + t) + t * 0.7) *
-        Math.cos(b - 1.7 * Math.sin(a * 0.6 - t * 0.8));
-      return 0.5 + 0.5 * v;
-    };
-    const draw = (t) => {
-      for (const p of panes) {
-        if (p.el.offsetWidth === 0) continue;
-        p.ctx.clearRect(0, 0, p.cv.width, p.cv.height);
-        for (let y = 0; y < p.rows; y++) {
-          for (let x = 0; x < p.cols; x++) {
-            // distance from the outer edge, 0 = outermost column
-            const edge = p.right ? p.cols - 1 - x : x;
-            const falloff = 1 - edge / p.cols;
-            const v = field(x + p.ox, y, t) * falloff * 1.6;
-            const g = RAMP[Math.min(RAMP.length - 1, (v * RAMP.length) | 0)];
-            if (g === " ") continue;
-            p.ctx.fillStyle = `rgba(139, 92, 246, ${(0.16 + v * 0.5).toFixed(2)})`;
-            p.ctx.fillText(g, x * CW + 2, y * CH + 2);
-          }
-        }
-      }
-    };
-    resize();
-    let last = 0;
-    addEventListener("resize", () => { resize(); draw(last); });
-    // The panes stretch to the app-screenshot section, whose height isn't
-    // final until the image loads — re-measure whenever their box changes,
-    // or the canvases end up CSS-stretched into streaks.
-    if (typeof ResizeObserver !== "undefined") {
-      const ro = new ResizeObserver(() => { resize(); draw(last); });
-      for (const p of panes) ro.observe(p.el);
+      col.append(dup);
     }
-    document.fonts.ready.then(() => { resize(); draw(last); });
-    if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      document.fonts.ready.then(() => draw(0));
-    } else {
-      let prev = 0;
-      const tick = (ms) => {
-        if (ms - prev > 66) { // ~15fps: the reference drifts slowly
-          prev = ms;
-          last = ms * 0.00022;
-          draw(last);
-        }
-        requestAnimationFrame(tick);
-      };
-      requestAnimationFrame(tick);
-    }
+    wall.classList.add("is-live");
   })();
-
-  // Ascii hands: rendered exactly like the edge railing — same cell grid,
-  // glyph ramp, colour, drift rate and fade — but shaped by a baked density
-  // map of each photo, so the characters keep flipping organically while
-  // the hand form holds steady.
+</script>
+<script>
+  // GitHub star count on the "Star on GitHub" buttons. Cached for an hour so
+  // repeat visits stay under the unauthenticated API rate limit.
   (() => {
-    const CW = 12, CH = 14; // glyph cell, matches the edge ascii
-    const RAMP = [" ", " ", " ", ".", ":", ">", "~", "×", "*", "#"];
-    const HANDS = [
-      { sel: ".hand-down", ox: 101, data: `70635533333633333633666666306605333200222100100000000000
-78873333333336333333666363366653333032220001001000000000
-00899777763333333333336333333605333330222000011000000000
-78999999999963363333333333333663333530222021101000000000
-66777889999998633333333333333333633333322220011101000000
-63336667899999983333333333333333333333320022200101000000
-78333336789999998633333333333333333300302220210010000000
-69863336778999999973333333333333333333032222211100100000
-79986333366778999997333333333333333333333022200101100000
-77777333333678999999963333333333333333330222000000100000
-33333333336777899999998636333333333333033222021001110000
-33377663333366677899999986333333333333333222220101000000
-33333333333333333367899999763333333333333002221111000000
-33333333333333333337778999888633333333300222021001000000
-33333333333333333333367999988733333333333222220000010000
-33333333333333333333368999998883333333333202201010100000
-33333333333333333333668888898777333333303222222010000000
-33333333333333333333887368999888733330333222000011000000
-33333333333333333333876689999989873333330020220011000000
-33333333333333333333677778888999977333330222220010000000
-33333333333333333336677333336789987733302200211001100000
-33333333333333333333787333333367766606332220010000000000
-33333333333333333337897333333336787633322222010110000000
-33333333333333333337333333333333337803322002110100000000
-33333333333333333333333333333333333007022000000100000000
-33333333333333333333336333333333333336642220011100000000
-33333333333333333333367333333330333332064020010110000000
-03333333333333333333337733333030333222034210100000000000
-33333333333333333333336633333333002202202020100000000000
-02303333333333333333333333333303022222000000010000000000
-22033030333333333333333363333333222202211001100000000000
-20202333033333330333303353333322222000011101000000000000
-02022220333333333333333773000222220201010001000000000000
-22222022223333333333333332022220022010010010000000000000
-02020022222222233333322222022020010100000000000000000000
-10020202002222020202222200022000101100000000000000000000
-10001022202222022202222220020111000000010000000000000000
-10010100220200202002002020201001000000000000000000000000
-11000110100012200202200100100001111000000000000000000000
-10001110110110101111011001000011000000000000000000000000
-00001001100111001101000010011000000000000000000000000000
-00000110000100110010101110010000000000000000000000000000
-00000000000000000100110000000000000000000000000000000000` },
-      { sel: ".hand-up", ox: 811, data: `000000000011011000020000000000003230000202000000
-000000000010000200333300030303330030332200020000
-000000000002202333033444044044044430002000000220
-000001002020033334000440040404005044402040122020
-000110002003300004400505055555055404044422300322
-001000022330034044555555555500505555544000443002
-000012230300344555555056660875665505004022204300
-110000302304040650606660768833666555350553244443
-010000000404420656666670679933666635555530334044
-000020330040550555366776689933666633333555530000
-022200300440706666666766688733666633330665330540
-112000304555233666666666667833366633336635533304
-020300005675333366666666668836336333366666633333
-022033442200633336666666667638863666666666330330
-000334405230773333786366666789967666666663333533
-000030445533333333798666337999973366666633336633
-020034455553333333338999999999983366663333363335
-223330005503333373337899998999976333633333333333
-003334005566333366783367888999763336633363333333
-203400440566633333886336789987633333366633333333
-233304455566633333766679999766333333333333333333
-033044555556663333333777998873333333333333333333
-033445555566666333337999999973333333333333333333
-033402405556666633333789988733333333333333333333
-003444455505336663333333333333636333333633330333
-200300005555633663333333333333766633333333333333
-003034055555566366663333333333386763633333333333
-003004542500666336633333333333878676763333333333
-002030045555336633363333333333377766663333333330
-000000304053333366336333333333377877663333330333
-000000304523333336333333333333678877666333333332
-000003340202333303333633333333377877666333333022
-010122002222203333533663333333336777770633333222
-001100002222220333335333333333333670767650332020
-000000123332222233353333333333333367076665040022
-000100000020200202035533003330033036777055404222` },
-      { sel: ".reach-left", ox: 293, data: `866642000000410000000000002310000000000022210
-565443200000001100000000000000000000000111111
-564322210000000001200000000000000100000000000
-431001111100000102520220000000000000100000000
-320000000200000464455254310000000000000000000
-100100000000016489988865883000000000010000000
-112100000000008999998874770000000000100000010
-431000000000037999999479810000000010000000000
-320000000000058889979988400000002000000000000
-201000000000026758999977200000000000000000000
-220000000000134569999885000000000000000000001
-000000000101112689999960000000000000000000010
-243330153010002899942410000001000000000000100
-788887895000001699920000000000010000000000000
-899999830000000389840000000000000000000220000
-799999941000000135863200000000000200002221000
-689999997100000000231110000000000002200001000
-779999998400000130000011000000000001000000010
-789999999974200220000027620000000000000000011
-999999999999875440000589520000000000100000000
-989999999998887385423999500000000001000000000
-868999899854000269988799971000000000000000000
-548999988775654206996069887410000000000000000
-446999988888756864870004889985010000000000000
-555899999998624788820000268984010000001000000
-565799998889866789600000001688643333557710220
-676899998777788998100000000049999999998874378
-878999875577346684000000000001366776542059747
-888999851036304463000110000000000000000000257
-999998887101100003210002000000000000000000008
-989999867860100004222100000000010000000000001
-899998865465320025401210000000001110000000000
-999999776335333234541210000000000200000000001
-999889876300232355444211000000002100000000000
-999987888763001125434320000000012000000000000
-999997578885310000233323000002332100000000000
-988898756653210110003435301022133200001000000
-999987665555300000000243445342333310110000003
-999998656765421000000013442323322343212201343
-999999998875453100000002554333433444333224434
-999999998976764211000003455443444455444345442
-999999999899887654201000255556544445545545542` },
-      { sel: ".reach-right", ox: 338, data: `0000122332210000002200001223332333345667889
-1000143101100000000110000111100011234466789
-0012001000000000000002102200000000122234577
-0110000000000000010000231100000000000123554
-0000000000022110121000000000000000023234444
-0000000000210100001100000000000002243234334
-0000000001000000000230000000002232011234434
-0000000120000000000001000000000020000003433
-1000001100000000000000000000000100000011233
-0221200000000000000100000000000000000010455
-0021000000000000000000000000000000000002446
-0000000000000000000000000000000000000033235
-0000000000000000000000110000000000000122223
-0000000000001000000000001000011210000111222
-0000000000000000000000001100000111210021122
-0000000000000000000000011000000001122122213
-0000000010000000000000010000000000001103232
-0000000000000000000000000000000000000013320
-0000000100000000000013000000000000000013222
-2100000000000000000001000000000000111111123
-1010000000000000000000000000000000001000013
-0000000000100000000000000000000000001000013
-0000000000220110100000000000232200310200103
-0000010000012100000000000002315456431000122
-0000000000000011000000000000644786596011212
-0000000000000010000000000000113899888322235
-5300000000000000000010000004025889998332554
-9541000000000000000002000002478999996024334
-8310000000100000001000010000799987985222233
-6400000100000000000000000000017987762000001
-2000000365000000100000000020000999200000000
-0000001477435630000000000000035895000032000
-1000000266888886100010000012036751000037776
-1000000134200048874322433458622200000058999
-0100000000100101589988999999985033000599997
-0110010100001100013466678888798446446999999
-3212101011013101110122123443458999999999999
-2421001001222112221133531322445898878998999
-2311110001323222211344443334555588888899999
-2222111113134333214435345555566679999999999
-3322222242453444344543355555666667999999999
-2433223335554433454543456556566777999999999` },
-    ]
-      .map((h) => {
-        const cv = document.querySelector(h.sel);
-        if (!cv) return null;
-        const grid = h.data.split("\n");
-        return { ...h, cv, ctx: cv.getContext("2d"), grid, cols: grid[0].length, rows: grid.length };
+    const KEY = "zeron-gh-stars";
+    const show = (n) => {
+      const text = "★ " + new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(n).toLowerCase();
+      for (const el of document.querySelectorAll(".gh-stars")) {
+        el.textContent = text;
+        el.hidden = false;
+      }
+    };
+    let cached = null;
+    try { cached = JSON.parse(localStorage.getItem(KEY)); } catch {}
+    if (cached && Number.isFinite(cached.n)) show(cached.n);
+    if (cached && Date.now() - cached.at < 3600e3) return;
+    fetch("https://api.github.com/repos/zeronsh/zeron", { credentials: "omit" })
+      .then((r) => r.ok ? r.json() : Promise.reject())
+      .then(({ stargazers_count: n }) => {
+        if (!Number.isFinite(n)) return;
+        show(n);
+        try { localStorage.setItem(KEY, JSON.stringify({ n, at: Date.now() })); } catch {}
       })
-      .filter(Boolean);
-    if (!HANDS.length) return;
-    const dpr = Math.min(devicePixelRatio || 1, 2);
-    for (const h of HANDS) {
-      h.cv.width = h.cols * CW * dpr;
-      h.cv.height = h.rows * CH * dpr;
-      h.cv.style.width = h.cols * CW + "px";
-      h.cv.style.height = h.rows * CH + "px";
-      h.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      h.ctx.font = '10px "Geist Mono", monospace';
-      h.ctx.textBaseline = "top";
-    }
-    const field = (x, y, t) => {
-      const a = x * 0.55, b = y * 0.35;
-      const v =
-        Math.sin(a + 2.1 * Math.sin(b * 0.9 + t) + t * 0.7) *
-        Math.cos(b - 1.7 * Math.sin(a * 0.6 - t * 0.8));
-      return 0.5 + 0.5 * v;
-    };
-    const draw = (t) => {
-      for (const h of HANDS) {
-        if (h.cv.offsetWidth === 0) continue;
-        h.ctx.clearRect(0, 0, h.cols * CW, h.rows * CH);
-        for (let y = 0; y < h.rows; y++) {
-          for (let x = 0; x < h.cols; x++) {
-            const base = +h.grid[y][x] / 9;
-            if (!base) continue;
-            const v = base * (0.72 + 0.58 * field(x + h.ox, y, t));
-            const g = RAMP[Math.min(RAMP.length - 1, (v * RAMP.length) | 0)];
-            if (g === " ") continue;
-            h.ctx.fillStyle = `rgba(139, 92, 246, ${(0.16 + v * 0.5).toFixed(2)})`;
-            h.ctx.fillText(g, x * CW + 2, y * CH + 2);
-          }
-        }
-      }
-    };
-    if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      document.fonts.ready.then(() => draw(0));
-    } else {
-      let prev = 0;
-      const tick = (ms) => {
-        if (ms - prev > 66) { // ~15fps, same drift as the edge ascii
-          prev = ms;
-          draw(ms * 0.00022);
-        }
-        requestAnimationFrame(tick);
-      };
-      requestAnimationFrame(tick);
-    }
+      .catch(() => {});
   })();
-
-  // keep the reaching figures vertically centered on the harness row —
-  // they point at "Runs what you already use" wherever it sits in the panel
-  (() => {
-    const sect = document.querySelector(".panel-sect");
-    const row = document.querySelector(".p-harness");
-    const figs = document.querySelectorAll(".reach-left, .reach-right");
-    if (!sect || !row || !figs.length) return;
-    const place = () => {
-      const y =
-        row.getBoundingClientRect().top -
-        sect.getBoundingClientRect().top +
-        row.offsetHeight / 2;
-      for (const f of figs) f.style.top = y + "px";
-    };
-    place();
-    addEventListener("resize", place);
-    if (typeof ResizeObserver !== "undefined") {
-      const ro = new ResizeObserver(place);
-      ro.observe(sect);
-      ro.observe(row);
-    }
-    document.fonts.ready.then(place);
-  })();
+</script>
+<script>
 </script>
 </body>
 </html>

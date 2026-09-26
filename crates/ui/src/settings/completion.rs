@@ -1,48 +1,11 @@
-//! Composer completion preferences in Settings → Shortcuts.
+//! Per-agent composer completion preferences inside Settings → Providers.
 
-use super::ShortcutsPage;
-use crate::{popover::Loadable, settings, settings::widgets, theme::Theme};
-use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
-use zeron_engine::registry::HarnessDescriptor;
+use super::HarnessesPage;
+use crate::{settings, settings::widgets, theme::Theme};
+use gpui::{AnyElement, Context, div, prelude::*, px};
 use zeron_proto::HarnessId;
 
-/// Use the same installed/enabled gate as the composer, in settings order.
-fn active_agents(list: &[HarnessDescriptor]) -> Vec<(HarnessId, &'static str)> {
-    let offered = crate::pickers::offered_harnesses(list);
-    settings::SKILL_COMPLETION_HARNESSES
-        .into_iter()
-        .filter(|(id, _)| offered.iter().any(|agent| agent.id == *id))
-        .collect()
-}
-
-impl ShortcutsPage {
-    pub(crate) fn load_completion_harnesses(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.completion_harnesses =
-                Loadable::Error("Connect this device to load its active agents.".into());
-            return;
-        };
-        self.completion_harnesses = Loadable::Loading;
-        self.completion_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(zeron_rpc::methods::LIST_HARNESSES, serde_json::json!({}))
-                .await;
-            this.update(cx, |page, cx| {
-                page.completion_harnesses = match result {
-                    Ok(value) => match serde_json::from_value(value) {
-                        Ok(list) => Loadable::Ready(list),
-                        Err(error) => Loadable::Error(error.to_string()),
-                    },
-                    Err(error) => Loadable::Error(error.to_string()),
-                };
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
+impl HarnessesPage {
     fn toggle_completion(&mut self, harness: HarnessId, dollar: bool, cx: &mut Context<Self>) {
         settings::update(settings::SavePolicy::Immediate, cx, |settings| {
             let mut preferences = settings.skill_completion(harness);
@@ -58,267 +21,119 @@ impl ShortcutsPage {
         cx.notify();
     }
 
-    fn reset_completion(&mut self, cx: &mut Context<Self>) {
-        settings::update(settings::SavePolicy::Immediate, cx, |settings| {
-            settings.skill_completion_by_harness.clear();
-            settings.skills_in_slash_menu = false;
-        });
-        cx.notify();
-    }
-
-    pub(super) fn render_completion(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_completion_for(
+        &self,
+        harness: HarnessId,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let current = settings::current(cx);
-        let customized =
-            !current.skill_completion_by_harness.is_empty() || current.skills_in_slash_menu;
-        let header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .flex_wrap()
-            .gap(px(12.0))
-            .child(widgets::field_label(theme, "Composer completion"))
-            .when(customized, |header| {
-                header.child(
-                    widgets::ghost_action(theme)
-                        .id("reset-completion")
-                        .role(gpui::Role::Button)
-                        .aria_label("Restore composer completion defaults")
-                        .tab_index(0)
-                        .border_1()
-                        .border_color(gpui::transparent_black())
-                        .focus_visible(|s| s.border_color(theme.accent))
-                        .on_click(cx.listener(|page, _, _, cx| page.reset_completion(cx)))
-                        .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
-                            if !event.is_held
-                                && matches!(event.keystroke.key.as_str(), "enter" | "space")
-                            {
-                                cx.stop_propagation();
-                                page.reset_completion(cx);
-                            }
-                        }))
-                        .child("Restore defaults"),
+        let preferences = current.skill_completion(harness);
+        let rows = [
+            (
+                true,
+                "Use $ for skills",
+                "Type $ in the composer to pick a skill.",
+                preferences.dollar,
+            ),
+            (
+                false,
+                "Separate / commands",
+                "Keep skills out of the / menu.",
+                preferences.separate_from_slash,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(ix, (dollar, label, description, enabled))| {
+            div()
+                .id(format!("completion-{harness:?}-{dollar}"))
+                .min_h(px(52.0))
+                .py(px(10.0))
+                .when(ix > 0, |row| {
+                    row.border_t_1().border_color(widgets::row_divider(theme))
+                })
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(16.0))
+                .role(gpui::Role::Switch)
+                .aria_label(format!("{harness:?}: {label}"))
+                .aria_toggled(if enabled {
+                    gpui::Toggled::True
+                } else {
+                    gpui::Toggled::False
+                })
+                .tab_index(0)
+                .cursor_pointer()
+                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                .on_click(
+                    cx.listener(move |page, _, _, cx| page.toggle_completion(harness, dollar, cx)),
                 )
-            });
-        let mut section = div().mt(px(28.0)).flex().flex_col().gap(px(12.0))
-            .child(div().flex().flex_col().gap(px(4.0)).child(header)
-                .child(widgets::page_subtitle(theme, "For active agents on this device. Completion preferences apply across your devices.")
-                    .mt(px(0.0)).line_height(px(20.0))));
-        match &self.completion_harnesses {
-            Loadable::Idle | Loadable::Loading => {
-                section = section.child(widgets::page_subtitle(theme, "Loading active agents…"));
-            }
-            Loadable::Error(_) => {
-                section =
-                    section.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .flex_wrap()
-                            .gap(px(12.0))
-                            .child(widgets::page_subtitle(
-                                theme,
-                                "Unable to load active agents.",
-                            ))
-                            .child(
-                                widgets::ghost_action(theme)
-                                    .id("retry-completion-agents")
-                                    .role(gpui::Role::Button)
-                                    .aria_label("Retry loading active agents")
-                                    .tab_index(0)
-                                    .border_1()
-                                    .border_color(gpui::transparent_black())
-                                    .focus_visible(|s| s.border_color(theme.accent))
-                                    .on_click(cx.listener(|page, _, _, cx| {
-                                        page.load_completion_harnesses(cx)
-                                    }))
-                                    .on_key_down(cx.listener(
-                                        |page, event: &gpui::KeyDownEvent, _, cx| {
-                                            if !event.is_held
-                                                && matches!(
-                                                    event.keystroke.key.as_str(),
-                                                    "enter" | "space"
-                                                )
-                                            {
-                                                cx.stop_propagation();
-                                                page.load_completion_harnesses(cx);
-                                            }
-                                        },
-                                    ))
-                                    .child("Retry"),
-                            ),
-                    );
-            }
-            Loadable::Ready(list) => {
-                let agents = active_agents(list);
-                if agents.is_empty() {
-                    section = section.child(widgets::page_subtitle(theme, "No active agents on this device. Enable an installed agent in Settings → Agents."));
-                }
-                for (harness, name) in agents {
-                    let preferences = current.skill_completion(harness);
-                    let (logo, tint) = crate::pickers::harness_brand_icon(harness);
-                    let mut card = widgets::section_card(theme).mt(px(0.0)).child(
-                        div()
-                            .px(px(20.0))
-                            .pt(px(16.0))
-                            .pb(px(4.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(10.0))
-                            .child(
-                                crate::icons::icon(logo)
-                                    .size(px(18.0))
-                                    .flex_none()
-                                    .text_color(tint.unwrap_or(theme.text)),
-                            )
-                            .child(widgets::row_title(theme, name)),
-                    );
-                    for (dollar, label, description, enabled) in [
-                        (
-                            true,
-                            "Use $ for skills",
-                            "Type $ to find and insert a skill.",
-                            preferences.dollar,
-                        ),
-                        (
-                            false,
-                            "Separate / commands",
-                            "Keep skills out of the / command menu.",
-                            preferences.separate_from_slash,
-                        ),
-                    ]
-                    .into_iter()
-                    {
-                        card = card.child(
-                            widgets::card_row(theme, true)
-                                .id(SharedString::from(format!(
-                                    "completion-{harness:?}-{dollar}"
-                                )))
-                                .role(gpui::Role::Switch)
-                                .aria_label(format!(
-                                    "{name}: {label}, {}",
-                                    if enabled { "on" } else { "off" }
-                                ))
-                                .tab_index(0)
-                                .cursor_pointer()
-                                .border_1()
-                                .border_color(gpui::transparent_black())
-                                .focus_visible(|s| s.border_color(theme.accent))
-                                .on_click(cx.listener(move |page, _, _, cx| {
-                                    page.toggle_completion(harness, dollar, cx)
-                                }))
-                                .on_key_down(cx.listener(
-                                    move |page, event: &gpui::KeyDownEvent, _, cx| {
-                                        if !event.is_held
-                                            && matches!(
-                                                event.keystroke.key.as_str(),
-                                                "enter" | "space"
-                                            )
-                                        {
-                                            cx.stop_propagation();
-                                            page.toggle_completion(harness, dollar, cx);
-                                        }
-                                    },
-                                ))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(4.0))
-                                        .child(widgets::row_title(theme, label))
-                                        .child(
-                                            div()
-                                                .text_size(crate::typography::ui_rems(
-                                                    widgets::ROW_DESCRIPTION_SIZE,
-                                                ))
-                                                .line_height(px(18.0))
-                                                .text_color(theme.text_muted)
-                                                .child(description),
-                                        ),
-                                )
-                                .child(widgets::toggle_switch(theme, enabled).flex_none()),
-                        );
+                .on_key_down(cx.listener(move |page, event: &gpui::KeyDownEvent, _, cx| {
+                    if !event.is_held && matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        page.toggle_completion(harness, dollar, cx);
+                        cx.stop_propagation();
                     }
-                    section = section.child(card);
-                }
-            }
-        }
-        section.into_any_element()
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(theme, label))
+                        .child(widgets::meta_line(
+                            theme,
+                            vec![div().child(description).into_any_element()],
+                        )),
+                )
+                .child(widgets::toggle_switch(
+                    theme,
+                    enabled,
+                    format!("completion-switch-{harness:?}-{dollar}"),
+                ))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .child(widgets::details_label(theme, "Completion"))
+            .children(rows)
+            .into_any_element()
     }
 }
 
 #[cfg(test)]
 mod completion_tests {
     use super::*;
-    fn descriptor(id: HarnessId, installed: bool, enabled: Option<bool>) -> HarnessDescriptor {
-        HarnessDescriptor {
-            id,
-            name: format!("{id:?}"),
-            supports_steering: false,
-            steering_mode: zeron_proto::SteeringMode::TurnBoundary,
-            reasoning_levels: Vec::new(),
-            installed,
-            can_install: false,
-            enabled,
-        }
-    }
-
-    #[test]
-    fn completion_only_lists_installed_enabled_agents_in_settings_order() {
-        let list = [
-            descriptor(HarnessId::Opencode, true, Some(true)),
-            descriptor(HarnessId::Cursor, true, Some(false)),
-            descriptor(HarnessId::Devin, false, Some(true)),
-            descriptor(HarnessId::Codex, true, Some(true)),
-            descriptor(HarnessId::ClaudeCode, true, None),
-            descriptor(HarnessId::Grok, false, None),
-            descriptor(HarnessId::Mock, true, Some(true)),
-        ];
-        assert_eq!(
-            active_agents(&list),
-            vec![
-                (HarnessId::ClaudeCode, "Claude Code"),
-                (HarnessId::Codex, "Codex"),
-                (HarnessId::Opencode, "OpenCode"),
-            ]
-        );
-        assert!(active_agents(&[]).is_empty());
-        assert!(active_agents(&[descriptor(HarnessId::Codex, true, Some(false))]).is_empty());
-    }
 
     #[gpui::test]
-    fn completion_preferences_save_locally_and_independently(cx: &mut gpui::TestAppContext) {
+    fn completion_preferences_save_independently_per_agent(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| settings::init(Default::default(), dir.path(), cx));
         let state = cx.new(|_| crate::state::AppState::new());
-        let page = cx.new(|cx| {
-            ShortcutsPage::new(
-                state,
-                Default::default(),
-                false,
-                Default::default(),
-                false,
-                false,
-                crate::appshots::AppshotDestination::Automatic,
-                cx,
-            )
-        });
+        let page = cx.new(|cx| HarnessesPage::new(state, cx));
         page.update(cx, |page, cx| {
             page.toggle_completion(HarnessId::ClaudeCode, true, cx);
             page.toggle_completion(HarnessId::ClaudeCode, false, cx);
             page.toggle_completion(HarnessId::Opencode, true, cx);
         });
+        // Both default on, so each flip turns its own preference off.
         let loaded = settings::UiSettings::load(dir.path());
-        let claude = loaded.skill_completion(HarnessId::ClaudeCode);
-        assert!(claude.dollar && claude.separate_from_slash);
-        let opencode = loaded.skill_completion(HarnessId::Opencode);
-        assert!(opencode.dollar && !opencode.separate_from_slash);
-        assert!(!loaded.skill_completion(HarnessId::Cursor).dollar);
-        page.update(cx, |page, cx| page.reset_completion(cx));
-        let reset = settings::UiSettings::load(dir.path());
-        assert!(reset.skill_completion_by_harness.is_empty());
-        assert!(reset.skill_completion(HarnessId::Codex).dollar);
-        assert!(!reset.skill_completion(HarnessId::ClaudeCode).dollar);
+        assert!(!loaded.skill_completion(HarnessId::ClaudeCode).dollar);
+        assert!(
+            !loaded
+                .skill_completion(HarnessId::ClaudeCode)
+                .separate_from_slash
+        );
+        assert!(!loaded.skill_completion(HarnessId::Opencode).dollar);
+        assert!(
+            loaded
+                .skill_completion(HarnessId::Opencode)
+                .separate_from_slash
+        );
+        assert!(
+            loaded
+                .skill_completion_by_harness
+                .contains_key(&HarnessId::ClaudeCode)
+        );
     }
 }

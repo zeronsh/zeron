@@ -2,7 +2,7 @@
 //! slots resolved on first use (claude-code spawns subprocess discovery; codex/cursor
 //! later). Lazy slots carry a static descriptor so `ListHarnesses` never forces a spawn.
 //!
-//! Also owns the device's harness ENABLEMENT (Settings → Agents): which harnesses
+//! Also owns the device's harness ENABLEMENT (Settings → Providers): which harnesses
 //! this device's composer offers, persisted in `{data_dir}/harness-prefs.json`.
 //! Per-device because CLI installs are — a viewer retargets the settings page at
 //! another device and edits THAT device's set over the forwarded RPCs.
@@ -33,7 +33,7 @@ pub struct HarnessDescriptor {
     /// Explicit CLI installation is available on this listing device.
     #[serde(default)]
     pub can_install: bool,
-    /// Whether the listing device offers this harness (Settings → Agents).
+    /// Whether the listing device offers this harness (Settings → Providers).
     /// `None` — the catalog came from an engine predating the setting — means
     /// "unknown": consumers fall back to detection (see [`descriptor_enabled`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]

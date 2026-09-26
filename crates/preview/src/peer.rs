@@ -1,6 +1,6 @@
 //! Authenticated signaling supplies SDP/DTLS fingerprints. Preview bytes only
 //! use the resulting reliable, ordered DataChannel; there is no edge byte relay.
-use crate::mux::{Connector, Mux, Stream, Transport};
+use crate::mux::{Connector, Mux, PeerScoped, Stream, Transport};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -104,7 +104,12 @@ impl Peers {
     async fn send(&self, to: &str, signal: Signal) -> anyhow::Result<()> {
         tokio::select! { _ = self.0.stop.cancelled() => anyhow::bail!("preview networking stopped"), result = self.0.output.send(OutgoingSignal { to: to.into(), signal }) => { result?; Ok(()) } }
     }
-    async fn create(&self, session: String, initiator: bool) -> anyhow::Result<Arc<Peer>> {
+    async fn create(
+        &self,
+        device: &str,
+        session: String,
+        initiator: bool,
+    ) -> anyhow::Result<Arc<Peer>> {
         tracing::debug!(initiator, "creating preview peer");
         let (ready, receiver) = watch::channel(None);
         let (gathered, gathering) = watch::channel(false);
@@ -113,7 +118,9 @@ impl Peers {
             ready,
             gathered,
             channel_claimed: AtomicBool::new(false),
-            connector: self.0.connector.clone(),
+            // Streams this peer opens are attributed to its authenticated
+            // device (sign-in callbacks only serve the device that asked).
+            connector: Arc::new(PeerScoped::new(device, self.0.connector.clone())),
             initiator,
             stop: stop.clone(),
             changed: self.0.changed.clone(),
@@ -194,7 +201,7 @@ impl Peers {
             peers.len() < 16 || peers.contains_key(device),
             "too many preview peers"
         );
-        let peer = self.create(session, true).await?;
+        let peer = self.create(device, session, true).await?;
         if let Some(old) = peers.insert(device.into(), peer.clone()) {
             old.close().await;
         }
@@ -241,7 +248,7 @@ impl Peers {
                     peers.len() < 16 || peers.contains_key(device),
                     "too many preview peers"
                 );
-                let peer = self.create(signal.session, false).await?;
+                let peer = self.create(device, signal.session, false).await?;
                 if let Some(old) = peers.insert(device.into(), peer.clone()) {
                     old.close().await;
                 }
