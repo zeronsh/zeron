@@ -127,4 +127,17 @@ final class SessionFlowTests: XCTestCase {
         first.tap()
         XCTAssertTrue((input.value as? String ?? "").contains("@mod.rs"), "token inserted: \(input.value ?? "")")
     }
+
+    func testArchiveWithUndo() {
+        let app = launch()
+        let cell = app.cells["session-chat-deploy"]
+        XCTAssertTrue(cell.waitForExistence(timeout: 10))
+        cell.swipeLeft()
+        app.buttons["Archive"].tap()
+        let undo = app.buttons["toast-action"]
+        XCTAssertTrue(undo.waitForExistence(timeout: 3))
+        snapshot(app, "archive-undo")
+        undo.tap()
+        XCTAssertTrue(app.cells["session-chat-deploy"].waitForExistence(timeout: 5), "unarchived session returns")
+    }
 }

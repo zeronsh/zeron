@@ -336,7 +336,11 @@ final class AppModel {
         attempt("pin") { pinned ? try client?.pinSession(chatId: id) : try client?.unpinSession(chatId: id) }
     }
 
-    func archive(_ id: String) { attempt("archive") { try client?.archiveSession(chatId: id) } }
+    func archive(_ id: String) {
+        attempt("archive") { try client?.archiveSession(chatId: id) }
+        let window = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
+        Toast.show("Archived", action: "Undo", in: window) { [weak self] in self?.unarchive(id) }
+    }
     func unarchive(_ id: String) { attempt("unarchive") { try client?.unarchiveSession(chatId: id) } }
     func move(_ id: String, toSection section: String?) { attempt("assign") { try client?.assignSection(chatId: id, sectionId: section) } }
     func movePin(_ id: String, after: String?, before: String?) {
