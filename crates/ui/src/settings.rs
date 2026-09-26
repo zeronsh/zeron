@@ -231,6 +231,19 @@ pub fn transcript_width(cx: &App) -> f32 {
         .unwrap_or(TRANSCRIPT_WIDTH_DEFAULT)
 }
 
+pub fn sidebar_hover_enabled(cx: &App) -> bool {
+    cx.try_global::<SettingsStore>()
+        .is_none_or(|store| store.current.sidebar_hover_enabled)
+}
+
+pub fn set_sidebar_hover_enabled(enabled: bool, cx: &mut App) {
+    if update(SavePolicy::Debounced, cx, |settings| {
+        settings.sidebar_hover_enabled = enabled;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
 pub fn set_transcript_width(width: f32, cx: &mut App) {
     if update(SavePolicy::Debounced, cx, |settings| {
         settings.transcript_width = normalize_transcript_width(width);
@@ -670,6 +683,8 @@ pub struct UiSettings {
         std::collections::HashMap<zeron_proto::HarnessId, SkillCompletionSettings>,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
+    /// Reveal the collapsed sidebar when hovering over the left window edge.
+    pub sidebar_hover_enabled: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
     /// folder inherently). Kept for file compatibility; no longer read.
     pub sidebar_grouped: bool,
@@ -826,6 +841,7 @@ impl Default for UiSettings {
             window_geometry: None,
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
+            sidebar_hover_enabled: true,
             sidebar_grouped: false,
             sidebar_organization: SidebarOrganization::InOneList,
             sidebar_sort: SidebarSort::LastUpdated,
@@ -2206,6 +2222,7 @@ mod tests {
             window_geometry: None,
             sidebar_width: 300.0,
             sidebar_collapsed: true,
+            sidebar_hover_enabled: false,
             sidebar_grouped: true,
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,
@@ -2412,10 +2429,12 @@ mod tests {
     #[test]
     fn sidebar_display_defaults_and_preferences_round_trip() {
         let settings: UiSettings = serde_json::from_str("{}").unwrap();
+        assert!(settings.sidebar_hover_enabled);
         assert!(settings.sidebar_compact);
         assert!(settings.sidebar_show_project_icon);
         assert!(settings.sidebar_show_project_label);
         let customized = UiSettings {
+            sidebar_hover_enabled: false,
             sidebar_compact: false,
             sidebar_show_project_icon: false,
             sidebar_show_project_label: false,
