@@ -121,7 +121,11 @@ final class TranscriptListView: UIScrollView, RowViewDelegate {
 
     func apply(_ frame: LayoutFrame) {
         let state = Signposts.transcript.beginInterval("apply-frame")
-        defer { Signposts.transcript.endInterval("apply-frame", state) }
+        let t0 = CACurrentMediaTime()
+        defer {
+            Signposts.transcript.endInterval("apply-frame", state)
+            TranscriptPerf.maxApplyMs = max(TranscriptPerf.maxApplyMs, (CACurrentMediaTime() - t0) * 1000)
+        }
         if frame.styleCount() != fonts.count { fonts.update(frame.styles()) }
         let first = current == nil || current?.rowCount() == 0
         var anchor: (key: UInt64, delta: CGFloat)?
@@ -154,7 +158,11 @@ final class TranscriptListView: UIScrollView, RowViewDelegate {
     private func layoutRows() {
         guard let frame = current else { return }
         let state = Signposts.transcript.beginInterval("layout-rows")
-        defer { Signposts.transcript.endInterval("layout-rows", state) }
+        let t0 = CACurrentMediaTime()
+        defer {
+            Signposts.transcript.endInterval("layout-rows", state)
+            TranscriptPerf.maxLayoutMs = max(TranscriptPerf.maxLayoutMs, (CACurrentMediaTime() - t0) * 1000)
+        }
         let y0 = contentOffset.y - overscan
         let y1 = contentOffset.y + bounds.height + overscan
         let placements = frame.rowsIn(y0: Float(y0), y1: Float(y1))
@@ -166,7 +174,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate {
             if let v = visible[p.key] {
                 view = v
             } else {
-                view = pool.popLast() ?? RowView()
+                view = pool.popLast() ?? { TranscriptPerf.viewsCreated += 1; return RowView() }()
                 view.delegate = self
                 visible[p.key] = view
                 if view.superview !== self { addSubview(view) }
@@ -203,7 +211,12 @@ final class TranscriptListView: UIScrollView, RowViewDelegate {
         let k = ModelKey(key: p.key, version: p.version, width: frame.width())
         if let m = cache[k] { return m }
         let state = Signposts.transcript.beginInterval("build-model-sync")
-        defer { Signposts.transcript.endInterval("build-model-sync", state) }
+        let t0 = CACurrentMediaTime()
+        TranscriptPerf.syncBuilds += 1
+        defer {
+            Signposts.transcript.endInterval("build-model-sync", state)
+            TranscriptPerf.maxSyncBuildMs = max(TranscriptPerf.maxSyncBuildMs, (CACurrentMediaTime() - t0) * 1000)
+        }
         let display = frame.display(index: p.index)!
         let m = RowModel(display: display, fonts: fonts)
         store(m, for: k)
@@ -227,6 +240,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate {
         prefetchQueue.async { [weak self] in
             guard let d = frame.display(index: p.index) else { return }
             let model = RowModel(display: d, fonts: fonts)
+            TranscriptPerf.asyncBuilds += 1
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.inflight.remove(k)

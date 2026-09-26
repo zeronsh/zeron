@@ -157,14 +157,19 @@ final class TranscriptLabViewController: UIViewController {
         view.addSubview(benchLabel)
         let idle = ScrollBench(list: list)
         bench = idle
+        TranscriptPerf.reset()
         idle.run(passes: 3) { [weak self] idleResult in
             guard let self else { return }
+            let idlePerf = TranscriptPerf.json
+            TranscriptPerf.reset()
             self.send("Stream the plan again while I scroll.")
             let streaming = ScrollBench(list: self.list)
             self.bench = streaming
             streaming.run(passes: 2) { streamResult in
-                let json = "{\"idle\":\(idleResult.json),\"streaming\":\(streamResult.json)}"
+                let json = "{\"idle\":\(idleResult.json),\"streaming\":\(streamResult.json),\"idlePerf\":\(idlePerf),\"streamingPerf\":\(TranscriptPerf.json)}"
                 NSLog("BENCH %@", json)
+                let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                try? json.write(to: docs.appendingPathComponent("bench.json"), atomically: true, encoding: .utf8)
                 self.benchLabel.text = json
                 self.benchLabel.accessibilityLabel = json
             }

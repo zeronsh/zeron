@@ -64,7 +64,7 @@ final class ScrollPerformanceTests: XCTestCase {
         add(attachment)
         print("BENCH \(json)")
         let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: [String: Double]])
-        for (phase, metrics) in parsed {
+        for (phase, metrics) in parsed where !phase.hasSuffix("Perf") {
             XCTAssertLessThan(metrics["hitchRatioMsPerS"] ?? 99, 5, "\(phase) hitch ratio")
         }
     }
