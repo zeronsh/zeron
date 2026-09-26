@@ -219,42 +219,6 @@ pub fn reasoning_label(level: ReasoningLevel) -> &'static str {
     }
 }
 
-/// The TraitsPicker trigger summary: the effective reasoning level plus every
-/// model option's effective choice — the explicit pick when one is saved and
-/// still offered, else the option's default — joined with " · " ("High · 1M ·
-/// Fast", Cursor's "Agent · Balance"). The Standard service tier is omitted;
-/// other effective choices stay visible. `None` means there is no visible suffix.
-pub fn traits_summary(
-    model: Option<&Model>,
-    reasoning: Option<ReasoningLevel>,
-    selections: &serde_json::Map<String, serde_json::Value>,
-) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(level) = reasoning {
-        parts.push(reasoning_label(level).to_string());
-    }
-    if let Some(model) = model {
-        for option in &model.options {
-            let choice_id = selections
-                .get(&option.id)
-                .and_then(|v| v.as_str())
-                .filter(|id| option.choices.iter().any(|c| c.id == *id))
-                .unwrap_or(&option.default_choice);
-            if option.id == "serviceTier" && matches!(choice_id, "default" | "standard") {
-                continue;
-            }
-            if let Some(choice) = option.choices.iter().find(|c| c.id == choice_id) {
-                parts.push(choice.label.clone());
-            }
-        }
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" · "))
-    }
-}
-
 /// Keep only the picks `model` still offers. Remembered picks outlive the
 /// model they were made on, and harnesses apply some options blindly (Claude
 /// appends `[1m]` to any model id when `contextWindow` is "1m").
@@ -271,30 +235,6 @@ pub fn offered_options(
         })
     });
     selections
-}
-
-/// Whether any trait departs from its default — the trigger brightens only
-/// then, so a customized run still stands out now that the summary always
-/// names the effective choices.
-pub fn traits_customized(
-    model: Option<&Model>,
-    reasoning: Option<ReasoningLevel>,
-    ladder: &[ReasoningLevel],
-    selections: &serde_json::Map<String, serde_json::Value>,
-) -> bool {
-    if reasoning != default_reasoning(ladder) {
-        return true;
-    }
-    model.is_some_and(|model| {
-        model.options.iter().any(|option| {
-            selections
-                .get(&option.id)
-                .and_then(|v| v.as_str())
-                .is_some_and(|id| {
-                    id != option.default_choice && option.choices.iter().any(|c| c.id == id)
-                })
-        })
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +390,22 @@ struct ModelRowData {
     harness_name: SharedString,
     model: Model,
     selected_only: bool,
+    /// Another listed row of the same harness shares this label, so the
+    /// row shows its description to tell them apart.
+    ambiguous: bool,
+}
+
+/// Flag rows whose label another listed row of the same harness shares.
+fn mark_ambiguous(rows: &mut [ModelRowData]) {
+    let mut labels: HashMap<(HarnessId, String), usize> = HashMap::new();
+    for row in rows.iter() {
+        *labels
+            .entry((row.harness, row.model.label.clone()))
+            .or_default() += 1;
+    }
+    for row in rows.iter_mut() {
+        row.ambiguous = labels[&(row.harness, row.model.label.clone())] > 1;
+    }
 }
 
 /// Which picker popover is open.
@@ -578,6 +534,9 @@ pub struct Pickers {
     config_hover: popover::HoverIntent<usize>,
     config_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     config_on_left: bool,
+    /// Where a card choice list just closed after a pick: the pointer is
+    /// still over it, and that must not read as leaving the card.
+    config_grace: Option<gpui::Bounds<gpui::Pixels>>,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
     models: HashMap<HarnessId, Loadable<Vec<Model>>>,
     model_refresh_errors: HashMap<HarnessId, String>,
@@ -775,6 +734,7 @@ impl Pickers {
             config_hover: popover::HoverIntent::default(),
             config_bounds: None,
             config_on_left: false,
+            config_grace: None,
             harnesses: Loadable::Idle,
             models: HashMap::new(),
             model_refresh_errors: HashMap::new(),
@@ -1860,6 +1820,7 @@ impl Pickers {
                         harness,
                         harness_name: descriptor.name.clone().into(),
                         selected_only: true,
+                        ambiguous: false,
                         model: Model {
                             id: id.into(),
                             label,
@@ -1873,6 +1834,7 @@ impl Pickers {
                 );
             }
         }
+        mark_ambiguous(&mut rows);
         rows
     }
 
@@ -3841,18 +3803,18 @@ impl Pickers {
         let harness_name = row.harness_name.clone();
         let harness = row.harness;
         let star_model = row.model.id.clone();
-        // Provider attribution (field report: several connected opencode
-        // providers advertise identically-named models — "GLM-5.2" exists
-        // under 64 providers — and rows were indistinguishable). The driver
-        // ships the provider display name in `description`; other harnesses'
-        // taglines read fine in the same slot. Skip when it just repeats the
-        // harness name.
+        // Rows show only the model name. The description appears only to
+        // tell identically-named rows apart (field report: "GLM-5.2" exists
+        // under 64 connected opencode providers, whose driver ships the
+        // provider name in `description`).
         let attribution: Option<SharedString> = row
             .model
             .description
             .as_deref()
             .map(str::trim)
-            .filter(|d| !d.is_empty() && !d.eq_ignore_ascii_case(harness_name.as_ref()))
+            .filter(|d| {
+                row.ambiguous && !d.is_empty() && !d.eq_ignore_ascii_case(harness_name.as_ref())
+            })
             .map(|d| SharedString::from(d.to_owned()));
         let compact = self.model_rail == ModelRail::Harness;
         let mut el = div()
@@ -4012,17 +3974,28 @@ impl Pickers {
                                 if this.config_row != Some(ix) {
                                     return;
                                 }
-                                // The card's own choice lists count as inside it.
+                                let pointer = event.position;
+                                // An open card choice list — including the cone
+                                // from its trigger row toward it — is inside the card.
                                 let in_choices = this.setting_scope == SettingScope::Card
                                     && this.setting_menu.is_some()
-                                    && this
-                                        .setting_bounds
-                                        .is_some_and(|b| b.contains(&event.position));
+                                    && this.setting_hover.contains_pointer(
+                                        gpui::Bounds::default(),
+                                        this.setting_bounds,
+                                        pointer,
+                                        this.setting_on_left,
+                                    );
+                                if this.config_bounds.is_some_and(|b| b.contains(&pointer)) {
+                                    this.config_grace = None;
+                                }
+                                let in_grace =
+                                    this.config_grace.is_some_and(|b| b.contains(&pointer));
                                 if in_choices
+                                    || in_grace
                                     || this.config_hover.contains_pointer(
                                         trigger,
                                         this.config_bounds,
-                                        event.position,
+                                        pointer,
                                         this.config_on_left,
                                     )
                                 {
@@ -4180,7 +4153,17 @@ impl Pickers {
             .into_any_element()
     }
 
+    /// The tray's settings. A model configured in place keeps them in its
+    /// hover card only.
     fn setting_groups(&self, cx: &App) -> Vec<SettingGroup> {
+        if self.selected_model(cx).is_some_and(configured_in_place) {
+            return Vec::new();
+        }
+        self.live_groups(cx)
+    }
+
+    /// The selected model's settings with the current picks.
+    fn live_groups(&self, cx: &App) -> Vec<SettingGroup> {
         build_setting_groups(
             self.trait_ladder(cx),
             self.effective_reasoning(cx),
@@ -4220,7 +4203,7 @@ impl Pickers {
             return Vec::new();
         };
         if self.row_is_selected(&row, cx) {
-            return card_order(self.setting_groups(cx));
+            return card_order(self.live_groups(cx));
         }
         let levels = if row.model.reasoning_levels.is_empty() {
             self.harnesses
@@ -4274,6 +4257,7 @@ impl Pickers {
         self.config_hover.reset();
         self.config_row = None;
         self.config_bounds = None;
+        self.config_grace = None;
         if self.setting_scope == SettingScope::Card {
             self.setting_menu = None;
             self.setting_bounds = None;
@@ -4400,6 +4384,8 @@ impl Pickers {
             return;
         };
         if scope == SettingScope::Card {
+            // Keep the card: the pointer rests where this list was.
+            self.config_grace = self.setting_bounds;
             self.select_card_model(cx);
         }
         match group.id {
@@ -4816,6 +4802,7 @@ fn scoped_model_rows<'a>(
         harness_name: SharedString::from(descriptor.name.clone()),
         model: model.clone(),
         selected_only: false,
+        ambiguous: false,
     };
     let in_scope = |descriptor: &HarnessDescriptor, model: &Model| match rail {
         ModelRail::Favorites => is_favorite(descriptor.id, &model.id),
@@ -5250,18 +5237,11 @@ impl Render for Pickers {
                 Some(crate::icons::claude_brand()),
             ),
         };
-        let explicit_options = self.explicit_options(cx);
-        let traits_set = traits_summary(
-            self.selected_model(cx),
-            self.effective_reasoning(cx),
-            &explicit_options,
-        );
-        let traits_active = traits_customized(
-            self.selected_model(cx),
-            self.effective_reasoning(cx),
-            &self.trait_ladder(cx),
-            &explicit_options,
-        );
+        // The chip names the model and its effort only; the other options
+        // (context, fast mode, ...) live in the popover. The effort brightens
+        // when it departs from the model's default.
+        let effort = self.effective_reasoning(cx);
+        let effort_customized = effort != default_reasoning(&self.trait_ladder(cx));
         // Render the open popover's body first (mutable borrow), then the
         // chips. Branch/Checkout render in the composer FOOTER row (see
         // `render_footer`), not here.
@@ -5284,53 +5264,26 @@ impl Render for Pickers {
             None => None,
         };
 
-        // The composer places this model chip beside the attachment button.
-        // ONE chip for the whole run identity (user request): brand icon +
-        // model name, then the joined traits summary ("Medium", "High · 1M ·
-        // Fast", "Agent · Balance") as the chip's muted second tone — the
-        // run's configuration reads without opening anything, and the suffix
-        // brightens only when something departs from its default. No suffix
-        // when the model has neither a ladder nor options (e.g. Hermes).
-        let chip_suffix = traits_set.map(|summary| {
+        // The composer places this model chip beside the attachment button:
+        // brand icon + model name, then the effort as the chip's muted second
+        // tone. No suffix when the model has no reasoning ladder.
+        let chip_suffix = effort.map(|level| {
             (
-                SharedString::from(summary),
-                traits_active.then(|| theme.text.opacity(0.85)),
+                SharedString::from(reasoning_label(level)),
+                effort_customized.then(|| theme.text.opacity(0.85)),
             )
         });
-        let fast = self.selected_model(cx).is_some_and(|model| {
-            model.options.iter().any(|option| {
-                option.id == "serviceTier"
-                    && self
-                        .resolved(cx)
-                        .model_options
-                        .get(&option.id)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(&option.default_choice)
-                        == "fast"
-            })
-        });
-        let model_chip = self
-            .trigger_chip(
-                PickerKind::HarnessModel,
-                model_label,
-                true,
-                Some(harness_icon),
-                chip_icon_loading,
-                chip_label_loading,
-                chip_suffix,
-                &theme,
-                cx,
-            )
-            .when(fast, |chip| {
-                chip.child(motion::fast_tier(
-                    "composer-fast-tier",
-                    div().flex_none().child(
-                        crate::icons::icon(crate::icons::FAST_TIER)
-                            .size(px(13.0))
-                            .text_color(theme.accent),
-                    ),
-                ))
-            });
+        let model_chip = self.trigger_chip(
+            PickerKind::HarnessModel,
+            model_label,
+            true,
+            Some(harness_icon),
+            chip_icon_loading,
+            chip_label_loading,
+            chip_suffix,
+            &theme,
+            cx,
+        );
         let model_chip = attach_overlay_end(
             model_chip,
             &mut overlay,
@@ -6345,6 +6298,204 @@ mod tests {
             .unwrap();
     }
 
+    /// Pointer paths through the Fusion card: the cone toward a card row's
+    /// choice list keeps both open, a pick keeps the card, and the selected
+    /// Fusion's settings live only in its card (not the tray).
+    #[gpui::test]
+    fn fusion_card_mouse_paths(cx: &mut gpui::TestAppContext) {
+        use std::{cell::Cell, rc::Rc};
+        struct CardFixture {
+            pickers: Entity<Pickers>,
+            bounds: Rc<Cell<gpui::Bounds<gpui::Pixels>>>,
+        }
+        impl Render for CardFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let measured = self.bounds.clone();
+                let menu = self.pickers.update(cx, |pickers, cx| {
+                    let content = pickers.render_harness_model_popover(cx);
+                    pickers.popover_frame_flush(304.0, content, cx)
+                });
+                div().size_full().relative().child(
+                    div()
+                        .absolute()
+                        .top(px(60.0))
+                        .left(px(32.0))
+                        .w(px(304.0))
+                        .child(menu)
+                        .child(
+                            gpui::canvas(move |bounds, _, _| measured.set(bounds), |_, _, _, _| {})
+                                .absolute()
+                                .inset_0(),
+                        ),
+                )
+            }
+        }
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let measured = Rc::new(Cell::new(gpui::Bounds::default()));
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let pickers = cx.new(|cx| Pickers::new(state, cx));
+            pickers.update(cx, |pickers, cx| {
+                let option = |id: &str, label: &str, choices: &[(&str, &str)]| ModelOption {
+                    id: id.into(),
+                    label: label.into(),
+                    default_choice: choices[0].0.into(),
+                    choices: choices
+                        .iter()
+                        .map(|(id, label)| ModelOptionChoice {
+                            id: (*id).into(),
+                            label: (*label).into(),
+                        })
+                        .collect(),
+                };
+                let mut fusion = bare_model("fusion", "Fusion");
+                fusion.reasoning_levels = vec![ReasoningLevel::Medium, ReasoningLevel::High];
+                fusion.options = vec![
+                    option(
+                        "lead",
+                        "Lead",
+                        &[("a", "Lead A"), ("b", "Lead B"), ("c", "Lead C")],
+                    ),
+                    option("sidekick", "Sidekick", &[("x", "Side X"), ("y", "Side Y")]),
+                    option(
+                        "speed",
+                        "Fast Mode",
+                        &[("standard", "Standard"), ("fast", "Fast")],
+                    ),
+                ];
+                pickers.config.harness = Some(HarnessId::Devin);
+                pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Devin, "Devin")]);
+                pickers.models.insert(
+                    HarnessId::Devin,
+                    Loadable::Ready(vec![bare_model("adaptive", "Adaptive"), fusion]),
+                );
+                pickers.open.open(PickerKind::HarnessModel);
+                pickers.pick_model("adaptive".into(), cx);
+            });
+            CardFixture {
+                pickers,
+                bounds: measured.clone(),
+            }
+        });
+        let pickers = handle
+            .read_with(cx, |fixture, _| fixture.pickers.clone())
+            .unwrap();
+        let hover = |window: &mut Window, cx: &mut App, position| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                    position,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            window.draw(cx).clear();
+            window.draw(cx).clear();
+        };
+        let click = |window: &mut Window, cx: &mut App, position| {
+            for input in [
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+            ] {
+                window.dispatch_event(input, cx);
+            }
+            window.draw(cx).clear();
+            window.draw(cx).clear();
+        };
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        let parent = measured.get();
+        // Find the Fusion row by hovering down the list.
+        let mut row = None;
+        for step in 0..60 {
+            let at = gpui::point(
+                parent.left() + px(60.0),
+                parent.top() + px(4.0 * step as f32),
+            );
+            cx.update_window(handle.into(), |_, window, cx| hover(window, cx, at))
+                .unwrap();
+            if pickers.read_with(cx, |p, _| p.config_row) == Some(1) {
+                row = Some(at);
+                break;
+            }
+        }
+        row.expect("hovering the Fusion row opens its card");
+        let card = pickers
+            .read_with(cx, |p, _| p.config_bounds)
+            .expect("card measured");
+        assert!(card.left() > parent.right(), "card opens beside the menu");
+        // Find the Lead trigger inside the card.
+        let mut lead = None;
+        for step in 0..40 {
+            let at = gpui::point(card.left() + px(40.0), card.top() + px(3.0 * step as f32));
+            cx.update_window(handle.into(), |_, window, cx| hover(window, cx, at))
+                .unwrap();
+            if pickers.read_with(cx, |p, _| p.setting_menu.clone())
+                == Some(ModelSetting::Option("lead".into()))
+            {
+                lead = Some(at);
+                break;
+            }
+        }
+        let lead = lead.expect("hovering Lead opens its choices");
+        let list = pickers
+            .read_with(cx, |p, _| p.setting_bounds)
+            .expect("choices measured");
+        assert!(list.left() > card.right());
+        // Diagonal path from the Lead row to the bottom of its list: through
+        // the gap and below the Lead row — inside the cone, not the card.
+        let target = gpui::point(list.left() + px(12.0), list.bottom() - px(10.0));
+        for t in 1..=10 {
+            let f = t as f32 / 10.0;
+            let at = gpui::point(
+                lead.x + (target.x - lead.x) * f,
+                lead.y + (target.y - lead.y) * f,
+            );
+            cx.update_window(handle.into(), |_, window, cx| hover(window, cx, at))
+                .unwrap();
+            pickers.read_with(cx, |p, _| {
+                assert_eq!(p.config_row, Some(1), "card closed at step {t}");
+                assert_eq!(
+                    p.setting_menu,
+                    Some(ModelSetting::Option("lead".into())),
+                    "choices closed at step {t}"
+                );
+            });
+        }
+        // Pick the last choice: Fusion is selected, the list closes, the
+        // card stays — also while the pointer rests where the list was.
+        cx.update_window(handle.into(), |_, window, cx| {
+            click(window, cx, target);
+            hover(window, cx, target + gpui::point(px(3.0), px(-2.0)));
+        })
+        .unwrap();
+        pickers.read_with(cx, |p, cx| {
+            assert_eq!(p.resolved(cx).model.as_deref(), Some("fusion"));
+            assert_eq!(p.resolved(cx).model_options["lead"], "c");
+            assert!(p.setting_menu.is_none());
+            assert_eq!(p.config_row, Some(1), "a pick keeps the card open");
+            // Selected Fusion keeps its settings out of the tray.
+            assert!(p.setting_groups(cx).is_empty());
+            assert!(!p.card_groups(cx).is_empty());
+        });
+        // Back into the card, then far away: the card closes.
+        cx.update_window(handle.into(), |_, window, cx| {
+            hover(window, cx, card.center());
+            hover(window, cx, gpui::point(px(4.0), px(4.0)));
+        })
+        .unwrap();
+        pickers.read_with(cx, |p, _| assert!(p.config_row.is_none()));
+    }
+
     #[gpui::test]
     fn nested_model_menu_mouse_paths_work_on_both_sides(cx: &mut gpui::TestAppContext) {
         use std::{cell::Cell, rc::Rc};
@@ -6862,6 +7013,45 @@ mod tests {
         assert_eq!(rows[0].model.id, "glm-5.2-b");
     }
 
+    /// Rows show descriptions only to tell same-named models apart.
+    #[test]
+    fn only_same_named_rows_are_ambiguous() {
+        let descriptors = vec![
+            descriptor(HarnessId::Opencode, "opencode"),
+            descriptor(HarnessId::Devin, "Devin"),
+        ];
+        let mut glm_a = bare_model("glm-a", "GLM-5.2");
+        glm_a.description = Some("Anthropic".into());
+        let mut glm_b = bare_model("glm-b", "GLM-5.2");
+        glm_b.description = Some("Baseten".into());
+        let opencode = vec![glm_a, glm_b, bare_model("kimi", "Kimi")];
+        let devin = vec![bare_model("glm", "GLM-5.2")];
+        let mut rows = scoped_model_rows(
+            "",
+            ModelRail::Favorites,
+            None,
+            &descriptors,
+            |harness| match harness {
+                HarnessId::Opencode => Some(opencode.as_slice()),
+                HarnessId::Devin => Some(devin.as_slice()),
+                _ => None,
+            },
+            |_, _| true,
+        );
+        mark_ambiguous(&mut rows);
+        let flags: Vec<_> = rows
+            .iter()
+            .map(|r| (r.model.id.as_str(), r.ambiguous))
+            .collect();
+        assert!(flags.contains(&("glm-a", true)));
+        assert!(flags.contains(&("glm-b", true)));
+        assert!(flags.contains(&("kimi", false)));
+        assert!(
+            flags.contains(&("glm", false)),
+            "other harness: not a clash"
+        );
+    }
+
     #[test]
     fn normalize_drops_default_alias_and_folds_orphan_1m_rows() {
         // The shape an OLDER engine serves: a `default` alias row plus
@@ -6941,167 +7131,32 @@ mod tests {
     }
 
     #[test]
-    fn standard_tier_is_hidden_but_other_defaults_remain() {
-        let mut model = bare_model("test", "Test");
-        model.options = vec![zeron_proto::ModelOption {
-            id: "serviceTier".into(),
-            label: "Service Tier".into(),
-            default_choice: "default".into(),
+    fn remembered_picks_keep_only_offered_options() {
+        let mut model = bare_model("opus", "Opus");
+        model.options = vec![ModelOption {
+            id: "context".into(),
+            label: "Context window".into(),
             choices: vec![
-                zeron_proto::ModelOptionChoice {
-                    id: "default".into(),
+                ModelOptionChoice {
+                    id: "standard".into(),
                     label: "Standard".into(),
                 },
-                zeron_proto::ModelOptionChoice {
-                    id: "fast".into(),
-                    label: "Fast".into(),
+                ModelOptionChoice {
+                    id: "1m".into(),
+                    label: "1M".into(),
                 },
             ],
+            default_choice: "standard".into(),
         }];
-        assert_eq!(
-            traits_summary(
-                Some(&model),
-                Some(ReasoningLevel::High),
-                &serde_json::Map::new()
-            ),
-            Some("High".into())
-        );
-        let mut picks = serde_json::Map::new();
-        picks.insert("serviceTier".into(), "default".into());
-        assert_eq!(traits_summary(Some(&model), None, &picks), None);
-        picks.insert("serviceTier".into(), "fast".into());
-        assert_eq!(
-            traits_summary(Some(&model), None, &picks),
-            Some("Fast".into())
-        );
-        model.options[0].id = "context".into();
-        assert_eq!(
-            traits_summary(Some(&model), None, &serde_json::Map::new()),
-            Some("Standard".into())
-        );
-    }
-
-    #[test]
-    fn traits_summary_formats_non_defaults() {
-        let model = Model {
-            id: "opus".into(),
-            label: "Opus".into(),
-            description: None,
-            reasoning_levels: vec![ReasoningLevel::Medium, ReasoningLevel::High],
-            options: vec![
-                ModelOption {
-                    id: "context".into(),
-                    label: "Context window".into(),
-                    choices: vec![
-                        ModelOptionChoice {
-                            id: "standard".into(),
-                            label: "Standard".into(),
-                        },
-                        ModelOptionChoice {
-                            id: "1m".into(),
-                            label: "1M".into(),
-                        },
-                    ],
-                    default_choice: "standard".into(),
-                },
-                ModelOption {
-                    id: "speed".into(),
-                    label: "Speed".into(),
-                    choices: vec![
-                        ModelOptionChoice {
-                            id: "normal".into(),
-                            label: "Normal".into(),
-                        },
-                        ModelOptionChoice {
-                            id: "fast".into(),
-                            label: "Fast".into(),
-                        },
-                    ],
-                    default_choice: "normal".into(),
-                },
-            ],
-        };
-        let mut selections = serde_json::Map::new();
-        selections.insert("context".into(), serde_json::Value::String("1m".into()));
-        selections.insert("speed".into(), serde_json::Value::String("fast".into()));
-        assert_eq!(
-            traits_summary(Some(&model), Some(ReasoningLevel::High), &selections),
-            Some("High · 1M · Fast".to_string())
-        );
-        // All defaults: the effective choices still read on the trigger.
-        assert_eq!(
-            traits_summary(Some(&model), None, &serde_json::Map::new()),
-            Some("Standard · Normal".to_string())
-        );
-        // A saved choice the option no longer offers falls back to the default
-        // label rather than vanishing or echoing a stale id.
-        let mut stale = serde_json::Map::new();
-        stale.insert(
-            "speed".into(),
-            serde_json::Value::String("ludicrous".into()),
-        );
-        assert_eq!(
-            traits_summary(Some(&model), None, &stale),
-            Some("Standard · Normal".to_string())
-        );
-        // Remembered picks drop what the model doesn't offer before sending.
-        let mut remembered = selections.clone();
-        remembered.insert(
-            "speed".into(),
-            serde_json::Value::String("ludicrous".into()),
-        );
+        let mut remembered = serde_json::Map::new();
+        remembered.insert("context".into(), serde_json::Value::String("1m".into()));
         remembered.insert("fastMode".into(), serde_json::Value::String("on".into()));
+        let mut stale = remembered.clone();
+        stale.insert("context".into(), serde_json::Value::String("2m".into()));
         let mut want = serde_json::Map::new();
         want.insert("context".into(), serde_json::Value::String("1m".into()));
         assert_eq!(offered_options(&model, remembered), want);
-        // Reasoning shows without a model too.
-        assert_eq!(
-            traits_summary(
-                None,
-                Some(ReasoningLevel::Ultrathink),
-                &serde_json::Map::new()
-            ),
-            Some("Ultrathink".to_string())
-        );
-        // Nothing to describe → "Traits" fallback upstream.
-        assert_eq!(traits_summary(None, None, &serde_json::Map::new()), None);
-
-        // Customized (bright trigger) only when something departs from its
-        // default: default-choice selections and the default reasoning level
-        // don't count; stale ids don't either.
-        let ladder = model.reasoning_levels.clone();
-        assert!(traits_customized(
-            Some(&model),
-            Some(ReasoningLevel::High),
-            &ladder,
-            &selections
-        ));
-        assert!(!traits_customized(
-            Some(&model),
-            default_reasoning(&ladder),
-            &ladder,
-            &serde_json::Map::new()
-        ));
-        let mut defaults = serde_json::Map::new();
-        defaults.insert("speed".into(), serde_json::Value::String("normal".into()));
-        assert!(!traits_customized(
-            Some(&model),
-            default_reasoning(&ladder),
-            &ladder,
-            &defaults
-        ));
-        assert!(!traits_customized(
-            Some(&model),
-            default_reasoning(&ladder),
-            &ladder,
-            &stale
-        ));
-        assert!(traits_customized(
-            Some(&model),
-            Some(ReasoningLevel::Medium),
-            &ladder,
-            &serde_json::Map::new()
-        ));
+        assert!(offered_options(&model, stale).is_empty());
     }
 
     #[test]
