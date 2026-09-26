@@ -140,22 +140,10 @@ fn open_login_url(url: &str, cx: &mut gpui::App) {
     }
 }
 
-/// Compact absolute reset moment (zeron settings.agents.tsx `formatReset`):
-/// a local clock time ("3:45 PM") when it lands within ~22h, a short weekday
-/// ("Mon") within a week, else month + day ("Sep 14") — a weekday is noise
-/// when the window is a Codex free-tier MONTHLY reset weeks out. The caller
-/// prefixes "resets ". Pure given `now`.
-pub fn format_reset(resets_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Option<String> {
-    use chrono::Local;
-    let at = resets_at?;
-    let local = at.with_timezone(&Local);
-    Some(if at.signed_duration_since(now).num_hours() < 22 {
-        format!("resets {}", local.format("%-I:%M %p"))
-    } else if at.signed_duration_since(now).num_hours() < 24 * 7 {
-        format!("resets {}", local.format("%a"))
-    } else {
-        format!("resets {}", local.format("%b %-d"))
-    })
+/// Full reset date and time in the computer's local timezone.
+pub fn format_reset(resets_at: Option<DateTime<Utc>>) -> Option<String> {
+    let local = resets_at?.with_timezone(&chrono::Local);
+    Some(format!("resets {}", local.format("%Y-%m-%d %H:%M")))
 }
 
 /// The providers zeron can sign into, in display order: (harness, name, CLI
@@ -343,7 +331,7 @@ pub fn mark_switched(snapshot: &mut AgentAccountsSnapshot, account: &AgentAccoun
 }
 
 /// One mini meter line of the usage column: label, a short bar, percent.
-/// The reset moment rides the row's tooltip instead of taking a column.
+/// Settings adds the reset date below this shared compact meter.
 pub(crate) fn render_usage_meter(
     window: &zeron_proto::AgentUsageWindow,
     theme: &Theme,
@@ -1148,7 +1136,6 @@ impl AccountsPage {
         ix: usize,
         first: bool,
         theme: &Theme,
-        now: DateTime<Utc>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let email: SharedString = account
@@ -1181,35 +1168,41 @@ impl AccountsPage {
                     .into_any_element(),
             );
         }
-        // Meters XOR the reason they're missing — the reason joins the meta
-        // line, so a failed probe never changes the row's height.
+        // When meters are missing, their reason joins the account meta line.
         let usage: AnyElement = if account.usage_windows.is_empty() {
             meta.extend(self.render_usage_missing(account, theme));
             div().w(px(USAGE_COLUMN_WIDTH)).flex_none().into_any_element()
         } else {
-            let resets = account
-                .usage_windows
-                .iter()
-                .map(|window| match format_reset(window.resets_at, now) {
-                    Some(reset) => format!("{}: {reset}", window.label),
-                    None => window.label.clone(),
-                })
-                .collect::<Vec<_>>()
-                .join(" · ");
             div()
                 .id(("account-usage", ix))
                 .w(px(USAGE_COLUMN_WIDTH))
                 .flex_none()
                 .flex()
                 .flex_col()
-                .gap(px(2.0))
-                .tooltip(widgets::text_tooltip(resets))
+                .gap(px(6.0))
                 .children(
                     account
                         .usage_windows
                         .iter()
                         .take(2)
-                        .map(|window| render_usage_meter(window, theme)),
+                        .map(|window| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .child(render_usage_meter(window, theme))
+                                .when_some(format_reset(window.resets_at), |el, reset| {
+                                    el.child(
+                                        div()
+                                            .w_full()
+                                            .text_right()
+                                            .whitespace_nowrap()
+                                            .text_size(crate::typography::ui_rems(10.5))
+                                            .text_color(theme.text_muted)
+                                            .child(SharedString::from(reset)),
+                                    )
+                                })
+                        }),
                 )
                 .into_any_element()
         };
@@ -1707,7 +1700,6 @@ impl AccountsPage {
         &self,
         harness: HarnessId,
         theme: &Theme,
-        now: DateTime<Utc>,
         dialog: Option<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1739,7 +1731,7 @@ impl AccountsPage {
                         .into_iter()
                         .enumerate()
                         .map(|(ix, account)| {
-                            self.render_account_row(account, ix, ix == 0, theme, now, cx)
+                            self.render_account_row(account, ix, ix == 0, theme, cx)
                         })
                         .collect();
                     let empty = rows.is_empty();
@@ -1873,10 +1865,9 @@ impl AccountsPage {
 impl Render for AccountsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
-        let now = Utc::now();
         let dialog = self.render_login_dialog(window.viewport_size(), cx);
         if let Some(harness) = self.embedded_harness {
-            return self.render_embedded_provider(harness, &theme, now, dialog, cx);
+            return self.render_embedded_provider(harness, &theme, dialog, cx);
         }
         let refreshing = self.refreshing || matches!(self.snapshot, Loadable::Loading);
         let account_count = self
@@ -2015,7 +2006,7 @@ impl Render for AccountsPage {
                             .iter()
                             .enumerate()
                             .map(|(ix, account)| {
-                                self.render_account_row(account, ix, ix == 0, &theme, now, cx)
+                                self.render_account_row(account, ix, ix == 0, &theme, cx)
                             })
                             .collect();
                         let add_id: SharedString = format!("add-account-{name}").into();
@@ -2266,38 +2257,26 @@ mod tests {
     }
 
     #[test]
-    fn reset_formatting_is_absolute() {
-        use chrono::Local;
-        let now = Utc::now();
-        assert_eq!(format_reset(None, now), None);
-        // Within ~22h: a local clock time ("resets 3:45 PM").
-        let soon = now + TimeDelta::minutes(125);
-        assert_eq!(
-            format_reset(Some(soon), now),
-            Some(format!(
-                "resets {}",
-                soon.with_timezone(&Local).format("%-I:%M %p")
-            ))
-        );
-        // Within a week: a short weekday ("resets Mon").
-        let later = now + TimeDelta::days(3);
-        assert_eq!(
-            format_reset(Some(later), now),
-            Some(format!(
-                "resets {}",
-                later.with_timezone(&Local).format("%a")
-            ))
-        );
-        // Beyond a week (Codex free tier resets ~monthly): month + day
-        // ("resets Sep 14") — a weekday 4 weeks out carries no information.
-        let monthly = now + TimeDelta::days(26);
-        assert_eq!(
-            format_reset(Some(monthly), now),
-            Some(format!(
-                "resets {}",
-                monthly.with_timezone(&Local).format("%b %-d")
-            ))
-        );
+    fn reset_formatting_uses_full_local_date_and_time() {
+        use chrono::{Datelike, Local, Timelike};
+        assert_eq!(format_reset(None), None);
+        let base: DateTime<Utc> = "2026-12-31T23:30:00Z".parse().unwrap();
+        // Past, near-term, weekly and monthly resets all retain the full date.
+        for offset in [-1, 0, 3, 26] {
+            let at = base + TimeDelta::days(offset);
+            let local = at.with_timezone(&Local);
+            assert_eq!(
+                format_reset(Some(at)),
+                Some(format!(
+                    "resets {:04}-{:02}-{:02} {:02}:{:02}",
+                    local.year(),
+                    local.month(),
+                    local.day(),
+                    local.hour(),
+                    local.minute(),
+                ))
+            );
+        }
     }
 
     #[test]
