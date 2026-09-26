@@ -1740,7 +1740,9 @@ pub struct Shell {
     /// while the lookup key keeps a file tab scoped to its chat panel.
     file_surfaces: std::collections::HashMap<u64, Entity<FilesSurface>>,
     file_surface_paths: std::collections::HashMap<u64, String>,
-    file_surface_keys: std::collections::HashMap<(String, String), u64>,
+    /// Open editors by (pane, owning chat, path): a side chat's file links
+    /// open editors bound to the side chat, beside the main chat's own.
+    file_surface_keys: std::collections::HashMap<(String, String, String), u64>,
     file_surface_subs: std::collections::HashMap<u64, Subscription>,
     file_surface_seq: u64,
     pending_file_closes: std::collections::HashSet<RightSurface>,
@@ -3307,22 +3309,39 @@ impl Shell {
 
     /// Open or focus a session-owned editor tab. The explorer is independent.
     fn add_file_surface(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_file_surface_at(path, None, window, cx);
+        let owner = (self.active_chat.clone(), self.state.clone());
+        self.add_file_surface_at(owner, path, None, window, cx);
     }
 
+    /// The chat and state a transcript link resolves in: the main chat's, or
+    /// an open side chat's own (its chat row may not reach the main list yet).
+    fn link_owner(&self, chat_id: &str, cx: &App) -> Option<(String, Entity<AppState>)> {
+        if chat_id == self.active_chat {
+            return Some((chat_id.to_owned(), self.state.clone()));
+        }
+        self.side_chats
+            .values()
+            .find(|side| side.state.read(cx).selected_chat.as_deref() == Some(chat_id))
+            .map(|side| (chat_id.to_owned(), side.state.clone()))
+    }
+
+    /// Open or focus the editor for `path` owned by `owner` (chat id + the
+    /// state that resolves it): reads and saves go to that chat's checkout.
     fn add_file_surface_at(
         &mut self,
+        owner: (String, Entity<AppState>),
         path: String,
         location: Option<(u32, Option<u32>)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_chat.is_empty() {
+        if self.active_chat.is_empty() || owner.0.is_empty() {
             return;
         }
+        let (owner_chat, owner_state) = owner;
         self.set_surfaces_open(true, cx);
         let panel_key = self.panel_key(cx);
-        let lookup = (panel_key.clone(), path.clone());
+        let lookup = (panel_key.clone(), owner_chat.clone(), path.clone());
         if let Some(id) = self.file_surface_keys.get(&lookup).copied() {
             let surface = RightSurface::File(id);
             self.set_right_active(surface, cx);
@@ -3339,8 +3358,8 @@ impl Shell {
         let id = self.file_surface_seq;
         let file = cx.new(|cx| {
             FilesSurface::new_editor(
-                self.state.clone(),
-                self.active_chat.clone(),
+                owner_state.clone(),
+                owner_chat.clone(),
                 path.clone(),
                 self.settings.files_autosave_enabled,
                 self.settings.files_autosave_delay_ms,
@@ -3361,7 +3380,11 @@ impl Shell {
                     return;
                 }
                 match event {
-                    FilesEvent::OpenFile(path) => this.add_file_surface(path.clone(), window, cx),
+                    // Navigation from an editor stays in its own chat.
+                    FilesEvent::OpenFile(path) => {
+                        let owner = (source.read(cx).chat_id().to_owned(), owner_state.clone());
+                        this.add_file_surface_at(owner, path.clone(), None, window, cx)
+                    }
                     FilesEvent::RevealFile(path) => {
                         this.add_files_surface(window, cx);
                         if let Some(files) = this.files.get(&this.panel_key(cx)).cloned() {
@@ -3419,8 +3442,8 @@ impl Shell {
         }
     }
 
-    /// Open a transcript's file link, resolved against the linking chat's
-    /// checkout (a side chat's own, which it inherits from its parent).
+    /// Open a transcript's file link in the linking chat's own checkout: a
+    /// side chat's link resolves against, and edits, the side chat's files.
     fn open_workspace_file_link(
         &mut self,
         chat_id: &str,
@@ -3428,18 +3451,17 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let cwd = |state: &Entity<AppState>| {
-            state
-                .read(cx)
-                .chats
-                .iter()
-                .find(|chat| chat.id == chat_id)
-                .and_then(|chat| chat.cwd.clone())
+        let Some(owner) = self.link_owner(chat_id, cx) else {
+            return false;
         };
-        // A just-created fork may reach the main list after its own state.
-        let root =
-            cwd(&self.state).or_else(|| self.side_chats.values().find_map(|side| cwd(&side.state)));
-        let Some(root) = root else {
+        let Some(root) = owner
+            .1
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.cwd.clone())
+        else {
             return false;
         };
         let Some(link) = resolve_workspace_file_link(target, &root) else {
@@ -3454,6 +3476,7 @@ impl Shell {
             self.right_tween = Some(WidthTween::new(from, self.right_target(cx)));
         }
         self.add_file_surface_at(
+            owner,
             link.path,
             link.line.map(|line| (line, link.column)),
             window,
@@ -3474,10 +3497,20 @@ impl Shell {
             return;
         }
         self.file_surface_paths.insert(id, new_path.to_string());
+        let Some(owner) = self
+            .file_surfaces
+            .get(&id)
+            .map(|file| file.read(cx).chat_id().to_owned())
+        else {
+            return;
+        };
+        self.file_surface_keys.remove(&(
+            panel_key.to_string(),
+            owner.clone(),
+            old_path.to_string(),
+        ));
         self.file_surface_keys
-            .remove(&(panel_key.to_string(), old_path.to_string()));
-        self.file_surface_keys
-            .entry((panel_key.to_string(), new_path.to_string()))
+            .entry((panel_key.to_string(), owner, new_path.to_string()))
             .or_insert(id);
         cx.notify();
     }
@@ -3907,12 +3940,15 @@ impl Shell {
     }
 
     fn reveal_unsaved_file(&mut self, cx: &mut Context<Self>) {
-        let editors = self.file_surface_keys.iter().filter_map(|((key, _), id)| {
-            self.file_surfaces
-                .get(id)
-                .filter(|files| files.read(cx).has_unsaved_changes())
-                .map(|_| (key.clone(), RightSurface::File(*id)))
-        });
+        let editors = self
+            .file_surface_keys
+            .iter()
+            .filter_map(|((key, _, _), id)| {
+                self.file_surfaces
+                    .get(id)
+                    .filter(|files| files.read(cx).has_unsaved_changes())
+                    .map(|_| (key.clone(), RightSurface::File(*id)))
+            });
         let current = self.panel_key(cx);
         let mut dirty = editors.collect::<Vec<_>>();
         dirty.sort_by_key(|(key, _)| (key != &current, key.clone()));
@@ -14596,7 +14632,7 @@ mod exit_regressions {
                     shell.file_surfaces.insert(0, files);
                     shell
                         .file_surface_keys
-                        .insert(("test".into(), "test.rs".into()), 0);
+                        .insert(("test".into(), "test".into(), "test.rs".into()), 0);
                 })
                 .unwrap();
             cx.update(|cx| cx.dispatch_action(&crate::app_menus::Quit));

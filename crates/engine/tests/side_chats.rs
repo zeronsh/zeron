@@ -503,3 +503,188 @@ async fn native_commands_and_empty_side_chats_skip_the_history_wrapper() {
     assert_eq!(request.prompt, "And now?");
     core.shutdown().await;
 }
+
+/// A provider runtime that stays alive between turns: later sends arrive
+/// through the steering mailbox (the engine's warm dispatch), not new runs.
+/// Each record: (prompt, resumed session, arrived through the mailbox).
+type WarmLog = Arc<Mutex<Vec<(String, Option<String>, bool)>>>;
+struct Warm(WarmLog);
+#[async_trait]
+impl Harness for Warm {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Warm"
+    }
+    fn supports_steering(&self) -> bool {
+        true
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((request.prompt.clone(), request.resume.clone(), false));
+        let turn = |text: &str| {
+            vec![
+                Ok(AgentEvent::TextDelta { text: text.into() }),
+                Ok(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: Some("warm-session".into()),
+                }),
+            ]
+        };
+        let mut first = vec![Ok(AgentEvent::SessionStarted {
+            harness: HarnessId::Mock,
+            model: "mock-1".into(),
+            tools: vec![],
+            cwd: request.cwd.clone(),
+            session_id: "warm-session".into(),
+            assistant_message_id: uuid::Uuid::new_v4().to_string(),
+        })];
+        first.extend(turn("first answer"));
+        let seen = self.0.clone();
+        let later = futures::stream::unfold(controls.steering, move |mut steering| {
+            let seen = seen.clone();
+            async move {
+                let message = steering.recv().await?;
+                seen.lock().unwrap().push((message.prompt, None, true));
+                let mut events = vec![Ok(AgentEvent::Steered {
+                    assistant_message_id: None,
+                    next_assistant_message_id: Some(uuid::Uuid::new_v4().to_string()),
+                })];
+                events.extend(turn("later answer"));
+                Some((futures::stream::iter(events), steering))
+            }
+        })
+        .flatten();
+        Ok(futures::stream::iter(first).chain(later).boxed())
+    }
+}
+
+/// A fork whose first turn is a native command, continued in the SAME live
+/// provider runtime: the copied history must ride the next ordinary send
+/// (warm dispatch or steer), exactly once, and survive a cold resume.
+#[tokio::test]
+async fn warm_side_chat_sends_owed_fork_history_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Warm(seen.clone())));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    core.workspace
+        .create_chat(
+            "main",
+            None,
+            Some(&core.device_id),
+            None,
+            Some("/tmp".into()),
+        )
+        .unwrap();
+    let source = core.doc_host.open("main").unwrap();
+    for (id, role, text) in [
+        ("u1", MessageRole::User, "Remember PINEAPPLE"),
+        ("a1", MessageRole::Assistant, "I remember PINEAPPLE"),
+    ] {
+        source
+            .doc()
+            .push_message(&message(id, role, text, MessageStatus::Complete))
+            .unwrap();
+    }
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            methods::FORK_SIDE_CHAT,
+            serde_json::json!({ "chatId": "fork", "sourceChatId": "main" }),
+        )
+        .await
+        .unwrap();
+    let request = |prompt: &str| RunRequest {
+        mcp: None,
+        prompt: prompt.into(),
+        harness: Some(HarnessId::Mock),
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        cwd: "/tmp".into(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+        auto_approve: true,
+        resume: None,
+        attachments: vec![],
+        worktree: None,
+    };
+    let settle = |count: usize| {
+        let seen = seen.clone();
+        let core = &core;
+        async move {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while seen.lock().unwrap().len() < count
+                    || core
+                        .sessions
+                        .session_status("fork")
+                        .is_some_and(|s| s.status != zeron_proto::SessionStatus::Idle)
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            seen.lock().unwrap()[count - 1].0.clone()
+        }
+    };
+    let dispatch = |prompt: &'static str, id: &'static str| {
+        core.sessions
+            .dispatch("fork", HarnessId::Mock, request(prompt), Some(id.into()))
+    };
+    dispatch("/review", "f1").await.unwrap();
+    assert_eq!(settle(1).await, "/review");
+    let doc = core.doc_host.open("fork").unwrap();
+    assert_eq!(
+        doc.doc().fork_history_session(),
+        None,
+        "nothing delivered yet"
+    );
+    // Warm dispatch into the live runtime: the owed history goes out.
+    dispatch("What should you remember?", "f2").await.unwrap();
+    let warm = settle(2).await;
+    assert!(warm.contains("PINEAPPLE"), "{warm}");
+    assert!(warm.ends_with("What should you remember?"), "{warm}");
+    assert!(seen.lock().unwrap()[1].2, "delivered to the live runtime");
+    assert_eq!(
+        doc.doc().fork_history_session().as_deref(),
+        Some("warm-session")
+    );
+    // Delivered: an explicit steer and later sends go out bare.
+    core.sessions
+        .steer("fork", "And now?", Some("f3".into()))
+        .await
+        .unwrap();
+    assert_eq!(settle(3).await, "And now?");
+    assert!(seen.lock().unwrap()[2].2);
+    // A cold resume of the same provider session owes nothing either.
+    core.sessions.interrupt("fork").await.unwrap();
+    dispatch("Again", "f4").await.unwrap();
+    assert_eq!(settle(4).await, "Again");
+    assert!(!seen.lock().unwrap()[3].2, "a new runtime");
+    assert_eq!(
+        seen.lock().unwrap()[3].1.as_deref(),
+        Some("warm-session"),
+        "resumed the provider session"
+    );
+    core.shutdown().await;
+}

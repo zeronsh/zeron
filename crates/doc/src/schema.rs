@@ -375,6 +375,25 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// The provider session that received a fork's copied history — a side
+    /// chat's bootstrap is owed to any other session it continues in.
+    pub fn fork_history_session(&self) -> Option<String> {
+        match self.doc.get_map("meta").get("forkHistorySession") {
+            Some(loro::ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),
+            _ => None,
+        }
+    }
+
+    pub fn set_fork_history_session(&self, session_id: &str) -> Result<(), DocError> {
+        if self.fork_history_session().as_deref() != Some(session_id) {
+            self.doc
+                .get_map("meta")
+                .insert("forkHistorySession", session_id)?;
+            self.doc.commit();
+        }
+        Ok(())
+    }
+
     pub fn chat_id(&self) -> Option<String> {
         match self.doc.get_map("meta").get("chatId") {
             Some(loro::ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),

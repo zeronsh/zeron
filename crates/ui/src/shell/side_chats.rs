@@ -484,16 +484,22 @@ mod tests {
             })
             .unwrap();
         let chat: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
-            "id": "side", "parentChatId": "main", "deviceId": "local", "cwd": "/tmp",
+            "id": "side", "parentChatId": "main", "deviceId": "local", "cwd": "/tmp/other",
             "archived": false, "createdAt": Utc::now(),
         }))
         .unwrap();
         window
             .update(cx, |shell, _, cx| {
                 shell.active_chat = "main".into();
-                shell
-                    .state
-                    .update(cx, |state, _| state.selected_chat = Some("main".into()));
+                let main: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+                    "id": "main", "deviceId": "local", "cwd": "/tmp/main",
+                    "archived": false, "createdAt": Utc::now(),
+                }))
+                .unwrap();
+                shell.state.update(cx, |state, _| {
+                    state.chats = vec![main];
+                    state.selected_chat = Some("main".into());
+                });
                 shell.toggle_right_pane(cx);
                 shell.open_side_chat(chat.clone(), shell.panel_key(cx), cx);
             })
@@ -516,6 +522,34 @@ mod tests {
                 assert_eq!(
                     shell.activate_session_link(&activation, window, cx),
                     LinkOutcome::Rejected
+                );
+                // A side chat's file link opens an editor bound to the side
+                // chat's own checkout; the main chat's same relative path
+                // gets its own editor, and each link reuses its editor.
+                let file_link = |chat: &str, root: &str| LinkActivation {
+                    target: LinkTarget::new("lib", &format!("{root}/src/lib.rs")),
+                    action: LinkAction::Primary,
+                    source_session: Some(chat.into()),
+                };
+                assert_eq!(
+                    shell.activate_session_link(&file_link("side", "/tmp/other"), window, cx),
+                    LinkOutcome::Internal
+                );
+                let side_editor = shell.file_surface_seq;
+                assert_eq!(shell.file_surfaces[&side_editor].read(cx).chat_id(), "side");
+                assert_eq!(shell.file_surface_paths[&side_editor], "src/lib.rs");
+                assert_eq!(
+                    shell.activate_session_link(&file_link("main", "/tmp/main"), window, cx),
+                    LinkOutcome::Internal
+                );
+                let main_editor = shell.file_surface_seq;
+                assert_ne!(main_editor, side_editor);
+                assert_eq!(shell.file_surfaces[&main_editor].read(cx).chat_id(), "main");
+                shell.activate_session_link(&file_link("side", "/tmp/other"), window, cx);
+                assert_eq!(shell.file_surface_seq, main_editor, "reused, not reopened");
+                assert_eq!(
+                    shell.resolved_right_active(cx),
+                    RightSurface::File(side_editor)
                 );
                 // The side chat's model menu owns Cmd/Ctrl+digit.
                 let composer = shell.side_chats[&id].composer.clone();
