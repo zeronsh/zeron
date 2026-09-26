@@ -31,14 +31,24 @@ fn shaped(face_file: &str, size: f32, text: &str) -> f32 {
 #[test]
 fn widths_match_rustybuzz_ground_truth() {
     let mut fx = Fixture::new();
-    for text in ["Hello, World!", "AVATAR Toyota", "naïve café", "0123456789", "“quotes” — dash"] {
+    for text in [
+        "Hello, World!",
+        "AVATAR Toyota",
+        "naïve café",
+        "0123456789",
+        "“quotes” — dash",
+    ] {
         let got = fx.width(text, fx.sans);
         assert_close(got, shaped("Geist.ttf", 15.0, text), text);
     }
     let got = fx.width("fn main() -> i32", fx.mono);
     // mono has ligatures off; plain shaping may differ only if the face had liga for this text
     assert!(got > 0.0);
-    assert_eq!(fx.fallback_calls(), 0, "covered text never reaches the fallback");
+    assert_eq!(
+        fx.fallback_calls(),
+        0,
+        "covered text never reaches the fallback"
+    );
 }
 
 #[test]
@@ -104,7 +114,13 @@ fn letter_spacing_is_per_grapheme() {
 #[test]
 fn grapheme_advances_sum_to_the_shaped_run() {
     let mut fx = Fixture::new();
-    for text in ["Wavefunction", "office", "AVATAR", "naïve", "e\u{301}e\u{301}x"] {
+    for text in [
+        "Wavefunction",
+        "office",
+        "AVATAR",
+        "naïve",
+        "e\u{301}e\u{301}x",
+    ] {
         let p = fx.prep(text);
         let lines = p.lines(0.0);
         let sum: f32 = lines.iter().map(|l| l.width).sum();
@@ -126,10 +142,7 @@ fn fallback_only_for_uncovered_text_and_cached() {
     assert!(calls >= 3, "emoji and CJK go to the host: {calls}");
     let log = fx.fallback.as_ref().unwrap().log.lock().unwrap().clone();
     for t in &log {
-        assert!(
-            t.chars().any(|c| !c.is_ascii()),
-            "covered text reached the fallback: {t:?}"
-        );
+        assert!(!t.is_ascii(), "covered text reached the fallback: {t:?}");
     }
     // deterministic fallback widths flow into layout: 😀 is 1em
     let emoji_line = fx.prep("😀");
@@ -203,8 +216,18 @@ fn cache_rebinds_to_a_different_book() {
     // Same StyleId(0) in a different book must not reuse the old widths.
     assert_eq!(style, StyleId(0));
     let spans = [Span::new(0..4, style)];
-    let p = prepare(&other, &mut fx.cache, "abcd", &spans, &PrepareOptions::default());
-    assert_close(p.max_content_width(), shaped("GeistMono.ttf", 30.0, "abcd"), "rebind");
+    let p = prepare(
+        &other,
+        &mut fx.cache,
+        "abcd",
+        &spans,
+        &PrepareOptions::default(),
+    );
+    assert_close(
+        p.max_content_width(),
+        shaped("GeistMono.ttf", 30.0, "abcd"),
+        "rebind",
+    );
 }
 
 #[test]

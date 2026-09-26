@@ -111,13 +111,22 @@ fn pre_breaks_only_at_hard_breaks() {
 fn no_breaks_inside_grapheme_clusters() {
     let text = "a👨\u{200D}👩b🇺🇸🇯🇵";
     let mut out = Vec::new();
-    break_opportunities(text, &[span(0..text.len(), 0)], WhiteSpace::Normal, &mut out);
-    let bounds: Vec<usize> = unicode_segmentation::UnicodeSegmentation::grapheme_indices(text, true)
-        .map(|(i, _)| i)
-        .collect();
+    break_opportunities(
+        text,
+        &[span(0..text.len(), 0)],
+        WhiteSpace::Normal,
+        &mut out,
+    );
+    let bounds: Vec<usize> =
+        unicode_segmentation::UnicodeSegmentation::grapheme_indices(text, true)
+            .map(|(i, _)| i)
+            .collect();
     for (p, _) in out {
         let p = p as usize;
-        assert!(p == text.len() || bounds.contains(&p), "break inside cluster at {p}");
+        assert!(
+            p == text.len() || bounds.contains(&p),
+            "break inside cluster at {p}"
+        );
     }
 }
 
@@ -125,9 +134,20 @@ fn no_breaks_inside_grapheme_clusters() {
 fn segments_split_hang_and_classify_breaks() {
     let text = "foo  trans\u{AD}bar \t\nx";
     let mut br = Vec::new();
-    break_opportunities(text, &[span(0..text.len(), 0)], WhiteSpace::PreWrap, &mut br);
+    break_opportunities(
+        text,
+        &[span(0..text.len(), 0)],
+        WhiteSpace::PreWrap,
+        &mut br,
+    );
     let mut segs = Vec::new();
-    segments(text, &[span(0..text.len(), 0)], &br, WhiteSpace::PreWrap, &mut segs);
+    segments(
+        text,
+        &[span(0..text.len(), 0)],
+        &br,
+        WhiteSpace::PreWrap,
+        &mut segs,
+    );
     let shy_end = text.find('b').unwrap() as u32;
     let nl = text.find('\n').unwrap() as u32;
     assert_eq!(
@@ -180,5 +200,76 @@ fn tab_stops() {
 fn utf16_lengths() {
     for s in ["", "abc", "é", "😀", "a😀b𠀀c", "中文"] {
         assert_eq!(utf16_len(s.as_bytes()), s.encode_utf16().count(), "{s}");
+    }
+}
+
+fn scripts(text: &str, foreign: impl Fn(char) -> bool) -> Vec<&str> {
+    let mut out = Vec::new();
+    crate::analysis::script_breaks(text, |_, c| foreign(c), &mut out);
+    let mut parts = Vec::new();
+    let mut prev = 0;
+    for b in out
+        .iter()
+        .map(|&b| b as usize)
+        .chain(std::iter::once(text.len()))
+    {
+        parts.push(&text[prev..b]);
+        prev = b;
+    }
+    parts
+}
+
+#[test]
+fn script_runs_resolve_neutrals_like_icu() {
+    let none = |_| false;
+    // Single real script: one run, no work.
+    assert_eq!(scripts("naïve café", none), ["naïve café"]);
+    // Neutrals join the run they follow; leading neutrals join the first real script.
+    assert_eq!(
+        scripts("\"abc русский\" def", none),
+        ["\"abc ", "русский\" ", "def"]
+    );
+    // A closing bracket takes its opening bracket's script.
+    assert_eq!(
+        scripts("abc (русский) def", none),
+        ["abc (", "русский", ") def"]
+    );
+    // Text in a fallback font ends the run: the quote after it starts fresh with `q`.
+    let greek_foreign = |c: char| ('\u{370}'..='\u{3FF}').contains(&c);
+    assert_eq!(scripts("λ \"qu Ελλ \"q", greek_foreign), ["λ \"qu Ελλ \"q"]);
+}
+
+#[test]
+fn apple_quote_and_sa_tailoring() {
+    let mut out = Vec::new();
+    let brk = |t: &str, out: &mut Vec<(u32, bool)>| {
+        break_opportunities(t, &[span(0..t.len(), 0)], WhiteSpace::Normal, out);
+        out.iter().map(|b| b.0 as usize).collect::<Vec<_>>()
+    };
+    // “ opens (no break after it), ” closes (break after it before a letter).
+    let t = "a,“b”c";
+    assert_eq!(brk(t, &mut out), vec![2, t.find('c').unwrap(), t.len()]);
+    // SA runs: dictionary breaks inside, ordinary rules at the edges (no break before `!`).
+    let t = "ภาษาไทย!";
+    let b = brk(t, &mut out);
+    assert_eq!(b, vec![t.find('ไ').unwrap(), t.len()]);
+}
+
+#[test]
+fn bmp_coverage_bitmap_matches_cmap() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ui/assets/fonts");
+    let mut book = crate::FontBook::new();
+    for f in ["Geist.ttf", "GeistMono.ttf"] {
+        let id = book.add_face(std::fs::read(dir.join(f)).unwrap()).unwrap();
+        let face = book.face_data(id);
+        for u in 0..0x10000u32 {
+            if let Some(c) = char::from_u32(u) {
+                assert_eq!(
+                    face.covers(c),
+                    face.hb.glyph_index(c).is_some(),
+                    "{f} U+{u:04X}"
+                );
+            }
+        }
     }
 }

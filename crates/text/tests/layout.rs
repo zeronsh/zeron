@@ -58,7 +58,10 @@ fn pre_wrap_preserves_spaces_and_hard_breaks() {
     let mut fx = Fixture::new();
     let p = fx.prep_with("  Hello   World  ", opts(WhiteSpace::PreWrap));
     assert_eq!(p.text(), "  Hello   World  ");
-    assert_eq!(segs(&p), vec![("", "  "), ("Hello", "   "), ("World", "  ")]);
+    assert_eq!(
+        segs(&p),
+        vec![("", "  "), ("Hello", "   "), ("World", "  ")]
+    );
     let p = fx.prep_with("Hello\r\nWorld\rX", opts(WhiteSpace::PreWrap));
     assert_eq!(p.text(), "Hello\nWorld\nX");
     assert_eq!(line_texts(&p, 1000.0), vec!["Hello", "World", "X"]);
@@ -105,8 +108,14 @@ fn punctuation_attaches_like_uax14() {
         vec!["said", "\"hello\"", "there"]
     );
     assert_eq!(contents(&fx.prep("“Whenever")), vec!["“Whenever"]);
-    assert_eq!(contents(&fx.prep("$500 500€ 50°C")), vec!["$500", "500€", "50°C"]);
-    assert_eq!(contents(&fx.prep("universe—so")), vec!["universe", "—", "so"]);
+    assert_eq!(
+        contents(&fx.prep("$500 500€ 50°C")),
+        vec!["$500", "500€", "50°C"]
+    );
+    assert_eq!(
+        contents(&fx.prep("universe—so")),
+        vec!["universe", "—", "so"]
+    );
     assert_eq!(contents(&fx.prep("foo-bar")), vec!["foo-", "bar"]);
     assert_eq!(contents(&fx.prep("(hello)")), vec!["(hello)"]);
 }
@@ -137,7 +146,13 @@ fn urls_and_paths_break_with_anywhere() {
     let p = fx.prep(url);
     assert_eq!(
         contents(&p),
-        vec!["https://", "example.com/", "reports/", "q3?", "lang=ar&mode=full"]
+        vec![
+            "https://",
+            "example.com/",
+            "reports/",
+            "q3?",
+            "lang=ar&mode=full"
+        ]
     );
     let path = "crates/text/src/layout.rs";
     let p = fx.prep(path);
@@ -151,7 +166,10 @@ fn urls_and_paths_break_with_anywhere() {
         assert!(l.width <= 100.0 + LINE_FIT_EPSILON);
     }
     assert_eq!(
-        lines.iter().map(|l| &p.text()[l.range.clone()]).collect::<String>(),
+        lines
+            .iter()
+            .map(|l| &p.text()[l.range.clone()])
+            .collect::<String>(),
         token
     );
     // ...and overflows with overflow-wrap: normal
@@ -338,13 +356,7 @@ fn pre_wrap_tabs_advance_to_tab_stops() {
     let lines = line_texts(&p, stop + b - 0.1);
     assert_eq!(lines, vec!["a", "b"]);
     // tab_size 0 renders tabs zero-width
-    let p = fx.prep_with(
-        "a\tb",
-        PrepareOptions {
-            tab_size: 0,
-            ..o
-        },
-    );
+    let p = fx.prep_with("a\tb", PrepareOptions { tab_size: 0, ..o });
     assert_close(p.lines(500.0)[0].width, a + b, "tab_size 0");
 }
 
@@ -387,7 +399,8 @@ fn line_count_monotone_in_width() {
 #[test]
 fn walk_lines_stats_and_lines_agree() {
     let mut fx = Fixture::new();
-    let p = fx.prep("foo trans\u{AD}atlantic said \"hello\" to 世界 and waved. alpha\u{200B}beta 🚀");
+    let p =
+        fx.prep("foo trans\u{AD}atlantic said \"hello\" to 世界 and waved. alpha\u{200B}beta 🚀");
     for w in [20.0, 48.0, 72.0, 90.0, 120.0, 400.0] {
         let lines = p.lines(w);
         let mut walked = Vec::new();
@@ -470,7 +483,11 @@ fn fragments_split_by_span_and_carry_exact_x() {
     assert_eq!(&p.text()[f[1].range.clone()], "crates/text/src/lib.rs");
     assert_eq!(f[1].span, 1);
     assert_eq!(f[0].x, 0.0);
-    assert_close(f[0].width, fx.width("see the file ", fx.sans), "prefix width");
+    assert_close(
+        f[0].width,
+        fx.width("see the file ", fx.sans),
+        "prefix width",
+    );
     assert_close(
         f[1].width,
         fx.width("crates/text/src/lib.rs", fx.mono) + 8.0,
@@ -509,7 +526,9 @@ fn atomic_spans_are_unbreakable_units() {
     let b = a + "@maya.long.handle.name".len();
     let spans = [
         Span::new(0..a, fx.sans),
-        Span::new(a..b, fx.bold).with_padding(6.0, 6.0).with_atomic(true),
+        Span::new(a..b, fx.bold)
+            .with_padding(6.0, 6.0)
+            .with_atomic(true),
         Span::new(b..text.len(), fx.sans),
     ];
     let p = fx.prep_spans(text, &spans, PrepareOptions::default());
@@ -620,12 +639,20 @@ fn min_and_max_content_width() {
             ..Default::default()
         },
     );
-    assert_close(p.min_content_width(), fx.width("bbbb", fx.sans), "min normal");
+    assert_close(
+        p.min_content_width(),
+        fx.width("bbbb", fx.sans),
+        "min normal",
+    );
     // laying out at min-content never overflows
     let w = p.min_content_width();
     assert!(p.lines(w).iter().all(|l| l.width <= w + LINE_FIT_EPSILON));
     let p = fx.prep_with("wide line\nfit\nmid", opts(WhiteSpace::PreWrap));
-    assert_close(p.max_content_width(), fx.width("wide line", fx.sans), "hard lines");
+    assert_close(
+        p.max_content_width(),
+        fx.width("wide line", fx.sans),
+        "hard lines",
+    );
 }
 
 #[test]

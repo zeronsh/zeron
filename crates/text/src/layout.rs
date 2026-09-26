@@ -46,7 +46,8 @@ pub struct LineRange {
     /// Byte range of the line's visible content in [`Prepared::text`], excluding hanging
     /// trailing whitespace and the forced-break character.
     pub range: Range<usize>,
-    /// Advance of the visible content, including the hyphen when `hyphenated`.
+    /// Advance of the visible content as CoreText fits it (including the last glyph's kerning
+    /// with the next line's first glyph), plus the hyphen when `hyphenated`.
     pub width: f32,
     /// The line ends at a soft hyphen that must be drawn as `-`.
     pub hyphenated: bool,
@@ -66,7 +67,8 @@ pub struct LineStats {
 pub struct Line {
     /// Byte range of the visible content (hanging whitespace excluded).
     pub range: Range<usize>,
-    /// Advance of the visible content, including the hyphen when `hyphenated`.
+    /// Advance of the visible content as CoreText fits it (including the last glyph's kerning
+    /// with the next line's first glyph), plus the hyphen when `hyphenated`.
     pub width: f32,
     /// Draw a `-` (U+002D, in the last fragment's style) at `width - hyphen` — i.e. right after
     /// the last fragment.
@@ -179,7 +181,14 @@ impl Prepared {
     /// far ends at `x0`, while they fit within `fit`. With `force_first` the first unit is placed
     /// even if it doesn't fit (a line must make progress). Returns the new line end and, when
     /// the segment doesn't fit entirely, the unit to resume from.
-    fn fit_units(&self, i: usize, from: u32, x0: f64, fit: f64, force_first: bool) -> (f64, Option<u32>) {
+    fn fit_units(
+        &self,
+        i: usize,
+        from: u32,
+        x0: f64,
+        fit: f64,
+        force_first: bool,
+    ) -> (f64, Option<u32>) {
         let c = &self.cold[i];
         let mut x = x0;
         let mut placed = !force_first;
@@ -301,7 +310,11 @@ impl Prepared {
                         // only the hyphen overflows, break there as a plain grapheme boundary.
                         let x = x - tail(last);
                         let hy = !(self.anywhere && x <= fit);
-                        let w = if hy { x + self.cold[last].hyphen as f64 } else { x };
+                        let w = if hy {
+                            x + self.cold[last].hyphen as f64
+                        } else {
+                            x
+                        };
                         return Some(end_after(last, w, hy));
                     }
                     if self.anywhere && h.flags & F_BREAKABLE != 0 && x <= fit {
@@ -503,7 +516,9 @@ impl Prepared {
         }
     }
 
-    /// Builds the fragments of the line `start..s`, whose visible bytes are `bytes`.
+    /// Builds the fragments of the line `start..s`, whose visible bytes are `bytes`. Positions
+    /// replay [`Prepared::step`]'s arithmetic exactly (same order, same float types), so tab
+    /// stops resolve identically.
     fn fragments(
         &self,
         start: Pos,
@@ -516,7 +531,6 @@ impl Prepared {
             u16c,
             out: Vec::new(),
             cur: None,
-            x: 0.0,
         };
         let (last, split) = if s.end_seg != NONE {
             (s.end_seg as usize, None)
@@ -524,7 +538,10 @@ impl Prepared {
             (s.next.seg as usize, Some(s.next.unit))
         };
         let reshaped = start.unit == 0 && self.hot[start.seg as usize].flags & F_LEAD != 0;
+        // Line position after the previous segment's content, as `step` tracks it.
+        let mut lx = 0.0f64;
         for seg in start.seg as usize..=last {
+            let h = self.hot[seg];
             let c = &self.cold[seg];
             let from = if seg == start.seg as usize {
                 start.unit
@@ -532,40 +549,72 @@ impl Prepared {
                 0
             };
             let to = if seg == last { split } else { None };
+            // A segment continuing the line carries the right half of the pair context: it
+            // shifts where the content starts, and is drawn as part of its first piece.
+            let lead = if seg != start.seg as usize && h.flags & F_LEAD != 0 {
+                c.lead
+            } else {
+                0.0
+            };
+            lx += lead as f64;
             // The reshaped line's last glyph has no kerning with the next line.
-            let mut tail = if reshaped && seg == last && to.is_none() {
+            let tail = if reshaped && seg == last && to.is_none() {
                 c.tail
             } else {
                 0.0
             };
             let run = self.content_run(seg);
-            // A segment continuing the line carries the right half of the pair context.
-            let mut lead = if seg != start.seg as usize && self.hot[seg].flags & F_LEAD != 0 {
-                c.lead
-            } else {
-                0.0
-            };
+            let pieces = run.as_slice();
             if from == 0 && to.is_none() {
-                let pieces = run.as_slice();
+                let x0 = lx as f32;
+                let mut x = x0;
                 for (k, piece) in pieces.iter().enumerate() {
-                    let mut w = piece.width + std::mem::take(&mut lead);
-                    if k + 1 == pieces.len() {
-                        w -= std::mem::take(&mut tail);
+                    let tab = piece.kind == P_TAB;
+                    let adv = if tab {
+                        tab_advance(piece.width, x, self.tab_size)
+                    } else {
+                        piece.width
+                    };
+                    let (mut px, mut pw) = (x, adv);
+                    if k == 0 {
+                        px -= lead;
+                        pw += lead;
                     }
-                    fb.piece(piece.span, piece.start as usize, piece.end as usize, w, piece.kind);
+                    if k + 1 == pieces.len() {
+                        pw -= tail;
+                    }
+                    fb.piece(
+                        piece.span,
+                        piece.start as usize,
+                        piece.end as usize,
+                        px,
+                        pw,
+                        tab,
+                    );
+                    x += adv;
                 }
+                let adv = if h.flags & F_DYN_W != 0 {
+                    x - x0
+                } else {
+                    h.width
+                };
+                lx += adv as f64;
             } else {
-                // Partial segment (split by overflow-wrap): clip pieces to the line's bytes and
-                // sum the units that fall inside.
-                let lo = if from == 0 { c.start as usize } else { bytes.start };
+                // Partial segment (split by overflow-wrap): walk the units like `fit_units`.
+                let lo = if from == 0 {
+                    c.start as usize
+                } else {
+                    bytes.start
+                };
                 let hi = if to.is_some() {
                     bytes.end
                 } else {
                     c.content_end as usize
                 };
                 let to_u = to.unwrap_or(c.n_units);
-                let pieces = run.as_slice();
                 let first = pieces.partition_point(|p| (p.end as usize) <= lo);
+                let mut x = lx;
+                let mut lead = lead;
                 for piece in &pieces[first..] {
                     if piece.start as usize >= hi {
                         break;
@@ -574,20 +623,46 @@ impl Prepared {
                     let u1 = (piece.unit0 + piece.n_units).min(to_u);
                     let a = (piece.start as usize).max(lo);
                     let b = (piece.end as usize).min(hi);
-                    let width = if u0 == piece.unit0 && u1 == piece.unit0 + piece.n_units {
-                        piece.width
-                    } else {
-                        self.units[(c.units + u0) as usize..(c.units + u1) as usize]
-                            .iter()
-                            .sum()
-                    };
-                    fb.piece(piece.span, a, b, width + std::mem::take(&mut lead), piece.kind);
+                    let px = x;
+                    let tab = piece.kind == P_TAB;
+                    for k in u0..u1 {
+                        x += if tab {
+                            tab_advance(piece.width, x as f32, self.tab_size) as f64
+                        } else {
+                            self.units[(c.units + k) as usize] as f64
+                        };
+                    }
+                    let l = std::mem::take(&mut lead);
+                    fb.piece(piece.span, a, b, px as f32 - l, (x - px) as f32 + l, tab);
                 }
+                lx = x;
             }
             if seg != last {
+                let hx0 = lx as f32;
+                let mut x = hx0;
                 for piece in self.hang_run(seg).as_slice() {
-                    fb.piece(piece.span, piece.start as usize, piece.end as usize, piece.width, piece.kind);
+                    let tab = piece.kind == P_TAB;
+                    let adv = if tab {
+                        tab_advance(piece.width, x, self.tab_size)
+                    } else {
+                        piece.width
+                    };
+                    fb.piece(
+                        piece.span,
+                        piece.start as usize,
+                        piece.end as usize,
+                        x,
+                        adv,
+                        tab,
+                    );
+                    x += adv;
                 }
+                let adv = if h.flags & F_DYN_H != 0 {
+                    x - hx0
+                } else {
+                    h.hang
+                };
+                lx += adv as f64;
             }
         }
         fb.finish()
@@ -675,17 +750,12 @@ struct FragBuilder<'a> {
     out: Vec<Fragment>,
     /// Open fragment and whether it is a tab.
     cur: Option<(Fragment, bool)>,
-    x: f32,
 }
 
 impl FragBuilder<'_> {
-    fn piece(&mut self, span: u32, a: usize, b: usize, width: f32, kind: u8) {
-        let tab = kind == P_TAB;
-        let width = if tab {
-            tab_advance(width, self.x, self.p.tab_size)
-        } else {
-            width
-        };
+    /// Adds a piece at line position `x` with advance `width`, merging it into the open fragment
+    /// when it continues the same span (tabs are fragments of their own).
+    fn piece(&mut self, span: u32, a: usize, b: usize, x: f32, width: f32, tab: bool) {
         if let Some((cur, cur_tab)) = self.cur.as_mut()
             && !tab
             && !*cur_tab
@@ -693,7 +763,7 @@ impl FragBuilder<'_> {
             && cur.range.end == a
         {
             cur.range.end = b;
-            cur.width += width;
+            cur.width = x + width - cur.x;
         } else {
             self.flush();
             self.cur = Some((
@@ -701,13 +771,12 @@ impl FragBuilder<'_> {
                     range: a..b,
                     utf16: 0..0,
                     span: span as usize,
-                    x: self.x,
+                    x,
                     width,
                 },
                 tab,
             ));
         }
-        self.x += width;
     }
 
     fn flush(&mut self) {

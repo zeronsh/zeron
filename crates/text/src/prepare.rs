@@ -3,7 +3,7 @@
 use std::ops::Range;
 
 use crate::analysis::{self, BRK_SOFT_HYPHEN, RawSeg};
-use crate::cache::{PairContext, UnitsRef, WidthCache, needs_fallback};
+use crate::cache::{PairContext, UnitsRef, WidthCache, char_needs_fallback, needs_fallback};
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
 use crate::chars::{is_hard_break, is_strong_rtl};
@@ -97,6 +97,21 @@ impl Span {
     }
 }
 
+/// How a line may end after a segment ([`Prepared::segment_breaks`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SegmentBreak {
+    /// A forced break (newline, paragraph end).
+    Mandatory,
+    /// A UAX #14 break opportunity.
+    Allowed,
+    /// A soft hyphen: breaking here shows a hyphen.
+    SoftHyphen,
+    /// Whitespace inside a UAX #14 segment (`( x`, `a !`): the line may end after it only when
+    /// it overflows *within* the whitespace, as CoreText does. Such breaks make line counts
+    /// non-monotone in width, exactly like CoreText's.
+    WhitespaceOverflow,
+}
+
 // Segment flags.
 pub(crate) const F_DYN_W: u8 = 1; // content contains a tab: width depends on line position
 pub(crate) const F_DYN_H: u8 = 2; // hang contains a tab
@@ -145,8 +160,9 @@ pub(crate) struct Cold {
     /// right half of the pair context across the preceding boundary (a ligature or contextual
     /// form spanning it, like `-|>`, puts its advance on the left side).
     pub lead: f32,
-    /// The part of the content advance that is kerning with the grapheme after it (dropped
-    /// when the line was re-shaped from an `F_LEAD` start, which ends with a standalone glyph).
+    /// The part of the content advance that is pure kerning with the grapheme after it: dropped
+    /// when the line was re-shaped from an `F_LEAD` start (CoreText then ends it with a
+    /// standalone glyph). A ligature across the end boundary still counts in full.
     pub tail: f32,
     /// Kind of the implicit content piece.
     pub kind: u8,
@@ -258,14 +274,21 @@ impl Prepared {
                     .cold
                     .get(i + 1)
                     .map_or(self.text.len(), |n| n.start as usize);
-                let (s, ce, we) = (
-                    c.start as usize,
-                    c.content_end as usize,
-                    c.ws_end as usize,
-                );
+                let (s, ce, we) = (c.start as usize, c.content_end as usize, c.ws_end as usize);
                 (s..ce, ce..we, we..end)
             })
             .collect()
+    }
+
+    /// How a line may end after each segment (diagnostics and tests; parallel to
+    /// [`Prepared::segment_ranges`]).
+    pub fn segment_breaks(&self) -> impl ExactSizeIterator<Item = SegmentBreak> + '_ {
+        self.hot.iter().map(|h| match h.brk {
+            analysis::BRK_MANDATORY => SegmentBreak::Mandatory,
+            analysis::BRK_ALLOWED => SegmentBreak::Allowed,
+            analysis::BRK_SOFT_HYPHEN => SegmentBreak::SoftHyphen,
+            _ => SegmentBreak::WhitespaceOverflow,
+        })
     }
 
     /// Content pieces of segment `i`.
@@ -426,13 +449,32 @@ pub fn prepare(
                 if !fallback {
                     return false;
                 }
-                let k = spans.partition_point(|s| s.range.end <= i).min(spans.len() - 1);
+                let k = spans
+                    .partition_point(|s| s.range.end <= i)
+                    .min(spans.len() - 1);
                 let face = book.face_data(book.style(spans[k].style).face);
-                let mut buf = [0u8; 4];
-                needs_fallback(face, c.encode_utf8(&mut buf))
+                char_needs_fallback(face, c)
             },
             &mut scratch.scripts,
         );
+        // CoreText shapes per bidi run (visual order), so no kerning or contextual shaping
+        // crosses a bidi level change either (`T.` in `…V.A.T.שלום` in a right-to-left
+        // paragraph).
+        if ntext.chars().any(is_strong_rtl) {
+            let bidi = unicode_bidi::BidiInfo::new(&ntext, None);
+            let levels = &bidi.levels;
+            let mut extra = false;
+            for (i, _) in ntext.char_indices().skip(1) {
+                if levels[i] != levels[i - 1] {
+                    scratch.scripts.push(i as u32);
+                    extra = true;
+                }
+            }
+            if extra {
+                scratch.scripts.sort_unstable();
+                scratch.scripts.dedup();
+            }
+        }
     } else {
         scratch.scripts.clear();
     }
@@ -506,47 +548,102 @@ struct FallbackRuns {
 impl FallbackRuns {
     fn build(book: &FontBook, cache: &mut WidthCache, text: &str, spans: &[Span]) -> Self {
         let mut out = Self::default();
+        // Runs continue across span boundaries that don't change the font: same style, no
+        // padding or atomic box between (Arabic joining and CJK font choice need the context).
+        let mut run: Option<(usize, usize, StyleId)> = None;
+        let mut flush = |run: &mut Option<(usize, usize, StyleId)>, out: &mut Self| -> bool {
+            let Some((a, b, style)) = run.take() else {
+                return true;
+            };
+            let Some(adv) = cache.run_advances(book, style, &text[a..b]) else {
+                return !cache.runs_unsupported;
+            };
+            out.runs.push((a as u32, b as u32, out.starts.len() as u32));
+            out.starts.extend(
+                text[a..b]
+                    .grapheme_indices(true)
+                    .map(|(i, _)| (a + i) as u32),
+            );
+            out.adv.extend_from_slice(adv);
+            debug_assert_eq!(out.starts.len(), out.adv.len());
+            true
+        };
+        let mut prev: Option<&Span> = None;
         for span in spans {
-            if span.atomic || span.range.is_empty() {
+            if span.range.is_empty() {
+                continue;
+            }
+            let joins = prev.is_some_and(|p| {
+                p.style == span.style
+                    && !p.atomic
+                    && !span.atomic
+                    && p.pad_end == 0.0
+                    && span.pad_start == 0.0
+            });
+            if !joins && !flush(&mut run, &mut out) {
+                return Self::default();
+            }
+            prev = Some(span);
+            if span.atomic {
                 continue;
             }
             let face = book.face_data(book.style(span.style).face);
-            let base = span.range.start;
-            let mut run: Option<(usize, usize, usize)> = None; // (start, end, graphemes)
-            let mut flush = |run: &mut Option<(usize, usize, usize)>, out: &mut Self| -> bool {
-                let Some((a, b, n)) = run.take() else {
-                    return true;
+            let (start, end) = (span.range.start, span.range.end);
+            let sub = &text[..end];
+            // Scan chars (cheap); only around a char the face lacks, walk graphemes.
+            let mut i = start;
+            while i < end {
+                let Some((j, c)) = sub[i..]
+                    .char_indices()
+                    .map(|(k, c)| (i + k, c))
+                    .find(|&(_, c)| char_needs_fallback(face, c))
+                else {
+                    break;
                 };
-                if n < 2 {
-                    return true;
-                }
-                let Some(adv) = cache.run_advances(book, span.style, &text[a..b]) else {
-                    return !cache.runs_unsupported;
+                // The grapheme containing `j`, clamped to the span.
+                let mut cur = GraphemeCursor::new(j, end, true);
+                let a = if cur.is_boundary(sub, 0).unwrap_or(true) {
+                    j
+                } else {
+                    cur.prev_boundary(sub, 0)
+                        .ok()
+                        .flatten()
+                        .unwrap_or(j)
+                        .max(start)
                 };
-                out.runs.push((a as u32, b as u32, out.starts.len() as u32));
-                out.starts
-                    .extend(text[a..b].grapheme_indices(true).map(|(i, _)| (a + i) as u32));
-                out.adv.extend_from_slice(adv);
-                debug_assert_eq!(out.starts.len(), out.adv.len());
-                true
-            };
-            for (i, g) in text[span.range.clone()].grapheme_indices(true) {
-                let (a, b) = (base + i, base + i + g.len());
-                if needs_fallback(face, g) {
-                    match &mut run {
-                        Some(r) => {
-                            r.1 = b;
-                            r.2 += 1;
-                        }
-                        None => run = Some((a, b, 1)),
+                let mut cur = GraphemeCursor::new(j + c.len_utf8(), end, true);
+                let mut b = if cur.is_boundary(sub, 0).unwrap_or(true) {
+                    j + c.len_utf8()
+                } else {
+                    cur.next_boundary(sub, 0).ok().flatten().unwrap_or(end)
+                };
+                // Extend over following graphemes that also need the fallback.
+                while b < end {
+                    let mut cur = GraphemeCursor::new(b, end, true);
+                    let nb = cur.next_boundary(sub, 0).ok().flatten().unwrap_or(end);
+                    if !needs_fallback(face, &sub[b..nb]) {
+                        break;
                     }
-                } else if !flush(&mut run, &mut out) {
-                    return Self::default();
+                    b = nb;
                 }
+                match &mut run {
+                    Some(r) if r.1 == a && r.2 == span.style => r.1 = b,
+                    _ => {
+                        if !flush(&mut run, &mut out) {
+                            return Self::default();
+                        }
+                        run = Some((a, b, span.style));
+                    }
+                }
+                i = b;
             }
-            if !flush(&mut run, &mut out) {
+            // A run continues into the next span only if it reaches this span's end.
+            if run.is_some_and(|r| r.1 < end) && !flush(&mut run, &mut out) {
                 return Self::default();
             }
+        }
+        if !flush(&mut run, &mut out) {
+            return Self::default();
         }
         out
     }
@@ -566,8 +663,8 @@ impl FallbackRuns {
 struct Builder<'a> {
     /// Pair context carried from the previous segment's end to the next segment.
     lead: PairContext,
-    /// Script-run boundaries (see [`analysis::script_breaks`]): pieces split there and no pair
-    /// context crosses them.
+    /// Shaping-run boundaries — script runs (see [`analysis::script_breaks`]) and bidi level
+    /// changes: pieces split there and no pair context crosses them.
     scripts: Vec<u32>,
     book: &'a FontBook,
     cache: &'a mut WidthCache,
@@ -604,7 +701,9 @@ impl Builder<'_> {
             let pc = self.kern_at(seg.content_end as usize);
             if pc.left != 0.0 {
                 content.width += pc.left;
-                tail = pc.left;
+                if !pc.substituted {
+                    tail = pc.left;
+                }
                 self.add_to_last(pieces, units, pc.left);
             }
             if seg.ws_end > seg.content_end {
@@ -717,7 +816,7 @@ impl Builder<'_> {
         if l < 0x20 || r < 0x20 || l == 0x7F || r == 0x7F {
             return PairContext::NONE;
         }
-        let a0 = if l < 0x80 {
+        let a0 = if l < 0x80 && r < 0x80 {
             pos - 1
         } else {
             let mut c = GraphemeCursor::new(pos, len, true);
@@ -738,7 +837,7 @@ impl Builder<'_> {
                 _ => return PairContext::NONE,
             }
         };
-        let ls = self.spans.partition_point(|s| s.range.end <= pos - 1);
+        let ls = self.spans.partition_point(|s| s.range.end < pos);
         let rs = self.spans.partition_point(|s| s.range.end <= pos);
         let (sl, sr) = (&self.spans[ls], &self.spans[rs]);
         if sl.style != sr.style
@@ -799,7 +898,9 @@ impl Builder<'_> {
                     run_end = run_end.min(x as usize);
                 }
             }
-            if self.tabs && bytes[p] == b'\t' {
+            // An atomic span is one box: tabs inside it don't advance to tab stops.
+            let split_tabs = self.tabs && !span.atomic;
+            if split_tabs && bytes[p] == b'\t' {
                 let stop = self.tab_size as f32 * self.cache.space_width(self.book, span.style);
                 if want_units {
                     self.units.push(stop);
@@ -818,7 +919,7 @@ impl Builder<'_> {
                 p += 1;
                 continue;
             }
-            let q = if self.tabs {
+            let q = if split_tabs {
                 bytes[p..run_end]
                     .iter()
                     .position(|&c| c == b'\t')
@@ -833,7 +934,11 @@ impl Builder<'_> {
             } else {
                 0.0
             };
-            let pad_end = if q == span.range.end { span.pad_end } else { 0.0 };
+            let pad_end = if q == span.range.end {
+                span.pad_end
+            } else {
+                0.0
+            };
             let (base, n_units) = if !content && q - p == 1 && bytes[p] == b' ' {
                 (self.cache.space_width(self.book, span.style), 0)
             } else if !atomic && self.ctx.overlaps(p as u32, q as u32) {
@@ -883,8 +988,23 @@ impl Builder<'_> {
             let PairContext {
                 left: dl,
                 right: dr,
-                ..
+                substituted,
             } = self.kern_at(pc.end as usize);
+            let next = self.pieces[i + 1];
+            if substituted && pc.n_units > 0 && next.n_units > 0 {
+                // A ligature across a span change (same font): one glyph, so the right side's
+                // first unit folds into the left side and becomes an unsplittable zero-advance
+                // tail, like a ligature inside one piece.
+                let a = (units_base + pc.unit0) as usize;
+                let first_right = (units_base + next.unit0) as usize;
+                let r0 = self.units[first_right];
+                add_to_last_unit(&mut self.units[a..a + pc.n_units as usize], dl + r0 + dr);
+                self.units[first_right] = 0.0;
+                self.pieces[i].width += dl + r0 + dr;
+                self.pieces[i + 1].width -= r0;
+                r.width += dl + dr;
+                continue;
+            }
             if dl != 0.0 {
                 self.pieces[i].width += dl;
                 r.width += dl;
@@ -894,7 +1014,6 @@ impl Builder<'_> {
                 }
             }
             if dr != 0.0 {
-                let next = self.pieces[i + 1];
                 self.pieces[i + 1].width += dr;
                 r.width += dr;
                 if next.n_units > 0 {
@@ -918,7 +1037,10 @@ impl Builder<'_> {
             match ctx.runs.get(r) {
                 Some(&(rs, re, g0)) if rs <= a => {
                     let b = re.min(q as u32);
-                    let g_end = ctx.runs.get(r + 1).map_or(ctx.starts.len(), |n| n.2 as usize);
+                    let g_end = ctx
+                        .runs
+                        .get(r + 1)
+                        .map_or(ctx.starts.len(), |n| n.2 as usize);
                     let gs = &ctx.starts[g0 as usize..g_end];
                     let lo = g0 as usize + gs.partition_point(|&s| s < a);
                     let hi = g0 as usize + gs.partition_point(|&s| s < b);
@@ -935,9 +1057,12 @@ impl Builder<'_> {
                 }
                 next => {
                     let b = next.map_or(q as u32, |run| run.0.min(q as u32));
-                    let idx = self
-                        .cache
-                        .lookup(self.book, style, &self.text[a as usize..b as usize], want_units);
+                    let idx = self.cache.lookup(
+                        self.book,
+                        style,
+                        &self.text[a as usize..b as usize],
+                        want_units,
+                    );
                     width += self.cache.width(idx);
                     if want_units {
                         n += self.push_units(idx, 0.0, 0.0);

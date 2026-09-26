@@ -1,5 +1,7 @@
-//! Text analysis: CSS `white-space` normalization (with span remapping) and UAX #14 break
-//! opportunities, cut into segments with hanging trailing whitespace split off.
+//! Text analysis: CSS `white-space` normalization (with span remapping), UAX #14 break
+//! opportunities as CoreText finds them (Unicode 17 rules via ICU4X, Apple's quote tailoring,
+//! dictionary breaks for SA scripts), segments with hanging trailing whitespace split off, and
+//! the script-run boundaries shaping must not cross.
 
 use std::sync::OnceLock;
 
@@ -242,10 +244,10 @@ fn stand_in(c: char) -> Option<char> {
                     GeneralCategory::NonspacingMark | GeneralCategory::SpacingMark
                 ),
             ) {
-                (true, false) => '\u{2C00}',  // GLAGOLITIC CAPITAL LETTER AZU (AL)
+                (true, false) => '\u{2C00}',   // GLAGOLITIC CAPITAL LETTER AZU (AL)
                 (false, false) => '\u{10400}', // DESERET CAPITAL LETTER LONG I (AL)
-                (true, true) => '\u{20D0}',   // COMBINING LEFT HARPOON ABOVE (CM)
-                (false, true) => '\u{1D167}', // MUSICAL SYMBOL COMBINING TREMOLO-1 (CM)
+                (true, true) => '\u{20D0}',    // COMBINING LEFT HARPOON ABOVE (CM)
+                (false, true) => '\u{1D167}',  // MUSICAL SYMBOL COMBINING TREMOLO-1 (CM)
             },
         ),
         _ => None,
@@ -256,7 +258,7 @@ fn stand_in(c: char) -> Option<char> {
 /// not break where one SA script meets another).
 fn sa_script(c: char) -> u32 {
     match c as u32 {
-        u @ 0x0E00..=0x0EFF => u >> 7, // Thai, Lao
+        u @ 0x0E00..=0x0EFF => u >> 7,                            // Thai, Lao
         0x1000..=0x109F | 0xA9E0..=0xA9FF | 0xAA60..=0xAA7F => 1, // Myanmar
         0x1780..=0x17FF | 0x19E0..=0x19FF => 2,                   // Khmer
         u => u >> 5,
@@ -494,11 +496,10 @@ pub(crate) fn segments(
 /// ICU's paired punctuation (`uscript` run resolution): a closing mark takes the script of its
 /// opening mark. Opening marks sit at even indices.
 const PAIRED: [char; 34] = [
-    '(', ')', '<', '>', '[', ']', '{', '}', '\u{AB}', '\u{BB}', '\u{2018}', '\u{2019}',
-    '\u{201C}', '\u{201D}', '\u{2039}', '\u{203A}', '\u{3008}', '\u{3009}', '\u{300A}',
-    '\u{300B}', '\u{300C}', '\u{300D}', '\u{300E}', '\u{300F}', '\u{3010}', '\u{3011}',
-    '\u{3014}', '\u{3015}', '\u{3016}', '\u{3017}', '\u{3018}', '\u{3019}', '\u{301A}',
-    '\u{301B}',
+    '(', ')', '<', '>', '[', ']', '{', '}', '\u{AB}', '\u{BB}', '\u{2018}', '\u{2019}', '\u{201C}',
+    '\u{201D}', '\u{2039}', '\u{203A}', '\u{3008}', '\u{3009}', '\u{300A}', '\u{300B}', '\u{300C}',
+    '\u{300D}', '\u{300E}', '\u{300F}', '\u{3010}', '\u{3011}', '\u{3014}', '\u{3015}', '\u{3016}',
+    '\u{3017}', '\u{3018}', '\u{3019}', '\u{301A}', '\u{301B}',
 ];
 
 /// Byte offsets where the text's script run changes, resolved like ICU's `UScriptRun` (which is
@@ -509,16 +510,23 @@ const PAIRED: [char; 34] = [
 /// Itemization happens per font run, so characters drawn by a fallback font (`foreign(byte, c)`)
 /// end the current run: neutrals after them start fresh (CoreText sets `ηνικά "q` as Helvetica
 /// then one Geist run ` "q`, kerning `"q`; but `λ, "q` all in Geist as Greek `λ, "` + Latin `q`).
-pub(crate) fn script_breaks(
-    text: &str,
-    foreign: impl Fn(usize, char) -> bool,
-    out: &mut Vec<u32>,
-) {
+pub(crate) fn script_breaks(text: &str, foreign: impl Fn(usize, char) -> bool, out: &mut Vec<u32>) {
     out.clear();
     if text.is_ascii() {
         return;
     }
     let map = CodePointMapData::<Script>::new();
+    let script = |c: char| {
+        if c.is_ascii() {
+            if c.is_ascii_alphabetic() {
+                Script::Latin
+            } else {
+                Script::Common
+            }
+        } else {
+            map.get(c)
+        }
+    };
     let neutral = |sc: Script| sc == Script::Common || sc == Script::Inherited;
     // Cheap pre-check: at most one real script among the face's own characters means a single
     // run.
@@ -530,7 +538,7 @@ pub(crate) fn script_breaks(
         if !c.is_ascii() && foreign(i, c) {
             return false;
         }
-        let sc = map.get(c);
+        let sc = script(c);
         if neutral(sc) {
             return false;
         }
@@ -554,7 +562,7 @@ pub(crate) fn script_breaks(
             stack.clear();
             continue;
         }
-        let mut sc = map.get(c);
+        let mut sc = script(c);
         let mut close = false;
         if let Some(k) = PAIRED.iter().position(|&p| p == c) {
             if k % 2 == 0 {

@@ -9,7 +9,10 @@ pub(crate) const OBJECT_REPLACEMENT: char = '\u{FFFC}';
 /// normalized to `\n`.
 #[inline]
 pub(crate) fn is_hard_break(c: char) -> bool {
-    matches!(c, '\n' | '\u{0B}' | '\u{0C}' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}')
+    matches!(
+        c,
+        '\n' | '\u{0B}' | '\u{0C}' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
 }
 
 /// Default_Ignorable_Code_Point (DerivedCoreProperties). Shapers render these invisibly even when

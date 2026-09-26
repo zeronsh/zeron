@@ -134,15 +134,22 @@ fn sanitize(w: f32) -> f32 {
 /// Whether `text` needs the host measurer: some visible char has no glyph in the face, or the
 /// text requests emoji presentation.
 pub(crate) fn needs_fallback(face: &FaceData, text: &str) -> bool {
-    text.chars().any(|c| {
-        if forces_emoji(c) {
-            return true;
-        }
-        if (c as u32) < 0x20 || c == '\u{7F}' || is_default_ignorable(c) {
-            return false;
-        }
-        !face.covers(c)
-    })
+    text.chars().any(|c| char_needs_fallback(face, c))
+}
+
+/// Per-char part of [`needs_fallback`].
+#[inline]
+pub(crate) fn char_needs_fallback(face: &FaceData, c: char) -> bool {
+    if (c as u32) < 0x80 {
+        return (c as u32) >= 0x20 && c != '\u{7F}' && !face.covers(c);
+    }
+    if forces_emoji(c) {
+        return true;
+    }
+    if is_default_ignorable(c) {
+        return false;
+    }
+    !face.covers(c)
 }
 
 pub(crate) fn grapheme_count(text: &str) -> usize {
@@ -302,7 +309,12 @@ impl WidthCache {
     /// draw), without letter spacing, from the host's
     /// [`crate::FallbackMeasurer::measure_run`]. `None` when there is no fallback measurer or it
     /// doesn't measure runs (remembered), or its answer was malformed.
-    pub(crate) fn run_advances(&mut self, book: &FontBook, style: StyleId, run: &str) -> Option<&[f32]> {
+    pub(crate) fn run_advances(
+        &mut self,
+        book: &FontBook,
+        style: StyleId,
+        run: &str,
+    ) -> Option<&[f32]> {
         if self.runs_unsupported {
             return None;
         }
@@ -382,6 +394,9 @@ impl WidthCache {
             return true;
         }
         let face = book.face_data(book.style_data(style).style.face);
+        if let [b] = grapheme.as_bytes() {
+            return !char_needs_fallback(face, *b as char);
+        }
         !needs_fallback(face, grapheme)
     }
 
@@ -436,7 +451,13 @@ impl WidthCache {
         self.compute_pair_context(book, style, a, b)
     }
 
-    fn compute_pair_context(&mut self, book: &FontBook, style: StyleId, a: &str, b: &str) -> PairContext {
+    fn compute_pair_context(
+        &mut self,
+        book: &FontBook,
+        style: StyleId,
+        a: &str,
+        b: &str,
+    ) -> PairContext {
         let sd = book.style_data(style);
         let face = book.face_data(sd.style.face);
         let mut pair = String::with_capacity(a.len() + b.len());
@@ -459,7 +480,11 @@ impl WidthCache {
         for (k, t) in [a, b].into_iter().enumerate() {
             let glyphs = self.shape_glyphs(sd, face, t);
             apart.extend(glyphs.glyph_infos().iter().map(|g| g.glyph_id));
-            units[k] = glyphs.glyph_positions().iter().map(|p| p.x_advance as i64).sum();
+            units[k] = glyphs
+                .glyph_positions()
+                .iter()
+                .map(|p| p.x_advance as i64)
+                .sum();
             self.buffer = Some(glyphs.clear());
         }
         PairContext {
@@ -469,7 +494,12 @@ impl WidthCache {
         }
     }
 
-    fn shape_glyphs(&mut self, sd: &StyleData, face: &FaceData, text: &str) -> rustybuzz::GlyphBuffer {
+    fn shape_glyphs(
+        &mut self,
+        sd: &StyleData,
+        face: &FaceData,
+        text: &str,
+    ) -> rustybuzz::GlyphBuffer {
         let mut buf = self.buffer.take().unwrap_or_default();
         buf.push_str(text);
         buf.guess_segment_properties();
@@ -595,7 +625,13 @@ impl WidthCache {
     /// Shapes `text` with rustybuzz. Returns the raw advance in points (no letter spacing) and,
     /// when `want_units`, pushes per-grapheme advances (letter spacing included) onto
     /// `self.units` and returns their count.
-    fn shape(&mut self, sd: &StyleData, face: &FaceData, text: &str, want_units: bool) -> (f32, u32) {
+    fn shape(
+        &mut self,
+        sd: &StyleData,
+        face: &FaceData,
+        text: &str,
+        want_units: bool,
+    ) -> (f32, u32) {
         let mut buf = self.buffer.take().unwrap_or_default();
         buf.push_str(text);
         buf.guess_segment_properties();

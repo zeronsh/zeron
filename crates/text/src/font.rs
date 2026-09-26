@@ -133,6 +133,9 @@ pub(crate) struct FaceData {
     /// Bit `c` set when printable ASCII char `c` (0x20..0x7F) maps to a glyph. Lets the cold
     /// coverage check skip the cmap lookup for the overwhelmingly common case.
     pub(crate) ascii: u128,
+    /// Coverage of the whole BMP as a bitmap (8 KiB), built from the cmap's own code point
+    /// lists, so coverage checks never walk cmap subtables outside the astral planes.
+    pub(crate) bmp: Box<[u64; 1024]>,
 }
 
 impl FaceData {
@@ -142,6 +145,9 @@ impl FaceData {
         let u = c as u32;
         if (0x20..0x80).contains(&u) {
             return self.ascii & (1u128 << u) != 0;
+        }
+        if u < 0x10000 {
+            return self.bmp[u as usize / 64] & (1u64 << (u % 64)) != 0;
         }
         self.hb.glyph_index(c).is_some()
     }
@@ -213,8 +219,33 @@ impl FontBook {
                 ascii |= 1u128 << u;
             }
         }
+        let mut bmp = Box::new([0u64; 1024]);
+        if let Some(cmap) = hb.tables().cmap {
+            for sub in cmap.subtables {
+                if !sub.is_unicode() {
+                    continue;
+                }
+                sub.codepoints(|u| {
+                    if u < 0x10000
+                        && let Some(c) = char::from_u32(u)
+                        && hb.glyph_index(c).is_some()
+                    {
+                        bmp[u as usize / 64] |= 1u64 << (u % 64);
+                    }
+                });
+            }
+        }
+        // Format 4's end sentinel isn't enumerated but may still resolve.
+        if hb.glyph_index('\u{FFFF}').is_some() {
+            bmp[1023] |= 1 << 63;
+        }
         let id = FaceId(self.faces.len() as u16);
-        self.faces.push(FaceData { hb, upem, ascii });
+        self.faces.push(FaceData {
+            hb,
+            upem,
+            ascii,
+            bmp,
+        });
         Ok(id)
     }
 

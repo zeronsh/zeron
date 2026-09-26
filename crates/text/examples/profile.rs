@@ -3,7 +3,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use std::hint::black_box;
 use zeron_text::*;
@@ -32,23 +31,88 @@ impl Rng {
 }
 
 const PROSE: &[&str] = &[
-    "the", "layout", "engine", "measures", "text", "once", "and", "then", "wraps", "it", "at",
-    "any", "width", "with", "pure", "arithmetic", "so", "scrolling", "a", "long", "transcript",
-    "never", "touches", "CoreText", "for", "heights", "we", "should", "probably", "check", "whether",
-    "virtualization", "works", "when", "messages", "stream", "in", "quickly", "I", "think", "that's",
-    "fine,", "but", "let's", "verify", "it.", "Also,", "the", "tests", "pass", "now.", "Okay!",
-    "don't", "worry", "about", "edge-cases", "(mostly)", "—", "yes.",
+    "the",
+    "layout",
+    "engine",
+    "measures",
+    "text",
+    "once",
+    "and",
+    "then",
+    "wraps",
+    "it",
+    "at",
+    "any",
+    "width",
+    "with",
+    "pure",
+    "arithmetic",
+    "so",
+    "scrolling",
+    "a",
+    "long",
+    "transcript",
+    "never",
+    "touches",
+    "CoreText",
+    "for",
+    "heights",
+    "we",
+    "should",
+    "probably",
+    "check",
+    "whether",
+    "virtualization",
+    "works",
+    "when",
+    "messages",
+    "stream",
+    "in",
+    "quickly",
+    "I",
+    "think",
+    "that's",
+    "fine,",
+    "but",
+    "let's",
+    "verify",
+    "it.",
+    "Also,",
+    "the",
+    "tests",
+    "pass",
+    "now.",
+    "Okay!",
+    "don't",
+    "worry",
+    "about",
+    "edge-cases",
+    "(mostly)",
+    "—",
+    "yes.",
 ];
 const CODE: &[&str] = &[
-    "prepare()", "line_count", "Vec<Line>", "crates/text/src/layout.rs", "cargo test -p zeron-text",
-    "Arc<FontBook>", "&mut WidthCache", "u32::MAX", "fn main()", "let x = 42;",
+    "prepare()",
+    "line_count",
+    "Vec<Line>",
+    "crates/text/src/layout.rs",
+    "cargo test -p zeron-text",
+    "Arc<FontBook>",
+    "&mut WidthCache",
+    "u32::MAX",
+    "fn main()",
+    "let x = 42;",
 ];
 const LINKS: &[&str] = &[
     "https://github.com/chenglou/pretext/blob/main/src/layout.ts",
     "https://docs.rs/rustybuzz/latest/rustybuzz/fn.shape_with_plan.html",
     "~/Documents/GitHub/comet-native/apps/ios/Sources/Transcript/RowView.swift",
 ];
-const CJK: &[&str] = &["这个布局引擎很快。", "日本語のテキストも折り返します。", "한국어 문장도 됩니다."];
+const CJK: &[&str] = &[
+    "这个布局引擎很快。",
+    "日本語のテキストも折り返します。",
+    "한국어 문장도 됩니다.",
+];
 const EMOJI: &[&str] = &["😀", "👍🏽", "🎉", "👨‍👩‍👧", "🇯🇵", "🚀"];
 
 struct Styles {
@@ -112,14 +176,17 @@ fn setup() -> (FontBook, Vec<(String, Vec<Span>)>, Styles) {
     (book, corpus, st)
 }
 
-fn prepare_all(book: &FontBook, cache: &mut WidthCache, corpus: &[(String, Vec<Span>)]) -> Vec<Prepared> {
+fn prepare_all(
+    book: &FontBook,
+    cache: &mut WidthCache,
+    corpus: &[(String, Vec<Span>)],
+) -> Vec<Prepared> {
     let opts = PrepareOptions::default();
     corpus
         .iter()
         .map(|(t, s)| prepare(book, cache, t, s, &opts))
         .collect()
 }
-
 
 fn main() {
     let (book, corpus, _st) = setup();
