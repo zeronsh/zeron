@@ -63,6 +63,8 @@ mod actions_ui;
 mod command_palette;
 mod files_panel;
 mod navigation_focus;
+#[cfg(test)]
+mod navigation_tests;
 mod project_icon;
 mod side_chats;
 mod sidebar_pins;
