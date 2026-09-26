@@ -54,7 +54,9 @@ final class ScrollPerformanceTests: XCTestCase {
         app.launchArguments = ["-lab", "-turns", "300", "-bench"]
         app.launch()
         let result = app.staticTexts["bench-result"]
-        XCTAssertTrue(result.waitForExistence(timeout: 120))
+        XCTAssertTrue(result.waitForExistence(timeout: 30))
+        let done = expectation(for: NSPredicate(format: "label CONTAINS 'streaming'"), evaluatedWith: result)
+        wait(for: [done], timeout: 180)
         let json = result.label
         let attachment = XCTAttachment(string: json)
         attachment.name = "bench.json"

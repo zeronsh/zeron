@@ -1,3 +1,4 @@
+import Network
 import Security
 import UIKit
 
@@ -41,6 +42,7 @@ final class AppModel {
     private lazy var bridge = ListenerBridge(app: self)
     private var refreshScheduled = false
     private var clock: Timer?
+    private let path = NWPathMonitor()
 
     var onSignedIn: (() -> Void)?
     var onSignOut: (() -> Void)?
@@ -50,11 +52,18 @@ final class AppModel {
     var isDemo: Bool { client?.isDemo() ?? false }
 
     init() {
+        // Online/offline + interface changes cut sync backoff short.
+        path.pathUpdateHandler = { [weak self] p in
+            DispatchQueue.main.async { self?.client?.setNetworkOnline(online: p.status == .satisfied) }
+        }
+        path.start(queue: DispatchQueue(label: "sh.zeron.path"))
         let args = ProcessInfo.processInfo.arguments
         if args.contains("-signedout") {
             Credentials.clearStored()
         }
-        if args.contains("-demo") || args.contains("-route") && Credentials.stored() == nil {
+        if let i = args.firstIndex(of: "-dev"), i + 2 < args.count {
+            start(.dev(userId: args[i + 1], orgId: args[i + 2]))
+        } else if args.contains("-demo") || args.contains("-route") && Credentials.stored() == nil {
             start(.demo(options: Self.demoOptions()))
         } else if let stored = Credentials.stored() {
             start(stored)
@@ -79,7 +88,7 @@ final class AppModel {
         let dir = support.appendingPathComponent(credentials.isDemo ? "demo" : "core", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let config = CoreConfig(
-            edgeUrl: Endpoints.edgeURL.absoluteString,
+            edgeUrl: Self.edgeURL,
             dataDir: dir.path,
             deviceId: Self.deviceId,
             deviceName: UIDevice.current.name,
@@ -98,6 +107,13 @@ final class AppModel {
             NSLog("core start failed: \(error)")
             client = nil
         }
+    }
+
+    /// `-edge <url>` points at a local `wrangler dev` edge; otherwise production.
+    static var edgeURL: String {
+        let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: "-edge"), i + 1 < args.count { return args[i + 1] }
+        return Endpoints.edgeURL.absoluteString
     }
 
     static var deviceId: String {

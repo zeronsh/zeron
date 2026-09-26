@@ -73,6 +73,7 @@ Zeron/
 | `-big` / `-huge` | Demo transcripts with 120 / 600 turns |
 | `-route chat:<id>` / `new` / `projects` / `prs` / `more` / `search` | Open a screen at launch |
 | `-signedout` | Clear stored credentials |
+| `-dev <userId> <orgId> [-edge <url>]` | Dev bearer against an `AUTH_MODE=dev` edge (e.g. `wrangler dev`) |
 | `-lab [-turns N] [-autostream] [-autoscroll] [-top] [-meter]` | Transcript lab over fixture markdown, with an on-screen hitch meter |
 
 ## Tests

@@ -41,8 +41,10 @@ final class SessionFlowTests: XCTestCase {
         // Optimistic echo appears immediately, then the host streams a reply.
         let echo = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'You: Summarize the launch post'")).firstMatch
         XCTAssertTrue(echo.waitForExistence(timeout: 3))
-        XCTAssertTrue(app.buttons["Stop response"].waitForExistence(timeout: 5))
         snapshot(app, "streaming")
+        // The host's reply lands after the echo and the turn settles.
+        let reply = app.staticTexts.matching(identifier: "row-markdown").element(boundBy: 0)
+        XCTAssertTrue(reply.waitForExistence(timeout: 15))
         XCTAssertTrue(app.buttons["Send message"].waitForExistence(timeout: 30))
         snapshot(app, "reply-complete")
     }
