@@ -6569,6 +6569,7 @@ impl Shell {
                 })
                 .size(px(13.0))
                 .flex_none()
+                .whitespace_nowrap()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -6962,8 +6963,9 @@ impl Shell {
                                     let id = id.clone();
                                     move || format!("chat-time-{id}")
                                 })
-                                .w(px(30.0))
+                                .when(compact_jump_label.is_none(), |el| el.w(px(30.0)))
                                 .flex_none()
+                                .whitespace_nowrap()
                                 .text_right()
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(subline)
