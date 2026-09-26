@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use zeron_proto::{
     AgentAccount, AgentAccountsSnapshot, AgentLoginMode, AgentLoginPoll, AgentLoginStart,
-    AgentLoginStatus, HarnessId,
+    AgentLoginStatus, CodexResetCredit, CodexResetOutcome, HarnessId,
 };
 use zeron_rpc::methods;
 
@@ -121,7 +121,9 @@ pub fn is_openable_login_url(url: &str) -> bool {
         "https" => true,
         "http" => {
             let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-            let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+            let authority = authority
+                .rsplit_once('@')
+                .map_or(authority, |(_, host)| host);
             let host = match authority.strip_prefix('[') {
                 Some(v6) => v6.split(']').next().unwrap_or(""),
                 None => authority.split(':').next().unwrap_or(""),
@@ -175,6 +177,38 @@ pub const PROVIDERS: [(HarnessId, &str, &str); 9] = [
 ];
 
 /// Whether `harness` has an Accounts section (and sign-in flow). Pure.
+fn format_credit_expiry(expires_at: Option<DateTime<Utc>>) -> String {
+    expires_at
+        .map(|at| {
+            at.with_timezone(&chrono::Local)
+                .format("%b %-d, %Y at %-I:%M %p")
+                .to_string()
+        })
+        .unwrap_or_else(|| "No expiry shown".into())
+}
+
+fn reset_outcome_message(outcome: &str) -> &'static str {
+    match outcome {
+        "reset" => "Codex usage limits reset.",
+        "nothing_to_reset" => "No Codex usage window needed a reset. The credit was not used.",
+        "no_credit" => "That reset is no longer available.",
+        "already_redeemed" => "This reset was already used.",
+        _ => "Codex returned an unknown reset result.",
+    }
+}
+
+fn available_resets(account: &AgentAccount) -> u64 {
+    account
+        .codex_reset_credits
+        .as_ref()
+        .map_or(0, |summary| summary.available_count)
+}
+
+fn available_resets_label(count: u64) -> SharedString {
+    let noun = if count == 1 { "reset" } else { "resets" };
+    format!("{count} available {noun}").into()
+}
+
 pub fn signs_in(harness: HarnessId) -> bool {
     PROVIDERS
         .iter()
@@ -467,6 +501,19 @@ impl LoginFlow {
     }
 }
 
+enum ResetDialog {
+    List {
+        account: AgentAccount,
+    },
+    Confirm {
+        account: AgentAccount,
+        credit: CodexResetCredit,
+        idempotency_key: String,
+        busy: bool,
+        error: Option<SharedString>,
+    },
+}
+
 /// The last accounts list per target device (`None` = this device), shared
 /// by every accounts view so a re-opened Settings paints instantly and
 /// revalidates in place instead of flashing a skeleton.
@@ -496,6 +543,8 @@ pub struct AccountsPage {
     row_menu: popover::Popup<String>,
     login: Option<LoginFlow>,
     login_attempts: u64,
+    reset_dialog: Option<ResetDialog>,
+    reset_message: Option<SharedString>,
     error: Option<SharedString>,
     code_input: Entity<ComposerInput>,
     load_task: Option<Task<()>>,
@@ -546,6 +595,8 @@ impl AccountsPage {
             row_menu: popover::Popup::default(),
             login: None,
             login_attempts: 0,
+            reset_dialog: None,
+            reset_message: None,
             error: None,
             code_input,
             load_task: None,
@@ -575,6 +626,8 @@ impl AccountsPage {
         // login/action state and reload with a forced usage probe (the new
         // device's cache is cold).
         self.login = None;
+        self.reset_dialog = None;
+        self.reset_message = None;
         self.busy_account = None;
         self.error = None;
         self.load(force_usage_for(LoadTrigger::Mount), cx);
@@ -584,6 +637,8 @@ impl AccountsPage {
         if self.embedded_harness != Some(harness) {
             self.embedded_harness = Some(harness);
             self.login = None;
+            self.reset_dialog = None;
+            self.reset_message = None;
             self.error = None;
             cx.notify();
         }
@@ -817,6 +872,120 @@ impl AccountsPage {
         cx.notify();
     }
 
+    // ---- codex banked resets ----
+
+    fn open_resets(&mut self, account: &AgentAccount, cx: &mut Context<Self>) {
+        self.reset_message = None;
+        self.reset_dialog = Some(ResetDialog::List {
+            account: account.clone(),
+        });
+        cx.notify();
+    }
+
+    fn select_reset(
+        &mut self,
+        account: &AgentAccount,
+        credit: &CodexResetCredit,
+        cx: &mut Context<Self>,
+    ) {
+        self.reset_dialog = Some(ResetDialog::Confirm {
+            account: account.clone(),
+            credit: credit.clone(),
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+            busy: false,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    fn back_to_resets(&mut self, cx: &mut Context<Self>) {
+        if let Some(ResetDialog::Confirm {
+            account,
+            busy: false,
+            ..
+        }) = &self.reset_dialog
+        {
+            self.reset_dialog = Some(ResetDialog::List {
+                account: account.clone(),
+            });
+            cx.notify();
+        }
+    }
+
+    fn close_resets(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.reset_dialog,
+            Some(ResetDialog::Confirm { busy: true, .. })
+        ) {
+            return;
+        }
+        self.reset_dialog = None;
+        cx.notify();
+    }
+
+    fn redeem_selected_reset(&mut self, cx: &mut Context<Self>) {
+        let Some(ResetDialog::Confirm {
+            account,
+            credit,
+            idempotency_key,
+            busy,
+            error,
+        }) = &mut self.reset_dialog
+        else {
+            return;
+        };
+        if *busy {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            *error = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
+        *busy = true;
+        *error = None;
+        let payload = serde_json::json!({
+            "accountId": account.id,
+            "creditId": credit.id,
+            "idempotencyKey": idempotency_key,
+        });
+        let params = self.params(payload);
+        let target_device = self.target_device.clone();
+        self.action_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::CONSUME_CODEX_RESET_CREDIT, params)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<CodexResetOutcome>(value).map_err(|e| e.to_string())
+                });
+            this.update(cx, |page, cx| {
+                if page.target_device != target_device {
+                    return;
+                }
+                match result {
+                    Ok(result) => {
+                        page.reset_dialog = None;
+                        page.reset_message = Some(reset_outcome_message(&result.outcome).into());
+                        page.load(force_usage_for(LoadTrigger::Refresh), cx);
+                    }
+                    Err(err) => {
+                        if let Some(ResetDialog::Confirm { busy, error, .. }) =
+                            &mut page.reset_dialog
+                        {
+                            *busy = false;
+                            *error = Some(err.into());
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
     // ---- add-account flows ----
 
     /// Start (or Retry) a sign-in: the same dialog for every provider.
@@ -840,6 +1009,7 @@ impl AccountsPage {
             step: LoginStep::Browser { message: None },
         });
         self.poll_task = None;
+        self.reset_dialog = None;
         self.error = None;
         let mut params = serde_json::json!({ "harness": harness });
         if let (Some(provider), Some(object)) = (provider, params.as_object_mut()) {
@@ -1159,6 +1329,7 @@ impl AccountsPage {
             .into();
         let can_switch = !account.active && account.switchable;
         let switch_account = account.clone();
+        let reset_count = available_resets(account);
 
         // Personal Claude orgs are named "<email>'s Organization" — noise
         // right under the email itself.
@@ -1181,11 +1352,21 @@ impl AccountsPage {
                     .into_any_element(),
             );
         }
+        if reset_count > 0 {
+            meta.push(
+                div()
+                    .child(available_resets_label(reset_count))
+                    .into_any_element(),
+            );
+        }
         // Meters XOR the reason they're missing — the reason joins the meta
         // line, so a failed probe never changes the row's height.
         let usage: AnyElement = if account.usage_windows.is_empty() {
             meta.extend(self.render_usage_missing(account, theme));
-            div().w(px(USAGE_COLUMN_WIDTH)).flex_none().into_any_element()
+            div()
+                .w(px(USAGE_COLUMN_WIDTH))
+                .flex_none()
+                .into_any_element()
         } else {
             let resets = account
                 .usage_windows
@@ -1291,6 +1472,7 @@ impl AccountsPage {
         if menu_open {
             let popup = Theme::of(cx).for_popup();
             let switch_from_menu = account.clone();
+            let reset_account = account.clone();
             let forget_account = account.clone();
             let menu = popover::popover_card(&popup)
                 .w(px(208.0))
@@ -1310,6 +1492,22 @@ impl AccountsPage {
                                 );
                             }))
                             .child(SharedString::from("Switch to this account")),
+                    )
+                })
+                .when(reset_count > 0, |menu| {
+                    menu.child(
+                        popover::menu_row(&popup, false, format!("account-menu-resets-{ix}"))
+                            .id(("account-menu-resets", ix))
+                            .on_click(cx.listener(move |page, _, _, cx| {
+                                page.close_row_menu(cx);
+                                page.open_resets(&reset_account, cx);
+                            }))
+                            .child(div().flex_1().child(available_resets_label(reset_count)))
+                            .child(
+                                crate::icons::icon(crate::icons::ALT_ARROW_RIGHT)
+                                    .size(px(14.0))
+                                    .text_color(popup.text_muted),
+                            ),
                     )
                 })
                 .when(account.switchable, |menu| {
@@ -1370,7 +1568,9 @@ impl AccountsPage {
                     .flex_1()
                     .min_w_0()
                     .child(widgets::row_title(theme, email.clone()).truncate())
-                    .when(!meta.is_empty(), |el| el.child(widgets::meta_line(theme, meta))),
+                    .when(!meta.is_empty(), |el| {
+                        el.child(widgets::meta_line(theme, meta))
+                    }),
             )
             .child(usage)
             .child(
@@ -1605,6 +1805,251 @@ impl AccountsPage {
             .child(buttons)
             .into_any_element();
         Some(popover::modal("add-account-dialog", viewport, card))
+    }
+
+    /// Codex banked resets: pick one from the account's saved credits, then
+    /// confirm before it is spent — same card, title and action row as the
+    /// sign-in dialog.
+    fn render_reset_dialog(
+        &self,
+        viewport: gpui::Size<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let dialog = self.reset_dialog.as_ref()?;
+        let theme = Theme::of(cx).for_popup();
+        let action = |id: &'static str, tone: widgets::ActionTone, label: &'static str| {
+            widgets::text_action(&theme, tone, label)
+                .id(id)
+                .tab_index(0)
+                .role(gpui::Role::Button)
+                .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
+        };
+        let note = |copy: &'static str| {
+            div()
+                .text_size(crate::typography::ui_rems(12.0))
+                .line_height(px(17.0))
+                .text_color(theme.text_muted)
+                .child(SharedString::from(copy))
+        };
+        let buttons = div()
+            .mt(px(16.0))
+            .flex()
+            .flex_row()
+            .justify_end()
+            .gap(px(8.0));
+
+        let (title, body): (&str, Vec<AnyElement>) = match dialog {
+            ResetDialog::List { account } => {
+                let credits = account.codex_reset_credits.as_ref()?;
+                let email = account
+                    .email
+                    .clone()
+                    .unwrap_or_else(|| "Codex account".into());
+                let list_height = (f32::from(viewport.height) - 280.0).clamp(120.0, 320.0);
+
+                let rows = credits.credits.iter().enumerate().map(|(ix, credit)| {
+                    let selected_account = account.clone();
+                    let selected_credit = credit.clone();
+                    let hover_key = format!("codex-reset-credit-{ix}-hover");
+                    div()
+                        .id(("codex-reset-credit", ix))
+                        .px(px(12.0))
+                        .py(px(10.0))
+                        .when(ix > 0, |el| {
+                            el.border_t_1().border_color(widgets::row_divider(&theme))
+                        })
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(12.0))
+                        .cursor_pointer()
+                        .bg(crate::motion::hover_blend(
+                            &hover_key,
+                            theme.wash(0.0),
+                            theme.wash(0.04),
+                        ))
+                        .on_hover(crate::motion::hover_listener(hover_key))
+                        .tab_index(0)
+                        .role(gpui::Role::Button)
+                        .aria_label(format!("Review {}", credit.title))
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .on_click(cx.listener(move |page, _, _, cx| {
+                            page.select_reset(&selected_account, &selected_credit, cx);
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(widgets::row_title(&theme, credit.title.clone()).truncate())
+                                .child(widgets::meta_line(
+                                    &theme,
+                                    vec![
+                                        div()
+                                            .child(SharedString::from(format!(
+                                                "Expires {}",
+                                                format_credit_expiry(credit.expires_at)
+                                            )))
+                                            .into_any_element(),
+                                    ],
+                                )),
+                        )
+                        .child(
+                            crate::icons::icon(crate::icons::ALT_ARROW_RIGHT)
+                                .size(px(14.0))
+                                .flex_none()
+                                .text_color(theme.text_muted),
+                        )
+                        .into_any_element()
+                });
+
+                let list = div()
+                    .id("codex-reset-credit-list")
+                    .mt(px(16.0))
+                    .max_h(px(list_height))
+                    .overflow_y_scroll()
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .when(credits.credits.is_empty(), |el| {
+                        el.child(div().p(px(12.0)).child(note(
+                            "Reset details are unavailable. Refresh usage and try again.",
+                        )))
+                    })
+                    .children(rows);
+
+                (
+                    "Saved Codex resets",
+                    vec![
+                        div()
+                            .mt(px(8.0))
+                            .child(popover::dialog_body(&theme, email).truncate())
+                            .into_any_element(),
+                        list.into_any_element(),
+                        note("A reset is used only when an eligible usage window refreshes.")
+                            .mt(px(12.0))
+                            .into_any_element(),
+                        buttons
+                            .child(
+                                action("reset-close", widgets::ActionTone::Quiet, "Close")
+                                    .on_click(cx.listener(|page, _, _, cx| page.close_resets(cx))),
+                            )
+                            .into_any_element(),
+                    ],
+                )
+            }
+            ResetDialog::Confirm {
+                account,
+                credit,
+                busy,
+                error,
+                ..
+            } => {
+                let busy = *busy;
+                let email = account
+                    .email
+                    .clone()
+                    .unwrap_or_else(|| "Codex account".into());
+                let expiry = format_credit_expiry(credit.expires_at);
+
+                let summary = div()
+                    .mt(px(16.0))
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.wash(0.03))
+                    .child(widgets::row_title(&theme, credit.title.clone()))
+                    .child(widgets::meta_line(
+                        &theme,
+                        vec![
+                            div().child(SharedString::from(email)).into_any_element(),
+                            div()
+                                .child(SharedString::from(format!("Expires {expiry}")))
+                                .into_any_element(),
+                        ],
+                    ));
+
+                let error_line = error.clone().map(|message| {
+                    div()
+                        .mt(px(12.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.danger_muted.opacity(0.9))
+                        .child(message)
+                        .into_any_element()
+                });
+
+                let mut body = vec![
+                    div()
+                        .mt(px(8.0))
+                        .child(popover::dialog_body(
+                            &theme,
+                            "This refreshes eligible Codex usage windows and changes your weekly \
+                             reset date. If no window can be reset, the credit stays available.",
+                        ))
+                        .into_any_element(),
+                    summary.into_any_element(),
+                ];
+                body.extend(error_line);
+                body.push(
+                    buttons
+                        .child(
+                            action("reset-back", widgets::ActionTone::Quiet, "Back")
+                                .when(busy, |el| el.opacity(0.5))
+                                .on_click(cx.listener(|page, _, _, cx| page.back_to_resets(cx))),
+                        )
+                        .child(
+                            action(
+                                "reset-confirm",
+                                widgets::ActionTone::Solid,
+                                if busy { "Using reset…" } else { "Use reset" },
+                            )
+                            .when(busy, |el| el.opacity(0.5))
+                            .on_click(cx.listener(|page, _, _, cx| page.redeem_selected_reset(cx))),
+                        )
+                        .into_any_element(),
+                );
+                ("Use this reset?", body)
+            }
+        };
+
+        let card = popover::dialog_card(&theme)
+            .id("codex-reset-card")
+            .w(px(400.0_f32.min(f32::from(viewport.width) - 48.0)))
+            .role(gpui::Role::Dialog)
+            .aria_label(title)
+            .on_key_down(cx.listener(|page, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    page.close_resets(cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(popover::dialog_title(&theme, title))
+            .children(body)
+            .into_any_element();
+        Some(popover::modal("codex-reset-dialog", viewport, card))
+    }
+
+    /// The quiet outcome line after a reset is used; click to dismiss.
+    fn render_reset_notice(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let message = self.reset_message.clone()?;
+        Some(
+            div()
+                .id("codex-reset-notice")
+                .mt(px(8.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.text_muted)
+                .cursor_pointer()
+                .tab_index(0)
+                .role(gpui::Role::Button)
+                .aria_label("Dismiss reset result")
+                .on_click(cx.listener(|page, _, _, cx| {
+                    page.reset_message = None;
+                    cx.notify();
+                }))
+                .child(message)
+                .into_any_element(),
+        )
     }
 
     /// A ghost account row (zeron settings.agents.tsx `SkeletonRow`): avatar,
@@ -1844,6 +2289,7 @@ impl AccountsPage {
                         })),
                 )
             })
+            .children(self.render_reset_notice(theme, cx))
             .children(match &self.snapshot {
                 Loadable::Ready(snapshot) => snapshot
                     .warnings
@@ -1874,7 +2320,9 @@ impl Render for AccountsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
         let now = Utc::now();
-        let dialog = self.render_login_dialog(window.viewport_size(), cx);
+        let dialog = self
+            .render_login_dialog(window.viewport_size(), cx)
+            .or_else(|| self.render_reset_dialog(window.viewport_size(), cx));
         if let Some(harness) = self.embedded_harness {
             return self.render_embedded_provider(harness, &theme, now, dialog, cx);
         }
@@ -2192,6 +2640,7 @@ impl Render for AccountsPage {
                                         })),
                                 )
                             })
+                            .children(self.render_reset_notice(&theme, cx))
                             .children(sections)
                             // Footer note (zeron: `mt-6 text-[12px] leading-relaxed
                             // text-muted-foreground/60`).
@@ -2217,7 +2666,9 @@ impl Render for AccountsPage {
 mod tests {
     #[test]
     fn only_web_and_loopback_login_urls_open() {
-        assert!(is_openable_login_url("https://claude.com/cai/oauth/authorize?x=1"));
+        assert!(is_openable_login_url(
+            "https://claude.com/cai/oauth/authorize?x=1"
+        ));
         assert!(is_openable_login_url("http://localhost:1455/auth/callback"));
         assert!(is_openable_login_url("http://127.0.0.1:8080/"));
         assert!(is_openable_login_url("http://[::1]:9000/cb"));
@@ -2386,6 +2837,7 @@ mod tests {
             switchable: true,
             saved_at: None,
             provider: provider.map(str::to_string),
+            codex_reset_credits: None,
         };
         let mut snapshot = AgentAccountsSnapshot {
             accounts: vec![
@@ -2538,6 +2990,7 @@ mod tests {
             switchable,
             saved_at: None,
             provider: Some("openai".into()),
+            codex_reset_credits: None,
         };
         window
             .update(cx, |page, _, cx| {
@@ -2620,6 +3073,7 @@ mod tests {
             plan_label: None,
             active,
             usage_windows: vec![],
+            codex_reset_credits: None,
             usage_fetched_at: None,
             usage_error: None,
             display_name: None,

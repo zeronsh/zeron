@@ -132,6 +132,8 @@ fn mocked(base: &str) -> ProbeEndpoints {
         claude_loopback_token: format!("{base}/v1/oauth/token"),
         claude_profile: format!("{base}/api/oauth/profile"),
         codex_usage: format!("{base}/backend-api/wham/usage"),
+        codex_reset_credits: format!("{base}/backend-api/wham/rate-limit-reset-credits"),
+        codex_consume_reset: format!("{base}/backend-api/wham/rate-limit-reset-credits/consume"),
         grok_usage: format!("{base}/v1/billing?format=credits"),
         github_api: base.to_string(),
         github_login: base.to_string(),
