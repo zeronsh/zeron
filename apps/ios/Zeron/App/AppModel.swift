@@ -593,7 +593,7 @@ final class AppModel {
     func archivedChats(in spaceId: String? = nil) -> [Chat] {
         if let demo {
             return sortActive(demo.chats.filter {
-                $0.archived && $0.parentChatId == nil && (spaceId == nil || $0.spaceId == spaceId)
+                $0.archived && (spaceId == nil || $0.spaceId == spaceId)
             })
         }
         return workspace?.archivedChats(in: spaceId) ?? []

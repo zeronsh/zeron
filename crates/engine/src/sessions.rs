@@ -1216,6 +1216,30 @@ impl Inner {
 
 // ── run task ────────────────────────────────────────────────────────────────
 
+/// Whether the provider routes this prompt as a native command: its delivered
+/// text leads with `/name` (Codex `command_request`, OpenCode commands, Claude
+/// slash commands). Anything put in front of it would make it model input.
+fn native_command(prompt: &str, harness: HarnessId) -> bool {
+    let delivered = if harness == HarnessId::Codex {
+        zeron_proto::invocation::invocation_prompt(prompt)
+    } else {
+        zeron_proto::invocation::harness_prompt(prompt, harness)
+    };
+    zeron_proto::invocation::leading_command(&delivered).is_some()
+}
+
+/// A transcript entry's text parts, joined.
+fn entry_text(entry: &zeron_doc::SessionMessageEntry) -> String {
+    entry
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            zeron_doc::MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// A turn is in flight: streaming, or parked on a question it is still owed an
 /// answer to. Notably NOT a persistent session that has parked between turns —
 /// that holds a warm child with nothing outstanding.
@@ -1585,40 +1609,70 @@ async fn drive_run(
     });
     // A side chat owns a fresh provider session. Bootstrap it from the frozen
     // conversation, never resume (and mutate) the parent's provider session.
-    if request.resume.is_none()
+    // Providers route a leading `/name` natively, so a command turn goes out
+    // bare; a fork whose first turns were all commands carries its copied
+    // history on its first ordinary turn instead.
+    if !native_command(&request.prompt, harness_id)
         && inner
             .workspace()
             .and_then(|ws| ws.chat(&chat_id).ok().flatten())
             .is_some_and(|chat| chat.parent_chat_id.is_some())
     {
-        let history: Vec<_> = doc
+        let entries: Vec<_> = doc
             .read_entries()
             .unwrap_or_default()
             .into_iter()
             .filter(|entry| entry.id != resume_state.user_message_id)
+            .collect();
+        let end = if request.resume.is_none() {
+            Some(entries.len())
+        } else {
+            // A resumed provider session holds every turn since the seam; it
+            // still lacks the copied history until an ordinary turn sent it.
+            entries
+                .iter()
+                .position(|entry| {
+                    entry
+                        .parts
+                        .iter()
+                        .any(|part| matches!(part, zeron_doc::MessagePart::Fork { .. }))
+                })
+                .filter(|&seam| {
+                    !entries[seam + 1..].iter().any(|entry| {
+                        entry.role == zeron_doc::MessageRole::User
+                            && !native_command(&entry_text(entry), harness_id)
+                    })
+                })
+        };
+        let history: Vec<_> = entries[..end.unwrap_or(0)]
+            .iter()
             .map(|entry| {
                 let text = entry
                     .parts
-                    .into_iter()
+                    .iter()
                     .filter_map(|part| match part {
-                        zeron_doc::MessagePart::Text { text, .. } => Some(text),
+                        zeron_doc::MessagePart::Text { text, .. } => Some(text.clone()),
                         zeron_doc::MessagePart::Tool { call, output, .. } => Some(format!(
                             "Tool: {}\n{}",
-                            serde_json::to_string(&call).unwrap_or_default(),
-                            output.unwrap_or_default()
+                            serde_json::to_string(call).unwrap_or_default(),
+                            output.clone().unwrap_or_default()
                         )),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                serde_json::json!({ "role": entry.role, "text": text })
+                (entry.role, text)
             })
+            .filter(|(_, text)| !text.is_empty())
+            .map(|(role, text)| serde_json::json!({ "role": role, "text": text }))
             .collect();
-        request.prompt = format!(
-            "Continue this side conversation using the following prior conversation as context.\n<conversation>\n{}\n</conversation>\n\n{}",
-            serde_json::to_string(&history).unwrap_or_default(),
-            request.prompt
-        );
+        if !history.is_empty() {
+            request.prompt = format!(
+                "Continue this side conversation using the following prior conversation as context.\n<conversation>\n{}\n</conversation>\n\n{}",
+                serde_json::to_string(&history).unwrap_or_default(),
+                request.prompt
+            );
+        }
     }
     // Startup can stop before the SDK saves user text, with no new session
     // ID or receipt. Bridge that unacknowledged tail from our transcript;

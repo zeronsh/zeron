@@ -386,3 +386,120 @@ async fn forking_a_side_chat_can_land_as_a_sibling_under_the_main_chat() {
         .unwrap();
     assert_eq!(nested.parent_chat_id.as_deref(), Some("side"));
 }
+
+/// One turn through the engine; returns the request the provider received.
+async fn side_turn(
+    core: &EngineCore,
+    requests: &Arc<Mutex<Vec<RunRequest>>>,
+    chat: &str,
+    prompt: &str,
+    message_id: &str,
+) -> RunRequest {
+    let before = requests.lock().unwrap().len();
+    let resume = core
+        .workspace
+        .chat(chat)
+        .unwrap()
+        .unwrap()
+        .harness_session_id;
+    core.sessions
+        .dispatch(
+            chat,
+            HarnessId::Mock,
+            RunRequest {
+                mcp: None,
+                prompt: prompt.into(),
+                harness: Some(HarnessId::Mock),
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                cwd: "/tmp".into(),
+                sandbox: SandboxLevel::WorkspaceWrite,
+                auto_approve: true,
+                resume,
+                attachments: vec![],
+                worktree: None,
+            },
+            Some(message_id.into()),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while requests.lock().unwrap().len() == before
+            || core
+                .sessions
+                .session_status(chat)
+                .is_some_and(|s| s.status != zeron_proto::SessionStatus::Idle)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    requests.lock().unwrap()[before].clone()
+}
+
+/// A native command must lead the delivered prompt so the provider routes it
+/// (Codex `command_request`, OpenCode commands): no bootstrap wrapper in front
+/// of it, and none at all when there is no prior conversation.
+#[tokio::test]
+async fn native_commands_and_empty_side_chats_skip_the_history_wrapper() {
+    let dir = tempfile::tempdir().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Capture(requests.clone())));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    for (id, parent) in [
+        ("main", None),
+        ("plus-review", Some("main")),
+        ("plus", Some("main")),
+    ] {
+        core.workspace
+            .create_chat_with_parent(
+                id,
+                None,
+                Some(&core.device_id),
+                None,
+                Some("/tmp".into()),
+                parent.map(str::to_owned),
+            )
+            .unwrap();
+    }
+    // A fresh `+` side chat: nothing to bootstrap.
+    let request = side_turn(&core, &requests, "plus-review", "/review", "u-review").await;
+    assert_eq!(request.prompt, "/review");
+    let request = side_turn(&core, &requests, "plus", "hello there", "u-hello").await;
+    assert_eq!(request.prompt, "hello there");
+
+    // A fork whose first turn is a command: the command goes out bare, and
+    // the copied history rides the first ordinary turn, once.
+    let source = core.doc_host.open("main").unwrap();
+    for (id, role, text) in [
+        ("u1", MessageRole::User, "Remember PINEAPPLE"),
+        ("a1", MessageRole::Assistant, "I remember PINEAPPLE"),
+    ] {
+        source
+            .doc()
+            .push_message(&message(id, role, text, MessageStatus::Complete))
+            .unwrap();
+    }
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            methods::FORK_SIDE_CHAT,
+            serde_json::json!({ "chatId": "fork", "sourceChatId": "main" }),
+        )
+        .await
+        .unwrap();
+    let request = side_turn(&core, &requests, "fork", "  /review tests", "f1").await;
+    assert_eq!(request.resume, None);
+    assert_eq!(request.prompt, "  /review tests");
+    let request = side_turn(&core, &requests, "fork", "What should I remember?", "f2").await;
+    assert_eq!(request.resume.as_deref(), Some("side-provider-session"));
+    assert!(request.prompt.contains("PINEAPPLE"), "{}", request.prompt);
+    assert!(request.prompt.ends_with("What should I remember?"));
+    assert!(!request.prompt.contains("/review"), "{}", request.prompt);
+    let request = side_turn(&core, &requests, "fork", "And now?", "f3").await;
+    assert_eq!(request.prompt, "And now?");
+    core.shutdown().await;
+}

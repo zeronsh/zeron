@@ -438,7 +438,7 @@ final class WorkspaceStore {
     /// `overviewChats`, a live space is not required: an archived session of a
     /// deleted space should still be reachable for unarchive.
     func archivedChats(in spaceId: String? = nil) -> [Chat] {
-        sortActive(chats.filter { $0.archived && $0.parentChatId == nil && (spaceId == nil || $0.spaceId == spaceId) })
+        sortActive(chats.filter { $0.archived && (spaceId == nil || $0.spaceId == spaceId) })
     }
 
     func indicator(for chat: Chat) -> ChatIndicator {
