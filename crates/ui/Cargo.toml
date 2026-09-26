@@ -12,6 +12,7 @@ browser-fixture = []
 windows-render-fixture = []
 appshots-fixture = ["gpui_platform/test-support"]
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
+math-fixture = ["gpui_platform/test-support"]
 
 [[example]]
 name = "macos-resource-profile"
@@ -41,6 +42,10 @@ required-features = ["project-palette-fixture"]
 name = "sidebar-fixture"
 required-features = ["project-palette-fixture"]
 
+[[example]]
+name = "math-fixture"
+required-features = ["math-fixture"]
+
 [dependencies]
 url = "2"
 zeron-proto.workspace = true
@@ -67,6 +72,13 @@ base64 = "0.22"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 usvg = "0.46"
 mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
+# LaTeX math in Markdown: KaTeX-compatible parsing and layout in pure Rust.
+# Glyph outlines come from the bundled KaTeX fonts (see markdown/math.rs), so
+# RaTeX's own font-embedding and raster crates are not needed.
+ratex-parser = "=0.1.14"
+ratex-layout = "=0.1.14"
+ratex-types = "=0.1.14"
+ratex-font = "=0.1.14"
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 fontdb.workspace = true
