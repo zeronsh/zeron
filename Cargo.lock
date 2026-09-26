@@ -12123,7 +12123,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-client"
-version = "0.2.93"
+version = "0.2.94"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12228,7 +12228,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-markdown"
-version = "0.2.93"
+version = "0.2.94"
 dependencies = [
  "pulldown-cmark",
 ]
@@ -12253,7 +12253,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-mobile"
-version = "0.2.93"
+version = "0.2.94"
 dependencies = [
  "serde",
  "serde_json",
@@ -12384,7 +12384,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-text"
-version = "0.2.93"
+version = "0.2.94"
 dependencies = [
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
