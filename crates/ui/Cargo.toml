@@ -98,6 +98,7 @@ foreign-types = "0.5"
 block = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+raw-window-handle = "0.6"
 ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "global_shortcuts", "screenshot"] }
 atspi = { version = "0.30.0", features = ["zbus"] }
 async-io = "2"

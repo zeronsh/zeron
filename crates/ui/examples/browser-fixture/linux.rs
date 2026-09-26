@@ -35,23 +35,7 @@ pub(super) fn dispatch(
             _ => None,
         };
         if let Some((position, action)) = pointer {
-            let id = if let Ok(id) = std::env::var("ZERON_BROWSER_CAPTURE_WINDOW") {
-                id
-            } else {
-                let ids = std::process::Command::new("xdotool")
-                    .args([
-                        "search",
-                        "--onlyvisible",
-                        "--pid",
-                        &std::process::id().to_string(),
-                    ])
-                    .output()?;
-                String::from_utf8(ids.stdout)?
-                    .lines()
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("fixture window not found"))?
-                    .to_owned()
-            };
+            let id = linux_capture::window_id()?.to_string();
             let scale = AnyWindowHandle::from(window).update(cx, |_, w, _| w.scale_factor())?;
             let mut cmd = std::process::Command::new("xdotool");
             cmd.args([

@@ -211,13 +211,15 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libx11-dev libxcb1-dev libx11-xcb-dev libfontconfig1-dev \
             libfreetype-dev libasound2-dev libvulkan-dev pkg-config cmake \
-            libwebkit2gtk-4.1-dev libjson-glib-dev xvfb xdotool openbox \
+            libwebkit2gtk-4.1-dev libjson-glib-dev xvfb xauth xdotool x11-utils openbox \
             weston ffmpeg imagemagick fonts-noto-cjk
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: Build browser fixture
         run: cargo build --release --locked -p zeron-ui --example browser-fixture --features browser-fixture
+      - name: X11 capture readiness regressions
+        run: xvfb-run -a cargo test --release --locked -p zeron-ui --example browser-fixture --features browser-fixture linux_capture::tests -- --include-ignored
       - name: X11 and Wayland browser regressions
         timeout-minutes: 5
         env:
