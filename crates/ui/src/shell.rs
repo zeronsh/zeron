@@ -4041,10 +4041,6 @@ impl Shell {
         self.settings.transcript_width = current.transcript_width;
         self.settings.skill_completion_by_harness = current.skill_completion_by_harness;
         self.settings.skills_in_slash_menu = current.skills_in_slash_menu;
-        // The composer owns the drafts map; this full-store publish would
-        // otherwise write this Shell's boot-time copy back over every draft
-        // typed since. (The real fix — per-owner updates instead of one
-        // `replace` — is a separate change across all settings writers.)
         self.settings.drafts = current.drafts;
     }
 
