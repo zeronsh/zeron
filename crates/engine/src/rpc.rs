@@ -1326,6 +1326,8 @@ fn forwardable(method: &str) -> bool {
             | methods::FETCH_ALL
             | methods::SWITCH_REF
             | methods::LIST_FOLDERS
+            | methods::GET_WORKTREE_SETTINGS
+            | methods::SET_WORKTREE_SETTINGS
             | methods::LIST_DRIVES
             | methods::SEARCH_FILES
             | methods::LIST_WORKSPACE_DIRECTORY
@@ -2809,6 +2811,16 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "branch": branch }))
+            }
+            methods::GET_WORKTREE_SETTINGS => RpcReply::value(&self.repos.worktree_settings()),
+            methods::SET_WORKTREE_SETTINGS => {
+                let settings: zeron_proto::WorktreeSettings = parse_params(params)?;
+                let status = self
+                    .repos
+                    .set_worktree_settings(settings)
+                    .await
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                RpcReply::value(&status)
             }
             methods::LIST_FOLDERS => {
                 let p: ListFoldersParams = parse_params(params)?;

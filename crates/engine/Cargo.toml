@@ -37,6 +37,7 @@ reqwest.workspace = true
 ignore.workspace = true
 nucleo-matcher.workspace = true
 
+same-file = "1"
 tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]

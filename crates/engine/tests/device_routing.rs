@@ -796,6 +796,40 @@ async fn target_device_id_routes_over_the_relay() {
         "remote folder listing must come from B's filesystem: {names:?}"
     );
 
+    // Worktree preferences and their filesystem validation belong to B.
+    let a_settings = core_a.repos.worktree_settings();
+    let custom_worktrees = dirs.path().join("b-custom-worktrees");
+    let saved = client
+        .call(
+            methods::SET_WORKTREE_SETTINGS,
+            serde_json::json!({
+                "targetDeviceId": "device-b",
+                "useCustomDirectory": true,
+                "customDirectory": custom_worktrees,
+            }),
+        )
+        .await
+        .expect("save worktree location on B");
+    let remote_settings = client
+        .call(
+            methods::GET_WORKTREE_SETTINGS,
+            serde_json::json!({
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("read worktree location on B");
+    assert_eq!(saved, remote_settings);
+    assert_eq!(
+        core_a.repos.worktree_settings(),
+        a_settings,
+        "A's preferences are unchanged"
+    );
+    assert_eq!(
+        std::path::PathBuf::from(saved["effectiveDirectory"].as_str().unwrap()),
+        custom_worktrees.canonicalize().unwrap()
+    );
+
     // Streaming proxy: WatchDocMessages against B's doc from A's IPC surface.
     let mut stream = client
         .subscribe_scoped(
@@ -1036,6 +1070,7 @@ async fn target_device_id_routes_over_the_relay() {
             .as_str()
             .expect("remote setup worktree"),
     );
+    assert!(setup_worktree.starts_with(custom_worktrees.canonicalize().unwrap()));
     tokio::time::sleep(Duration::from_millis(250)).await;
     let mut setup_stream = client
         .subscribe(

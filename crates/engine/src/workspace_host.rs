@@ -793,9 +793,10 @@ impl WorkspaceHost {
         }
         let root = linked_worktree_root(std::path::Path::new(path));
         if let Some(root) = root.as_deref()
-            && let Some(space) = spaces
-                .iter()
-                .find(|s| s.device_id == *device_id && s.path == root)
+            && let Some(space) = spaces.iter().find(|s| {
+                s.device_id == *device_id
+                    && (s.path == root || same_file::is_same_file(&s.path, root).unwrap_or(false))
+            })
         {
             return Ok(space.id.clone());
         }

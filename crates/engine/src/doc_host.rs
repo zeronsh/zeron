@@ -5434,9 +5434,9 @@ impl DocHost {
         if let Some(ws) = self.workspace()
             && let Ok(Some(chat)) = ws.chat(chat_id)
             && let Some(cwd) = chat.cwd
-            && cwd != spec.repo_path
-            && crate::workspace_host::linked_worktree_root(std::path::Path::new(&cwd)).as_deref()
-                == Some(spec.repo_path.as_str())
+            && crate::workspace_host::linked_worktree_root(std::path::Path::new(&cwd)).is_some_and(
+                |root| same_file::is_same_file(&root, &spec.repo_path).unwrap_or(false),
+            )
         {
             tracing::info!(chat = %chat_id, cwd = %cwd, "worktree spec: reusing the chat's existing worktree");
             return Ok((cwd, None));

@@ -27,6 +27,7 @@ pub mod notifications;
 pub mod shortcuts;
 pub mod thread_naming;
 pub mod widgets;
+mod worktrees;
 
 /// Sidebar drag-resize bounds (px).
 pub const SIDEBAR_MIN: f32 = 224.0;

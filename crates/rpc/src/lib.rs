@@ -153,6 +153,8 @@ pub mod methods {
     pub const FETCH_ALL: &str = "FetchAll";
     pub const SWITCH_REF: &str = "SwitchRef";
     pub const LIST_FOLDERS: &str = "ListFolders";
+    pub const GET_WORKTREE_SETTINGS: &str = "GetWorktreeSettings";
+    pub const SET_WORKTREE_SETTINGS: &str = "SetWorktreeSettings";
     /// The device's browse roots: home plus mounted drives/volumes.
     pub const LIST_DRIVES: &str = "ListDrives";
     /// Fuzzy relative-path search rooted in a known chat or space checkout.
