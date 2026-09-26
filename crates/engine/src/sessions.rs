@@ -131,6 +131,10 @@ struct RunHandle {
 struct RoutedSteer {
     prompt: String,
     message_id: String,
+    /// The delivered text carried the fork's copied history: its delivery
+    /// is recorded only when the runtime confirms consuming it (`Steered`).
+    /// An orphan re-dispatches the bare prompt, still owing the history.
+    fork_history: bool,
 }
 
 struct Inner {
@@ -441,6 +445,7 @@ impl SessionsEngine {
                     pending.push_back(RoutedSteer {
                         prompt: request.prompt.clone(),
                         message_id: user_id.clone(),
+                        fork_history: bootstrap.is_some(),
                     });
                     permit.send(message);
                     true
@@ -455,7 +460,7 @@ impl SessionsEngine {
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
                 if self.is_live(chat_id, &run_id) {
                     if bootstrap.is_some() {
-                        self.note_fork_history_sent(chat_id, &history_sent);
+                        history_sent.store(true, std::sync::atomic::Ordering::Release);
                     }
                     // Working BEFORE the lastMessageAt bump: both ride the
                     // workspace doc from this one peer, so causal order makes it
@@ -595,7 +600,8 @@ impl SessionsEngine {
 
     /// A warm send's prompt with the fork's copied history in front, when the
     /// live provider session never received it (the fork's first turns were
-    /// native commands). `None` = send the prompt as is.
+    /// native commands) and no earlier send in this runtime carries it
+    /// (`sent`). `None` = send the prompt as is.
     fn warm_fork_history(
         &self,
         chat_id: &str,
@@ -619,19 +625,6 @@ impl SessionsEngine {
             None,
             ProviderSession::Continued(session.as_deref()),
         )
-    }
-
-    /// A warm send carried the fork history: remember it for this runtime and,
-    /// once its provider session is known, for that session.
-    fn note_fork_history_sent(&self, chat_id: &str, sent: &std::sync::atomic::AtomicBool) {
-        sent.store(true, std::sync::atomic::Ordering::Release);
-        let session = lock(&self.inner.harness_sessions)
-            .get(chat_id)
-            .map(|known| known.session_id.clone())
-            .filter(|id| !id.is_empty());
-        if let (Some(session), Ok(handle)) = (session, self.doc_handle(chat_id)) {
-            let _ = handle.doc().set_fork_history_session(&session);
-        }
     }
 
     /// Push a steer prompt into the live run's mailbox. `NotSteerable` when no live
@@ -682,6 +675,7 @@ impl SessionsEngine {
             pending.push_back(RoutedSteer {
                 prompt: prompt.to_string(),
                 message_id: user_id.clone(),
+                fork_history: bootstrap.is_some(),
             });
             permit.send(message);
         }
@@ -694,7 +688,7 @@ impl SessionsEngine {
         }
         if self.is_live(chat_id, &run_id) {
             if bootstrap.is_some() {
-                self.note_fork_history_sent(chat_id, &history_sent);
+                history_sent.store(true, std::sync::atomic::Ordering::Release);
             }
             self.set_status(chat_id, SessionStatus::Working, false);
             self.inner.note_message(chat_id, prompt);
@@ -1286,13 +1280,10 @@ enum ProviderSession<'a> {
     Continued(Option<&'a str>),
 }
 
-/// A run's provider session now holds the fork history it carried.
-fn note_fork_history_session(doc: &SessionDoc, state: &RunResumeState, session_id: &str) {
-    if !session_id.is_empty()
-        && state
-            .fork_history_sent
-            .load(std::sync::atomic::Ordering::Acquire)
-    {
+/// A run's provider session now holds the fork history its own prompt
+/// carried (steers record theirs when confirmed, not here).
+fn note_fork_history_session(doc: &SessionDoc, carried: bool, session_id: &str) {
+    if carried && !session_id.is_empty() {
         let _ = doc.set_fork_history_session(session_id);
     }
 }
@@ -1755,6 +1746,7 @@ async fn drive_run(
     });
     // A side chat owns a fresh provider session. Bootstrap it from the frozen
     // conversation, never resume (and mutate) the parent's provider session.
+    let mut carried_history = false;
     let provider = match request.resume.as_deref() {
         None => ProviderSession::Fresh,
         resumed => ProviderSession::Continued(resumed),
@@ -1768,6 +1760,7 @@ async fn drive_run(
         provider,
     ) {
         request.prompt = prompt;
+        carried_history = true;
         resume_state
             .fork_history_sent
             .store(true, std::sync::atomic::Ordering::Release);
@@ -2508,11 +2501,19 @@ async fn drive_run(
             inner.set_status(&chat_id, SessionStatus::Working, true);
             // The boundary confirms delivery of the oldest accepted steer —
             // retire its at-least-once ledger entry.
-            if let Some(h) = lock(&inner.runs)
+            let confirmed = lock(&inner.runs)
                 .get(&chat_id)
                 .filter(|h| h.run_id == run_id)
+                .and_then(|h| lock(&h.routed_steers).pop_front());
+            // Consumed: a steer carrying the fork history delivered it to
+            // this runtime's provider session.
+            if confirmed.is_some_and(|steer| steer.fork_history)
+                && let Some(session) = lock(&inner.harness_sessions)
+                    .get(&chat_id)
+                    .map(|known| known.session_id.clone())
+                    .filter(|id| !id.is_empty())
             {
-                lock(&h.routed_steers).pop_front();
+                let _ = doc.set_fork_history_session(&session);
             }
             continue;
         }
@@ -2525,14 +2526,14 @@ async fn drive_run(
                 // The event's own cwd (where the harness actually created the
                 // session) scopes the stored id, not the request's.
                 inner.remember_harness_session(&chat_id, session_id, cwd);
-                note_fork_history_session(&doc, &resume_state, session_id);
+                note_fork_history_session(&doc, carried_history, session_id);
             }
             AgentEvent::Done {
                 session_id: Some(session_id),
                 ..
             } => {
                 inner.remember_harness_session(&chat_id, session_id, &run_cwd);
-                note_fork_history_session(&doc, &resume_state, session_id);
+                note_fork_history_session(&doc, carried_history, session_id);
             }
             AgentEvent::InputRequested { .. } => {
                 // Known-id guaranteed: the unknown-id twin was dropped above,

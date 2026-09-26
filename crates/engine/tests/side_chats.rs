@@ -688,3 +688,183 @@ async fn warm_side_chat_sends_owed_fork_history_once() {
     );
     core.shutdown().await;
 }
+
+/// A runtime that answers its first turn, then exits once released without
+/// reading its mailbox: sends routed into it are orphaned and re-dispatched.
+struct Dropping {
+    runs: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    release: Arc<tokio::sync::Notify>,
+}
+#[async_trait]
+impl Harness for Dropping {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Dropping"
+    }
+    fn supports_steering(&self) -> bool {
+        true
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let first = {
+            let mut runs = self.runs.lock().unwrap();
+            runs.push((request.prompt.clone(), request.resume.clone()));
+            runs.len() == 1
+        };
+        let events = vec![
+            Ok(AgentEvent::SessionStarted {
+                harness: HarnessId::Mock,
+                model: "mock-1".into(),
+                tools: vec![],
+                cwd: request.cwd.clone(),
+                session_id: "drop-session".into(),
+                assistant_message_id: uuid::Uuid::new_v4().to_string(),
+            }),
+            Ok(AgentEvent::TextDelta {
+                text: "answer".into(),
+            }),
+            Ok(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: Some("drop-session".into()),
+            }),
+        ];
+        let release = self.release.clone();
+        // The first runtime lingers (mailbox unread) until released, then
+        // ends; later ones end after their turn.
+        let tail = futures::stream::once(async move {
+            let _mailbox = controls.steering;
+            if first {
+                release.notified().await;
+            }
+        })
+        .filter_map(|_| async { None });
+        Ok(futures::stream::iter(events).chain(tail).boxed())
+    }
+}
+
+/// A steer carrying the owed fork history counts as delivered only once the
+/// runtime consumes it: orphaned in a dying runtime, its re-dispatch into
+/// the same provider session still carries the history.
+#[tokio::test]
+async fn orphaned_history_steer_still_owes_the_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let runs = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Dropping {
+        runs: runs.clone(),
+        release: release.clone(),
+    }));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    core.workspace
+        .create_chat(
+            "main",
+            None,
+            Some(&core.device_id),
+            None,
+            Some("/tmp".into()),
+        )
+        .unwrap();
+    let source = core.doc_host.open("main").unwrap();
+    for (id, role, text) in [
+        ("u1", MessageRole::User, "Remember PINEAPPLE"),
+        ("a1", MessageRole::Assistant, "I remember PINEAPPLE"),
+    ] {
+        source
+            .doc()
+            .push_message(&message(id, role, text, MessageStatus::Complete))
+            .unwrap();
+    }
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            methods::FORK_SIDE_CHAT,
+            serde_json::json!({ "chatId": "fork", "sourceChatId": "main" }),
+        )
+        .await
+        .unwrap();
+    let request = |prompt: &str| RunRequest {
+        mcp: None,
+        prompt: prompt.into(),
+        harness: Some(HarnessId::Mock),
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        cwd: "/tmp".into(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+        auto_approve: true,
+        resume: None,
+        attachments: vec![],
+        worktree: None,
+    };
+    core.sessions
+        .dispatch(
+            "fork",
+            HarnessId::Mock,
+            request("/review"),
+            Some("f1".into()),
+        )
+        .await
+        .unwrap();
+    let idle = || {
+        core.sessions
+            .session_status("fork")
+            .is_some_and(|s| s.status == zeron_proto::SessionStatus::Idle)
+    };
+    for _ in 0..500 {
+        if idle() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(idle(), "the /review turn ends; its runtime lingers");
+    // Routed into the live runtime's mailbox, never read.
+    core.sessions
+        .dispatch(
+            "fork",
+            HarnessId::Mock,
+            request("What should you remember?"),
+            Some("f2".into()),
+        )
+        .await
+        .unwrap();
+    let doc = core.doc_host.open("fork").unwrap();
+    assert_eq!(doc.doc().fork_history_session(), None, "not consumed yet");
+    assert_eq!(runs.lock().unwrap().len(), 1);
+    release.notify_one();
+    for _ in 0..500 {
+        if runs.lock().unwrap().len() == 2 && idle() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let (prompt, resume) = runs.lock().unwrap()[1].clone();
+    assert_eq!(
+        resume.as_deref(),
+        Some("drop-session"),
+        "same provider session"
+    );
+    assert!(prompt.contains("PINEAPPLE"), "{prompt}");
+    assert!(prompt.ends_with("What should you remember?"), "{prompt}");
+    assert_eq!(
+        doc.doc().fork_history_session().as_deref(),
+        Some("drop-session")
+    );
+    core.shutdown().await;
+}
