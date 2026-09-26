@@ -11,6 +11,7 @@ struct SessionChrome: Equatable {
         case notDelivered
         case uploading(progress: Double)
         case failed(String)
+        case editing
     }
 
     struct Question: Equatable {
@@ -59,6 +60,10 @@ protocol SessionSource: AnyObject {
     func answer(requestId: String, answers: [(questionId: String, labels: [String])])
     func queueAction(_ id: String, _ action: QueueAction)
     func retryDelivery()
+    /// Lease a queued message for editing; returns its text when acquired.
+    func beginEdit(_ id: String) async -> String?
+    /// Commit (text) or cancel (nil) the active edit.
+    func finishEdit(text: String?) async
     /// Menu for a composer chip (model, effort, branch…), or nil.
     func chipMenu(_ id: String) -> UIMenu?
     func loadImage(_ reference: String, into view: UIImageView)
@@ -183,6 +188,8 @@ final class FixtureSessionSource: SessionSource {
     }
 
     func retryDelivery() {}
+    func beginEdit(_ id: String) async -> String? { chrome.queue.first { $0.id == id }?.text }
+    func finishEdit(text: String?) async {}
     func chipMenu(_ id: String) -> UIMenu? {
         switch id {
         case "model":

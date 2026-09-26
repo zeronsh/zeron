@@ -50,8 +50,13 @@ final class SessionViewController: UIViewController {
             return AttachmentPicker.menu(host: self, limit: 8 - self.composer.images.count) { [weak self] in self?.composer.addImages($0) }
         }
         composer.onSend = { [weak self] text, images, mode in
-            self?.source.send(text: text, images: images, mode: mode)
-            self?.list.scrollToBottom(animated: true)
+            guard let self else { return }
+            if self.editingQueueId != nil {
+                self.endEdit(commit: text)
+                return
+            }
+            self.source.send(text: text, images: images, mode: mode)
+            self.list.scrollToBottom(animated: true)
         }
         composer.onStop = { [weak self] in self?.source.stop() }
         composer.text = Drafts.load(chatId)
@@ -61,9 +66,14 @@ final class SessionViewController: UIViewController {
             self.source.answer(requestId: id, answers: answers)
         }
         questions.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
-        queue.onAction = { [weak self] id, action in self?.source.queueAction(id, action) }
+        queue.onAction = { [weak self] id, action in
+            guard let self else { return }
+            if action == .edit { self.beginEdit(id) } else { self.source.queueAction(id, action) }
+        }
         pill.onTap = { [weak self] in
-            if case .notDelivered = self?.shown.banner { self?.source.retryDelivery() }
+            guard let self else { return }
+            if self.editingQueueId != nil { self.endEdit(commit: nil) }
+            if case .notDelivered = self.shown.banner { self.source.retryDelivery() }
         }
 
         bottom.axis = .vertical
@@ -132,6 +142,37 @@ final class SessionViewController: UIViewController {
         }
     }
 
+    // MARK: Queue editing (host lease)
+
+    private var editingQueueId: String?
+    private var stashedDraft = ""
+
+    private func beginEdit(_ id: String) {
+        Task { @MainActor in
+            guard let text = await source.beginEdit(id) else {
+                let alert = UIAlertController(title: "Can't edit right now", message: "Another device is editing this message, or it was just sent.", preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "OK", style: .default))
+                present(alert, animated: true)
+                return
+            }
+            editingQueueId = id
+            stashedDraft = composer.text
+            composer.text = text
+            composer.placeholder = "Edit queued message"
+            pill.banner = .editing
+            pill.superview?.isHidden = false
+            composer.becomeFirstResponder()
+        }
+    }
+
+    private func endEdit(commit text: String?) {
+        editingQueueId = nil
+        composer.text = stashedDraft
+        composer.placeholder = shown.placeholder
+        Task { await source.finishEdit(text: text) }
+        render(animated: true)
+    }
+
     private func applyFrame() {
         list.apply(engine.frame())
     }
@@ -163,8 +204,9 @@ final class SessionViewController: UIViewController {
             if let q = c.questions { self.questions.configure(q.items) }
             self.queue.isHidden = c.queue.isEmpty || asking
             self.queue.configure(c.queue)
-            self.pill.superview?.isHidden = c.banner == .none
-            self.pill.banner = c.banner
+            let editing = self.editingQueueId != nil
+            self.pill.superview?.isHidden = c.banner == .none && !editing
+            self.pill.banner = editing ? .editing : c.banner
             self.bottom.layoutIfNeeded()
             self.view.layoutIfNeeded()
         }
@@ -300,6 +342,9 @@ final class StatusPill: UIControl {
         case let .failed(message):
             grid.style = .errored
             label.text = message
+        case .editing:
+            grid.style = .idle
+            label.text = "Editing queued message · Tap to cancel"
         }
     }
 

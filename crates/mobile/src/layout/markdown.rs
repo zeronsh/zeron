@@ -621,7 +621,9 @@ fn place_table(t: &PTable, px: Px, x: f32, y: f32, width: f32, out: Option<&mut 
     };
     let radius = px.v(10.0);
     if let Some(first) = row_heights.first() {
+        // Rounded top corners only: a rounded fill plus a square lower half.
         out.fill(ox, oy, content_w, *first, radius, ColorRole::TableHeaderBackground);
+        out.fill(ox, oy + first / 2.0, content_w, first / 2.0, 0.0, ColorRole::TableHeaderBackground);
     }
     out.hairline(ox, oy, if scrolls { content_w } else { table_w }, h, radius, ColorRole::TableBorder);
     let mut ry = oy;

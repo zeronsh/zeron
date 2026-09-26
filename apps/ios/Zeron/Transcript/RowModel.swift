@@ -42,8 +42,17 @@ final class RowModel: @unchecked Sendable {
     }
 
     /// Paint one layer (0 = row canvas, n = scroller n-1) in its coordinates.
-    func draw(layer: Int, in ctx: CGContext, traits: UITraitCollection, hairline: CGFloat) {
+    /// Which runs to paint: `veilFrom` splits a streaming row into settled
+    /// text (start < veilFrom) and freshly appended text (the fading overlay).
+    enum Pass {
+        case all
+        case settled(veilFrom: UInt32)
+        case fresh(veilFrom: UInt32)
+    }
+
+    func draw(layer: Int, in ctx: CGContext, traits: UITraitCollection, hairline: CGFloat, pass: Pass = .all) {
         traits.performAsCurrent {
+            if case .fresh = pass {} else {
             for i in boxesByLayer[layer] {
                 let b = display.boxes[i]
                 let rect = CGRect(x: CGFloat(b.x), y: CGFloat(b.y), width: CGFloat(b.w), height: CGFloat(b.h))
@@ -63,10 +72,34 @@ final class RowModel: @unchecked Sendable {
                     ctx.strokePath()
                 }
             }
+            }
             ctx.textMatrix = .identity
             for i in runsByLayer[layer] {
                 guard let line = lines[i] else { continue }
                 let run = display.runs[i]
+                // Split a run straddling the veil boundary at the glyph edge.
+                var clip: CGRect?
+                switch pass {
+                case .all:
+                    break
+                case let .settled(from):
+                    if run.start >= from { continue }
+                    if run.start + run.len > from {
+                        let dx = CTLineGetOffsetForStringIndex(line, CFIndex(from - run.start), nil)
+                        clip = CGRect(x: CGFloat(run.x), y: -10_000, width: dx, height: 20_000)
+                    }
+                case let .fresh(from):
+                    if run.start + run.len <= from { continue }
+                    if run.start < from {
+                        let dx = CTLineGetOffsetForStringIndex(line, CFIndex(from - run.start), nil)
+                        clip = CGRect(x: CGFloat(run.x) + dx, y: -10_000, width: 10_000, height: 20_000)
+                    }
+                }
+                if let clip {
+                    ctx.saveGState()
+                    ctx.clip(to: clip)
+                }
+                defer { if clip != nil { ctx.restoreGState() } }
                 let color = Palette.color(run.color).cgColor
                 ctx.saveGState()
                 ctx.setFillColor(color)

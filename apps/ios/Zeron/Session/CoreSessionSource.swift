@@ -110,8 +110,33 @@ final class CoreSessionSource: SessionSource {
         case .remove: Task { _ = try? await handle.removeQueued(id: id) }
         case .moveUp: _ = try? handle.moveQueuedBy(id: id, delta: -1)
         case .moveDown: _ = try? handle.moveQueuedBy(id: id, delta: 1)
-        case .edit: break
+        case .edit: break // Driven by the view: beginEdit / finishEdit.
         }
+    }
+
+    private var lease: QueueEditLease?
+    private var renewal: Task<Void, Never>?
+
+    func beginEdit(_ id: String) async -> String? {
+        let start = await handle.beginQueuedEdit(id: id, instanceId: UUID().uuidString)
+        guard case let .acquired(lease) = start else { return nil }
+        self.lease = lease
+        renewal?.cancel()
+        renewal = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(20))
+                guard let self, let lease = self.lease, !Task.isCancelled else { return }
+                if await !self.handle.renewQueuedEdit(lease: lease) { return }
+            }
+        }
+        return handle.composer().queue.first { $0.id == id }?.visibleText
+    }
+
+    func finishEdit(text: String?) async {
+        renewal?.cancel()
+        guard let lease else { return }
+        self.lease = nil
+        _ = await handle.finishQueuedEdit(lease: lease, action: text == nil ? .cancel : .commit, text: text)
     }
 
     func retryDelivery() {

@@ -5,6 +5,7 @@ import UIKit
 final class RowCanvas: UIView {
     var model: RowModel? { didSet { setNeedsDisplay() } }
     var layerIndex = 0
+    var pass: RowModel.Pass = .all
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -19,7 +20,7 @@ final class RowCanvas: UIView {
 
     override func draw(_ rect: CGRect) {
         guard let model, let ctx = UIGraphicsGetCurrentContext() else { return }
-        model.draw(layer: layerIndex, in: ctx, traits: traitCollection, hairline: 1 / max(1, traitCollection.displayScale))
+        model.draw(layer: layerIndex, in: ctx, traits: traitCollection, hairline: 1 / max(1, traitCollection.displayScale), pass: pass)
     }
 
     override func traitCollectionDidChange(_ previous: UITraitCollection?) {
@@ -38,6 +39,8 @@ protocol RowViewDelegate: AnyObject {
 final class RowView: UIView {
     private(set) var model: RowModel?
     private let canvas = RowCanvas()
+    /// Freshly streamed text, fading in over the settled canvas (the veil).
+    private let fresh = RowCanvas()
     private var scrollers: [UIScrollView] = []
     private var widgetViews: [UIView] = []
     weak var delegate: RowViewDelegate?
@@ -48,16 +51,43 @@ final class RowView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         addSubview(canvas)
+        addSubview(fresh)
+        fresh.isHidden = true
         clipsToBounds = false
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     func configure(_ model: RowModel, kind: RowKind) {
+        // Same row grew (streaming append): veil the new text in.
+        let previous = self.model?.display
+        let grew = previous.map { $0.key == model.display.key && model.display.text.hasPrefix($0.text) && model.display.text.count > $0.text.count } ?? false
+        let veilFrom = grew ? UInt32((previous?.text ?? "").utf16.count) : 0
         self.model = model
         self.kind = kind
         let d = model.display
-        canvas.frame = CGRect(x: 0, y: 0, width: CGFloat(d.width), height: CGFloat(d.height))
+        let bounds = CGRect(x: 0, y: 0, width: CGFloat(d.width), height: CGFloat(d.height))
+        canvas.frame = bounds
+        if grew, !UIAccessibility.isReduceMotionEnabled {
+            canvas.pass = .settled(veilFrom: veilFrom)
+            fresh.frame = bounds
+            fresh.pass = .fresh(veilFrom: veilFrom)
+            fresh.model = model
+            fresh.isHidden = false
+            fresh.layer.removeAllAnimations()
+            fresh.alpha = 0
+            UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                self.fresh.alpha = 1
+            } completion: { [weak self] done in
+                guard done, let self, self.model === model else { return }
+                self.canvas.pass = .all
+                self.canvas.setNeedsDisplay()
+                self.fresh.isHidden = true
+            }
+        } else {
+            canvas.pass = .all
+            fresh.isHidden = true
+        }
         canvas.model = model
         // Scrollers: reuse views in order.
         while scrollers.count < d.scrollers.count {
