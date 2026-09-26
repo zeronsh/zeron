@@ -43,6 +43,15 @@ final class RowView: UIView {
     private let fresh = RowCanvas()
     private var scrollers: [UIScrollView] = []
     private var widgetViews: [UIView] = []
+    private var textElement: UIAccessibilityElement?
+
+    override var accessibilityElements: [Any]? {
+        get {
+            textElement?.accessibilityFrameInContainerSpace = bounds
+            return (textElement.map { [$0] } ?? []) + widgetViews.filter { $0 is UIControl }
+        }
+        set {}
+    }
     weak var delegate: RowViewDelegate?
     var key: UInt64 { model?.display.key ?? 0 }
     var version: UInt64 { model?.display.version ?? 0 }
@@ -89,6 +98,21 @@ final class RowView: UIView {
             fresh.isHidden = true
         }
         canvas.model = model
+        // Painted text is invisible to accessibility: one text element per
+        // row, followed by the row's native widgets (copy, disclosure…).
+        let element = UIAccessibilityElement(accessibilityContainer: self)
+        element.accessibilityLabel = kind == .user ? "You: \(d.copyText)" : (d.copyText.isEmpty ? d.text : d.copyText)
+        element.accessibilityIdentifier = switch kind {
+        case .user: "row-user"
+        case .markdown: "row-markdown"
+        case .tools: "row-tools"
+        case .chip: "row-chip"
+        case .image: "row-image"
+        case .working: "row-working"
+        }
+        element.accessibilityTraits = .staticText
+        element.accessibilityFrameInContainerSpace = bounds
+        textElement = element
         // Scrollers: reuse views in order.
         while scrollers.count < d.scrollers.count {
             let s = UIScrollView()

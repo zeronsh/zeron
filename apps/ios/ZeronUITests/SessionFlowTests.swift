@@ -7,9 +7,9 @@ final class SessionFlowTests: XCTestCase {
         continueAfterFailure = false
     }
 
-    private func launch(_ args: [String] = []) -> XCUIApplication {
+    private func launch(_ args: [String] = [], fast: Bool = true) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-demo", "-fast"] + args
+        app.launchArguments = ["-demo"] + (fast ? ["-fast"] : []) + args
         app.launch()
         return app
     }
@@ -39,6 +39,8 @@ final class SessionFlowTests: XCTestCase {
         input.typeText("Summarize the launch post in three bullets.")
         app.buttons["composer-send"].tap()
         // Optimistic echo appears immediately, then the host streams a reply.
+        let echo = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'You: Summarize the launch post'")).firstMatch
+        XCTAssertTrue(echo.waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons["Stop response"].waitForExistence(timeout: 5))
         snapshot(app, "streaming")
         XCTAssertTrue(app.buttons["Send message"].waitForExistence(timeout: 30))
@@ -60,7 +62,7 @@ final class SessionFlowTests: XCTestCase {
     }
 
     func testQueueWhileWorking() {
-        let app = launch(["-route", "chat:chat-blog"])
+        let app = launch(["-route", "chat:chat-blog", "-longreply"], fast: false)
         let input = app.textViews["composer-input"]
         XCTAssertTrue(input.waitForExistence(timeout: 10))
         input.tap()
