@@ -50,7 +50,9 @@ final class RowView: UIView {
     override var accessibilityElements: [Any]? {
         get {
             textElement?.accessibilityFrameInContainerSpace = bounds
-            return (textElement.map { [$0] } ?? []) + widgetViews.filter { $0 is UIControl }
+            // Controls first: accessibility hit-testing takes the first match,
+            // and the row's text element spans the whole row.
+            return widgetViews.filter { $0 is UIControl || $0.gestureRecognizers?.isEmpty == false } + (textElement.map { [$0] } ?? [])
         }
         set {}
     }

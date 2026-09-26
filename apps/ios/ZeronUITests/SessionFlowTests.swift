@@ -156,4 +156,17 @@ final class SessionFlowTests: XCTestCase {
         use.tap()
         XCTAssertTrue(add.waitForExistence(timeout: 10), "sheet dismissed after creating")
     }
+
+    func testToolGroupExpandsAndShowsDetail() {
+        let app = launch(["-route", "chat:chat-veil"])
+        let expand = app.buttons["Expand"].firstMatch
+        XCTAssertTrue(expand.waitForExistence(timeout: 10))
+        expand.tap()
+        let detail = app.buttons.matching(NSPredicate(format: "label ENDSWITH ' details'")).firstMatch
+        XCTAssertTrue(detail.waitForExistence(timeout: 5))
+        snapshot(app, "tools-expanded")
+        detail.tap()
+        XCTAssertTrue(app.textViews.firstMatch.waitForExistence(timeout: 5))
+        snapshot(app, "tool-detail")
+    }
 }
