@@ -918,6 +918,38 @@ impl DocHost {
     /// Every background task rides the tracker, raced against the shutdown
     /// token: the loops' own exits stay authoritative in normal operation;
     /// the token is the retirement override.
+    pub(crate) fn spawn_agent_import(&self) {
+        let Some(workspace) = self.workspace().cloned() else {
+            return;
+        };
+        let store = self.inner.store.clone();
+        let device_id = self.inner.config.device_id.clone();
+        let cancel = self.inner.shutdown.clone();
+        let tasks = self.inner.tasks.clone();
+        tasks.spawn_blocking(move || {
+            let home = crate::repos::home_dir();
+            let root = |name: &str, fallback: std::path::PathBuf| {
+                std::env::var_os(name)
+                    .filter(|value| !value.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or(fallback)
+            };
+            let data = root("XDG_DATA_HOME", home.join(".local/share"));
+            if let Err(error) = crate::agent_import::import(
+                &root("CODEX_HOME", home.join(".codex")),
+                &root("CLAUDE_CONFIG_DIR", home.join(".claude")),
+                &home.join(".cursor"),
+                &root("OPENCODE_DB", data.join("opencode/opencode.db")),
+                &workspace,
+                &store,
+                &device_id,
+                &cancel,
+            ) {
+                tracing::warn!(%error, "Agent history import failed");
+            }
+        });
+    }
+
     fn spawn_worker(&self, fut: impl std::future::Future<Output = ()> + Send + 'static) {
         let cancel = self.inner.shutdown.clone();
         self.inner.tasks.spawn(async move {
