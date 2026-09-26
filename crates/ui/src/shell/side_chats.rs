@@ -329,10 +329,12 @@ impl Shell {
         };
         let transcript = tab.transcript.clone();
         let composer = tab.composer.clone();
-        // The main composer is driven by the shell's dock (settled, docked)
-        // and fed the column width; give the side chat's the same inputs so
-        // both take the same height branch.
-        let width = self.right_visible_width(cx);
+        // Share the main chat's docked width cap and responsive padding.
+        let width = composer_target_width(
+            self.right_visible_width(cx),
+            settings::transcript_width(cx),
+            true,
+        );
         composer.update(cx, |composer, cx| {
             composer.set_dock_frame(crate::composer_dock::DockFrame::settled(true), cx);
             composer.set_available_width(width, cx);
