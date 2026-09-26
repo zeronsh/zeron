@@ -196,8 +196,9 @@ fn bench_layout_passes() {
     }
     entries.clear();
     println!(
-        "rows={} cold={:?} resize={:?} display/row={:?} stream/update={:?}",
+        "rows={} heap={:.1}MB cold={:?} resize={:?} display/row={:?} stream/update={:?}",
         frame.row_count(),
+        frame.prepared_heap_bytes() as f64 / 1_048_576.0,
         cold,
         resize,
         display,

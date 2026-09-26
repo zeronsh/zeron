@@ -796,3 +796,28 @@ fn place_tools(t: &ToolGroup, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
     }
     h
 }
+
+/// Heap held by a row's prepared text (diagnostics; blocks recurse).
+pub(crate) fn content_heap_bytes(content: &Content) -> usize {
+    fn block(b: &PBlock) -> usize {
+        match b {
+            PBlock::Text(t) | PBlock::Heading(t) => t.p.heap_bytes(),
+            PBlock::Code(c) => c.body.p.heap_bytes() + c.source.len() + c.label.as_ref().map_or(0, |l| l.p.heap_bytes()),
+            PBlock::Quote(children) => children.iter().map(block).sum(),
+            PBlock::List { items, .. } => items
+                .iter()
+                .map(|i| i.children.iter().map(block).sum::<usize>() + i.marker.as_ref().map_or(0, |m| m.p.heap_bytes()))
+                .sum(),
+            PBlock::Table(t) => t.cells.iter().flatten().map(|c| c.p.heap_bytes()).sum(),
+            PBlock::Rule => 0,
+        }
+    }
+    match content {
+        Content::Block(b) => block(b),
+        Content::User(u) => u.text.p.heap_bytes() + u.more.p.heap_bytes(),
+        Content::Tools(t) => t.summary.p.heap_bytes() + t.lines.iter().map(|l| l.label.p.heap_bytes() + l.detail.p.heap_bytes()).sum::<usize>(),
+        Content::Chip(c) => c.text.p.heap_bytes(),
+        Content::Image { reference } => reference.len(),
+        Content::Working { .. } => 0,
+    }
+}

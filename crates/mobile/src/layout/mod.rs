@@ -164,6 +164,11 @@ impl LayoutFrame {
         self.styles.len() as u32
     }
 
+    /// Approximate heap held by prepared text across all rows (diagnostics).
+    pub fn prepared_heap_bytes(&self) -> u64 {
+        self.rows.iter().map(|r| rows::content_heap_bytes(&r.core.content) as u64).sum()
+    }
+
     /// Rows intersecting `[y0, y1)`.
     pub fn rows_in(&self, y0: f32, y1: f32) -> Vec<RowPlacement> {
         let start = self.rows.partition_point(|r| r.y + r.height <= y0);
