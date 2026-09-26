@@ -485,7 +485,7 @@ impl RowBuilder {
         let (size, lh) = TYPE.body;
         let style = ctx.typo.style(Family::Sans, Weight::Regular, false, size);
         let lh = ctx.typo.px(lh);
-        let text = prepare_plain(ctx, body.trim(), style, lh, ColorRole::Text, WhiteSpace::PreWrap);
+        let text = prepare_user_text(ctx, body.trim(), style, lh);
         let (msize, mlh) = TYPE.small;
         let mstyle = ctx.typo.style(Family::Sans, Weight::Medium, false, msize);
         let expanded = self.expanded.contains(&key);
@@ -569,6 +569,66 @@ impl RowBuilder {
             }),
             copy_text: String::new(),
         }
+    }
+}
+
+/// User prompt text with `[name](zeron-file:path)` mentions shown as atomic
+/// accent `@name` chips (the desktop's file-chip rendering).
+fn prepare_user_text(ctx: &mut Ctx, body: &str, style: super::style::Resolved, lh: f32) -> PText {
+    let links = zeron_proto::file_mentions::file_mention_links(body);
+    if links.is_empty() {
+        return prepare_plain(ctx, body, style, lh, ColorRole::Text, WhiteSpace::PreWrap);
+    }
+    let (size, _) = TYPE.body;
+    let chip = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
+    let mut text = String::with_capacity(body.len());
+    let mut spans = Vec::new();
+    let mut paints = Vec::new();
+    let mut at = 0;
+    let mut push = |text: &mut String, piece: &str, style: zeron_text::StyleId, atomic: bool, color: ColorRole| {
+        if piece.is_empty() {
+            return;
+        }
+        let start = text.len();
+        text.push_str(piece);
+        spans.push(zeron_text::Span {
+            range: start..text.len(),
+            style,
+            pad_start: 0.0,
+            pad_end: 0.0,
+            atomic,
+        });
+        paints.push(super::markdown::SpanPaint {
+            color,
+            decoration: super::display::Decoration::None,
+            link: None,
+            chip: false,
+        });
+    };
+    for link in &links {
+        push(&mut text, &body[at..link.range.start], style.id, false, ColorRole::Text);
+        push(&mut text, &format!("@{}", link.basename), chip.id, true, ColorRole::Link);
+        at = link.range.end;
+    }
+    push(&mut text, &body[at..], style.id, false, ColorRole::Text);
+    let p = zeron_text::prepare(
+        &ctx.typo.book,
+        ctx.cache,
+        &text,
+        &spans,
+        &zeron_text::PrepareOptions {
+            white_space: WhiteSpace::PreWrap,
+            overflow_wrap: zeron_text::OverflowWrap::Anywhere,
+            ..Default::default()
+        },
+    );
+    PText {
+        p,
+        lh,
+        base: super::style::baseline(lh, style),
+        paints,
+        links: Vec::new(),
+        chip: (0.0, 0.0),
     }
 }
 

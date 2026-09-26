@@ -201,3 +201,15 @@ fn bench_layout_passes() {
         total / updates as u32
     );
 }
+
+#[test]
+fn user_mentions_render_as_accent_chips() {
+    let mut w = worker(390.0);
+    let text = "Look at [mod.rs](zeron-file:crates/mobile/src/layout/mod.rs) please".to_owned();
+    w.input = debug_input(vec![DebugEntry { id: "u".into(), user: true, text, streaming: false }], false);
+    let frame = w.pass();
+    let d = frame.display(0).unwrap();
+    assert!(d.text.contains("@mod.rs"), "{}", d.text);
+    assert!(!d.text.contains("zeron-file:"));
+    assert!(d.runs.iter().any(|r| r.color == display::ColorRole::Link));
+}
