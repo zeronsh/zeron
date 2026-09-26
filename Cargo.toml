@@ -12,6 +12,8 @@ members = [
     "crates/update",
     "crates/ui",
     "crates/syntax",
+    "crates/markdown",
+    "crates/mobile",
     "crates/mcp",
     "apps/zeron",
 ]
@@ -33,6 +35,8 @@ zeron-rpc = { path = "crates/rpc" }
 zeron-update = { path = "crates/update" }
 zeron-ui = { path = "crates/ui" }
 zeron-syntax = { path = "crates/syntax" }
+zeron-markdown = { path = "crates/markdown" }
+zeron-mobile = { path = "crates/mobile" }
 zeron-theme = { path = "crates/theme" }
 zeron-mcp = { path = "crates/mcp" }
 
@@ -147,3 +151,20 @@ opt-level = 0
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# Mobile core (scripts/ios/build-core.sh). Always optimized — layout and sync
+# run on the phone's hot paths, so even Debug app builds link an -O core.
+[profile.mobile]
+inherits = "release"
+lto = false
+strip = false
+debug = "line-tables-only"
+incremental = true
+codegen-units = 16
+
+# TestFlight/App Store archives.
+[profile.mobile-dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

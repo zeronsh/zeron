@@ -1,0 +1,11 @@
+[package]
+name = "zeron-markdown"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Block-level markdown model + append-incremental reparse. Shared by the gpui
+# desktop transcript and the mobile layout core, so it stays UI-free.
+[dependencies]
+pulldown-cmark.workspace = true
