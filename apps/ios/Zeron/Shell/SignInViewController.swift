@@ -111,7 +111,7 @@ final class SignInViewController: UIViewController, ASWebAuthenticationPresentat
             self.signIn.configuration?.showsActivityIndicator = true
             Task { @MainActor in
                 do {
-                    try await self.app.signIn(code: code)
+                    try await self.app.signIn(code: code) { orgs in await self.pickOrg(orgs) }
                 } catch {
                     self.status.text = error.localizedDescription
                 }
@@ -122,6 +122,20 @@ final class SignInViewController: UIViewController, ASWebAuthenticationPresentat
         s.prefersEphemeralWebBrowserSession = false
         session = s
         s.start()
+    }
+
+    /// Several organizations: let the user pick (nil = cancelled).
+    @MainActor
+    private func pickOrg(_ orgs: [AuthOrg]) async -> AuthOrg? {
+        await withCheckedContinuation { cont in
+            let sheet = UIAlertController(title: "Choose an organization", message: nil, preferredStyle: .actionSheet)
+            for org in orgs {
+                sheet.addAction(UIAlertAction(title: org.name, style: .default) { _ in cont.resume(returning: org) })
+            }
+            sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in cont.resume(returning: nil) })
+            sheet.popoverPresentationController?.sourceView = signIn
+            present(sheet, animated: true)
+        }
     }
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {

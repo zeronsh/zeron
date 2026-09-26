@@ -53,11 +53,17 @@ final class ScrollPerformanceTests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-lab", "-turns", "300", "-bench"]
         app.launch()
+        // Don't poll while it runs: every XCUITest query snapshots the app's
+        // accessibility tree on its main thread (30–50ms) and would itself
+        // cause the hitches being measured. Sleep through, read once.
+        Thread.sleep(forTimeInterval: 32)
         let result = app.staticTexts["bench-result"]
         XCTAssertTrue(result.waitForExistence(timeout: 30))
-        let done = expectation(for: NSPredicate(format: "label CONTAINS 'streaming'"), evaluatedWith: result)
-        wait(for: [done], timeout: 180)
-        let json = result.label
+        var json = result.label
+        for _ in 0..<20 where !json.contains("streaming") {
+            Thread.sleep(forTimeInterval: 2)
+            json = result.label
+        }
         let attachment = XCTAttachment(string: json)
         attachment.name = "bench.json"
         attachment.lifetime = .keepAlways

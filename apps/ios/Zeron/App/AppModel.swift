@@ -135,11 +135,12 @@ final class AppModel {
     }
 
     /// WorkOS code → tokens → org (the first, or the only one) → client.
-    func signIn(code: String) async throws {
-        let edge = Endpoints.edgeURL.absoluteString
+    func signIn(code: String, chooseOrg: @escaping ([AuthOrg]) async -> AuthOrg?) async throws {
+        let edge = Self.edgeURL
         let exchange = try await authExchangeCode(edgeUrl: edge, code: code)
         let orgs = try await authListOrgs(edgeUrl: edge, accessToken: exchange.tokens.accessToken)
-        guard let org = orgs.first else { throw CoreError.Auth(message: "This account isn't in an organization yet.") }
+        guard !orgs.isEmpty else { throw CoreError.Auth(message: "This account isn't in an organization yet.") }
+        guard let org = orgs.count == 1 ? orgs[0] : await chooseOrg(orgs) else { return }
         let tokens = try await authRefresh(edgeUrl: edge, refreshToken: exchange.tokens.refreshToken, organizationId: org.organizationId)
         await MainActor.run {
             start(.workOs(userId: exchange.user.id, orgId: org.organizationId, tokens: tokens))
