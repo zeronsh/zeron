@@ -234,9 +234,12 @@ fn side_chat_to_diff_retains_right_focus_and_custom_bindings(cx: &mut TestAppCon
             shell.close_right_surface(RightSurface::SideChat(1), window, cx);
         })
     });
+    cx.update(|window, cx| window.draw(cx).clear());
+    // Closing returns to the most recently visited tab, then cycles in strip order.
+    assert_surface(&shell, cx, RightSurface::Diff(1));
     cx.simulate_keystrokes("alt-down");
     cx.update(|window, cx| window.draw(cx).clear());
-    assert_surface(&shell, cx, RightSurface::Subagent(2));
+    assert_surface(&shell, cx, RightSurface::Subagent(1));
 }
 
 #[gpui::test]
