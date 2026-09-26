@@ -84,6 +84,7 @@ impl ConnectivityTracker {
     }
 
     /// Anything still inside its grace window (the ticker keeps sampling).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn settling(&self) -> bool {
         !self.degraded_since.is_empty()
     }

@@ -25,6 +25,89 @@ use crate::lock;
 /// Refresh this long before `exp` (legacy AppConfig: 60s early margin).
 pub const EARLY_REFRESH_SECS: i64 = 60;
 
+/// Production endpoints (edge/wrangler.jsonc). Mobile always talks to prod —
+/// a stale override once broke sign-in in the worst ghost way.
+pub const PRODUCTION_EDGE_URL: &str = "https://edge.zeron.sh";
+pub const WORKOS_CLIENT_ID: &str = "client_01KWD0EAKZKD50YCQJNYSRE4BY";
+pub const WORKOS_API_BASE: &str = "https://api.workos.com";
+/// OAuth redirect: `zeron://callback?code=…&state=…`.
+pub const CALLBACK_SCHEME: &str = "zeron";
+
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                match u8::from_str_radix(&value[i + 1..i + 3], 16) {
+                    Ok(b) => {
+                        out.push(b);
+                        i += 3;
+                        continue;
+                    }
+                    Err(_) => out.push(b'%'),
+                }
+            }
+            b'+' => out.push(b' '),
+            b => out.push(b),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// WorkOS AuthKit authorization-code URL (the ASWebAuthenticationSession
+/// start URL). `state` is the caller's CSRF nonce.
+pub fn workos_authorize_url(state: &str) -> String {
+    format!(
+        "{WORKOS_API_BASE}/user_management/authorize?response_type=code&client_id={}&redirect_uri={}&provider=authkit&state={}",
+        percent_encode(WORKOS_CLIENT_ID),
+        percent_encode(&format!("{CALLBACK_SCHEME}://callback")),
+        percent_encode(state),
+    )
+}
+
+/// The `code` + `state` of an OAuth callback URL, or the provider's error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthCallback {
+    Code { code: String, state: Option<String> },
+    Error { error: String, description: Option<String> },
+}
+
+pub fn parse_auth_callback(url: &str) -> Option<AuthCallback> {
+    let query = url.split_once('?')?.1;
+    let query = query.split('#').next().unwrap_or(query);
+    let mut params = std::collections::HashMap::new();
+    for pair in query.split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        params.insert(percent_decode(key), percent_decode(value));
+    }
+    if let Some(error) = params.remove("error") {
+        return Some(AuthCallback::Error {
+            error,
+            description: params.remove("error_description"),
+        });
+    }
+    let code = params.remove("code").filter(|c| !c.is_empty())?;
+    Some(AuthCallback::Code {
+        code,
+        state: params.remove("state"),
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthUser {
@@ -309,6 +392,26 @@ impl TokenProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authorize_url_and_callback_round_trip() {
+        let url = workos_authorize_url("s t&1");
+        assert!(url.starts_with("https://api.workos.com/user_management/authorize?response_type=code"));
+        assert!(url.contains("redirect_uri=zeron%3A%2F%2Fcallback"));
+        assert!(url.contains("state=s%20t%261"));
+        assert_eq!(
+            parse_auth_callback("zeron://callback?code=abc&state=s%20t%261"),
+            Some(AuthCallback::Code {
+                code: "abc".into(),
+                state: Some("s t&1".into())
+            })
+        );
+        assert!(matches!(
+            parse_auth_callback("zeron://callback?error=access_denied"),
+            Some(AuthCallback::Error { .. })
+        ));
+        assert_eq!(parse_auth_callback("zeron://callback"), None);
+    }
 
     #[test]
     fn jwt_expiry_reads_the_exp_claim() {

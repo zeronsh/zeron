@@ -38,7 +38,7 @@ pub mod runtime;
 pub mod session;
 pub mod workspace;
 
-pub use client::{Client, NewSession, SessionTarget};
+pub use client::{Client, NewSession, PRELOAD_CAP, SessionTarget, WARM_SESSION_CAP};
 pub use config::{
     AuthTokens, ClientConfig, Credentials, DemoFixture, DemoOptions, StreamSpeed, TranscriptScale,
 };
@@ -46,19 +46,23 @@ pub use connectivity::{Connectivity, ConnectivityState, SendState};
 pub use error::ClientError;
 pub use events::{ClientEvent, ClientListener};
 pub use session::{
-    BusyPolicy, ComposerState, Entry, HostCapabilities, InputRequest, LiveStatus,
-    OutgoingAttachment, PendingSend, QueueEditFinish, QueueEditLease, QueueEditStart, QueueGate,
-    QueueItem, SendOutcome, SendRequest, SessionHandle, SessionSnapshot, SnapshotDelta,
+    AppendHint, BusyPolicy, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest,
+    LiveStatus, LocalEcho, OutgoingAttachment, PendingKind, PendingSend, QueueEditAction,
+    QueueEditFinish, QueueEditLease, QueueEditStart, QueueGate, QueueItem, RoomState,
+    SendOutcome, SendRequest, SessionHandle, SessionSnapshot, SnapshotDelta, SnapshotWatch,
 };
 pub use workspace::{
     DeviceView, FrontPage, ProjectRef, ProjectView, PullRequestGroups, SearchField, SearchHit,
-    SectionView, SessionRow, WorkspaceSnapshot,
+    SectionView, SessionRow, WorkspaceSnapshot, project_color_index, relative_time_label,
 };
 
 /// Re-exported so consumers (the layout engine) name the exact doc types the
 /// transcript carries without a direct `zeron-doc` dependency.
 pub use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
-pub use zeron_proto::{ChangeRequestState, ChangeRequestSummary, ChatIndicator};
+pub use zeron_proto::{
+    ChangeRequestState, ChangeRequestSummary, ChatConfig, ChatIndicator, ContextUsage,
+    UserInputAnswer, UserInputQuestion, WorktreeSpec,
+};
 
 /// Wall clock in epoch millis.
 pub(crate) fn now_ms() -> i64 {

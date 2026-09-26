@@ -1,7 +1,12 @@
 //! Text analysis: CSS `white-space` normalization (with span remapping) and UAX #14 break
 //! opportunities, cut into segments with hanging trailing whitespace split off.
 
-use unicode_linebreak::{BreakOpportunity, linebreaks};
+use std::sync::OnceLock;
+
+use icu_properties::CodePointMapData;
+use icu_properties::props::LineBreak;
+use icu_segmenter::LineSegmenter;
+use icu_segmenter::options::LineBreakOptions;
 use unicode_segmentation::GraphemeCursor;
 
 use crate::chars::{OBJECT_REPLACEMENT, SOFT_HYPHEN, is_hard_break};
@@ -185,6 +190,98 @@ pub(crate) fn normalize(text: &str, spans: &[Span], mode: WhiteSpace) -> (String
     (n.out, new_spans)
 }
 
+/// Rule-based UAX #14 (Unicode 17 rules, the ICU/CLDR behavior CoreText follows). Complex-context
+/// (SA) scripts resolve to AL here: no breaks inside Thai/Lao/Khmer/Myanmar runs.
+fn rule_segmenter() -> icu_segmenter::LineSegmenterBorrowed<'static> {
+    static SEG: OnceLock<icu_segmenter::LineSegmenterBorrowed<'static>> = OnceLock::new();
+    *SEG.get_or_init(|| LineSegmenter::new_17_for_non_complex_scripts(LineBreakOptions::default()))
+}
+
+/// Same rules plus ICU's dictionaries for SA scripts; only consulted for breaks *inside* SA runs.
+fn dictionary_segmenter() -> icu_segmenter::LineSegmenterBorrowed<'static> {
+    static SEG: OnceLock<icu_segmenter::LineSegmenterBorrowed<'static>> = OnceLock::new();
+    *SEG.get_or_init(|| {
+        let mut s = LineSegmenter::new_17_for_non_complex_scripts(LineBreakOptions::default());
+        s.load_dictionary();
+        s
+    })
+}
+
+/// Line_Break=SA (complex context: Thai, Lao, Khmer, Myanmar, Tai scripts, ...).
+fn is_sa(c: char) -> bool {
+    matches!(c as u32, 0x0E00..=0x0EFF | 0x1000..=0x109F | 0x1780..=0x17FF | 0x1950..=0x1AAF
+        | 0xA9E0..=0xA9FF | 0xAA60..=0xAADF | 0x11700..=0x1174F)
+        && CodePointMapData::<LineBreak>::new().get(c) == LineBreak::ComplexContext
+}
+
+/// The class CoreText's line breaker (Apple's ICU) gives a character, when it differs from what
+/// the Unicode 17 rules would see: `Some(stand-in)` with the same UTF-8 length and the class
+/// CoreText uses.
+///
+/// - Line_Break=SA resolves to AL (LB1; SA marks resolve to CM, which attach to an AL base: the
+///   same for breaking). ICU4X instead hands SA runs to its complex-script handler, which also
+///   reports a break at every run end; dictionary breaks *inside* runs are added separately.
+/// - Apple's ICU breaks curly quotes like brackets rather than as ambiguous QU: `‘` and `“`
+///   (U+2018, U+201C) as OP and `”` (U+201D) as CL. `’` (U+2019) stays QU: it is also the
+///   apostrophe. (Established by differential testing against CFStringTokenizer and
+///   CTFramesetter; see tests/coretext.rs.)
+#[inline]
+fn stand_in(c: char) -> Option<char> {
+    match c {
+        '\u{2018}' | '\u{201C}' => Some('\u{2045}'), // ⁅ LEFT SQUARE BRACKET WITH QUILL (OP)
+        '\u{201D}' => Some('\u{2046}'),              // ⁆ RIGHT SQUARE BRACKET WITH QUILL (CL)
+        _ if is_sa(c) => Some(if c.len_utf8() == 3 {
+            '\u{2C00}' // GLAGOLITIC CAPITAL LETTER AZU (AL)
+        } else {
+            '\u{10400}' // DESERET CAPITAL LETTER LONG I (AL)
+        }),
+        _ => None,
+    }
+}
+
+/// UAX #14 break opportunities in `text` as `(position, mandatory)`, excluding position 0.
+fn linebreaks(text: &str, out: &mut Vec<(u32, bool)>) {
+    let start = out.len();
+    let mandatory =
+        |p: usize| p == text.len() || text[..p].chars().next_back().is_some_and(is_hard_break);
+    let tailored = !text.is_ascii() && text.chars().any(|c| stand_in(c).is_some());
+    if !tailored {
+        out.extend(
+            rule_segmenter()
+                .segment_str(text)
+                .filter(|&p| p > 0)
+                .map(|p| (p as u32, mandatory(p))),
+        );
+        return;
+    }
+    let subst: String = text.chars().map(|c| stand_in(c).unwrap_or(c)).collect();
+    debug_assert_eq!(subst.len(), text.len());
+    out.extend(
+        rule_segmenter()
+            .segment_str(&subst)
+            .filter(|&p| p > 0)
+            .map(|p| (p as u32, mandatory(p))),
+    );
+    if !text.chars().any(is_sa) {
+        return;
+    }
+    // Word breaks inside SA runs come from ICU's dictionaries.
+    for p in dictionary_segmenter().segment_str(text) {
+        if p == 0 || p >= text.len() {
+            continue;
+        }
+        let before = text[..p].chars().next_back();
+        let after = text[p..].chars().next();
+        if before.is_some_and(is_sa) && after.is_some_and(is_sa) {
+            out.push((p as u32, false));
+        }
+    }
+    out[start..].sort_unstable_by_key(|b| b.0);
+    let mut v: Vec<(u32, bool)> = out.drain(start..).collect();
+    v.dedup_by_key(|b| b.0);
+    out.extend(v);
+}
+
 /// Break opportunities `(position, mandatory)` in increasing order, ending with `text.len()`.
 pub(crate) fn break_opportunities(
     text: &str,
@@ -222,19 +319,20 @@ pub(crate) fn break_opportunities(
         }
         let (mut sub_base, mut orig_base) = (0usize, 0usize);
         let mut r = 0;
-        for (p, kind) in linebreaks(&sub) {
+        let mut sub_breaks = Vec::new();
+        linebreaks(&sub, &mut sub_breaks);
+        for (p, mandatory) in sub_breaks {
+            let p = p as usize;
             while r < repl.len() && repl[r].0 <= p {
                 sub_base = repl[r].0;
                 orig_base = repl[r].1;
                 r += 1;
             }
             let orig = p - sub_base + orig_base;
-            out.push((orig as u32, kind == BreakOpportunity::Mandatory));
+            out.push((orig as u32, mandatory));
         }
     } else {
-        out.extend(
-            linebreaks(text).map(|(p, kind)| (p as u32, kind == BreakOpportunity::Mandatory)),
-        );
+        linebreaks(text, out);
     }
 
     // Never break inside an extended grapheme cluster (emoji ZWJ sequences, flags, keycaps,

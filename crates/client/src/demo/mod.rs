@@ -546,24 +546,24 @@ impl DemoHost {
         }
         self.set_status(&client, chat_id, SessionStatus::Working, None);
 
-        let (mut index, mut written) = match resume {
-            Some(state) => state,
+        let (entry_id, (mut index, mut written)) = match resume {
+            Some(state) => {
+                let snapshot = core.snapshot();
+                let id = snapshot.entries[..snapshot.transcript_len]
+                    .last()
+                    .map(|e| e.id.clone())
+                    .unwrap_or_default();
+                (id, state)
+            }
             None => {
                 let entry_id = crate::new_id();
                 match core.write(|doc| Ok(SegmentWriter::begin(doc, &entry_id, &host, now_ms())?.into_state())) {
-                    Ok(state) => state,
+                    Ok(state) => (entry_id, state),
                     Err(_) => return,
                 }
             }
         };
         let mut parts = written.clone();
-        let entry_id = core
-            .snapshot()
-            .entries
-            .get(..core.snapshot().transcript_len)
-            .and_then(|e| e.last())
-            .map(|e| e.id.clone())
-            .unwrap_or_default();
 
         let sync = |parts: &[MessagePart], written: &mut Vec<MessagePart>, index: &mut usize| {
             let taken = std::mem::take(written);
@@ -690,6 +690,11 @@ impl DemoHost {
             }
             Ok(())
         });
+        // A replacement turn is already waiting on the gate: don't flash Idle
+        // between the two (it flips Working itself).
+        if !self.is_current_turn(chat_id, turn_id) {
+            return;
+        }
         let status = if awaiting {
             SessionStatus::AwaitingInput
         } else {

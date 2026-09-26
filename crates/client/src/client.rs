@@ -31,6 +31,12 @@ use crate::{lock, now_ms, read, write};
 const ATTACHMENT_CACHE_BYTES: usize = 48 * 1024 * 1024;
 /// Time-driven re-derivation cadence (staleness, presence, send grace).
 const TICK: Duration = Duration::from_secs(1);
+/// Detached sessions kept warm (doc + room) before the least recently used
+/// is evicted. On-screen sessions, streaming ones and ones with unadopted
+/// sends are never evicted.
+pub const WARM_SESSION_CAP: usize = 6;
+/// Sessions `preload_sessions` warms (front page order).
+pub const PRELOAD_CAP: usize = 4;
 
 /// Where a new session runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,8 +130,11 @@ impl ClientInner {
                 .recompute(&self.config.device_id, &send_states, synced)
         {
             self.events.workspace(revision);
+            // Host presence / live status feed every open session's snapshot
+            // (working flag) and composer; `refresh` is O(1) when no doc
+            // event is pending.
             for core in self.cores() {
-                core.recompute_composer(self);
+                core.refresh();
             }
         }
     }
@@ -308,6 +317,27 @@ impl ClientInner {
 
     pub(crate) fn kick_room(&self, _chat_id: &str) {}
 
+    /// Drop the least recently used detached, quiet sessions past the cap.
+    pub(crate) fn evict_sessions(&self) {
+        let mut sessions = lock(&self.sessions);
+        let mut idle: Vec<(i64, String)> = sessions
+            .values()
+            .filter(|core| {
+                !core.view_attached() && !core.has_pending_sends() && !core.snapshot().streaming
+            })
+            .map(|core| (core.touched_ms(), core.chat_id.clone()))
+            .collect();
+        if idle.len() <= WARM_SESSION_CAP {
+            return;
+        }
+        idle.sort();
+        let excess = idle.len() - WARM_SESSION_CAP;
+        for (_, chat_id) in idle.into_iter().take(excess) {
+            tracing::debug!(chat = %chat_id, "evicting warm session");
+            sessions.remove(&chat_id);
+        }
+    }
+
     fn tick(self: &Arc<Self>) {
         self.recompute_connectivity();
         self.recompute_workspace();
@@ -408,10 +438,6 @@ impl Client {
         Ok(Self { inner })
     }
 
-    pub(crate) fn inner(&self) -> &Arc<ClientInner> {
-        &self.inner
-    }
-
     pub fn config(&self) -> &ClientConfig {
         &self.inner.config
     }
@@ -456,6 +482,11 @@ impl Client {
 
     pub fn connectivity(&self) -> Connectivity {
         self.inner.connectivity()
+    }
+
+    /// The chat's run configuration (harness/model/effort/options/sandbox).
+    pub fn session_config(&self, chat_id: &str) -> Option<ChatConfig> {
+        self.inner.workspace.chat(chat_id).and_then(|c| c.config)
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
@@ -741,10 +772,12 @@ impl Client {
         if self.inner.is_demo() {
             core.set_hydrated();
         }
+        core.touch();
         core.refresh();
         if let Some(demo) = self.inner.demo() {
             demo.session_opened(&core);
         }
+        self.inner.evict_sessions();
         Ok(SessionHandle { core })
     }
 
@@ -761,6 +794,7 @@ impl Client {
         if let Some(handle) = self.session(chat_id) {
             handle.set_view_attached(false);
         }
+        self.inner.evict_sessions();
     }
 
     // ── host RPC ───────────────────────────────────────────────────────────
@@ -865,6 +899,10 @@ impl Client {
     /// "unsatisfied" — ambiguity stays online.
     pub fn set_network_online(&self, online: bool) {
         let was = self.inner.path_online.swap(online, Ordering::AcqRel);
+        if !self.inner.is_demo() {
+            // Parks/un-parks every sync backoff in the process (zeron-sync).
+            zeron_sync::wake::set_path_online(online);
+        }
         if was != online {
             self.inner.recompute_connectivity();
         }
@@ -881,8 +919,31 @@ impl Client {
         self.inner.foreground.store(false, Ordering::Release);
     }
 
-    /// Warm the most relevant sessions (hydrate from disk; capped dials).
-    pub fn preload_sessions(&self) {}
+    /// Warm the most relevant sessions (front page order: pinned, sections,
+    /// recent), up to [`PRELOAD_CAP`]. Opening is instant (local snapshot);
+    /// live rooms dial behind the client's dial cap.
+    pub fn preload_sessions(&self) {
+        let workspace = self.workspace();
+        let front = &workspace.front;
+        let candidates = front
+            .pinned
+            .iter()
+            .chain(front.sections.iter().flat_map(|s| s.sessions.iter()))
+            .chain(front.recent.iter())
+            .filter(|row| row.room_gen >= 2);
+        for row in candidates.take(PRELOAD_CAP) {
+            if self.inner.session_core(&row.id).is_none() {
+                let _ = self.open_session(&row.id);
+            }
+        }
+    }
+
+    /// Ids of the sessions currently open (warm), most recently used first.
+    pub fn open_session_ids(&self) -> Vec<String> {
+        let mut cores = self.inner.cores();
+        cores.sort_by_key(|c| std::cmp::Reverse(c.touched_ms()));
+        cores.iter().map(|c| c.chat_id.clone()).collect()
+    }
 }
 
 /// Seed helpers shared with the demo host.

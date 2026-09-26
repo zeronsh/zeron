@@ -18,6 +18,7 @@ use zeron_proto::{CheckoutChangeRequestStatus, SidebarPreferences};
 pub use view::{
     DeviceView, FrontPage, PROJECT_COLOR_COUNT, ProjectRef, ProjectView, PullRequestGroups,
     SearchField, SearchHit, SectionView, SessionRow, WorkspaceSnapshot, project_color_index,
+    relative_time_label,
 };
 pub(crate) use view::{DeriveContext, device_online};
 
@@ -53,6 +54,7 @@ impl WorkspaceStore {
     }
 
     /// The shared replica (handed to `RegistryClient` in live mode).
+    #[allow(dead_code)] // live registry client
     pub(crate) fn doc(&self) -> &Arc<Mutex<RegistryDoc>> {
         &self.doc
     }
@@ -98,6 +100,7 @@ impl WorkspaceStore {
         lock(&self.presence).insert(device_id.to_owned(), at_ms);
     }
 
+    #[allow(dead_code)] // live registry client
     pub(crate) fn replace_presence(&self, presence: HashMap<String, i64>) {
         *lock(&self.presence) = presence;
     }

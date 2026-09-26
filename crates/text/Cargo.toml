@@ -9,6 +9,8 @@ description = "Analytic text measurement and line layout (pretext-style prepare/
 [dependencies]
 rustybuzz = "0.20"
 unicode-linebreak = "0.1.5"
+icu_segmenter = { version = "~2.3", default-features = false, features = ["compiled_data", "unstable"] }
+icu_properties = "2.3"
 unicode-segmentation.workspace = true
 unicode-bidi = "0.3"
 hashbrown = { version = "0.15", default-features = false, features = ["inline-more"] }
@@ -21,3 +23,9 @@ unicode-segmentation.workspace = true
 [[bench]]
 name = "layout"
 harness = false
+
+# CoreText ground-truth harness (tests/coretext.rs): same font bytes, CTFramesetter line breaks.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+core-text = "21"
+core-foundation = "0.10"
+core-graphics = "0.24"

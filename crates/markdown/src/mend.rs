@@ -176,7 +176,7 @@ pub fn close_hanging(text: &str) -> Option<String> {
     {
         pending.push((open, format!("]({PENDING_LINK_URL})")));
     }
-    pending.sort_by(|a, b| b.0.cmp(&a.0));
+    pending.sort_by_key(|b| std::cmp::Reverse(b.0));
     let closers: String = pending.into_iter().map(|(_, s)| s).collect();
 
     // A trailing line of only `-`/`--`/`=`/`==` under text is a setext

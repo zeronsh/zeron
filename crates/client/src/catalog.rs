@@ -336,6 +336,80 @@ pub fn model_label(harness: &str, model_id: &str) -> String {
     curated_label(model_id, &curated_catalog(harness)).unwrap_or_else(|| model_id.to_owned())
 }
 
+/// Last-known live catalogs on disk (`{data_dir}/catalogs/{device}.json`):
+/// pickers open instantly with the device's real list, and an unreachable
+/// device still shows what it offered last time before the static fallback.
+#[derive(Debug, Clone)]
+pub(crate) struct DiskCatalog {
+    dir: std::path::PathBuf,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct DeviceCatalog {
+    #[serde(default)]
+    harnesses: Option<Vec<HarnessInfo>>,
+    #[serde(default)]
+    models: std::collections::BTreeMap<String, Vec<ModelInfo>>,
+}
+
+fn file_safe(id: &str) -> String {
+    id.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
+impl DiskCatalog {
+    pub(crate) fn new(data_dir: &std::path::Path) -> Self {
+        Self {
+            dir: data_dir.join("catalogs"),
+        }
+    }
+
+    fn path(&self, device_id: &str) -> std::path::PathBuf {
+        self.dir.join(format!("{}.json", file_safe(device_id)))
+    }
+
+    fn load(&self, device_id: &str) -> DeviceCatalog {
+        std::fs::read(self.path(device_id))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn store(&self, device_id: &str, catalog: &DeviceCatalog) {
+        let write = || -> std::io::Result<()> {
+            std::fs::create_dir_all(&self.dir)?;
+            let path = self.path(device_id);
+            let tmp = path.with_extension("json.tmp");
+            std::fs::write(&tmp, serde_json::to_vec(catalog).unwrap_or_default())?;
+            std::fs::rename(tmp, path)
+        };
+        if let Err(err) = write() {
+            tracing::debug!(error = %err, "catalog cache write failed");
+        }
+    }
+
+    pub(crate) fn harnesses(&self, device_id: &str) -> Option<Vec<HarnessInfo>> {
+        self.load(device_id).harnesses
+    }
+
+    pub(crate) fn put_harnesses(&self, device_id: &str, list: &[HarnessInfo]) {
+        let mut catalog = self.load(device_id);
+        catalog.harnesses = Some(list.to_vec());
+        self.store(device_id, &catalog);
+    }
+
+    pub(crate) fn models(&self, device_id: &str, harness: &str) -> Option<Vec<ModelInfo>> {
+        self.load(device_id).models.remove(harness)
+    }
+
+    pub(crate) fn put_models(&self, device_id: &str, harness: &str, list: &[ModelInfo]) {
+        let mut catalog = self.load(device_id);
+        catalog.models.insert(harness.to_owned(), list.to_vec());
+        self.store(device_id, &catalog);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,5 +434,17 @@ mod tests {
         assert_eq!(out[0].id, "claude-opus-5");
         assert_eq!(out[0].label, "Opus 5");
         assert!(out[0].options.iter().any(|o| o.id == "contextWindow"));
+    }
+
+    #[test]
+    fn disk_catalog_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCatalog::new(dir.path());
+        assert!(cache.harnesses("dev/mac").is_none());
+        cache.put_harnesses("dev/mac", &fallback_harnesses());
+        cache.put_models("dev/mac", "codex", &fallback_models("codex"));
+        assert_eq!(cache.harnesses("dev/mac").unwrap().len(), 2);
+        assert_eq!(cache.models("dev/mac", "codex").unwrap()[0].id, "gpt-6-astra");
+        assert!(cache.models("dev/mac", "grok").is_none());
     }
 }

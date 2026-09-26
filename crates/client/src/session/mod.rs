@@ -56,7 +56,7 @@ pub struct OutgoingAttachment {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SendRequest {
     pub text: String,
     pub attachments: Vec<OutgoingAttachment>,
@@ -170,6 +170,8 @@ pub(crate) struct SessionCore {
     transcript_tx: watch::Sender<Arc<SessionSnapshot>>,
     composer: RwLock<Arc<ComposerState>>,
     view_attached: AtomicBool,
+    /// Last open/attach/detach (warm-set eviction order).
+    touched_ms: std::sync::atomic::AtomicI64,
 }
 
 impl SessionCore {
@@ -185,7 +187,7 @@ impl SessionCore {
             ..Default::default()
         }));
         let composer = Arc::new(empty_composer(chat_id));
-        let core = Arc::new(Self {
+        Arc::new(Self {
             chat_id: chat_id.to_owned(),
             client: Arc::downgrade(client),
             doc,
@@ -211,8 +213,8 @@ impl SessionCore {
             transcript_tx,
             composer: RwLock::new(composer),
             view_attached: AtomicBool::new(false),
-        });
-        core
+            touched_ms: std::sync::atomic::AtomicI64::new(now_ms()),
+        })
     }
 
     pub(crate) fn doc(&self) -> &Arc<SessionDoc> {
@@ -261,16 +263,19 @@ impl SessionCore {
         !lock(&self.state).pending.is_empty()
     }
 
-    pub(crate) fn is_streaming(&self) -> bool {
-        self.snapshot().streaming
-    }
-
     /// Apply queued doc events + time-driven state; publish what changed.
     pub(crate) fn refresh(&self) {
         let Ok(client) = self.client() else { return };
         let dirty = std::mem::take(&mut *lock(&self.dirty));
         let now = now_ms();
         let degraded = client.chat_delivery_degraded(&self.chat_id);
+        let (indicator_working, working_since_ms) = client
+            .workspace
+            .snapshot()
+            .session(&self.chat_id)
+            .map_or((false, None), |row| {
+                (row.indicator == ChatIndicator::Working, row.working_since_ms)
+            });
         let mut transcript_event = None;
         let send_before;
         let send_after;
@@ -289,9 +294,23 @@ impl SessionCore {
             }
             let echoes_changed = derive_pending(&mut st, &client.config.device_id, degraded, now);
             send_after = oldest_state(&st.pending);
-            if change.is_some() || echoes_changed || dirty.meta || st.transcript_revision == 0 {
+            let previous = self.snapshot();
+            let streaming = st.tracker.entries().last().is_some_and(|e| e.is_streaming());
+            let live = LiveFlags {
+                working: indicator_working || streaming,
+                working_since_ms,
+            };
+            let live_changed = previous.working != live.working
+                || previous.working_since_ms != live.working_since_ms
+                || previous.hydrated != st.hydrated;
+            if change.is_some()
+                || echoes_changed
+                || dirty.meta
+                || live_changed
+                || st.transcript_revision == 0
+            {
                 st.transcript_revision += 1;
-                let snapshot = build_snapshot(&self.chat_id, &st, change, &self.snapshot());
+                let snapshot = build_snapshot(&self.chat_id, &st, change, live, &previous);
                 transcript_event = Some(snapshot.revision);
                 self.transcript_tx.send_replace(Arc::new(snapshot));
             }
@@ -369,6 +388,7 @@ impl SessionCore {
         }
     }
 
+    #[allow(dead_code)] // attachment escort progress (live uploads)
     pub(crate) fn set_transfer_progress(&self, progress: Option<f64>) {
         self.update_state(|st| st.transfer_progress = progress);
     }
@@ -401,8 +421,16 @@ impl SessionCore {
         Ok(id)
     }
 
-    fn view_attached(&self) -> bool {
+    pub(crate) fn view_attached(&self) -> bool {
         self.view_attached.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn touch(&self) {
+        self.touched_ms.store(now_ms(), Ordering::Release);
+    }
+
+    pub(crate) fn touched_ms(&self) -> i64 {
+        self.touched_ms.load(Ordering::Acquire)
     }
 }
 
@@ -563,10 +591,13 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
             .get(&message_id)
             .copied()
             .unwrap_or(attempt.first_issued);
+        let parsed = attachments::parse_user_message(&attempt.text);
         next.push(PendingSend {
             state: send_state(started, degraded, attempt.dead && !attempt.live, now),
             message_id,
             text: attempt.text.clone(),
+            visible_text: parsed.text,
+            images: parsed.images.into_iter().map(|i| i.path).collect(),
             kind: attempt.kind,
             sent_at_ms: attempt.first_issued,
         });
@@ -589,7 +620,7 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
                     Arc::new(Entry {
                         id: pending.message_id.clone(),
                         rev,
-                        message: SessionMessageEntry {
+                        message: Arc::new(SessionMessageEntry {
                             id: pending.message_id.clone(),
                             role: MessageRole::User,
                             parts: vec![MessagePart::Text {
@@ -601,7 +632,7 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
                             status: Some(MessageStatus::Complete),
                             continuation_of: None,
                             duration_ms: None,
-                        },
+                        }),
                         echo: Some(LocalEcho {
                             state: pending.state,
                             sent_at_ms: pending.sent_at_ms,
@@ -618,10 +649,17 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
     changed
 }
 
+#[derive(Clone, Copy)]
+struct LiveFlags {
+    working: bool,
+    working_since_ms: Option<i64>,
+}
+
 fn build_snapshot(
     chat_id: &str,
     st: &CoreState,
     change: Option<transcript::TranscriptChange>,
+    live: LiveFlags,
     previous: &SessionSnapshot,
 ) -> SessionSnapshot {
     let transcript = st.tracker.entries();
@@ -645,6 +683,9 @@ fn build_snapshot(
         entries,
         transcript_len,
         streaming,
+        working: live.working,
+        working_since_ms: live.working_since_ms,
+        pending: st.pending.clone(),
         context_usage: st.context_usage,
         hydrated: st.hydrated,
         delta: SnapshotDelta::default(),
@@ -659,6 +700,18 @@ fn build_snapshot(
         _ => snapshot.changes_since(previous),
     };
     snapshot
+}
+
+/// Stops a [`SessionHandle::watch`] when dropped.
+#[derive(Debug)]
+pub struct SnapshotWatch {
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+impl Drop for SnapshotWatch {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 /// One open chat. Cheap to clone; all clones share the session.
@@ -693,6 +746,29 @@ impl SessionHandle {
         self.core.subscribe()
     }
 
+    /// Callback-style subscription: `f` gets the current snapshot at once,
+    /// then every newer one (coalesced — diff with
+    /// [`SessionSnapshot::changes_since`]). Runs on a client runtime thread;
+    /// dropping the returned guard stops it.
+    pub fn watch(&self, f: impl Fn(Arc<SessionSnapshot>) + Send + Sync + 'static) -> SnapshotWatch {
+        let mut rx = self.subscribe();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let token = cancel.clone();
+        crate::runtime::shared().spawn(async move {
+            let first = rx.borrow_and_update().clone();
+            f(first);
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => return,
+                    changed = rx.changed() => if changed.is_err() { return },
+                }
+                let next = rx.borrow_and_update().clone();
+                f(next);
+            }
+        });
+        SnapshotWatch { cancel }
+    }
+
     pub fn composer(&self) -> Arc<ComposerState> {
         self.core.composer()
     }
@@ -701,6 +777,7 @@ impl SessionHandle {
     /// attach; prioritizes this room's sync in live mode).
     pub fn set_view_attached(&self, attached: bool) {
         let was = self.core.view_attached.swap(attached, Ordering::AcqRel);
+        self.core.touch();
         if attached && !was {
             self.mark_seen();
         }

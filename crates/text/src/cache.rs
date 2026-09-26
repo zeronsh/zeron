@@ -1,10 +1,11 @@
 //! `(style, text) → width` cache plus the measurement backends it fronts: rustybuzz shaping for
 //! text the face covers, the host [`crate::FallbackMeasurer`] for everything else.
 
+use std::collections::HashMap;
 use std::hash::Hasher;
 
 use hashbrown::HashTable;
-use rustc_hash::FxHasher;
+use rustc_hash::{FxBuildHasher, FxHasher};
 use rustybuzz::{Direction, Script, ShapePlan, UnicodeBuffer};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -78,6 +79,11 @@ pub struct WidthCache {
     space: Vec<f32>,
     hyphen: Vec<f32>,
     plans: Vec<Plan>,
+    /// Pair kerning between printable-ASCII graphemes, per style: `[(a - 0x20) * 96 + (b - 0x20)]`,
+    /// NaN until computed.
+    kern_ascii: Vec<Option<Box<[f32]>>>,
+    /// Pair kerning between other single-char graphemes.
+    kern_chars: HashMap<(u16, char, char), f32, FxBuildHasher>,
     buffer: Option<UnicodeBuffer>,
     clusters: Vec<(u32, i32)>,
     starts: Vec<u32>,
@@ -147,6 +153,8 @@ impl WidthCache {
             space: Vec::new(),
             hyphen: Vec::new(),
             plans: Vec::new(),
+            kern_ascii: Vec::new(),
+            kern_chars: HashMap::default(),
             buffer: None,
             clusters: Vec::new(),
             starts: Vec::new(),
@@ -164,6 +172,8 @@ impl WidthCache {
         self.space.clear();
         self.hyphen.clear();
         self.plans.clear();
+        self.kern_ascii.clear();
+        self.kern_chars.clear();
         self.stats = CacheStats::default();
     }
 
@@ -270,6 +280,78 @@ impl WidthCache {
         }
         self.hyphen[i] = w;
         w
+    }
+
+    /// Whether `grapheme` in `style` is shaped with the style's face (as opposed to going to the
+    /// host fallback measurer, i.e. a different font).
+    pub(crate) fn is_shaped(&self, book: &FontBook, style: StyleId, grapheme: &str) -> bool {
+        if book.fallback().is_none() {
+            return true;
+        }
+        let face = book.face_data(book.style_data(style).style.face);
+        !needs_fallback(face, grapheme)
+    }
+
+    /// Advance change from shaping two adjacent graphemes together rather than apart:
+    /// `shape(a + b) − shape(a) − shape(b)`, in points. This is the pair kerning (and any other
+    /// two-glyph context effect) that a paragraph-level shaper applies across a segment
+    /// boundary; like GPOS pair adjustment it belongs to the advance of `a`. Both graphemes must
+    /// be shaped by the style's face (see [`WidthCache::is_shaped`]).
+    pub(crate) fn pair_kern(&mut self, book: &FontBook, style: StyleId, a: &str, b: &str) -> f32 {
+        let ab = a.as_bytes();
+        let bb = b.as_bytes();
+        if ab.len() == 1 && bb.len() == 1 && (0x20..0x80).contains(&ab[0]) && (0x20..0x80).contains(&bb[0]) {
+            let i = style.0 as usize;
+            if self.kern_ascii.len() <= i {
+                self.kern_ascii.resize_with(i + 1, || None);
+            }
+            let k = (ab[0] as usize - 0x20) * 96 + (bb[0] as usize - 0x20);
+            let cached = self.kern_ascii[i].as_ref().map_or(f32::NAN, |t| t[k]);
+            if !cached.is_nan() {
+                return cached;
+            }
+            let v = self.compute_pair_kern(book, style, a, b);
+            self.kern_ascii[i].get_or_insert_with(|| vec![f32::NAN; 96 * 96].into_boxed_slice())[k] = v;
+            return v;
+        }
+        let mut ca = a.chars();
+        let mut cb = b.chars();
+        if let (Some(x), None, Some(y), None) = (ca.next(), ca.next(), cb.next(), cb.next()) {
+            if let Some(&v) = self.kern_chars.get(&(style.0, x, y)) {
+                return v;
+            }
+            let v = self.compute_pair_kern(book, style, a, b);
+            self.kern_chars.insert((style.0, x, y), v);
+            return v;
+        }
+        self.compute_pair_kern(book, style, a, b)
+    }
+
+    fn compute_pair_kern(&mut self, book: &FontBook, style: StyleId, a: &str, b: &str) -> f32 {
+        let sd = book.style_data(style);
+        let face = book.face_data(sd.style.face);
+        let mut pair = String::with_capacity(a.len() + b.len());
+        pair.push_str(a);
+        pair.push_str(b);
+        let units = self.shape_units(sd, face, &pair)
+            - self.shape_units(sd, face, a)
+            - self.shape_units(sd, face, b);
+        units as f32 * sd.scale
+    }
+
+    /// Total advance of `text` in font units.
+    fn shape_units(&mut self, sd: &StyleData, face: &FaceData, text: &str) -> i64 {
+        let mut buf = self.buffer.take().unwrap_or_default();
+        buf.push_str(text);
+        buf.guess_segment_properties();
+        let direction = buf.direction();
+        let script = buf.script();
+        let script = (script != rustybuzz::script::UNKNOWN).then_some(script);
+        let plan = self.plan(sd, face, direction, script);
+        let glyphs = rustybuzz::shape_with_plan(&face.hb, &self.plans[plan].plan, buf);
+        let total = glyphs.glyph_positions().iter().map(|p| p.x_advance as i64).sum();
+        self.buffer = Some(glyphs.clear());
+        total
     }
 
     fn insert(

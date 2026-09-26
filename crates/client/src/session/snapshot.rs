@@ -39,7 +39,10 @@ pub struct Entry {
     /// Per-session monotonic content revision: a new `Arc<Entry>` always has a
     /// new `rev`; an unchanged entry keeps both its `Arc` and its `rev`.
     pub rev: u64,
-    pub message: SessionMessageEntry,
+    /// The (joined) doc message. Shared: cloning it is an `Arc` bump, and it
+    /// stays pointer-equal across snapshots while the entry is unchanged —
+    /// the layout engine's row-reuse key.
+    pub message: Arc<SessionMessageEntry>,
     /// `Some` for a local echo that is not in the doc yet.
     pub echo: Option<LocalEcho>,
     pub append: Option<AppendHint>,
@@ -90,6 +93,15 @@ pub struct SessionSnapshot {
     pub transcript_len: usize,
     /// The newest host entry is still streaming.
     pub streaming: bool,
+    /// A turn is running on the host (row indicator Working — which already
+    /// folds in this device's in-flight sends — or a streaming tail). Drives
+    /// the transcript's tail "Working…" row.
+    pub working: bool,
+    /// Run start of the live turn, when the host reported one.
+    pub working_since_ms: Option<i64>,
+    /// This device's unadopted sends, oldest first. Their echo entries are
+    /// `entries[transcript_len..]` (same order, same ids).
+    pub pending: Vec<PendingSend>,
     pub context_usage: Option<ContextUsage>,
     /// Content is present (local snapshot loaded or first sync landed). False
     /// = show a loader, not an empty chat.
@@ -99,6 +111,17 @@ pub struct SessionSnapshot {
 }
 
 impl SessionSnapshot {
+    /// Host-written entries (no echoes).
+    pub fn transcript(&self) -> &[Arc<Entry>] {
+        &self.entries[..self.transcript_len]
+    }
+
+    /// The host-written messages as shared `Arc`s — pointer-equal across
+    /// snapshots while unchanged (O(entries) `Arc` bumps, no content copy).
+    pub fn transcript_messages(&self) -> Vec<Arc<SessionMessageEntry>> {
+        self.transcript().iter().map(|e| e.message.clone()).collect()
+    }
+
     pub fn entry(&self, id: &str) -> Option<&Arc<Entry>> {
         self.index.get(id).and_then(|&ix| self.entries.get(ix))
     }
@@ -181,8 +204,15 @@ pub enum PendingKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingSend {
+    /// Client-minted id; the host's user entry reuses it (adoption).
     pub message_id: String,
+    /// Raw prompt content exactly as the host will write it (attachment
+    /// trailer included — row builders split it themselves).
     pub text: String,
+    /// The user-visible part of `text` (trailer + Appshot context stripped).
+    pub visible_text: String,
+    /// Attachment refs/paths from the trailer (`pending://…` until adopted).
+    pub images: Vec<String>,
     pub kind: PendingKind,
     pub sent_at_ms: i64,
     pub state: SendState,

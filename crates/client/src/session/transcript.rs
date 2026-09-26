@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use loro::event::DiffEvent;
-use loro::{Container, ContainerID, Index, LoroDoc, LoroMap, ToJson, ValueOrContainer};
+use loro::{Container, ContainerID, ContainerTrait, Index, LoroDoc, LoroMap, ToJson, ValueOrContainer};
 use zeron_doc::{MessagePart, SessionMessageEntry};
 
 use super::snapshot::{AppendHint, Entry};
@@ -29,10 +29,6 @@ pub(crate) struct Dirty {
 }
 
 impl Dirty {
-    pub fn any(&self) -> bool {
-        self.list || !self.entries.is_empty() || self.queue || self.commands || self.meta
-    }
-
     /// Everything (first projection / resync).
     pub fn all() -> Self {
         Self {
@@ -73,12 +69,14 @@ struct Slot {
     entry: Option<Arc<SessionMessageEntry>>,
 }
 
-/// Joined-transcript change produced by one refresh.
+/// Joined-transcript change produced by one refresh. Snapshots diff by `Arc`
+/// identity ([`super::SessionSnapshot::changes_since`]); `changed` is the
+/// tracker's own account, asserted by the O(changed) tests.
 #[derive(Debug, Default)]
 pub(crate) struct TranscriptChange {
     pub reset: bool,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub changed: Vec<String>,
-    pub removed: Vec<String>,
 }
 
 pub(crate) struct Tracker {
@@ -259,15 +257,22 @@ impl Tracker {
                     let Some(root_entry) = root.entry.as_ref() else {
                         continue;
                     };
-                    let mut message = (**root_entry).clone();
-                    for &i in &members[1..] {
-                        if let Some(part) = self.slots[i].entry.as_ref() {
-                            message.parts.extend(part.parts.iter().cloned());
-                            if part.duration_ms.is_some() {
-                                message.duration_ms = part.duration_ms;
+                    // A lone entry shares the slot's decode (no copy); a root
+                    // with continuations is joined into a fresh message.
+                    let message = if members.len() == 1 {
+                        root_entry.clone()
+                    } else {
+                        let mut message = (**root_entry).clone();
+                        for &i in &members[1..] {
+                            if let Some(part) = self.slots[i].entry.as_ref() {
+                                message.parts.extend(part.parts.iter().cloned());
+                                if part.duration_ms.is_some() {
+                                    message.duration_ms = part.duration_ms;
+                                }
                             }
                         }
-                    }
+                        Arc::new(message)
+                    };
                     let previous = previous.map(|(_, e)| e.clone());
                     self.next_rev += 1;
                     let rev = self.next_rev;
@@ -285,20 +290,9 @@ impl Tracker {
             by_root.insert(root.cid.clone(), (sig, entry.clone()));
             joined.push(entry);
         }
-        let current: HashSet<&str> = joined.iter().map(|e| e.id.as_str()).collect();
-        let removed = self
-            .joined
-            .iter()
-            .filter(|e| !current.contains(e.id.as_str()))
-            .map(|e| e.id.clone())
-            .collect();
         self.joined = joined;
         self.by_root = by_root;
-        TranscriptChange {
-            reset,
-            changed,
-            removed,
-        }
+        TranscriptChange { reset, changed }
     }
 }
 
@@ -409,17 +403,21 @@ mod tests {
         let before: Vec<Arc<Entry>> = rig.tracker.entries().to_vec();
         let decodes = rig.tracker.decodes;
 
-        let mut writer = SegmentWriter::begin(&rig.doc, "a1", "host", 2).unwrap();
+        let mut state = SegmentWriter::begin(&rig.doc, "a1", "host", 2)
+            .unwrap()
+            .into_state();
         rig.refresh().unwrap();
         let mut text = String::new();
         for word in ["streaming ", "one ", "word ", "at ", "a ", "time"] {
             text.push_str(word);
+            let mut writer = SegmentWriter::resume(&rig.doc, state.0, state.1);
             writer
                 .sync(&[MessagePart::Text {
                     id: "p0".into(),
                     text: text.clone(),
                 }])
                 .unwrap();
+            state = writer.into_state();
             let change = rig.refresh().unwrap();
             assert_eq!(change.changed, vec!["a1".to_owned()]);
         }

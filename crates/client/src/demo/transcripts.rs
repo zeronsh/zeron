@@ -560,7 +560,7 @@ pub(crate) fn reply(prompt: &str, long: bool) -> Vec<Step> {
     let first_line = prompt.lines().next().unwrap_or("").trim();
     let quoted: String = first_line.chars().take(80).collect();
     let body = if long {
-        vec![REPLY; 12].join("\n\n---\n\n")
+        [REPLY; 12].join("\n\n---\n\n")
     } else {
         REPLY.to_owned()
     };

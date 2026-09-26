@@ -38,6 +38,18 @@ pub fn project_color_index(space_id: &str) -> u32 {
     (hash % PROJECT_COLOR_COUNT as u64) as u32
 }
 
+/// Compact age label for list rows: `now`, `34m`, `4h`, `2d` (legacy
+/// `relativeTime`). Future timestamps read as `now`.
+pub fn relative_time_label(at_ms: i64, now_ms: i64) -> String {
+    let secs = (now_ms - at_ms).max(0) / 1000;
+    match secs {
+        0..60 => "now".to_owned(),
+        60..3_600 => format!("{}m", secs / 60),
+        3_600..86_400 => format!("{}h", secs / 3_600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProjectRef {
     pub id: String,
@@ -72,6 +84,9 @@ pub struct SessionRow {
     pub working_since_ms: Option<i64>,
     /// `last_message_at`, falling back to `created_at` (the sort key).
     pub last_activity_ms: i64,
+    /// [`relative_time_label`] of `last_activity_ms` at derive time (the 1 Hz
+    /// re-derive refreshes it; it changes at most once a minute).
+    pub time_label: String,
     pub created_at_ms: i64,
     pub unseen: bool,
     pub archived: bool,
@@ -367,6 +382,7 @@ fn hash_row(row: &SessionRow) -> u64 {
     attention_rank(row.indicator).hash(&mut h);
     row.working_since_ms.hash(&mut h);
     row.last_activity_ms.hash(&mut h);
+    row.time_label.hash(&mut h);
     row.created_at_ms.hash(&mut h);
     row.unseen.hash(&mut h);
     row.archived.hash(&mut h);
@@ -465,6 +481,7 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         indicator,
         working_since_ms,
         last_activity_ms: sort_key(chat).timestamp_millis(),
+        time_label: relative_time_label(sort_key(chat).timestamp_millis(), now_ms),
         created_at_ms: chat.created_at.timestamp_millis(),
         unseen: chat.unseen(),
         archived: chat.archived,
@@ -729,5 +746,20 @@ impl Hash for DeviceView {
         self.capabilities.hash(h);
         self.is_execution_host.hash(h);
         self.session_count.hash(h);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_labels() {
+        let now = 10 * 86_400_000;
+        assert_eq!(relative_time_label(now - 59_000, now), "now");
+        assert_eq!(relative_time_label(now + 5_000, now), "now");
+        assert_eq!(relative_time_label(now - 34 * 60_000, now), "34m");
+        assert_eq!(relative_time_label(now - 4 * 3_600_000 - 1, now), "4h");
+        assert_eq!(relative_time_label(now - 2 * 86_400_000, now), "2d");
     }
 }

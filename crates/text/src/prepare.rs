@@ -4,7 +4,9 @@ use std::ops::Range;
 
 use crate::analysis::{self, BRK_SOFT_HYPHEN, RawSeg};
 use crate::cache::{UnitsRef, WidthCache};
-use crate::chars::is_strong_rtl;
+use unicode_segmentation::GraphemeCursor;
+
+use crate::chars::{is_hard_break, is_strong_rtl};
 use crate::font::{FontBook, StyleId};
 
 /// CSS `white-space` modes.
@@ -326,6 +328,10 @@ impl Run<'_> {
     }
 }
 
+fn is_hard_break_str(g: &str) -> bool {
+    g.chars().next().is_some_and(is_hard_break)
+}
+
 /// UTF-16 length of UTF-8 bytes: one unit per scalar, two for 4-byte scalars.
 #[inline]
 pub(crate) fn utf16_len(bytes: &[u8]) -> usize {
@@ -452,10 +458,26 @@ impl Builder<'_> {
     fn segment(&mut self, seg: &RawSeg) -> (Hot, Cold) {
         let pieces = self.pieces.len() as u32;
         let units = self.units.len() as u32;
-        let content = self.region(seg.start, seg.content_end, true);
+        let mut content = self.region(seg.start, seg.content_end, true);
+        if seg.content_end > seg.start {
+            // The content's last glyph kerns with whatever follows it in the paragraph (its
+            // hanging space, or the next segment): like CoreText, count it in the advance.
+            let k = self.kern_at(seg.content_end as usize);
+            if k != 0.0 {
+                content.width += k;
+                self.add_to_last(pieces, units, k);
+            }
+        }
         let (n_content, span, kind) = self.implicit(pieces);
         let hang_at = self.pieces.len() as u32;
-        let hang = self.region(seg.content_end, seg.ws_end, false);
+        let mut hang = self.region(seg.content_end, seg.ws_end, false);
+        if seg.ws_end > seg.content_end {
+            let k = self.kern_at(seg.ws_end as usize);
+            if k != 0.0 {
+                hang.width += k;
+                self.add_to_last(hang_at, self.units.len() as u32, k);
+            }
+        }
         let (n_hang, hang_span, _) = self.implicit(hang_at);
         let hyphen = if seg.brk == BRK_SOFT_HYPHEN && seg.content_end > seg.start {
             let last = if n_content > 0 {
@@ -506,6 +528,76 @@ impl Builder<'_> {
         )
     }
 
+    /// Adds `k` to the advance of the last piece pushed since `from` (and to its last unit, if
+    /// it has units pushed since `units_from`).
+    fn add_to_last(&mut self, from: u32, units_from: u32, k: f32) {
+        if self.pieces.len() as u32 > from
+            && let Some(p) = self.pieces.last_mut()
+        {
+            p.width += k;
+            if p.n_units > 0 && self.units.len() as u32 > units_from {
+                *self.units.last_mut().unwrap() += k;
+            }
+        }
+    }
+
+    /// Kerning between the grapheme ending at `pos` and the one starting there, when a single
+    /// shaping run would contain both: same style, no padding or atomic box between them, both
+    /// drawn with the style's face, neither a control character. Zero otherwise.
+    fn kern_at(&mut self, pos: usize) -> f32 {
+        let text = self.text;
+        let bytes = text.as_bytes();
+        let len = text.len();
+        if pos == 0 || pos >= len {
+            return 0.0;
+        }
+        let (l, r) = (bytes[pos - 1], bytes[pos]);
+        if l < 0x20 || r < 0x20 || l == 0x7F || r == 0x7F {
+            return 0.0;
+        }
+        let a0 = if l < 0x80 {
+            pos - 1
+        } else {
+            let mut c = GraphemeCursor::new(pos, len, true);
+            if !c.is_boundary(text, 0).unwrap_or(false) {
+                return 0.0;
+            }
+            match c.prev_boundary(text, 0) {
+                Ok(Some(p)) => p,
+                _ => return 0.0,
+            }
+        };
+        let b1 = if r < 0x80 && bytes.get(pos + 1).is_none_or(|&c| c < 0x80) {
+            pos + 1
+        } else {
+            let mut c = GraphemeCursor::new(pos, len, true);
+            match c.next_boundary(text, 0) {
+                Ok(Some(p)) => p,
+                _ => return 0.0,
+            }
+        };
+        let ls = self.spans.partition_point(|s| s.range.end <= pos - 1);
+        let rs = self.spans.partition_point(|s| s.range.end <= pos);
+        let (sl, sr) = (&self.spans[ls], &self.spans[rs]);
+        if sl.style != sr.style
+            || sl.atomic
+            || sr.atomic
+            || (ls != rs && (sl.pad_end != 0.0 || sr.pad_start != 0.0))
+        {
+            return 0.0;
+        }
+        let style = sl.style;
+        let (a, b) = (&text[a0..pos], &text[pos..b1]);
+        if is_hard_break_str(a) || is_hard_break_str(b) {
+            return 0.0;
+        }
+        if !self.cache.is_shaped(self.book, style, a) || !self.cache.is_shaped(self.book, style, b)
+        {
+            return 0.0;
+        }
+        self.cache.pair_kern(self.book, style, a, b)
+    }
+
     /// Drops the pieces pushed since `from` when they are a single non-tab piece (implied by
     /// the segment instead). Returns (stored count, implicit span, implicit kind).
     fn implicit(&mut self, from: u32) -> (u32, u32, u8) {
@@ -530,6 +622,8 @@ impl Builder<'_> {
             has_tab: false,
             n_units: 0,
         };
+        let first_piece = self.pieces.len();
+        let units_base = self.units.len() as u32;
         let mut p = a;
         while p < b {
             while self.spans[self.span].range.end <= p {
@@ -603,6 +697,21 @@ impl Builder<'_> {
             r.width += width;
             r.n_units += n_units;
             p = q;
+        }
+        // Kerning across piece boundaries inside the region (span changes in one style).
+        for i in first_piece..self.pieces.len().saturating_sub(1) {
+            let pc = self.pieces[i];
+            if pc.kind == P_TAB || self.pieces[i + 1].kind == P_TAB {
+                continue;
+            }
+            let k = self.kern_at(pc.end as usize);
+            if k != 0.0 {
+                self.pieces[i].width += k;
+                r.width += k;
+                if pc.n_units > 0 {
+                    self.units[(units_base + pc.unit0 + pc.n_units - 1) as usize] += k;
+                }
+            }
         }
         r
     }
