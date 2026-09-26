@@ -131,6 +131,7 @@ pub(crate) enum Gap {
 
 pub(crate) mod geom {
     pub const MARGIN_X: f32 = 18.0;
+    pub const READING_WIDTH: f32 = 760.0;
     pub const GAP_FIRST: f32 = 14.0;
     pub const GAP_TURN: f32 = 30.0;
     pub const GAP_REPLY: f32 = 18.0;
@@ -593,8 +594,9 @@ fn chip_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, icon: &'static str, co
 pub(crate) fn place_row(core: &RowCore, gap: Gap, px: Px, width: f32, mut out: Option<&mut DisplayBuilder>) -> f32 {
     use geom::*;
     let margin = px.v(MARGIN_X);
-    let x = margin;
-    let cw = (width - margin * 2.0).max(40.0);
+    // Comfortable measure on iPad/landscape: cap the column, center it.
+    let cw = (width - margin * 2.0).clamp(40.0, px.v(READING_WIDTH));
+    let x = ((width - cw) / 2.0).max(margin).floor();
     let top = gap.px(px);
     let body = match &core.content {
         Content::Block(b) => place(b, px, x, top, cw, out),

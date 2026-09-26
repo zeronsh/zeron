@@ -96,8 +96,15 @@ final class SessionViewController: UIViewController {
         view.addSubview(jump)
 
         NSLayoutConstraint.activate([
-            bottom.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
-            bottom.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            // Full width on phones; a centered 760pt column on iPad/landscape.
+            bottom.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerXAnchor),
+            bottom.leadingAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            bottom.widthAnchor.constraint(lessThanOrEqualToConstant: 784),
+            {
+                let fill = bottom.widthAnchor.constraint(equalTo: view.safeAreaLayoutGuide.widthAnchor, constant: -24)
+                fill.priority = .defaultHigh
+                return fill
+            }(),
             bottom.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -8),
             jump.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
             jump.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -12),
