@@ -69,7 +69,13 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             status: Some(SessionStatus::Working),
             last_ago_ms: 40_000,
             created_ago_ms: HOUR,
-            ..chat("chat-veil", Some("space-zeron"), MAC, "Streaming veil on transcript rows", "Opening the PR now. Running the checks first:")
+            ..chat(
+                "chat-veil",
+                Some("space-zeron"),
+                MAC,
+                "Streaming veil on transcript rows",
+                "Opening the PR now. Running the checks first:",
+            )
         },
         DemoChat {
             branch: Some("catalog-sync"),
@@ -79,7 +85,13 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             created_ago_ms: 2 * HOUR,
             seen: false,
             model: "claude-opus-5",
-            ..chat("chat-picker", Some("space-zeron"), MAC, "Model picker catalog sync", "Before I wire the RPC, two decisions:")
+            ..chat(
+                "chat-picker",
+                Some("space-zeron"),
+                MAC,
+                "Model picker catalog sync",
+                "Before I wire the RPC, two decisions:",
+            )
         },
         DemoChat {
             harness: Codex,
@@ -89,58 +101,122 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             pr: Some((77, Closed, "Refine tool group colors")),
             last_ago_ms: 15 * MIN,
             seen: false,
-            ..chat("chat-tabs", Some("space-zeron"), MAC, "Tool group header colors", "Done — failed children stay quiet.")
+            ..chat(
+                "chat-tabs",
+                Some("space-zeron"),
+                MAC,
+                "Tool group header colors",
+                "Done — failed children stay quiet.",
+            )
         },
         DemoChat {
             status: Some(SessionStatus::Errored),
             last_ago_ms: 33 * MIN,
             seen: false,
-            ..chat("chat-errored", Some("space-edge"), VPS, "Durable Object hibernation flush", "Harness exited with status 1: rate limited")
+            ..chat(
+                "chat-errored",
+                Some("space-edge"),
+                VPS,
+                "Durable Object hibernation flush",
+                "Harness exited with status 1: rate limited",
+            )
         },
         DemoChat {
             last_ago_ms: DAY,
             created_ago_ms: 2 * DAY,
-            ..chat("chat-deploy", Some("space-edge"), VPS, "Wrangler deploy hygiene", "Hibernation-safe flush timer")
+            ..chat(
+                "chat-deploy",
+                Some("space-edge"),
+                VPS,
+                "Wrangler deploy hygiene",
+                "Hibernation-safe flush timer",
+            )
         },
         DemoChat {
             branch: Some("scroll-pinning"),
-            pr: Some((102, Open, "Clamp transcript offset on every geometry change")),
+            pr: Some((
+                102,
+                Open,
+                "Clamp transcript offset on every geometry change",
+            )),
             last_ago_ms: 80 * MIN,
             seen: false,
             harness: Codex,
             model: "gpt-6-astra",
             reasoning: Ultra,
-            ..chat("chat-ios-scroll", Some("space-mobile"), MAC, "Transcript scroll pinning", "Clamp the invariant on every geometry change")
+            ..chat(
+                "chat-ios-scroll",
+                Some("space-mobile"),
+                MAC,
+                "Transcript scroll pinning",
+                "Clamp the invariant on every geometry change",
+            )
         },
         DemoChat {
             last_ago_ms: 5 * HOUR,
-            ..chat("chat-ios-keyboard", Some("space-mobile"), MAC, "Keyboard avoidance for composer", "Tracking keyboardLayoutGuide fixes it")
+            ..chat(
+                "chat-ios-keyboard",
+                Some("space-mobile"),
+                MAC,
+                "Keyboard avoidance for composer",
+                "Tracking keyboardLayoutGuide fixes it",
+            )
         },
         DemoChat {
             last_ago_ms: 2 * HOUR,
             model: "claude-sonnet-5",
             reasoning: Medium,
-            ..chat("chat-home", None, MAC, "Clean up ~/Downloads", "Found 412 items older than 90 days.")
+            ..chat(
+                "chat-home",
+                None,
+                MAC,
+                "Clean up ~/Downloads",
+                "Found 412 items older than 90 days.",
+            )
         },
         DemoChat {
             last_ago_ms: 10 * MIN,
-            ..chat("chat-cjk", Some("space-zeron"), MAC, "多言語テキストのレイアウト 🌏", "日本語の長い段落です。")
+            ..chat(
+                "chat-cjk",
+                Some("space-zeron"),
+                MAC,
+                "多言語テキストのレイアウト 🌏",
+                "日本語の長い段落です。",
+            )
         },
         DemoChat {
             last_ago_ms: 5 * DAY,
             created_ago_ms: 6 * DAY,
-            ..chat("chat-blog", Some("space-blog"), STUDIO, "Draft the launch post", "## Outline")
+            ..chat(
+                "chat-blog",
+                Some("space-blog"),
+                STUDIO,
+                "Draft the launch post",
+                "## Outline",
+            )
         },
         DemoChat {
             parent: Some("chat-veil"),
             last_ago_ms: 30 * MIN,
-            ..chat("chat-side", Some("space-zeron"), MAC, "Side chat: veil timing", "α = 0.2 over inter-append gaps")
+            ..chat(
+                "chat-side",
+                Some("space-zeron"),
+                MAC,
+                "Side chat: veil timing",
+                "α = 0.2 over inter-append gaps",
+            )
         },
         DemoChat {
             archived: true,
             last_ago_ms: 3 * DAY,
             created_ago_ms: 4 * DAY,
-            ..chat("chat-oklch", Some("space-zeron"), MAC, "OKLCH conversion drift", "Gamma encode matches now.")
+            ..chat(
+                "chat-oklch",
+                Some("space-zeron"),
+                MAC,
+                "OKLCH conversion drift",
+                "Gamma encode matches now.",
+            )
         },
         DemoChat {
             archived: true,
@@ -149,50 +225,103 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             reasoning: High,
             last_ago_ms: 6 * DAY,
             created_ago_ms: 7 * DAY,
-            ..chat("chat-presence", Some("space-edge"), VPS, "Presence beat coalescing", "Batched to one beat per 25s.")
+            ..chat(
+                "chat-presence",
+                Some("space-edge"),
+                VPS,
+                "Presence beat coalescing",
+                "Batched to one beat per 25s.",
+            )
         },
     ]
 }
 
 pub(crate) fn spaces(now: i64) -> Vec<Space> {
-    let space = |id: &str, device: &str, path: &str, name: Option<&str>, git: bool, ago: i64| Space {
-        id: id.into(),
-        device_id: device.into(),
-        path: path.into(),
-        name: name.map(str::to_owned),
-        git_detected: git,
-        git_checked_at: git.then(|| ms(now)),
-        checkout_id: git.then(|| format!("co-{id}")),
-        created_at: ms(now - ago),
-    };
+    let space =
+        |id: &str, device: &str, path: &str, name: Option<&str>, git: bool, ago: i64| Space {
+            id: id.into(),
+            device_id: device.into(),
+            path: path.into(),
+            name: name.map(str::to_owned),
+            git_detected: git,
+            git_checked_at: git.then(|| ms(now)),
+            checkout_id: git.then(|| format!("co-{id}")),
+            created_at: ms(now - ago),
+        };
     vec![
-        space("space-blog", STUDIO, "/Users/dev/Projects/blog", None, false, 20 * DAY),
+        space(
+            "space-blog",
+            STUDIO,
+            "/Users/dev/Projects/blog",
+            None,
+            false,
+            20 * DAY,
+        ),
         space("space-zeron", MAC, "/Users/dev/zeron", None, true, 9 * DAY),
         space("space-edge", VPS, "/srv/deploys/edge", None, true, 4 * DAY),
-        space("space-mobile", MAC, "/Users/dev/zeron-ios", Some("Zeron iOS"), true, 2 * DAY),
+        space(
+            "space-mobile",
+            MAC,
+            "/Users/dev/zeron-ios",
+            Some("Zeron iOS"),
+            true,
+            2 * DAY,
+        ),
     ]
 }
 
 pub(crate) fn devices(self_id: &str, self_name: &str, now: i64) -> Vec<Device> {
-    let device = |id: &str, name: &str, platform: &str, version: &str, caps: bool, seen: i64| Device {
-        id: id.into(),
-        name: name.into(),
-        platform: platform.into(),
-        last_seen_at: Some(ms(seen)),
-        created_at: Some(ms(now - 30 * DAY)),
-        version: Some(version.into()),
-        cursor_sdk_version: None,
-        capabilities: if caps {
-            capability::ALL_QUEUE.iter().map(|c| (*c).to_owned()).collect()
-        } else {
-            Vec::new()
-        },
-    };
+    let device =
+        |id: &str, name: &str, platform: &str, version: &str, caps: bool, seen: i64| Device {
+            id: id.into(),
+            name: name.into(),
+            platform: platform.into(),
+            last_seen_at: Some(ms(seen)),
+            created_at: Some(ms(now - 30 * DAY)),
+            version: Some(version.into()),
+            cursor_sdk_version: None,
+            capabilities: if caps {
+                capability::ALL_QUEUE
+                    .iter()
+                    .map(|c| (*c).to_owned())
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        };
     vec![
-        device(MAC, "MacBook Pro", "macos", env!("CARGO_PKG_VERSION"), true, now),
-        device(VPS, "hetzner-01", "linux", env!("CARGO_PKG_VERSION"), true, now),
-        device(STUDIO, "Mac Studio", "macos", "0.2.80", false, now - 3 * DAY),
-        device(self_id, self_name, "ios", env!("CARGO_PKG_VERSION"), false, now),
+        device(
+            MAC,
+            "MacBook Pro",
+            "macos",
+            env!("CARGO_PKG_VERSION"),
+            true,
+            now,
+        ),
+        device(
+            VPS,
+            "hetzner-01",
+            "linux",
+            env!("CARGO_PKG_VERSION"),
+            true,
+            now,
+        ),
+        device(
+            STUDIO,
+            "Mac Studio",
+            "macos",
+            "0.2.80",
+            false,
+            now - 3 * DAY,
+        ),
+        device(
+            self_id,
+            self_name,
+            "ios",
+            env!("CARGO_PKG_VERSION"),
+            false,
+            now,
+        ),
     ]
 }
 
@@ -258,7 +387,10 @@ pub(crate) fn seed(
             title: Some(demo.title.into()),
             archived: demo.archived,
             cwd: Some(space.map_or_else(|| "~".to_owned(), |s| s.path.clone())),
-            branch: demo.branch.map(str::to_owned).or_else(|| space.filter(|s| s.git_detected).map(|_| "main".to_owned())),
+            branch: demo
+                .branch
+                .map(str::to_owned)
+                .or_else(|| space.filter(|s| s.git_detected).map(|_| "main".to_owned())),
             checkout_id: source_context.as_ref().map(|s| s.checkout_id.clone()),
             source_context: source_context.clone(),
             config: Some(ChatConfig {
@@ -320,7 +452,11 @@ pub(crate) fn seed(
     }
     for (section, name, members) in [
         ("section-p0", "P0", &["chat-tabs", "chat-errored"][..]),
-        ("section-mobile", "Mobile", &["chat-ios-scroll", "chat-ios-keyboard"][..]),
+        (
+            "section-mobile",
+            "Mobile",
+            &["chat-ios-scroll", "chat-ios-keyboard"][..],
+        ),
     ] {
         doc.change_sidebar_pin(&SidebarPinChange::Section {
             change: SidebarSectionChange::Create {

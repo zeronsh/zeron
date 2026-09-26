@@ -87,7 +87,13 @@ pub struct ModelInfo {
     pub options: Vec<ModelOption>,
 }
 
-fn model(id: &str, label: &str, description: &str, ladder: &[&str], options: Vec<ModelOption>) -> ModelInfo {
+fn model(
+    id: &str,
+    label: &str,
+    description: &str,
+    ladder: &[&str],
+    options: Vec<ModelOption>,
+) -> ModelInfo {
     ModelInfo {
         id: id.into(),
         label: label.into(),
@@ -125,7 +131,15 @@ fn context_window(default: &str) -> ModelOption {
     )
 }
 
-const FULL_LADDER: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultracode", "ultrathink"];
+const FULL_LADDER: &[&str] = &[
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultracode",
+    "ultrathink",
+];
 const CLAUDE_XHIGH: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultrathink"];
 const CODEX_ULTRA: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
 const CODEX_MAX: &[&str] = &["low", "medium", "high", "xhigh", "max"];
@@ -169,15 +183,51 @@ pub fn fallback_models(harness: &str) -> Vec<ModelInfo> {
         )]
     };
     match harness {
-        "grok" => vec![model("grok-4.5", "Grok 4.5", "xAI's coding model — 500k context", &["low", "medium", "high"], vec![])],
+        "grok" => vec![model(
+            "grok-4.5",
+            "Grok 4.5",
+            "xAI's coding model — 500k context",
+            &["low", "medium", "high"],
+            vec![],
+        )],
         "devin" => vec![
-            model("swe-1-7-medium", "SWE-1.7 Medium", "Devin's default coding model", &[], vec![]),
-            model("claude-fable-5-1-high", "Claude Fable 5.1 High", "Anthropic's frontier model through Devin", &[], vec![]),
-            model("adaptive", "Adaptive", "Devin picks the model per request", &[], vec![]),
+            model(
+                "swe-1-7-medium",
+                "SWE-1.7 Medium",
+                "Devin's default coding model",
+                &[],
+                vec![],
+            ),
+            model(
+                "claude-fable-5-1-high",
+                "Claude Fable 5.1 High",
+                "Anthropic's frontier model through Devin",
+                &[],
+                vec![],
+            ),
+            model(
+                "adaptive",
+                "Adaptive",
+                "Devin picks the model per request",
+                &[],
+                vec![],
+            ),
         ],
         "hermes" => vec![
-            model("hermes-4-405b", "Hermes 4 405B", "Nous Research's hybrid-reasoning flagship", &[], vec![]),
-            model("hermes-4-70b", "Hermes 4 70B", "Faster Hermes 4 — same post-training, 70B", &[], vec![]),
+            model(
+                "hermes-4-405b",
+                "Hermes 4 405B",
+                "Nous Research's hybrid-reasoning flagship",
+                &[],
+                vec![],
+            ),
+            model(
+                "hermes-4-70b",
+                "Hermes 4 70B",
+                "Faster Hermes 4 — same post-training, 70B",
+                &[],
+                vec![],
+            ),
         ],
         "pi" => vec![model(
             "default",
@@ -187,34 +237,160 @@ pub fn fallback_models(harness: &str) -> Vec<ModelInfo> {
             vec![],
         )],
         "opencode" => vec![
-            model("opencode/big-pickle", "Big Pickle", "OpenCode Zen's flagship coding model", &[], vec![]),
-            model("opencode/mimo-v2.5-free", "MiMo V2.5 Free", "Free tier on OpenCode Zen", &[], vec![]),
-            model("opencode/hy3-free", "Hy3 Free", "Free tier on OpenCode Zen", &["low", "medium", "high"], vec![]),
+            model(
+                "opencode/big-pickle",
+                "Big Pickle",
+                "OpenCode Zen's flagship coding model",
+                &[],
+                vec![],
+            ),
+            model(
+                "opencode/mimo-v2.5-free",
+                "MiMo V2.5 Free",
+                "Free tier on OpenCode Zen",
+                &[],
+                vec![],
+            ),
+            model(
+                "opencode/hy3-free",
+                "Hy3 Free",
+                "Free tier on OpenCode Zen",
+                &["low", "medium", "high"],
+                vec![],
+            ),
         ],
         "antigravity" => vec![
-            model("gemini-3.7-flash", "Gemini 3.7 Flash", "Google's fast Gemini model through Antigravity", &["low", "medium", "high"], vec![]),
-            model("gemini-3.1-pro", "Gemini 3.1 Pro", "Google's most capable Gemini model through Antigravity", &["low", "high"], vec![]),
+            model(
+                "gemini-3.7-flash",
+                "Gemini 3.7 Flash",
+                "Google's fast Gemini model through Antigravity",
+                &["low", "medium", "high"],
+                vec![],
+            ),
+            model(
+                "gemini-3.1-pro",
+                "Gemini 3.1 Pro",
+                "Google's most capable Gemini model through Antigravity",
+                &["low", "high"],
+                vec![],
+            ),
         ],
         "codex" => vec![
-            model("gpt-6-astra", "GPT-6-Astra", "Our most capable model for complex, demanding work.", CODEX_ULTRA, service_tier()),
-            model("gpt-5.6-sol", "GPT-5.6-Sol", "Frontier reasoning flagship", CODEX_ULTRA, service_tier()),
-            model("gpt-5.6-terra", "GPT-5.6-Terra", "Deep multi-step agentic work", CODEX_ULTRA, service_tier()),
-            model("gpt-5.6-luna", "GPT-5.6-Luna", "Fast frontier model", CODEX_MAX, service_tier()),
-            model("gpt-daybreak-blue-latest", "Daybreak Blue", "Frontier model for defensive cybersecurity work", CODEX_ULTRA, vec![]),
-            model("gpt-5.5", "GPT-5.5", "Previous generation flagship", CODEX_XHIGH, service_tier()),
-            model("gpt-5.4", "GPT-5.4", "Reliable general coding", CODEX_XHIGH, service_tier()),
-            model("gpt-5.4-mini", "GPT-5.4-Mini", "Small, fast and capable", CODEX_XHIGH, service_tier()),
-            model("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark", "Ultra-fast lightweight coding", CODEX_XHIGH, service_tier()),
+            model(
+                "gpt-6-astra",
+                "GPT-6-Astra",
+                "Our most capable model for complex, demanding work.",
+                CODEX_ULTRA,
+                service_tier(),
+            ),
+            model(
+                "gpt-5.6-sol",
+                "GPT-5.6-Sol",
+                "Frontier reasoning flagship",
+                CODEX_ULTRA,
+                service_tier(),
+            ),
+            model(
+                "gpt-5.6-terra",
+                "GPT-5.6-Terra",
+                "Deep multi-step agentic work",
+                CODEX_ULTRA,
+                service_tier(),
+            ),
+            model(
+                "gpt-5.6-luna",
+                "GPT-5.6-Luna",
+                "Fast frontier model",
+                CODEX_MAX,
+                service_tier(),
+            ),
+            model(
+                "gpt-daybreak-blue-latest",
+                "Daybreak Blue",
+                "Frontier model for defensive cybersecurity work",
+                CODEX_ULTRA,
+                vec![],
+            ),
+            model(
+                "gpt-5.5",
+                "GPT-5.5",
+                "Previous generation flagship",
+                CODEX_XHIGH,
+                service_tier(),
+            ),
+            model(
+                "gpt-5.4",
+                "GPT-5.4",
+                "Reliable general coding",
+                CODEX_XHIGH,
+                service_tier(),
+            ),
+            model(
+                "gpt-5.4-mini",
+                "GPT-5.4-Mini",
+                "Small, fast and capable",
+                CODEX_XHIGH,
+                service_tier(),
+            ),
+            model(
+                "gpt-5.3-codex-spark",
+                "GPT-5.3-Codex-Spark",
+                "Ultra-fast lightweight coding",
+                CODEX_XHIGH,
+                service_tier(),
+            ),
         ],
         // claude-code (mock shares it)
         _ => vec![
-            model("claude-fable-5-1", "Fable 5.1", "Most intelligent model for building agents", FULL_LADDER, vec![context_window("200k")]),
-            model("claude-fable-5", "Fable 5", "Previous generation Fable", FULL_LADDER, vec![context_window("200k")]),
-            model("claude-opus-5", "Opus 5", "Powerful model for complex work", FULL_LADDER, vec![context_window("200k"), toggle("fastMode", "Fast Mode")]),
-            model("claude-opus-4-8", "Opus 4.8", "Previous generation Opus", FULL_LADDER, vec![toggle("fastMode", "Fast Mode")]),
-            model("claude-opus-4-7", "Opus 4.7", "Older generation Opus", CLAUDE_XHIGH, vec![toggle("fastMode", "Fast Mode")]),
-            model("claude-sonnet-5", "Sonnet 5", "Balanced speed and intelligence", CLAUDE_XHIGH, vec![context_window("200k")]),
-            model("claude-haiku-4-5", "Haiku 4.5", "Fastest model for everyday tasks", &[], vec![toggle("thinking", "Thinking")]),
+            model(
+                "claude-fable-5-1",
+                "Fable 5.1",
+                "Most intelligent model for building agents",
+                FULL_LADDER,
+                vec![context_window("200k")],
+            ),
+            model(
+                "claude-fable-5",
+                "Fable 5",
+                "Previous generation Fable",
+                FULL_LADDER,
+                vec![context_window("200k")],
+            ),
+            model(
+                "claude-opus-5",
+                "Opus 5",
+                "Powerful model for complex work",
+                FULL_LADDER,
+                vec![context_window("200k"), toggle("fastMode", "Fast Mode")],
+            ),
+            model(
+                "claude-opus-4-8",
+                "Opus 4.8",
+                "Previous generation Opus",
+                FULL_LADDER,
+                vec![toggle("fastMode", "Fast Mode")],
+            ),
+            model(
+                "claude-opus-4-7",
+                "Opus 4.7",
+                "Older generation Opus",
+                CLAUDE_XHIGH,
+                vec![toggle("fastMode", "Fast Mode")],
+            ),
+            model(
+                "claude-sonnet-5",
+                "Sonnet 5",
+                "Balanced speed and intelligence",
+                CLAUDE_XHIGH,
+                vec![context_window("200k")],
+            ),
+            model(
+                "claude-haiku-4-5",
+                "Haiku 4.5",
+                "Fastest model for everyday tasks",
+                &[],
+                vec![toggle("thinking", "Thinking")],
+            ),
         ],
     }
 }
@@ -354,7 +530,13 @@ struct DeviceCatalog {
 
 fn file_safe(id: &str) -> String {
     id.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -444,7 +626,10 @@ mod tests {
         cache.put_harnesses("dev/mac", &fallback_harnesses());
         cache.put_models("dev/mac", "codex", &fallback_models("codex"));
         assert_eq!(cache.harnesses("dev/mac").unwrap().len(), 2);
-        assert_eq!(cache.models("dev/mac", "codex").unwrap()[0].id, "gpt-6-astra");
+        assert_eq!(
+            cache.models("dev/mac", "codex").unwrap()[0].id,
+            "gpt-6-astra"
+        );
         assert!(cache.models("dev/mac", "grok").is_none());
     }
 }

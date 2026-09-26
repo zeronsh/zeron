@@ -110,7 +110,10 @@ pub struct HostInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct LiveStatus {
+    /// Display status (an in-flight send reads Working).
     pub indicator: super::types::ChatIndicator,
+    /// A turn is actually running on the host (sends queue/steer).
+    pub turn_running: bool,
     pub working_since_ms: Option<i64>,
     /// The newest transcript entry is streaming.
     pub streaming: bool,
@@ -272,6 +275,7 @@ impl From<&zc::ComposerState> for ComposerState {
             },
             live: LiveStatus {
                 indicator: c.live.indicator.into(),
+                turn_running: c.live.turn_running,
                 working_since_ms: c.live.working_since_ms,
                 streaming: c.live.streaming,
                 can_interrupt: c.live.can_interrupt,
@@ -395,7 +399,9 @@ impl From<QueueEditLease> for zc::QueueEditLease {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum QueueEditStart {
-    Acquired { lease: QueueEditLease },
+    Acquired {
+        lease: QueueEditLease,
+    },
     /// Another editor holds the row.
     Locked,
     /// The row left the queue.
@@ -519,7 +525,11 @@ impl SessionHandle {
         Ok(self.inner.interrupt()?)
     }
 
-    pub fn respond_input(&self, request_id: String, answers: Vec<UserInputAnswer>) -> CoreResult<()> {
+    pub fn respond_input(
+        &self,
+        request_id: String,
+        answers: Vec<UserInputAnswer>,
+    ) -> CoreResult<()> {
         let answers = answers
             .into_iter()
             .map(|a| zc::UserInputAnswer {
@@ -531,7 +541,12 @@ impl SessionHandle {
     }
 
     /// Park a message on the shared queue directly. Returns the row id.
-    pub fn enqueue(&self, text: String, attachments: Vec<String>, hold_for_turn_end: bool) -> CoreResult<String> {
+    pub fn enqueue(
+        &self,
+        text: String,
+        attachments: Vec<String>,
+        hold_for_turn_end: bool,
+    ) -> CoreResult<String> {
         Ok(self.inner.enqueue(&text, attachments, hold_for_turn_end)?)
     }
 
@@ -547,12 +562,13 @@ impl SessionHandle {
 
     pub async fn begin_queued_edit(&self, id: String, instance_id: String) -> QueueEditStart {
         let inner = self.inner.clone();
-        let result = zc::runtime::run(async move {
-            Ok(inner.begin_queued_edit(&id, &instance_id).await)
-        })
-        .await;
+        let result =
+            zc::runtime::run(async move { Ok(inner.begin_queued_edit(&id, &instance_id).await) })
+                .await;
         match result {
-            Ok(zc::QueueEditStart::Acquired(lease)) => QueueEditStart::Acquired { lease: lease.into() },
+            Ok(zc::QueueEditStart::Acquired(lease)) => QueueEditStart::Acquired {
+                lease: lease.into(),
+            },
             Ok(zc::QueueEditStart::Locked) => QueueEditStart::Locked,
             Ok(zc::QueueEditStart::Missing) => QueueEditStart::Missing,
             Ok(zc::QueueEditStart::Unavailable) | Err(_) => QueueEditStart::Unavailable,
@@ -582,7 +598,10 @@ impl SessionHandle {
             QueueEditAction::Release => zc::QueueEditAction::Release,
         };
         let result =
-            zc::runtime::run(async move { Ok(inner.finish_queued_edit(&lease, action, text).await) }).await;
+            zc::runtime::run(
+                async move { Ok(inner.finish_queued_edit(&lease, action, text).await) },
+            )
+            .await;
         match result {
             Ok(zc::QueueEditFinish::Finished) => QueueEditFinish::Finished,
             Ok(zc::QueueEditFinish::Conflict) => QueueEditFinish::Conflict,

@@ -15,6 +15,9 @@ pub enum ClientError {
     /// The host is reachable but does not advertise the needed capability.
     #[error("not supported by the host: {0}")]
     Unsupported(String),
+    /// The host answered with an error (bad request, git failure, …).
+    #[error("host error: {0}")]
+    HostError(String),
     #[error("network: {0}")]
     Network(String),
     /// Credentials rejected / refresh failed. Irrecoverable failures also

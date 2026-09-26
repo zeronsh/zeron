@@ -201,7 +201,12 @@ impl DemoHost {
                 let live: Vec<Session> = state
                     .sessions
                     .iter()
-                    .filter(|s| matches!(s.status, SessionStatus::Working | SessionStatus::AwaitingInput))
+                    .filter(|s| {
+                        matches!(
+                            s.status,
+                            SessionStatus::Working | SessionStatus::AwaitingInput
+                        )
+                    })
                     .cloned()
                     .collect();
                 if !live.is_empty() {
@@ -271,7 +276,11 @@ impl DemoHost {
     /// A viewer opened `chat-veil`: finish its in-flight streaming entry.
     pub(crate) fn session_opened(self: &Arc<Self>, core: &Arc<SessionCore>) {
         let snapshot = core.snapshot();
-        let Some(last) = snapshot.entries.get(..snapshot.transcript_len).and_then(|e| e.last()) else {
+        let Some(last) = snapshot
+            .entries
+            .get(..snapshot.transcript_len)
+            .and_then(|e| e.last())
+        else {
             return;
         };
         if !last.is_streaming() || lock(&self.turns).contains_key(&core.chat_id) {
@@ -279,7 +288,12 @@ impl DemoHost {
         }
         let steps = vec![Step::Text(transcripts::VEIL_LIVE_REST.to_owned())];
         let written = last.message.parts.clone();
-        let index = core.doc().doc().get_list("messages").len().saturating_sub(1);
+        let index = core
+            .doc()
+            .doc()
+            .get_list("messages")
+            .len()
+            .saturating_sub(1);
         self.spawn_turn(core.chat_id.clone(), None, steps, Some((index, written)));
     }
 
@@ -318,7 +332,9 @@ impl DemoHost {
         if !self.host_online(&client, &host) {
             return;
         }
-        let Some(core) = client.session_core(chat_id) else { return };
+        let Some(core) = client.session_core(chat_id) else {
+            return;
+        };
         let commands = core.doc().read_commands().unwrap_or_default();
         for command in commands {
             if command.status != SessionCommandStatus::Pending
@@ -366,9 +382,13 @@ impl DemoHost {
                     answers,
                 } => {
                     let _ = core.write(|doc| doc.resolve_input(&request_id));
-                    let labels: Vec<String> =
-                        answers.into_iter().flat_map(|a| a.labels).collect();
-                    self.spawn_turn(chat_id.to_owned(), None, transcripts::answered(&labels), None);
+                    let labels: Vec<String> = answers.into_iter().flat_map(|a| a.labels).collect();
+                    self.spawn_turn(
+                        chat_id.to_owned(),
+                        None,
+                        transcripts::answered(&labels),
+                        None,
+                    );
                 }
             }
         }
@@ -390,7 +410,9 @@ impl DemoHost {
     fn adopt_attachments(&self, client: &ClientInner, host: &str, prompt: &str) -> String {
         let mut out = prompt.to_owned();
         for line in prompt.lines() {
-            let Some(reference) = line.trim().strip_prefix("- ") else { continue };
+            let Some(reference) = line.trim().strip_prefix("- ") else {
+                continue;
+            };
             let Some((upload_id, name)) = crate::attachments::parse_pending_ref(reference) else {
                 continue;
             };
@@ -406,22 +428,37 @@ impl DemoHost {
 
     fn drain_queue(self: &Arc<Self>, chat_id: &str) {
         let Ok(client) = self.client() else { return };
-        let Some(core) = client.session_core(chat_id) else { return };
+        let Some(core) = client.session_core(chat_id) else {
+            return;
+        };
         let Ok(Some(item)) = core.write(|doc| doc.take_queue_head()) else {
             return;
         };
         let host = self.host_of(&client, chat_id);
-        let text = if item.attachments.is_empty() || item.text.contains(crate::attachments::ATTACHMENT_MARKER) {
+        let text = if item.attachments.is_empty()
+            || item.text.contains(crate::attachments::ATTACHMENT_MARKER)
+        {
             item.text.clone()
         } else {
             crate::attachments::with_attachments(&item.text, &item.attachments)
         };
         let prompt = self.adopt_attachments(&client, &host, &text);
         let steps = self.reply_for(&prompt);
-        self.spawn_turn(chat_id.to_owned(), Some((item.id, prompt, item.issued_by)), steps, None);
+        self.spawn_turn(
+            chat_id.to_owned(),
+            Some((item.id, prompt, item.issued_by)),
+            steps,
+            None,
+        );
     }
 
-    fn set_status(&self, client: &Arc<ClientInner>, chat_id: &str, status: SessionStatus, completed: Option<&str>) {
+    fn set_status(
+        &self,
+        client: &Arc<ClientInner>,
+        chat_id: &str,
+        status: SessionStatus,
+        completed: Option<&str>,
+    ) {
         let host = self.host_of(client, chat_id);
         let now = Utc::now();
         let started = client
@@ -472,7 +509,9 @@ impl DemoHost {
         }
         let token = root.child_token();
         let turn_id = self.turn_seq.fetch_add(1, Ordering::Relaxed);
-        if let Some((_, previous)) = lock(&self.turns).insert(chat_id.clone(), (turn_id, token.clone())) {
+        if let Some((_, previous)) =
+            lock(&self.turns).insert(chat_id.clone(), (turn_id, token.clone()))
+        {
             previous.cancel();
         }
         let gate = lock(&self.turn_gates)
@@ -483,7 +522,8 @@ impl DemoHost {
         crate::runtime::shared().spawn(async move {
             let _serial = gate.lock().await;
             if !token.is_cancelled() {
-                host.run_turn(&chat_id, turn_id, user, steps, resume, token).await;
+                host.run_turn(&chat_id, turn_id, user, steps, resume, token)
+                    .await;
             }
             let idle = {
                 let mut turns = lock(&host.turns);
@@ -514,7 +554,9 @@ impl DemoHost {
         token: CancellationToken,
     ) {
         let Ok(client) = self.client() else { return };
-        let Some(core) = client.session_core(chat_id) else { return };
+        let Some(core) = client.session_core(chat_id) else {
+            return;
+        };
         let host = self.host_of(&client, chat_id);
         let now = now_ms();
 
@@ -534,11 +576,21 @@ impl DemoHost {
                 let _ = core.write(|doc| doc.push_message(&entry));
             }
             let preview = crate::attachments::parse_user_message(prompt).text;
-            let untitled = client.workspace.chat(chat_id).is_some_and(|c| c.title.is_none());
+            let untitled = client
+                .workspace
+                .chat(chat_id)
+                .is_some_and(|c| c.title.is_none());
             let _ = client.registry_write(|doc| {
-                doc.set_chat_last_message(chat_id, &zeron_proto::view::single_line(&preview), Utc::now())?;
+                doc.set_chat_last_message(
+                    chat_id,
+                    &zeron_proto::view::single_line(&preview),
+                    Utc::now(),
+                )?;
                 if untitled {
-                    let title: String = zeron_proto::view::single_line(&preview).chars().take(48).collect();
+                    let title: String = zeron_proto::view::single_line(&preview)
+                        .chars()
+                        .take(48)
+                        .collect();
                     doc.rename_chat(chat_id, if title.is_empty() { "Image" } else { &title })?;
                 }
                 Ok(())
@@ -557,7 +609,9 @@ impl DemoHost {
             }
             None => {
                 let entry_id = crate::new_id();
-                match core.write(|doc| Ok(SegmentWriter::begin(doc, &entry_id, &host, now_ms())?.into_state())) {
+                match core.write(|doc| {
+                    Ok(SegmentWriter::begin(doc, &entry_id, &host, now_ms())?.into_state())
+                }) {
                     Ok(state) => (entry_id, state),
                     Err(_) => return,
                 }
@@ -629,7 +683,12 @@ impl DemoHost {
                     is_error,
                     run_ms,
                 } => {
-                    let mut part = transcripts::tool(&format!("k{}", parts.len()), call, is_error, output.as_deref());
+                    let mut part = transcripts::tool(
+                        &format!("k{}", parts.len()),
+                        call,
+                        is_error,
+                        output.as_deref(),
+                    );
                     if let MessagePart::Tool { resolved, .. } = &mut part {
                         *resolved = false;
                     }
@@ -668,7 +727,8 @@ impl DemoHost {
             MessageStatus::Complete
         };
         let final_parts = parts.clone();
-        let _ = core.write(|doc| SegmentWriter::resume(doc, index, written).finish(&final_parts, status));
+        let _ = core
+            .write(|doc| SegmentWriter::resume(doc, index, written).finish(&final_parts, status));
         let preview = parts
             .iter()
             .rev()
@@ -677,7 +737,9 @@ impl DemoHost {
                 _ => None,
             })
             .map(|t| {
-                zeron_proto::view::single_line(t.lines().find(|l| !l.trim().is_empty()).unwrap_or(""))
+                zeron_proto::view::single_line(
+                    t.lines().find(|l| !l.trim().is_empty()).unwrap_or(""),
+                )
             })
             .unwrap_or_default();
         let viewing = core.snapshot().revision > 0 && self.is_viewing(&core);
@@ -700,7 +762,12 @@ impl DemoHost {
         } else {
             SessionStatus::Idle
         };
-        self.set_status(&client, chat_id, status, (!aborted && !awaiting).then_some(entry_id.as_str()));
+        self.set_status(
+            &client,
+            chat_id,
+            status,
+            (!aborted && !awaiting).then_some(entry_id.as_str()),
+        );
     }
 
     fn is_viewing(&self, core: &SessionCore) -> bool {
@@ -736,14 +803,22 @@ impl DemoHost {
         let reply = match method {
             m::BEGIN_QUEUED_MESSAGE_EDIT => match row {
                 None => serde_json::json!({ "outcome": "missing" }),
-                Some(row) if row.delivery_gate.is_some() => serde_json::json!({ "outcome": "locked" }),
+                Some(row) if row.delivery_gate.is_some() => {
+                    serde_json::json!({ "outcome": "locked" })
+                }
                 Some(row) => {
                     let lease_id = crate::new_id();
                     let hash = text_hash(&row.text);
                     let gate = QueueDeliveryGate::Editing {
                         lease_id: lease_id.clone(),
-                        owner_device_id: params["editorDeviceId"].as_str().unwrap_or_default().into(),
-                        owner_instance_id: params["editorInstanceId"].as_str().unwrap_or_default().into(),
+                        owner_device_id: params["editorDeviceId"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .into(),
+                        owner_instance_id: params["editorInstanceId"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .into(),
                         acquired_at_ms: now,
                         expires_at_ms: now + LEASE_MS,
                         base_text_hash: hash.clone(),
@@ -782,7 +857,10 @@ impl DemoHost {
                 match (row, held) {
                     (None, _) => serde_json::json!({ "outcome": "missing" }),
                     (Some(_), false) => serde_json::json!({ "outcome": "lost" }),
-                    (Some(row), true) if params["expectedTextHash"].as_str() != Some(text_hash(&row.text).as_str()) => {
+                    (Some(row), true)
+                        if params["expectedTextHash"].as_str()
+                            != Some(text_hash(&row.text).as_str()) =>
+                    {
                         serde_json::json!({ "outcome": "conflict", "currentText": row.text })
                     }
                     (Some(_), true) => {
@@ -825,7 +903,12 @@ impl DemoHost {
                         };
                         let prompt = self.adopt_attachments(&client, &host, &text);
                         let steps = self.reply_for(&prompt);
-                        self.spawn_turn(chat_id.clone(), Some((item.id, prompt, item.issued_by)), steps, None);
+                        self.spawn_turn(
+                            chat_id.clone(),
+                            Some((item.id, prompt, item.issued_by)),
+                            steps,
+                            None,
+                        );
                         serde_json::json!({ "sent": true })
                     }
                     None => serde_json::json!({ "sent": false }),
@@ -874,7 +957,11 @@ impl DemoHost {
         if path.contains("zeron") {
             vec![
                 r("main", true, None),
-                r("veil-fade", false, Some("/Users/dev/.zeron/worktrees/zeron-veil-fade")),
+                r(
+                    "veil-fade",
+                    false,
+                    Some("/Users/dev/.zeron/worktrees/zeron-veil-fade"),
+                ),
                 r("feature/diff-pane", false, None),
                 r("fix/tool-colors", false, None),
             ]
@@ -917,18 +1004,36 @@ impl DemoHost {
         let list = refs
             .entry(path.to_owned())
             .or_insert_with(|| Self::seeded_refs(path));
-        if let Some(r) = list.iter_mut().find(|r| r.name == base && r.worktree_path.is_none()) {
+        if let Some(r) = list
+            .iter_mut()
+            .find(|r| r.name == base && r.worktree_path.is_none())
+        {
             r.worktree_path = Some(worktree.clone());
         }
         Ok(worktree)
     }
 
-    pub(crate) async fn list_folders(&self, device_id: &str, path: Option<String>) -> Result<FolderListing> {
+    pub(crate) async fn list_folders(
+        &self,
+        device_id: &str,
+        path: Option<String>,
+    ) -> Result<FolderListing> {
         tokio::time::sleep(Duration::from_millis(120)).await;
-        let home = if device_id == fixtures::VPS { "/srv" } else { "/Users/dev" };
+        let home = if device_id == fixtures::VPS {
+            "/srv"
+        } else {
+            "/Users/dev"
+        };
         let path = path.unwrap_or_else(|| home.to_owned());
         let names: &[&str] = match path.as_str() {
-            "/Users/dev" => &["Documents", "Downloads", "Projects", "scratch", "zeron", "zeron-ios"],
+            "/Users/dev" => &[
+                "Documents",
+                "Downloads",
+                "Projects",
+                "scratch",
+                "zeron",
+                "zeron-ios",
+            ],
             "/Users/dev/Documents" => &["notes", "specs"],
             "/Users/dev/Projects" => &["blog", "dotfiles", "playground", "zeron"],
             "/Users/dev/Projects/zeron" => &["apps", "crates", "docs", "edge"],
@@ -937,7 +1042,15 @@ impl DemoHost {
             "/srv/deploys" => &["edge", "landing"],
             _ => &[],
         };
-        const REPOS: &[&str] = &["zeron", "zeron-ios", "dotfiles", "blog", "playground", "edge", "landing"];
+        const REPOS: &[&str] = &[
+            "zeron",
+            "zeron-ios",
+            "dotfiles",
+            "blog",
+            "playground",
+            "edge",
+            "landing",
+        ];
         Ok(FolderListing {
             path,
             entries: names

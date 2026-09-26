@@ -11,8 +11,8 @@
 //! same token — one won, the rest dialed with a dead token and sat in
 //! backoff), and reports the rotated pair to the platform.
 
-use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -51,16 +51,14 @@ fn percent_decode(value: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                match u8::from_str_radix(&value[i + 1..i + 3], 16) {
-                    Ok(b) => {
-                        out.push(b);
-                        i += 3;
-                        continue;
-                    }
-                    Err(_) => out.push(b'%'),
+            b'%' if i + 2 < bytes.len() => match u8::from_str_radix(&value[i + 1..i + 3], 16) {
+                Ok(b) => {
+                    out.push(b);
+                    i += 3;
+                    continue;
                 }
-            }
+                Err(_) => out.push(b'%'),
+            },
             b'+' => out.push(b' '),
             b => out.push(b),
         }
@@ -83,8 +81,14 @@ pub fn workos_authorize_url(state: &str) -> String {
 /// The `code` + `state` of an OAuth callback URL, or the provider's error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthCallback {
-    Code { code: String, state: Option<String> },
-    Error { error: String, description: Option<String> },
+    Code {
+        code: String,
+        state: Option<String>,
+    },
+    Error {
+        error: String,
+        description: Option<String>,
+    },
 }
 
 pub fn parse_auth_callback(url: &str) -> Option<AuthCallback> {
@@ -344,7 +348,9 @@ impl TokenProvider {
     /// rejects and the caller's backoff retries through here.
     pub(crate) async fn bearer(&self) -> Result<String> {
         match &self.mode {
-            Mode::Demo => Err(ClientError::Auth("demo mode has no edge credentials".into())),
+            Mode::Demo => Err(ClientError::Auth(
+                "demo mode has no edge credentials".into(),
+            )),
             Mode::Dev { bearer } => Ok(bearer.clone()),
             Mode::WorkOs {
                 edge_url,
@@ -369,13 +375,15 @@ impl TokenProvider {
                 match refresh(edge_url, &current.refresh_token, Some(org_id)).await {
                     Ok(next) => {
                         *lock(tokens) = next.clone();
-                        self.events.ordered(ClientEvent::AuthRefreshed(next.clone()));
+                        self.events
+                            .ordered(ClientEvent::AuthRefreshed(next.clone()));
                         Ok(next.access_token)
                     }
                     Err(ClientError::Auth(reason)) => {
                         if !self.expired.swap(true, Ordering::AcqRel) {
-                            self.events
-                                .ordered(ClientEvent::AuthExpired { reason: reason.clone() });
+                            self.events.ordered(ClientEvent::AuthExpired {
+                                reason: reason.clone(),
+                            });
                         }
                         Err(ClientError::Auth(reason))
                     }
@@ -396,7 +404,9 @@ mod tests {
     #[test]
     fn authorize_url_and_callback_round_trip() {
         let url = workos_authorize_url("s t&1");
-        assert!(url.starts_with("https://api.workos.com/user_management/authorize?response_type=code"));
+        assert!(
+            url.starts_with("https://api.workos.com/user_management/authorize?response_type=code")
+        );
         assert!(url.contains("redirect_uri=zeron%3A%2F%2Fcallback"));
         assert!(url.contains("state=s%20t%261"));
         assert_eq!(
@@ -411,6 +421,120 @@ mod tests {
             Some(AuthCallback::Error { .. })
         ));
         assert_eq!(parse_auth_callback("zeron://callback"), None);
+    }
+
+    /// A raw HTTP/1.1 responder: counts requests, answers each with `reply`.
+    async fn serve_http(
+        status: u16,
+        body: &'static str,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let counter = counter.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let _ = socket.read(&mut buf).await;
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    // Slow enough that concurrent callers overlap.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (url, hits)
+    }
+
+    struct Collect(Mutex<Vec<ClientEvent>>);
+
+    impl crate::events::ClientListener for Collect {
+        fn on_event(&self, event: ClientEvent) {
+            lock(&self.0).push(event);
+        }
+    }
+
+    fn expired_jwt() -> String {
+        // {"alg":"none"}.{"exp":1000}.sig — long expired.
+        "eyJhbGciOiJub25lIn0.eyJleHAiOjEwMDB9.c2ln".to_owned()
+    }
+
+    fn provider(edge: &str) -> (TokenProvider, Arc<Collect>) {
+        let collect = Arc::new(Collect(Mutex::new(Vec::new())));
+        let events = EventPump::new(collect.clone());
+        events.start(tokio_util::sync::CancellationToken::new());
+        let credentials = crate::config::Credentials::WorkOs {
+            user_id: "u".into(),
+            org_id: "org_1".into(),
+            tokens: AuthTokens {
+                access_token: expired_jwt(),
+                refresh_token: "r1".into(),
+            },
+        };
+        (TokenProvider::new(&credentials, edge, events), collect)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_is_single_flight_and_reported() {
+        let (edge, hits) =
+            serve_http(200, r#"{"accessToken":"fresh-access","refreshToken":"r2"}"#).await;
+        let (tokens, events) = provider(&edge);
+        let tokens = Arc::new(tokens);
+        let calls = (0..8).map(|_| {
+            let tokens = tokens.clone();
+            tokio::spawn(async move { tokens.bearer().await })
+        });
+        for call in futures::future::join_all(calls).await {
+            assert_eq!(call.unwrap().unwrap(), "fresh-access");
+        }
+        // The fresh token has no parseable exp → treated valid: one refresh.
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "single-flight refresh");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(lock(&events.0).iter().any(|e| matches!(
+            e,
+            ClientEvent::AuthRefreshed(t) if t.refresh_token == "r2"
+        )));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rejected_refresh_expires_the_session_once() {
+        let (edge, _hits) = serve_http(401, r#"{"error":"invalid_grant"}"#).await;
+        let (tokens, events) = provider(&edge);
+        assert!(matches!(tokens.bearer().await, Err(ClientError::Auth(_))));
+        assert!(matches!(tokens.bearer().await, Err(ClientError::Auth(_))));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let expired = lock(&events.0)
+            .iter()
+            .filter(|e| matches!(e, ClientEvent::AuthExpired { .. }))
+            .count();
+        assert_eq!(expired, 1);
+        // New tokens from the platform revive it.
+        tokens.update_tokens(AuthTokens {
+            access_token: "x.y.z".into(),
+            refresh_token: "r9".into(),
+        });
+        assert_eq!(tokens.bearer().await.unwrap(), "x.y.z");
+    }
+
+    #[tokio::test]
+    async fn dev_bearer_is_user_at_org() {
+        let events = EventPump::new(Arc::new(crate::events::NullListener));
+        let credentials = crate::config::Credentials::Dev {
+            user_id: "wing".into(),
+            org_id: "acme".into(),
+        };
+        let tokens = TokenProvider::new(&credentials, "http://unused", events);
+        assert_eq!(tokens.bearer().await.unwrap(), "wing@acme");
     }
 
     #[test]

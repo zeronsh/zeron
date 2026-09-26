@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
 use tokio_util::sync::CancellationToken;
-use zeron_doc::{RegistryDoc, SessionDoc};
+use zeron_doc::RegistryDoc;
 use zeron_proto::{Chat, ChatConfig, SidebarPinChange, SidebarSectionChange};
 
 use crate::attachments::{self, AttachmentCache};
@@ -20,10 +20,9 @@ use crate::connectivity::{
 use crate::demo::DemoHost;
 use crate::error::{ClientError, Result};
 use crate::events::{ClientEvent, ClientListener, EventPump};
+use crate::live::LiveBackend;
 use crate::rpc::{FolderListing, ProgressFn, QUEUED_ATTACHMENTS_MIN, RepoRef, capability};
-use crate::session::{
-    HostCapabilities, OutgoingAttachment, RoomState, SessionCore, SessionHandle,
-};
+use crate::session::{HostCapabilities, OutgoingAttachment, RoomState, SessionCore, SessionHandle};
 use crate::workspace::{SearchHit, WorkspaceSnapshot, WorkspaceStore};
 use crate::{lock, now_ms, read, write};
 
@@ -59,15 +58,9 @@ pub struct NewSession {
     pub title: Option<String>,
 }
 
-/// Live-mode transport. Phase 1 wires auth + nudges; registry/chat2/relay
-/// land in phase 2.
-pub(crate) struct LiveBackend {
-    edge_url: String,
-}
-
 pub(crate) enum Backend {
     Demo(Arc<DemoHost>),
-    Live(LiveBackend),
+    Live(Box<LiveBackend>),
 }
 
 pub(crate) struct ClientInner {
@@ -79,7 +72,7 @@ pub(crate) struct ClientInner {
     pub(crate) attachment_cache: AttachmentCache,
     backend: OnceLock<Backend>,
     sessions: Mutex<HashMap<String, Arc<SessionCore>>>,
-    cancel: CancellationToken,
+    pub(crate) cancel: CancellationToken,
     connectivity_tracker: Mutex<ConnectivityTracker>,
     connectivity: RwLock<Connectivity>,
     path_online: AtomicBool,
@@ -104,11 +97,18 @@ impl ClientInner {
         self.demo().is_some()
     }
 
+    pub(crate) fn live(&self) -> Option<&LiveBackend> {
+        match self.backend.get()? {
+            Backend::Live(live) => Some(live),
+            Backend::Demo(_) => None,
+        }
+    }
+
     pub(crate) fn session_core(&self, chat_id: &str) -> Option<Arc<SessionCore>> {
         lock(&self.sessions).get(chat_id).cloned()
     }
 
-    fn cores(&self) -> Vec<Arc<SessionCore>> {
+    pub(crate) fn cores(&self) -> Vec<Arc<SessionCore>> {
         lock(&self.sessions).values().cloned().collect()
     }
 
@@ -141,10 +141,134 @@ impl ClientInner {
 
     /// After any local registry write: settle (demo) / push (live), re-derive.
     pub(crate) fn after_registry_write(self: &Arc<Self>) {
-        if let Some(demo) = self.demo() {
-            demo.settle_registry(&self.workspace);
+        match self.backend() {
+            Backend::Demo(demo) => demo.settle_registry(&self.workspace),
+            Backend::Live(live) => live.registry_written(),
         }
         self.recompute_workspace();
+    }
+
+    /// Live: registry rows/acks applied (or (re)joined).
+    pub(crate) fn registry_changed(self: &Arc<Self>) {
+        let Some(live) = self.live() else { return };
+        let posture = live.registry_posture();
+        if posture.synced {
+            self.synced.store(true, Ordering::Release);
+            // Initialize prefs / prune pins of deleted chats (authoritative
+            // only once a server state applied — never on a cold replica).
+            match self
+                .workspace
+                .mutate(|doc| doc.reconcile_sidebar_pins(true))
+            {
+                Ok(true) => live.registry_written(),
+                Ok(false) => {}
+                Err(err) => tracing::warn!(error = %err, "sidebar pin reconcile failed"),
+            }
+        }
+        live.mark_registry_dirty();
+        if let Some(presence) = live.presence() {
+            self.workspace.replace_presence(presence);
+        }
+        self.recompute_connectivity();
+        self.recompute_workspace();
+        self.reconcile_change_request_watches();
+        // New rows may flip a chat's roomGen / host: attach rooms.
+        for core in self.cores() {
+            core.ensure_room(self);
+        }
+    }
+
+    /// Live: a presence beat arrived (or the local beat ticked).
+    pub(crate) fn presence_changed(self: &Arc<Self>) {
+        let Some(live) = self.live() else { return };
+        if let Some(presence) = live.presence() {
+            let before = self.workspace.presence();
+            let now = now_ms();
+            for (device, at) in &presence {
+                let was_fresh = before
+                    .get(device)
+                    .is_some_and(|b| now - b < crate::connectivity::PRESENCE_FRESH_MS);
+                if !was_fresh && now - at < crate::connectivity::PRESENCE_FRESH_MS {
+                    live.relay.peer_alive(device);
+                }
+            }
+            self.workspace.replace_presence(presence);
+        }
+        self.recompute_workspace();
+    }
+
+    pub(crate) fn connectivity_changed(self: &Arc<Self>) {
+        self.recompute_connectivity();
+    }
+
+    /// PR-status streams for every active chat with a branch (per
+    /// `(device, repo root, branch)`), only while foregrounded.
+    pub(crate) fn reconcile_change_request_watches(self: &Arc<Self>) {
+        let Some(live) = self.live() else { return };
+        if !self.foreground.load(Ordering::Acquire) {
+            live.relay.stop_watches();
+            return;
+        }
+        let (state, _) = self.workspace.state();
+        let targets = state
+            .chats
+            .iter()
+            .filter(|c| !c.archived && c.parent_chat_id.is_none())
+            .filter_map(|c| {
+                let source = c.source_context.as_ref()?;
+                let branch = source.branch.trim();
+                (!branch.is_empty() && !source.repo_root.is_empty()).then(|| {
+                    crate::live::relay::WatchKey {
+                        device_id: c.device_id.clone(),
+                        cwd: source.repo_root.clone(),
+                        branch: branch.to_owned(),
+                    }
+                })
+            })
+            .collect();
+        live.relay.reconcile_watches(self, targets);
+    }
+
+    /// Best-effort durable wake for the chat's host (`POST /device/{id}/nudge`).
+    /// Waits (briefly) for our own pending registry writes — e.g. a fresh
+    /// chat's CreateChat row — to reach the edge first, so the host never
+    /// wakes for a chat it can't see yet.
+    pub(crate) fn nudge_host(self: &Arc<Self>, host: &str, chat_id: &str) {
+        let Some(live) = self.live() else { return };
+        let url = crate::live::urls::nudge(&live.edge, host);
+        let inner = Arc::downgrade(self);
+        let chat_id = chat_id.to_owned();
+        crate::runtime::shared().spawn(async move {
+            for _ in 0..50 {
+                let Some(inner) = inner.upgrade() else { return };
+                if inner.workspace.mutate(|doc| doc.pending_len()) == 0 {
+                    break;
+                }
+                drop(inner);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let Some(inner) = inner.upgrade() else { return };
+            let Ok(token) = inner.tokens.bearer().await else {
+                return;
+            };
+            drop(inner);
+            for attempt in 0..3u64 {
+                let sent = crate::auth::http()
+                    .post(&url)
+                    .bearer_auth(&token)
+                    .json(&serde_json::json!({ "chatId": chat_id }))
+                    .timeout(Duration::from_secs(10))
+                    .send()
+                    .await;
+                match sent {
+                    // 503 nudge_queue_full is retryable.
+                    Ok(response) if response.status().as_u16() == 503 => {
+                        tokio::time::sleep(Duration::from_millis(500 * (attempt + 1))).await;
+                    }
+                    _ => return,
+                }
+            }
+        });
     }
 
     pub(crate) fn registry_write<R>(
@@ -160,14 +284,32 @@ impl ClientInner {
         let _ = self.registry_write(|doc| doc.set_chat_seen(chat_id, Utc::now()));
     }
 
-    fn recompute_connectivity(self: &Arc<Self>) {
-        let raw = RawConnectivity {
-            path_offline: !self.network_online(),
-            // Phase 2: the registry client's reconnect state.
-            registry_connected: true,
-            registry_retry_at_ms: None,
-            last_failure: None,
-            chat_rooms: Vec::new(),
+    pub(crate) fn recompute_connectivity(self: &Arc<Self>) {
+        let raw = match self.live() {
+            None => RawConnectivity {
+                path_offline: !self.network_online(),
+                registry_connected: true,
+                registry_retry_at_ms: None,
+                last_failure: None,
+                chat_rooms: Vec::new(),
+            },
+            Some(live) => {
+                let posture = live.registry_posture();
+                RawConnectivity {
+                    path_offline: !self.network_online(),
+                    registry_connected: posture.connected,
+                    registry_retry_at_ms: posture.retry_at_ms,
+                    last_failure: posture.last_failure,
+                    chat_rooms: self
+                        .cores()
+                        .iter()
+                        .filter_map(|core| {
+                            let room = core.room()?;
+                            Some((core.chat_id.clone(), room.connected(), room.retry_at_ms()))
+                        })
+                        .collect(),
+                }
+            }
         };
         let next = lock(&self.connectivity_tracker).compute(&raw, now_ms());
         let changed = {
@@ -221,14 +363,26 @@ impl ClientInner {
 
     pub(crate) fn room_state(&self, chat_id: &str) -> RoomState {
         let connectivity = self.connectivity();
-        RoomState {
-            connected: connectivity.state != ConnectivityState::Offline,
-            retry_at_ms: connectivity.retry_at_ms,
-            degraded: connectivity.degraded_chats.iter().any(|c| c == chat_id),
+        let degraded = connectivity.degraded_chats.iter().any(|c| c == chat_id);
+        match self.session_core(chat_id).and_then(|core| core.room()) {
+            Some(room) => RoomState {
+                connected: room.connected(),
+                retry_at_ms: room.retry_at_ms().or(connectivity.retry_at_ms),
+                degraded,
+            },
+            None => RoomState {
+                connected: connectivity.state != ConnectivityState::Offline,
+                retry_at_ms: connectivity.retry_at_ms,
+                degraded,
+            },
         }
     }
 
-    pub(crate) fn host_capabilities(&self, device_id: &str, harness: Option<&str>) -> HostCapabilities {
+    pub(crate) fn host_capabilities(
+        &self,
+        device_id: &str,
+        harness: Option<&str>,
+    ) -> HostCapabilities {
         let workspace = self.workspace.snapshot();
         let Some(device) = workspace.device(device_id) else {
             return HostCapabilities::default();
@@ -259,19 +413,37 @@ impl ClientInner {
     /// (the echo renders them immediately; the escort pushes them).
     pub(crate) fn stage_attachments(
         &self,
+        chat_id: &str,
         device_id: &str,
         attachments: &[OutgoingAttachment],
     ) -> Result<Vec<String>> {
+        if let Some(too_big) = attachments
+            .iter()
+            .find(|a| a.data.len() > attachments::MAX_ATTACHMENT_BYTES)
+        {
+            return Err(ClientError::InvalidArgument(format!(
+                "{} is larger than 24 MB",
+                too_big.name
+            )));
+        }
         attachments
             .iter()
             .map(|attachment| {
-                if attachment.data.len() > attachments::MAX_ATTACHMENT_BYTES {
-                    return Err(ClientError::InvalidArgument(format!(
-                        "{} is larger than 24 MB",
-                        attachment.name
-                    )));
+                let upload_id = crate::new_id();
+                let name = attachments::upload_file_name(&attachment.name);
+                let reference = attachments::pending_ref(&upload_id, &name);
+                if let Some(live) = self.live() {
+                    let meta = crate::live::escort::StashMeta {
+                        upload_id: upload_id.clone(),
+                        chat_id: chat_id.to_owned(),
+                        host_device_id: device_id.to_owned(),
+                        name: name.clone(),
+                        created_at_ms: now_ms(),
+                    };
+                    live.escorts
+                        .stash(&meta, &attachment.data)
+                        .map_err(|e| ClientError::Storage(e.to_string()))?;
                 }
-                let reference = attachments::pending_ref(&crate::new_id(), &attachment.name);
                 self.attachment_cache
                     .put(device_id, &reference, Arc::new(attachment.data.clone()));
                 Ok(reference)
@@ -279,26 +451,18 @@ impl ClientInner {
             .collect()
     }
 
-    /// A command/queue row was written: wake the host.
-    pub(crate) fn after_command(self: &Arc<Self>, core: &Arc<SessionCore>, _has_attachments: bool) {
+    /// A command/queue row was written: wake the host (and escort any
+    /// staged attachment bytes).
+    pub(crate) fn after_command(self: &Arc<Self>, core: &Arc<SessionCore>, has_attachments: bool) {
         match self.backend() {
             Backend::Demo(demo) => demo.on_command(&core.chat_id),
             Backend::Live(live) => {
-                let Some(host) = self.workspace.chat(&core.chat_id).map(|c| c.device_id) else {
-                    return;
-                };
-                let inner = self.clone();
-                let chat_id = core.chat_id.clone();
-                let url = format!("{}/device/{host}/nudge", live.edge_url);
-                crate::runtime::shared().spawn(async move {
-                    let Ok(token) = inner.tokens.bearer().await else { return };
-                    let _ = crate::auth::http()
-                        .post(url)
-                        .bearer_auth(token)
-                        .json(&serde_json::json!({ "chatId": chat_id }))
-                        .send()
-                        .await;
-                });
+                if has_attachments {
+                    live.escorts.respawn_chat(self, &core.chat_id);
+                }
+                if let Some(host) = self.workspace.chat(&core.chat_id).map(|c| c.device_id) {
+                    self.nudge_host(&host, &core.chat_id);
+                }
             }
         }
     }
@@ -311,11 +475,19 @@ impl ClientInner {
     ) -> Result<serde_json::Value> {
         match self.backend() {
             Backend::Demo(demo) => demo.host_rpc(device_id, method, params).await,
-            Backend::Live(_) => Err(ClientError::NotImplemented(format!("relay {method}"))),
+            Backend::Live(live) => live.relay.call(device_id, method, params).await,
         }
     }
 
-    pub(crate) fn kick_room(&self, _chat_id: &str) {}
+    /// Fresh socket for the chat's room (retry delivery).
+    pub(crate) fn kick_room(&self, chat_id: &str) {
+        if let Some(room) = self.session_core(chat_id).and_then(|c| c.room()) {
+            room.redial();
+        }
+        if let Some(live) = self.live() {
+            live.kick();
+        }
+    }
 
     /// Drop the least recently used detached, quiet sessions past the cap.
     pub(crate) fn evict_sessions(&self) {
@@ -339,6 +511,18 @@ impl ClientInner {
     }
 
     fn tick(self: &Arc<Self>) {
+        if let Some(live) = self.live() {
+            if let Some(presence) = live.presence() {
+                self.workspace.replace_presence(presence);
+            }
+            let peers_known = self
+                .workspace
+                .snapshot()
+                .devices
+                .iter()
+                .any(|d| d.is_execution_host);
+            live.check_registry_liveness(peers_known);
+        }
         self.recompute_connectivity();
         self.recompute_workspace();
         for core in self.cores() {
@@ -377,7 +561,14 @@ impl Client {
         }
         let events = EventPump::new(listener);
         let tokens = TokenProvider::new(&credentials, config.edge_base(), events.clone());
-        let registry = RegistryDoc::new(config.device_id.clone());
+        // Live: restore the registry replica + open the docs store first, so
+        // the very first snapshot renders the cached workspace (instant).
+        let (registry, store) = if credentials.is_demo() {
+            (RegistryDoc::new(config.device_id.clone()), None)
+        } else {
+            let (store, registry) = LiveBackend::open(&config.data_dir, &config.device_id)?;
+            (registry, Some(store))
+        };
         let inner = Arc::new(ClientInner {
             workspace: WorkspaceStore::new(registry),
             events: events.clone(),
@@ -409,15 +600,20 @@ impl Client {
                 inner.synced.store(true, Ordering::Release);
                 Backend::Demo(demo)
             }
-            _ => Backend::Live(LiveBackend {
-                edge_url: inner.config.edge_base().to_owned(),
-            }),
+            _ => Backend::Live(Box::new(LiveBackend::new(
+                &inner,
+                store.ok_or_else(|| ClientError::Internal("docs store missing".into()))?,
+            ))),
         };
         let _ = inner.backend.set(backend);
         events.start(inner.cancel.clone());
         inner.recompute_workspace();
-        if let Some(demo) = inner.demo() {
-            demo.start(&inner, inner.cancel.clone());
+        match inner.backend() {
+            Backend::Demo(demo) => demo.start(&inner, inner.cancel.clone()),
+            Backend::Live(live) => {
+                live.start(&inner);
+                inner.recompute_connectivity();
+            }
         }
         let ticker = Arc::downgrade(&inner);
         let cancel = inner.cancel.clone();
@@ -429,7 +625,9 @@ impl Client {
                     _ = cancel.cancelled() => return,
                     _ = interval.tick() => {}
                 }
-                let Some(inner) = ticker.upgrade() else { return };
+                let Some(inner) = ticker.upgrade() else {
+                    return;
+                };
                 if inner.foreground.load(Ordering::Acquire) {
                     inner.tick();
                 }
@@ -460,10 +658,15 @@ impl Client {
 
     /// Stop every background task (sign-out). Snapshots stay readable.
     pub fn shutdown(&self) {
-        self.inner.cancel.cancel();
-        if let Some(demo) = self.inner.demo() {
-            demo.stop();
+        match self.inner.backend() {
+            Backend::Demo(demo) => demo.stop(),
+            Backend::Live(live) => {
+                live.flush_registry(&self.inner);
+                live.stop();
+            }
         }
+        self.inner.cancel.cancel();
+        // Dropping the cores stops their rooms (each flushes its snapshot).
         lock(&self.inner.sessions).clear();
         self.inner.attachment_cache.clear();
     }
@@ -612,7 +815,8 @@ impl Client {
             }
             return Ok(());
         }
-        self.switch_ref(&chat.device_id, &cwd, &reference.name).await?;
+        self.switch_ref(&chat.device_id, &cwd, &reference.name)
+            .await?;
         self.inner
             .registry_write(|doc| doc.set_chat_branch(chat_id, &reference.name))?;
         Ok(())
@@ -620,9 +824,7 @@ impl Client {
 
     fn pin_change(&self, change: SidebarPinChange) -> Result<()> {
         if !self.workspace().pins_ready {
-            return Err(ClientError::Unsupported(
-                "pins are not synced yet".into(),
-            ));
+            return Err(ClientError::Unsupported("pins are not synced yet".into()));
         }
         self.inner
             .registry_write(|doc| doc.change_sidebar_pin(&change))
@@ -650,7 +852,12 @@ impl Client {
     }
 
     /// Reorder a pin between neighbours (either may be `None` at the ends).
-    pub fn move_pin(&self, chat_id: &str, after: Option<String>, before: Option<String>) -> Result<()> {
+    pub fn move_pin(
+        &self,
+        chat_id: &str,
+        after: Option<String>,
+        before: Option<String>,
+    ) -> Result<()> {
         self.pin_change(SidebarPinChange::Move {
             session_id: chat_id.to_owned(),
             after,
@@ -703,7 +910,12 @@ impl Client {
     /// Create a project on `device_id` (deduped on device + path). Live
     /// mode asks the owning host (`Mutate {createSpace}`) and falls back to
     /// a local row write when it is unreachable.
-    pub async fn create_project(&self, device_id: &str, path: &str, git_detected: bool) -> Result<String> {
+    pub async fn create_project(
+        &self,
+        device_id: &str,
+        path: &str,
+        git_detected: bool,
+    ) -> Result<String> {
         let (state, _) = self.inner.workspace.state();
         if let Some(existing) = state
             .spaces
@@ -723,13 +935,59 @@ impl Client {
             created_at: Utc::now(),
         };
         let id = space.id.clone();
+        // The owning host writes the row itself (it knows git state and runs
+        // the project's setup); an unreachable host gets a local row write
+        // it will adopt later.
+        if let Some(live) = self.inner.live() {
+            let asked = live
+                .relay
+                .call(
+                    device_id,
+                    zeron_rpc::methods::MUTATE,
+                    serde_json::json!({
+                        "op": "createSpace",
+                        "spaceId": id,
+                        "deviceId": device_id,
+                        "path": path,
+                        "gitDetected": git_detected,
+                    }),
+                )
+                .await;
+            match asked {
+                Ok(_) => {
+                    // Wait (briefly) for the host's row so the caller can
+                    // start a session in it right away.
+                    for _ in 0..50 {
+                        if self
+                            .inner
+                            .workspace
+                            .state()
+                            .0
+                            .spaces
+                            .iter()
+                            .any(|s| s.id == id)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    return Ok(id);
+                }
+                Err(err) => {
+                    tracing::info!(error = %err, "createSpace via host failed; writing locally")
+                }
+            }
+        }
         self.inner.registry_write(|doc| doc.upsert_space(&space))?;
         Ok(id)
     }
 
     pub fn rename_project(&self, space_id: &str, name: Option<&str>) -> Result<()> {
         let name = name.map(str::trim).filter(|n| !n.is_empty());
-        if self.inner.registry_write(|doc| doc.rename_space(space_id, name))? {
+        if self
+            .inner
+            .registry_write(|doc| doc.rename_space(space_id, name))?
+        {
             Ok(())
         } else {
             Err(ClientError::NotFound(space_id.to_owned()))
@@ -738,7 +996,9 @@ impl Client {
 
     /// Delete a project and cascade its chats' rows.
     pub fn delete_project(&self, space_id: &str) -> Result<()> {
-        let deleted = self.inner.registry_write(|doc| doc.delete_space(space_id))?;
+        let deleted = self
+            .inner
+            .registry_write(|doc| doc.delete_space(space_id))?;
         let mut sessions = lock(&self.inner.sessions);
         for chat_id in deleted.chat_ids {
             sessions.remove(&chat_id);
@@ -757,11 +1017,14 @@ impl Client {
         if self.inner.workspace.chat(chat_id).is_none() {
             return Err(ClientError::NotFound(chat_id.to_owned()));
         }
-        let doc = match self.inner.demo() {
-            Some(demo) => demo.session_doc(chat_id)?,
-            None => SessionDoc::from_doc(loro::LoroDoc::new()),
+        let (doc, cursor, hydrated) = match self.inner.backend() {
+            Backend::Demo(demo) => (demo.session_doc(chat_id)?, 0, true),
+            Backend::Live(live) => {
+                let local = crate::live::room::load_local(&live.store, chat_id);
+                (local.doc, local.cursor, local.had_content)
+            }
         };
-        let core = SessionCore::new(chat_id, &self.inner, doc);
+        let core = SessionCore::new(chat_id, &self.inner, doc, cursor);
         let core = {
             let mut sessions = lock(&self.inner.sessions);
             sessions
@@ -769,9 +1032,10 @@ impl Client {
                 .or_insert_with(|| core.clone())
                 .clone()
         };
-        if self.inner.is_demo() {
+        if hydrated {
             core.set_hydrated();
         }
+        core.ensure_room(&self.inner);
         core.touch();
         core.refresh();
         if let Some(demo) = self.inner.demo() {
@@ -799,64 +1063,163 @@ impl Client {
 
     // ── host RPC ───────────────────────────────────────────────────────────
 
-    /// Harness catalog of an execution device (static fallback when the
-    /// device is unreachable). Cached for capability gating.
+    /// Harness catalog of an execution device: live (cached to disk), else
+    /// the last cached list, else the static fallback. Cached in memory for
+    /// capability gating (mid-turn steering).
     pub async fn list_harnesses(&self, device_id: &str) -> Vec<HarnessInfo> {
-        let list = match self.inner.demo() {
-            Some(demo) => demo.list_harnesses(device_id).await,
-            None => catalog::fallback_harnesses(),
+        let list = match self.inner.backend() {
+            Backend::Demo(demo) => demo.list_harnesses(device_id).await,
+            Backend::Live(live) => {
+                let cache = catalog::DiskCatalog::new(&self.inner.config.data_dir);
+                let reply = live
+                    .relay
+                    .call(
+                        device_id,
+                        zeron_rpc::methods::LIST_HARNESSES,
+                        serde_json::json!({}),
+                    )
+                    .await
+                    .and_then(|v| {
+                        serde_json::from_value::<Vec<HarnessInfo>>(v)
+                            .map_err(|e| ClientError::HostError(e.to_string()))
+                    });
+                match reply {
+                    Ok(list) => {
+                        let list: Vec<HarnessInfo> =
+                            list.into_iter().filter(|h| h.id != "mock").collect();
+                        cache.put_harnesses(device_id, &list);
+                        list
+                    }
+                    Err(err) => {
+                        tracing::debug!(device = %device_id, error = %err, "ListHarnesses failed; using cache");
+                        cache
+                            .harnesses(device_id)
+                            .unwrap_or_else(catalog::fallback_harnesses)
+                    }
+                }
+            }
         };
         lock(&self.inner.harness_catalogs).insert(device_id.to_owned(), list.clone());
+        self.inner.recompute_workspace();
+        for core in self.inner.cores() {
+            core.recompute_composer(&self.inner);
+        }
         list
     }
 
     /// Model catalog for `harness` on `device_id` (normalized live reply,
-    /// else the curated static list).
+    /// else the cached one, else the curated static list).
     pub async fn list_models(&self, device_id: &str, harness: &str) -> Vec<ModelInfo> {
-        match self.inner.demo() {
-            Some(demo) => demo.list_models(harness).await,
-            None => {
-                let _ = device_id;
-                catalog::fallback_models(harness)
+        match self.inner.backend() {
+            Backend::Demo(demo) => demo.list_models(harness).await,
+            Backend::Live(live) => {
+                let cache = catalog::DiskCatalog::new(&self.inner.config.data_dir);
+                let reply = live
+                    .relay
+                    .call(
+                        device_id,
+                        zeron_rpc::methods::LIST_MODELS,
+                        serde_json::json!({ "harness": harness }),
+                    )
+                    .await
+                    .and_then(|v| {
+                        serde_json::from_value::<Vec<ModelInfo>>(v)
+                            .map_err(|e| ClientError::HostError(e.to_string()))
+                    });
+                match reply {
+                    Ok(list) if !list.is_empty() => {
+                        let list = catalog::normalize_models(harness, list);
+                        cache.put_models(device_id, harness, &list);
+                        list
+                    }
+                    _ => cache
+                        .models(device_id, harness)
+                        .unwrap_or_else(|| catalog::fallback_models(harness)),
+                }
             }
         }
     }
 
     pub async fn list_refs(&self, device_id: &str, repo_path: &str) -> Result<Vec<RepoRef>> {
-        match self.inner.demo() {
-            Some(demo) => demo.list_refs(repo_path).await,
-            None => Err(ClientError::NotImplemented(format!("ListRefs on {device_id}"))),
+        match self.inner.backend() {
+            Backend::Demo(demo) => demo.list_refs(repo_path).await,
+            Backend::Live(live) => {
+                let value = live
+                    .relay
+                    .call(
+                        device_id,
+                        zeron_rpc::methods::LIST_REFS,
+                        serde_json::json!({ "repoPath": repo_path }),
+                    )
+                    .await?;
+                serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+            }
         }
     }
 
     /// Browse folders on a device (`None` = its home folder).
-    pub async fn list_folders(&self, device_id: &str, path: Option<String>) -> Result<FolderListing> {
-        match self.inner.demo() {
-            Some(demo) => demo.list_folders(device_id, path).await,
-            None => Err(ClientError::NotImplemented(format!("ListFolders on {device_id}"))),
+    pub async fn list_folders(
+        &self,
+        device_id: &str,
+        path: Option<String>,
+    ) -> Result<FolderListing> {
+        match self.inner.backend() {
+            Backend::Demo(demo) => demo.list_folders(device_id, path).await,
+            Backend::Live(live) => {
+                let params = match path.filter(|p| !p.is_empty()) {
+                    Some(path) => serde_json::json!({ "path": path }),
+                    None => serde_json::json!({}),
+                };
+                let value = live
+                    .relay
+                    .call(device_id, zeron_rpc::methods::LIST_FOLDERS, params)
+                    .await?;
+                serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+            }
         }
     }
 
     /// `git checkout <ref>` in `repo_path` on the device.
     pub async fn switch_ref(&self, device_id: &str, repo_path: &str, ref_name: &str) -> Result<()> {
-        match self.inner.demo() {
-            Some(demo) => demo.switch_ref(repo_path, ref_name).await,
-            None => Err(ClientError::NotImplemented(format!("SwitchRef on {device_id}"))),
+        match self.inner.backend() {
+            Backend::Demo(demo) => demo.switch_ref(repo_path, ref_name).await,
+            Backend::Live(live) => live
+                .relay
+                .call(
+                    device_id,
+                    zeron_rpc::methods::SWITCH_REF,
+                    serde_json::json!({ "repoPath": repo_path, "refName": ref_name }),
+                )
+                .await
+                .map(|_| ()),
         }
     }
 
-    /// Create a worktree off `base`; returns its path.
+    /// Create a worktree for `branch` (an existing ref); returns its path.
     pub async fn create_worktree(
         &self,
         device_id: &str,
         space_id: &str,
         repo_path: &str,
-        base: &str,
+        branch: &str,
     ) -> Result<String> {
-        let _ = space_id;
-        match self.inner.demo() {
-            Some(demo) => demo.create_worktree(repo_path, base).await,
-            None => Err(ClientError::NotImplemented(format!("CreateWorktree on {device_id}"))),
+        match self.inner.backend() {
+            Backend::Demo(demo) => demo.create_worktree(repo_path, branch).await,
+            Backend::Live(live) => {
+                let mut params = serde_json::json!({ "repoPath": repo_path, "branch": branch });
+                if !space_id.is_empty() {
+                    params["spaceId"] = serde_json::Value::String(space_id.to_owned());
+                }
+                let value = live
+                    .relay
+                    .call(device_id, zeron_rpc::methods::CREATE_WORKTREE, params)
+                    .await?;
+                value
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .map(str::to_owned)
+                    .ok_or_else(|| ClientError::HostError("CreateWorktree returned no path".into()))
+            }
         }
     }
 
@@ -869,11 +1232,27 @@ impl Client {
         progress: Option<ProgressFn>,
     ) -> Result<String> {
         if data.len() > attachments::MAX_ATTACHMENT_BYTES {
-            return Err(ClientError::InvalidArgument(format!("{name} is larger than 24 MB")));
+            return Err(ClientError::InvalidArgument(format!(
+                "{name} is larger than 24 MB"
+            )));
         }
-        match self.inner.demo() {
-            Some(demo) => demo.upload(&self.inner, device_id, name, data, progress).await,
-            None => Err(ClientError::NotImplemented(format!("UploadChunk to {device_id}"))),
+        match self.inner.backend() {
+            Backend::Demo(demo) => {
+                demo.upload(&self.inner, device_id, name, data, progress)
+                    .await
+            }
+            Backend::Live(live) => {
+                let upload_id = crate::new_id();
+                let file_name = attachments::upload_file_name(name);
+                let path = live
+                    .relay
+                    .upload(device_id, &upload_id, &file_name, &data, progress)
+                    .await?;
+                self.inner
+                    .attachment_cache
+                    .put(device_id, &path, Arc::new(data));
+                Ok(path)
+            }
         }
     }
 
@@ -883,14 +1262,14 @@ impl Client {
         if let Some(hit) = self.inner.attachment_cache.get(device_id, path) {
             return Ok(hit);
         }
-        match self.inner.demo() {
-            Some(demo) => {
-                let bytes = demo.read_attachment(path)?;
-                self.inner.attachment_cache.put(device_id, path, bytes.clone());
-                Ok(bytes)
-            }
-            None => Err(ClientError::NotImplemented(format!("ReadAttachmentChunk from {device_id}"))),
-        }
+        let bytes = match self.inner.backend() {
+            Backend::Demo(demo) => demo.read_attachment(path)?,
+            Backend::Live(live) => Arc::new(live.relay.read_attachment(device_id, path).await?),
+        };
+        self.inner
+            .attachment_cache
+            .put(device_id, path, bytes.clone());
+        Ok(bytes)
     }
 
     // ── lifecycle ──────────────────────────────────────────────────────────
@@ -905,18 +1284,47 @@ impl Client {
         }
         if was != online {
             self.inner.recompute_connectivity();
+            if online && let Some(live) = self.inner.live() {
+                live.kick();
+                self.kick_rooms();
+            }
         }
     }
 
-    /// App returned to the foreground: resume ticking, redial/probe rooms.
+    /// App returned to the foreground: resume ticking, probe the registry
+    /// and every open room (liveness is judged by protocol frames only),
+    /// restart PR watches.
     pub fn on_foreground(&self) {
         self.inner.foreground.store(true, Ordering::Release);
+        if let Some(live) = self.inner.live() {
+            live.kick();
+            live.probe_health();
+            self.kick_rooms();
+            live.relay.clear_unsupported();
+            self.inner.reconcile_change_request_watches();
+        }
         self.inner.tick();
     }
 
-    /// App is backgrounding: persist docs now; pause time-driven work.
+    /// App is backgrounding: persist registry + docs now; pause time-driven
+    /// work and PR streams.
     pub fn on_background(&self) {
         self.inner.foreground.store(false, Ordering::Release);
+        if let Some(live) = self.inner.live() {
+            live.relay.stop_watches();
+            live.flush_registry(&self.inner);
+            for core in self.inner.cores() {
+                core.flush();
+            }
+        }
+    }
+
+    fn kick_rooms(&self) {
+        for core in self.inner.cores() {
+            if let Some(room) = core.room() {
+                room.kick();
+            }
+        }
     }
 
     /// Warm the most relevant sessions (front page order: pinned, sections,
@@ -948,5 +1356,7 @@ impl Client {
 
 /// Seed helpers shared with the demo host.
 pub(crate) fn ms(at: i64) -> chrono::DateTime<Utc> {
-    Utc.timestamp_millis_opt(at).single().unwrap_or_else(Utc::now)
+    Utc.timestamp_millis_opt(at)
+        .single()
+        .unwrap_or_else(Utc::now)
 }

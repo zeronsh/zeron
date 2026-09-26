@@ -15,12 +15,12 @@ use std::sync::{Arc, Mutex, RwLock};
 use zeron_doc::{RegistryDoc, WorkspaceState};
 use zeron_proto::{CheckoutChangeRequestStatus, SidebarPreferences};
 
+pub(crate) use view::{DeriveContext, device_online};
 pub use view::{
     DeviceView, FrontPage, PROJECT_COLOR_COUNT, ProjectRef, ProjectView, PullRequestGroups,
     SearchField, SearchHit, SectionView, SessionRow, WorkspaceSnapshot, project_color_index,
     relative_time_label,
 };
-pub(crate) use view::{DeriveContext, device_online};
 
 use crate::{lock, read, write};
 
@@ -93,7 +93,12 @@ impl WorkspaceStore {
     }
 
     pub(crate) fn chat(&self, chat_id: &str) -> Option<zeron_proto::Chat> {
-        self.state().0.chats.iter().find(|c| c.id == chat_id).cloned()
+        self.state()
+            .0
+            .chats
+            .iter()
+            .find(|c| c.id == chat_id)
+            .cloned()
     }
 
     pub(crate) fn set_presence(&self, device_id: &str, at_ms: i64) {

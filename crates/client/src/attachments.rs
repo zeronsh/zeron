@@ -51,6 +51,36 @@ pub fn with_attachments(text: &str, paths: &[String]) -> String {
     format!("{body}\n\n{ATTACHMENT_MARKER}\n{refs}")
 }
 
+/// The host's upload-name rule (uploads.rs `sanitize`): basename, anything
+/// outside `[A-Za-z0-9._-]` → `_`, last 80 chars, `upload` when empty. A
+/// `pending://` ref must name exactly what the escort commits.
+pub fn upload_file_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let tail: String = cleaned
+        .chars()
+        .rev()
+        .take(80)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if tail.is_empty() {
+        "upload".to_owned()
+    } else {
+        tail
+    }
+}
+
 pub fn pending_ref(upload_id: &str, name: &str) -> String {
     format!("{PENDING_REF_PREFIX}{upload_id}/{name}")
 }
@@ -138,7 +168,9 @@ pub fn parse_user_message(content: &str) -> ParsedUserMessage {
     let marker = (1..lines.len()).find(|&ix| {
         let line = lines[ix].trim();
         lines[ix - 1].trim().is_empty()
-            && line.to_lowercase().starts_with("attached images (local files")
+            && line
+                .to_lowercase()
+                .starts_with("attached images (local files")
             && line.ends_with("):")
     });
     let Some(marker) = marker else {

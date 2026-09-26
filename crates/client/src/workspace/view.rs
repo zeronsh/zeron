@@ -80,6 +80,10 @@ pub struct SessionRow {
     pub branch: Option<String>,
     pub cwd: Option<String>,
     pub indicator: ChatIndicator,
+    /// The host-reported status alone (45s staleness-gated) — `indicator`
+    /// minus the "a send of mine is in flight" override. What stop/busy
+    /// logic keys off (a send parked for an offline host is not a turn).
+    pub host_indicator: ChatIndicator,
     /// Run start of the live turn while Working/AwaitingInput.
     pub working_since_ms: Option<i64>,
     /// `last_message_at`, falling back to `created_at` (the sort key).
@@ -234,10 +238,7 @@ impl WorkspaceSnapshot {
     /// previews. Every whitespace-separated term must match some field.
     /// Active sessions rank above archived ones; ties break by recency.
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
-        let terms: Vec<String> = query
-            .split_whitespace()
-            .map(|t| t.to_lowercase())
-            .collect();
+        let terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
         if terms.is_empty() {
             return Vec::new();
         }
@@ -284,11 +285,12 @@ fn score_row(row: &SessionRow, terms: &[String]) -> Option<(u32, SearchField)> {
         let mut term_best: Option<(u32, SearchField)> = None;
         for (haystack, field, weight) in candidates {
             if let Some(at) = haystack.find(term.as_str()) {
-                let prefix_bonus = if at == 0 || !haystack.as_bytes()[at - 1].is_ascii_alphanumeric() {
-                    weight / 2
-                } else {
-                    0
-                };
+                let prefix_bonus =
+                    if at == 0 || !haystack.as_bytes()[at - 1].is_ascii_alphanumeric() {
+                        weight / 2
+                    } else {
+                        0
+                    };
                 let score = weight + prefix_bonus;
                 if term_best.is_none_or(|(s, _)| score > s) {
                     term_best = Some((score, field));
@@ -380,6 +382,7 @@ fn hash_row(row: &SessionRow) -> u64 {
     row.branch.hash(&mut h);
     row.cwd.hash(&mut h);
     attention_rank(row.indicator).hash(&mut h);
+    attention_rank(row.host_indicator).hash(&mut h);
     row.working_since_ms.hash(&mut h);
     row.last_activity_ms.hash(&mut h);
     row.time_label.hash(&mut h);
@@ -412,7 +415,8 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
     let now_ms = cx.now.timestamp_millis();
     let session = rc.sessions.get(chat.id.as_str()).copied();
     let send_state = cx.send_states.get(&chat.id).copied();
-    let mut indicator = display_status(chat, session, cx.now);
+    let host_indicator = display_status(chat, session, cx.now);
+    let mut indicator = host_indicator;
     let mut working_since_ms = match indicator {
         ChatIndicator::Working | ChatIndicator::AwaitingInput => session
             .and_then(|s| s.started_at)
@@ -438,7 +442,12 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         });
     let device = rc.devices.get(chat.device_id.as_str());
     let config = chat.config.as_ref();
-    let harness = config.and_then(|c| serde_json::to_value(c.harness).ok()?.as_str().map(str::to_owned));
+    let harness = config.and_then(|c| {
+        serde_json::to_value(c.harness)
+            .ok()?
+            .as_str()
+            .map(str::to_owned)
+    });
     let model = config.and_then(|c| c.model.clone());
     let reasoning = config
         .and_then(|c| c.reasoning)
@@ -479,6 +488,7 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
             .filter(|b| !b.trim().is_empty()),
         cwd: chat.cwd.clone(),
         indicator,
+        host_indicator,
         working_since_ms,
         last_activity_ms: sort_key(chat).timestamp_millis(),
         time_label: relative_time_label(sort_key(chat).timestamp_millis(), now_ms),
@@ -574,13 +584,19 @@ pub(crate) fn derive(
         .collect();
     let recent: Vec<Arc<SessionRow>> = active
         .iter()
-        .filter(|c| !rc.pinned.contains(c.id.as_str()) && !rc.section_of.contains_key(c.id.as_str()))
+        .filter(|c| {
+            !rc.pinned.contains(c.id.as_str()) && !rc.section_of.contains_key(c.id.as_str())
+        })
         .map(|c| row(c))
         .collect();
 
     // Projects (creation order), sessions by recency.
     let mut spaces: Vec<&Space> = state.spaces.iter().collect();
-    spaces.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+    spaces.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     let projects: Vec<ProjectView> = spaces
         .iter()
         .map(|space| {
@@ -600,8 +616,16 @@ pub(crate) fn derive(
                 path: space.path.clone(),
                 color_index: project_color_index(&space.id),
                 device_id: space.device_id.clone(),
-                device_name: rc.devices.get(space.device_id.as_str()).map(|d| d.name.clone()),
-                device_online: device_online(&space.device_id, cx.presence, cx.self_device_id, now_ms),
+                device_name: rc
+                    .devices
+                    .get(space.device_id.as_str())
+                    .map(|d| d.name.clone()),
+                device_online: device_online(
+                    &space.device_id,
+                    cx.presence,
+                    cx.self_device_id,
+                    now_ms,
+                ),
                 git_detected: space.git_detected,
                 created_at_ms: space.created_at.timestamp_millis(),
                 indicator,

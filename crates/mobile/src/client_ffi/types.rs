@@ -22,6 +22,9 @@ pub enum CoreError {
     HostUnavailable { message: String },
     #[error("not supported by the host: {message}")]
     Unsupported { message: String },
+    /// The host answered with an error (bad request, git failure, …).
+    #[error("host error: {message}")]
+    HostError { message: String },
     #[error("network: {message}")]
     Network { message: String },
     /// Credentials rejected. Irrecoverable cases also raise `AuthExpired`.
@@ -46,6 +49,7 @@ impl From<zc::ClientError> for CoreError {
             E::HostUnavailable(message) => CoreError::HostUnavailable { message },
             E::Unsupported(message) => CoreError::Unsupported { message },
             E::Network(message) => CoreError::Network { message },
+            E::HostError(message) => CoreError::HostError { message },
             E::Auth(message) => CoreError::Auth { message },
             E::Storage(message) => CoreError::Storage { message },
             E::NotImplemented(message) => CoreError::NotImplemented { message },
@@ -130,7 +134,9 @@ pub enum TranscriptScale {
     Big,
     /// 600 synthetic turns.
     Huge,
-    Turns { count: u32 },
+    Turns {
+        count: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -254,8 +260,14 @@ pub struct AuthExchange {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum AuthCallback {
-    Code { code: String, state: Option<String> },
-    Error { error: String, description: Option<String> },
+    Code {
+        code: String,
+        state: Option<String>,
+    },
+    Error {
+        error: String,
+        description: Option<String>,
+    },
 }
 
 impl From<zc::auth::AuthCallback> for AuthCallback {
@@ -314,23 +326,39 @@ impl From<zc::Connectivity> for Connectivity {
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum ClientEvent {
     /// `workspace()` advanced.
-    WorkspaceChanged { revision: u64 },
+    WorkspaceChanged {
+        revision: u64,
+    },
     /// A session's transcript advanced (the layout engine consumes it in Rust;
     /// this is informational for the platform).
-    SessionChanged { chat_id: String, revision: u64 },
+    SessionChanged {
+        chat_id: String,
+        revision: u64,
+    },
     /// A session's `composer()` advanced.
-    ComposerChanged { chat_id: String, revision: u64 },
-    ConnectivityChanged { connectivity: Connectivity },
+    ComposerChanged {
+        chat_id: String,
+        revision: u64,
+    },
+    ConnectivityChanged {
+        connectivity: Connectivity,
+    },
     /// The WorkOS pair rotated — persist it now (the old refresh token is spent).
-    AuthRefreshed { tokens: AuthTokens },
+    AuthRefreshed {
+        tokens: AuthTokens,
+    },
     /// The session can't be refreshed any more — sign out.
-    AuthExpired { reason: String },
+    AuthExpired {
+        reason: String,
+    },
 }
 
 impl From<zc::ClientEvent> for ClientEvent {
     fn from(e: zc::ClientEvent) -> Self {
         match e {
-            zc::ClientEvent::WorkspaceChanged { revision } => ClientEvent::WorkspaceChanged { revision },
+            zc::ClientEvent::WorkspaceChanged { revision } => {
+                ClientEvent::WorkspaceChanged { revision }
+            }
             zc::ClientEvent::SessionChanged { chat_id, revision } => {
                 ClientEvent::SessionChanged { chat_id, revision }
             }
@@ -461,6 +489,8 @@ pub struct SessionRow {
     pub cwd: Option<String>,
     /// Staleness-gated (45s) live status; an in-flight send reads Working.
     pub indicator: ChatIndicator,
+    /// Host-reported status only (no local-send override).
+    pub host_indicator: ChatIndicator,
     /// Run start of the live turn while Working/AwaitingInput.
     pub working_since_ms: Option<i64>,
     pub last_activity_ms: i64,
@@ -503,6 +533,7 @@ impl From<&zc::SessionRow> for SessionRow {
             branch: r.branch.clone(),
             cwd: r.cwd.clone(),
             indicator: r.indicator.into(),
+            host_indicator: r.host_indicator.into(),
             working_since_ms: r.working_since_ms,
             last_activity_ms: r.last_activity_ms,
             time_label: r.time_label.clone(),

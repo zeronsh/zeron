@@ -27,7 +27,11 @@ uuid.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 reqwest.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+zeron-sync = { workspace = true, features = ["mock-server"] }
+tokio-tungstenite.workspace = true
+async-trait.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

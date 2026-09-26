@@ -60,7 +60,11 @@ pub(crate) fn gradient(width: u32, height: u32, seed: u32) -> Vec<u8> {
             let card = (y * 5 / height.max(1)) % 2 == 1 && x > width / 12 && x < width - width / 12;
             let mix = |base: u8, accent: u8| {
                 let v = base as f32 * (1.0 - t) + accent as f32 * t;
-                if card { (v * 0.35 + 255.0 * 0.65) as u8 } else { v as u8 }
+                if card {
+                    (v * 0.35 + 255.0 * 0.65) as u8
+                } else {
+                    v as u8
+                }
             };
             raw.push(mix(246, tint.0));
             raw.push(mix(244, tint.1));

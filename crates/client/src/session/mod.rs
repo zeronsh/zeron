@@ -22,7 +22,9 @@ use zeron_doc::{
     SessionCommandEntry, SessionCommandPayload, SessionCommandStatus, SessionDoc,
     SessionMessageEntry,
 };
-use zeron_proto::{ChatIndicator, ContextUsage, RunRequest, SandboxLevel, UserInputAnswer, WorktreeSpec};
+use zeron_proto::{
+    ChatIndicator, ContextUsage, RunRequest, SandboxLevel, UserInputAnswer, WorktreeSpec,
+};
 
 pub use snapshot::{
     AppendHint, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest, LiveStatus,
@@ -36,6 +38,15 @@ use crate::client::ClientInner;
 use crate::connectivity::{SendState, send_state};
 use crate::error::{ClientError, Result};
 use crate::{lock, now_ms, read, write};
+
+/// Coalescing window for remote-import republishes (one display frame).
+const REFRESH_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+
+impl Drop for SessionCore {
+    fn drop(&mut self) {
+        self.tasks.cancel();
+    }
+}
 
 /// What to do with a message typed while the agent is working.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -123,7 +134,7 @@ impl QueueEditAction {
             QueueEditAction::Commit => "commit",
             QueueEditAction::Cancel => "cancel",
             QueueEditAction::Discard => "discard",
-            QueueEditAction::Release => "release",
+            QueueEditAction::Release => "releaseUnchanged",
         }
     }
 }
@@ -162,6 +173,12 @@ struct CoreState {
 pub(crate) struct SessionCore {
     pub(crate) chat_id: String,
     client: Weak<ClientInner>,
+    /// Live chat2 room (declared before `doc`: it drops — and flushes — first).
+    room: Mutex<Option<Arc<crate::live::room::Room>>>,
+    /// Verified cursor restored with the local snapshot (room join cursor).
+    initial_cursor: u64,
+    refresh_wake: Arc<tokio::sync::Notify>,
+    tasks: tokio_util::sync::CancellationToken,
     doc: Arc<SessionDoc>,
     write_gate: Mutex<()>,
     dirty: Arc<Mutex<Dirty>>,
@@ -175,7 +192,12 @@ pub(crate) struct SessionCore {
 }
 
 impl SessionCore {
-    pub(crate) fn new(chat_id: &str, client: &Arc<ClientInner>, doc: SessionDoc) -> Arc<Self> {
+    pub(crate) fn new(
+        chat_id: &str,
+        client: &Arc<ClientInner>,
+        doc: SessionDoc,
+        cursor: u64,
+    ) -> Arc<Self> {
         let doc = Arc::new(doc);
         let dirty = Arc::new(Mutex::new(Dirty::all()));
         let sink = dirty.clone();
@@ -187,9 +209,15 @@ impl SessionCore {
             ..Default::default()
         }));
         let composer = Arc::new(empty_composer(chat_id));
-        Arc::new(Self {
+        let refresh_wake = Arc::new(tokio::sync::Notify::new());
+        let tasks = client.cancel.child_token();
+        let core = Arc::new(Self {
             chat_id: chat_id.to_owned(),
             client: Arc::downgrade(client),
+            room: Mutex::new(None),
+            initial_cursor: cursor,
+            refresh_wake: refresh_wake.clone(),
+            tasks: tasks.clone(),
             doc,
             write_gate: Mutex::new(()),
             dirty,
@@ -214,7 +242,99 @@ impl SessionCore {
             composer: RwLock::new(composer),
             view_attached: AtomicBool::new(false),
             touched_ms: std::sync::atomic::AtomicI64::new(now_ms()),
-        })
+        });
+        // Coalesced republish for remote imports (a backfill of N rows costs
+        // ~one refresh per frame, not N).
+        let weak = Arc::downgrade(&core);
+        crate::runtime::shared().spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tasks.cancelled() => return,
+                    _ = refresh_wake.notified() => {}
+                }
+                let Some(core) = weak.upgrade() else { return };
+                core.refresh();
+                drop(core);
+                tokio::time::sleep(REFRESH_FRAME).await;
+            }
+        });
+        core
+    }
+
+    /// Remote change landed: refresh on the next frame.
+    pub(crate) fn schedule_refresh(&self) {
+        self.refresh_wake.notify_one();
+    }
+
+    pub(crate) fn room(&self) -> Option<Arc<crate::live::room::Room>> {
+        lock(&self.room).clone()
+    }
+
+    /// Live: join the chat's chat2 room once its row says it's dialable
+    /// (roomGen ≥ 2). Idempotent.
+    pub(crate) fn ensure_room(self: &Arc<Self>, client: &Arc<ClientInner>) {
+        let Some(live) = client.live() else { return };
+        if lock(&self.room).is_some() {
+            return;
+        }
+        let Some(chat) = client.workspace.chat(&self.chat_id) else {
+            return;
+        };
+        if chat.room_gen.unwrap_or(1) < 2 {
+            return;
+        }
+        let core = Arc::downgrade(self);
+        let on_applied: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(core) = core.upgrade() {
+                if core
+                    .room()
+                    .is_some_and(|r| r.status.caught_up.load(Ordering::Acquire))
+                {
+                    let newly = {
+                        let mut st = lock(&core.state);
+                        !std::mem::replace(&mut st.hydrated, true)
+                    };
+                    if newly {
+                        tracing::debug!(chat = %core.chat_id, "session hydrated from the room");
+                    }
+                }
+                core.schedule_refresh();
+            }
+        });
+        let weak_client = Arc::downgrade(client);
+        let status_core = Arc::downgrade(self);
+        let on_status: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(client) = weak_client.upgrade() {
+                client.recompute_connectivity();
+                if let Some(core) = status_core.upgrade() {
+                    core.recompute_composer(&client);
+                }
+            }
+        });
+        let room = crate::live::room::Room::start(
+            &self.doc,
+            &self.chat_id,
+            self.initial_cursor,
+            crate::live::room::RoomDeps {
+                bearer: crate::live::LiveBackend::bearer(client),
+                edge: live.edge.clone(),
+                device_id: client.config.device_id.clone(),
+                store: live.store.clone(),
+                on_applied,
+                on_status,
+            },
+        );
+        let mut slot = lock(&self.room);
+        if slot.is_none() {
+            *slot = Some(room);
+        }
+    }
+
+    /// Persist the doc now (backgrounding).
+    pub(crate) fn flush(&self) {
+        if let Some(room) = self.room() {
+            room.flush();
+        }
     }
 
     pub(crate) fn doc(&self) -> &Arc<SessionDoc> {
@@ -261,6 +381,7 @@ impl SessionCore {
 
     pub(crate) fn has_pending_sends(&self) -> bool {
         !lock(&self.state).pending.is_empty()
+            || self.room().is_some_and(|room| room.has_pending_pushes())
     }
 
     /// Apply queued doc events + time-driven state; publish what changed.
@@ -274,7 +395,10 @@ impl SessionCore {
             .snapshot()
             .session(&self.chat_id)
             .map_or((false, None), |row| {
-                (row.indicator == ChatIndicator::Working, row.working_since_ms)
+                (
+                    row.host_indicator == ChatIndicator::Working,
+                    row.working_since_ms,
+                )
             });
         let mut transcript_event = None;
         let send_before;
@@ -295,9 +419,14 @@ impl SessionCore {
             let echoes_changed = derive_pending(&mut st, &client.config.device_id, degraded, now);
             send_after = oldest_state(&st.pending);
             let previous = self.snapshot();
-            let streaming = st.tracker.entries().last().is_some_and(|e| e.is_streaming());
+            let streaming = st
+                .tracker
+                .entries()
+                .last()
+                .is_some_and(|e| e.is_streaming());
+            let sending = st.pending.iter().any(|p| p.state == SendState::Sending);
             let live = LiveFlags {
-                working: indicator_working || streaming,
+                working: indicator_working || streaming || sending,
                 working_since_ms,
             };
             let live_changed = previous.working != live.working
@@ -332,15 +461,28 @@ impl SessionCore {
         let degraded = client.chat_delivery_degraded(&self.chat_id);
         let room = client.room_state(&self.chat_id);
         let mut st = lock(&self.state);
-        let host_id = row.as_ref().map(|r| r.device_id.clone()).unwrap_or_default();
+        let host_id = row
+            .as_ref()
+            .map(|r| r.device_id.clone())
+            .unwrap_or_default();
         let device = workspace.device(&host_id);
-        let capabilities = client.host_capabilities(&host_id, row.as_ref().and_then(|r| r.harness.as_deref()));
+        let capabilities =
+            client.host_capabilities(&host_id, row.as_ref().and_then(|r| r.harness.as_deref()));
         let indicator = row.as_ref().map_or(ChatIndicator::Idle, |r| r.indicator);
-        let busy = matches!(indicator, ChatIndicator::Working | ChatIndicator::AwaitingInput);
+        let host_indicator = row
+            .as_ref()
+            .map_or(ChatIndicator::Idle, |r| r.host_indicator);
+        let busy = matches!(
+            host_indicator,
+            ChatIndicator::Working | ChatIndicator::AwaitingInput
+        );
+        let turn_running = host_indicator == ChatIndicator::Working || snapshot.streaming;
         let mut next = ComposerState {
             chat_id: self.chat_id.clone(),
             revision: 0,
-            title: row.as_ref().map_or_else(|| "New session".into(), |r| r.title.clone()),
+            title: row
+                .as_ref()
+                .map_or_else(|| "New session".into(), |r| r.title.clone()),
             host: HostInfo {
                 device_id: host_id.clone(),
                 name: device.map(|d| d.name.clone()),
@@ -349,6 +491,7 @@ impl SessionCore {
             },
             live: LiveStatus {
                 indicator,
+                turn_running,
                 working_since_ms: row.as_ref().and_then(|r| r.working_since_ms),
                 streaming: snapshot.streaming,
                 can_interrupt: busy || snapshot.streaming,
@@ -447,6 +590,7 @@ fn empty_composer(chat_id: &str) -> ComposerState {
         },
         live: LiveStatus {
             indicator: ChatIndicator::Idle,
+            turn_running: false,
             working_since_ms: None,
             streaming: false,
             can_interrupt: false,
@@ -465,16 +609,13 @@ fn empty_composer(chat_id: &str) -> ComposerState {
 }
 
 fn oldest_state(pending: &[PendingSend]) -> Option<SendState> {
-    pending
-        .iter()
-        .min_by_key(|p| p.sent_at_ms)
-        .map(|oldest| {
-            if pending.iter().any(|p| p.state == SendState::Failed) {
-                SendState::Failed
-            } else {
-                oldest.state
-            }
-        })
+    pending.iter().min_by_key(|p| p.sent_at_ms).map(|oldest| {
+        if pending.iter().any(|p| p.state == SendState::Failed) {
+            SendState::Failed
+        } else {
+            oldest.state
+        }
+    })
 }
 
 fn queue_item(item: &QueuedMessage, device_id: &str, pending: &HashSet<String>) -> QueueItem {
@@ -603,7 +744,8 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
         });
     }
     let live_ids: HashSet<&str> = next.iter().map(|p| p.message_id.as_str()).collect();
-    st.grace_started.retain(|id, _| live_ids.contains(id.as_str()));
+    st.grace_started
+        .retain(|id, _| live_ids.contains(id.as_str()));
     let changed = next != st.pending;
     if changed {
         // Rebuild echo entries, reusing unchanged Arcs.
@@ -778,6 +920,15 @@ impl SessionHandle {
     pub fn set_view_attached(&self, attached: bool) {
         let was = self.core.view_attached.swap(attached, Ordering::AcqRel);
         self.core.touch();
+        if attached
+            && !was
+            && let Some(room) = self.core.room()
+        {
+            // On screen: verify the room is live now rather than trusting a
+            // quiet socket (the 15-min quiet probe is far too slow for a
+            // chat someone is looking at).
+            room.kick();
+        }
         if attached && !was {
             self.mark_seen();
         }
@@ -802,9 +953,24 @@ impl SessionHandle {
             return Err(ClientError::InvalidArgument("empty message".into()));
         }
         let composer = self.composer();
-        let busy = matches!(composer.live.indicator, ChatIndicator::Working) || composer.live.streaming;
+        // A turn is running, or a Run of ours is about to start one on a
+        // reachable host (don't double-start in that ~RTT window).
+        let starting = composer
+            .pending_sends
+            .iter()
+            .any(|p| p.kind == PendingKind::Run && p.state == SendState::Sending);
+        let busy = composer.live.turn_running || starting;
         let caps = &composer.host.capabilities;
-        let refs = client.stage_attachments(&chat.device_id, &request.attachments)?;
+        if !request.attachments.is_empty()
+            && !composer.host.capabilities.queued_attachments
+            && !client.is_demo()
+        {
+            return Err(ClientError::Unsupported(
+                "the host is too old for image attachments — update Zeron on it".into(),
+            ));
+        }
+        let refs =
+            client.stage_attachments(&self.core.chat_id, &chat.device_id, &request.attachments)?;
         let prompt_text = request.text.trim_end().to_owned();
         let device_id = client.config.device_id.clone();
 
@@ -818,7 +984,12 @@ impl SessionHandle {
             } else {
                 attachments::with_attachments(&prompt_text, &refs)
             };
-            let id = self.enqueue_inner(&device_id, &text, refs.clone(), request.busy == BusyPolicy::Queue)?;
+            let id = self.enqueue_inner(
+                &device_id,
+                &text,
+                refs.clone(),
+                request.busy == BusyPolicy::Queue,
+            )?;
             SendOutcome::Queued { queue_id: id }
         } else {
             let content = attachments::with_attachments(&prompt_text, &refs);
@@ -858,7 +1029,8 @@ impl SessionHandle {
                 SendOutcome::Started { message_id }
             }
         };
-        if let SendOutcome::Started { message_id } | SendOutcome::Steered { message_id } = &outcome {
+        if let SendOutcome::Started { message_id } | SendOutcome::Steered { message_id } = &outcome
+        {
             let id = message_id.clone();
             self.core.update_state(|st| st.last_submitted = Some(id));
         }
@@ -869,8 +1041,10 @@ impl SessionHandle {
     /// Stop the live turn.
     pub fn interrupt(&self) -> Result<()> {
         let client = self.core.client()?;
-        self.core
-            .queue_command(&client.config.device_id, SessionCommandPayload::Interrupt {})?;
+        self.core.queue_command(
+            &client.config.device_id,
+            SessionCommandPayload::Interrupt {},
+        )?;
         client.after_command(&self.core, false);
         Ok(())
     }
@@ -916,7 +1090,12 @@ impl SessionHandle {
         if text.trim().is_empty() {
             return Err(ClientError::InvalidArgument("empty message".into()));
         }
-        let id = self.enqueue_inner(&client.config.device_id, text, attachments, hold_for_turn_end)?;
+        let id = self.enqueue_inner(
+            &client.config.device_id,
+            text,
+            attachments,
+            hold_for_turn_end,
+        )?;
         client.after_command(&self.core, false);
         Ok(id)
     }
@@ -927,7 +1106,9 @@ impl SessionHandle {
         {
             let st = lock(&self.core.state);
             let row = st.queue.iter().find(|q| q.id == id);
-            if row.is_none_or(|r| r.delivery_gate.is_some()) || st.queue_actions_pending.contains(id) {
+            if row.is_none_or(|r| r.delivery_gate.is_some())
+                || st.queue_actions_pending.contains(id)
+            {
                 return Ok(false);
             }
         }
@@ -952,7 +1133,11 @@ impl SessionHandle {
         self.move_queued(id, to as usize)
     }
 
-    async fn queue_rpc(&self, method: &'static str, params: serde_json::Value) -> Result<serde_json::Value> {
+    async fn queue_rpc(
+        &self,
+        method: &'static str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         let client = self.core.client()?;
         let host = self.composer().host.device_id.clone();
         if host.is_empty() {
@@ -964,7 +1149,10 @@ impl SessionHandle {
     pub async fn begin_queued_edit(&self, id: &str, instance_id: &str) -> QueueEditStart {
         let composer = self.composer();
         if !composer.host.capabilities.queue_edit_lease
-            || !composer.queue.iter().any(|q| q.id == id && !q.action_pending)
+            || !composer
+                .queue
+                .iter()
+                .any(|q| q.id == id && !q.action_pending)
         {
             return QueueEditStart::Unavailable;
         }
@@ -986,7 +1174,11 @@ impl SessionHandle {
             Ok(value) => match value.get("outcome").and_then(|o| o.as_str()) {
                 Some("acquired") => {
                     let field = |k: &str| value.get(k).and_then(|v| v.as_str()).map(str::to_owned);
-                    match (field("leaseId"), field("baseTextHash"), value.get("expiresAtMs").and_then(|v| v.as_i64())) {
+                    match (
+                        field("leaseId"),
+                        field("baseTextHash"),
+                        value.get("expiresAtMs").and_then(|v| v.as_i64()),
+                    ) {
                         (Some(lease_id), Some(base_text_hash), Some(expires_at_ms)) => {
                             QueueEditStart::Acquired(QueueEditLease {
                                 row_id: id.to_owned(),
@@ -1040,7 +1232,9 @@ impl SessionHandle {
             .await
         {
             Ok(value) => match value.get("outcome").and_then(|o| o.as_str()) {
-                Some("committed" | "cancelled" | "discarded" | "released") => QueueEditFinish::Finished,
+                Some("committed" | "cancelled" | "discarded" | "released") => {
+                    QueueEditFinish::Finished
+                }
                 Some("conflict") => QueueEditFinish::Conflict,
                 Some("missing") => QueueEditFinish::Missing,
                 _ => QueueEditFinish::Lost,
@@ -1070,7 +1264,10 @@ impl SessionHandle {
             zeron_rpc::methods::REMOVE_QUEUED_MESSAGE
         };
         let result = self
-            .queue_rpc(method, serde_json::json!({ "chatId": self.core.chat_id, "id": id }))
+            .queue_rpc(
+                method,
+                serde_json::json!({ "chatId": self.core.chat_id, "id": id }),
+            )
             .await;
         let label = if send_now { "send now" } else { "remove" };
         let key = if send_now { "sent" } else { "removed" };
@@ -1082,7 +1279,10 @@ impl SessionHandle {
                 }
                 Ok(true)
             }
-            Ok(_) => Err("The host did not confirm the action. The message may have already left the queue.".to_owned()),
+            Ok(_) => Err(
+                "The host did not confirm the action. The message may have already left the queue."
+                    .to_owned(),
+            ),
             Err(err) => Err(format!(
                 "Couldn't complete {label}. Check the connection to the chat host and the queue before retrying. ({err})"
             )),
@@ -1178,7 +1378,8 @@ impl SessionHandle {
                 continue;
             }
             tracing::info!(chat = %self.core.chat_id, old = %attempt.id, "retry re-issues a dead send attempt");
-            self.core.queue_command(&device_id, attempt.payload.clone())?;
+            self.core
+                .queue_command(&device_id, attempt.payload.clone())?;
         }
         self.core.refresh();
         client.after_command(&self.core, true);

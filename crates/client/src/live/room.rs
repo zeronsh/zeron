@@ -52,7 +52,9 @@ pub(crate) fn load_local(store: &DocsStore, chat_id: &str) -> LocalDoc {
                         cursor = stored_cursor;
                     }
                 }
-                Err(err) => tracing::warn!(chat = %chat_id, error = %err, "chat snapshot unreadable; starting fresh"),
+                Err(err) => {
+                    tracing::warn!(chat = %chat_id, error = %err, "chat snapshot unreadable; starting fresh")
+                }
             }
         }
         Ok(_) => {}
@@ -83,11 +85,16 @@ pub(crate) struct Persister {
     saved: AtomicU64,
     urgent: AtomicBool,
     write: Mutex<()>,
-    wake: Notify,
+    wake: Arc<Notify>,
 }
 
 impl Persister {
-    pub(crate) fn new(doc: &Arc<SessionDoc>, store: Arc<DocsStore>, chat_id: &str, cursor: u64) -> Arc<Self> {
+    pub(crate) fn new(
+        doc: &Arc<SessionDoc>,
+        store: Arc<DocsStore>,
+        chat_id: &str,
+        cursor: u64,
+    ) -> Arc<Self> {
         Arc::new(Self {
             doc: Arc::downgrade(doc),
             store,
@@ -97,17 +104,16 @@ impl Persister {
             saved: AtomicU64::new(0),
             urgent: AtomicBool::new(false),
             write: Mutex::new(()),
-            wake: Notify::new(),
+            wake: Arc::new(Notify::new()),
         })
     }
 
     pub(crate) fn start(self: &Arc<Self>, cancel: CancellationToken) {
         let weak = Arc::downgrade(self);
+        let wake = self.wake.clone();
         crate::runtime::shared().spawn(async move {
             loop {
-                let Some(this) = weak.upgrade() else { return };
-                let notified = this.wake.notified();
-                drop(this);
+                let notified = wake.notified();
                 tokio::select! {
                     _ = cancel.cancelled() => {
                         if let Some(this) = weak.upgrade() {
@@ -159,7 +165,9 @@ impl Persister {
         if generation == self.saved.load(Ordering::Acquire) {
             return;
         }
-        let Some(doc) = self.doc.upgrade() else { return };
+        let Some(doc) = self.doc.upgrade() else {
+            return;
+        };
         let cursor = self.cursor();
         let bytes = match doc.export_snapshot() {
             Ok(bytes) => bytes,
@@ -168,12 +176,16 @@ impl Persister {
                 return;
             }
         };
-        match self
-            .store
-            .save_verified_snapshot_with_cursor(&self.chat_id, &bytes, cursor, CHAT2_DOC_EPOCH)
-        {
+        match self.store.save_verified_snapshot_with_cursor(
+            &self.chat_id,
+            &bytes,
+            cursor,
+            CHAT2_DOC_EPOCH,
+        ) {
             Ok(()) => self.saved.store(generation, Ordering::Release),
-            Err(err) => tracing::warn!(chat = %self.chat_id, error = %err, "chat snapshot save failed"),
+            Err(err) => {
+                tracing::warn!(chat = %self.chat_id, error = %err, "chat snapshot save failed")
+            }
         }
     }
 }
@@ -212,7 +224,9 @@ impl ViewerSink {
 
 impl ChatDocSink for ViewerSink {
     fn cursor_is_verified(&self) -> bool {
-        self.store.snapshot_cursor_verified(&self.chat_id).unwrap_or(false)
+        self.store
+            .snapshot_cursor_verified(&self.chat_id)
+            .unwrap_or(false)
     }
 
     fn reset_cursor(&self, cursor: u64) {
@@ -225,6 +239,7 @@ impl ChatDocSink for ViewerSink {
             .rejected_chat_updates(&self.chat_id)
             .map_err(|e| e.to_string())?
             .into_iter()
+            .map(|(id, _)| id)
             .collect();
         Ok(self
             .store
@@ -296,7 +311,11 @@ pub(crate) struct ChatUrl {
 impl UrlProvider for ChatUrl {
     fn url(&self) -> BoxFuture<'static, Result<String, SyncError>> {
         let bearer = self.bearer.clone();
-        let (edge, chat, device) = (self.edge.clone(), self.chat_id.clone(), self.device_id.clone());
+        let (edge, chat, device) = (
+            self.edge.clone(),
+            self.chat_id.clone(),
+            self.device_id.clone(),
+        );
         Box::pin(async move {
             let token = bearer.get().await?;
             Ok(urls::chat_ws(&edge, &chat, &token, &device))
@@ -401,13 +420,20 @@ impl ChatTransport for ChatHttp {
                 .await
                 .map_err(http_err)?;
             if !response.status().is_success() {
-                return Err(SyncError::Protocol(format!("chat pull http {}", response.status())));
+                return Err(SyncError::Protocol(format!(
+                    "chat pull http {}",
+                    response.status()
+                )));
             }
             Ok(response.bytes().await.map_err(http_err)?.to_vec())
         })
     }
 
-    fn push(&self, batch_id: String, bytes: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+    fn push(
+        &self,
+        batch_id: String,
+        bytes: Vec<u8>,
+    ) -> BoxFuture<'static, Result<String, SyncError>> {
         let bearer = self.bearer.clone();
         let url = urls::chat_push(&self.edge, &self.chat_id, &batch_id, &self.device_id);
         Box::pin(async move {
@@ -423,7 +449,10 @@ impl ChatTransport for ChatHttp {
                 .await
                 .map_err(http_err)?;
             if !response.status().is_success() {
-                return Err(SyncError::Protocol(format!("chat push http {}", response.status())));
+                return Err(SyncError::Protocol(format!(
+                    "chat push http {}",
+                    response.status()
+                )));
             }
             response.text().await.map_err(http_err)
         })
@@ -474,7 +503,12 @@ pub(crate) struct RoomDeps {
 impl Room {
     /// Start publishing local writes and joining the room. `cursor` is the
     /// verified cursor from [`load_local`].
-    pub(crate) fn start(doc: &Arc<SessionDoc>, chat_id: &str, cursor: u64, deps: RoomDeps) -> Arc<Self> {
+    pub(crate) fn start(
+        doc: &Arc<SessionDoc>,
+        chat_id: &str,
+        cursor: u64,
+        deps: RoomDeps,
+    ) -> Arc<Self> {
         let persister = Persister::new(doc, deps.store.clone(), chat_id, cursor);
         let cancel = CancellationToken::new();
         persister.start(cancel.clone());
@@ -486,19 +520,21 @@ impl Room {
         let store = deps.store.clone();
         let publish_chat = chat_id.to_owned();
         let publish_persister = persister.clone();
-        let local_updates = doc.doc().subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
-            let batch_id = crate::new_id();
-            let mut slot = lock(&publish_slot);
-            if let Err(err) = store.enqueue_chat_update(&publish_chat, &batch_id, bytes) {
-                tracing::warn!(chat = %publish_chat, error = %err, "outbox enqueue failed");
-            }
-            match &slot.client {
-                Some(client) => client.enqueue_batch(batch_id, bytes.clone()),
-                None => slot.unsent.push((batch_id, bytes.clone())),
-            }
-            publish_persister.dirty(false);
-            true
-        }));
+        let local_updates = doc
+            .doc()
+            .subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
+                let batch_id = crate::new_id();
+                let mut slot = lock(&publish_slot);
+                if let Err(err) = store.enqueue_chat_update(&publish_chat, &batch_id, bytes) {
+                    tracing::warn!(chat = %publish_chat, error = %err, "outbox enqueue failed");
+                }
+                match &slot.client {
+                    Some(client) => client.enqueue_batch(batch_id, bytes.clone()),
+                    None => slot.unsent.push((batch_id, bytes.clone())),
+                }
+                publish_persister.dirty(false);
+                true
+            }));
 
         let room = Arc::new(Self {
             chat_id: chat_id.to_owned(),
@@ -564,9 +600,10 @@ impl Room {
                     Ok(Err(err)) => *lock(&status.last_failure) = Some(err.to_string()),
                     Err(_) => *lock(&status.last_failure) = Some("join timed out".into()),
                 }
-                status
-                    .retry_at_ms
-                    .store(crate::now_ms() + backoff.as_millis() as i64, Ordering::Release);
+                status.retry_at_ms.store(
+                    crate::now_ms() + backoff.as_millis() as i64,
+                    Ordering::Release,
+                );
                 on_status();
                 if !super::wait_backoff(&cancel, backoff).await {
                     return;

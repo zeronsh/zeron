@@ -93,8 +93,9 @@ pub struct SessionSnapshot {
     pub transcript_len: usize,
     /// The newest host entry is still streaming.
     pub streaming: bool,
-    /// A turn is running on the host (row indicator Working — which already
-    /// folds in this device's in-flight sends — or a streaming tail). Drives
+    /// A turn is running (host status Working or a streaming tail) or one of
+    /// this device's sends is on its way to a reachable host. A send parked
+    /// for an offline host is NOT working (its echo shows Queued). Drives
     /// the transcript's tail "Working…" row.
     pub working: bool,
     /// Run start of the live turn, when the host reported one.
@@ -119,7 +120,10 @@ impl SessionSnapshot {
     /// The host-written messages as shared `Arc`s — pointer-equal across
     /// snapshots while unchanged (O(entries) `Arc` bumps, no content copy).
     pub fn transcript_messages(&self) -> Vec<Arc<SessionMessageEntry>> {
-        self.transcript().iter().map(|e| e.message.clone()).collect()
+        self.transcript()
+            .iter()
+            .map(|e| e.message.clone())
+            .collect()
     }
 
     pub fn entry(&self, id: &str) -> Option<&Arc<Entry>> {
@@ -250,7 +254,11 @@ pub struct HostInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveStatus {
+    /// The row's display status (an in-flight send reads Working).
     pub indicator: ChatIndicator,
+    /// A turn is actually running on the host (host status Working or a
+    /// streaming tail) — new sends queue/steer instead of starting a turn.
+    pub turn_running: bool,
     pub working_since_ms: Option<i64>,
     /// The newest transcript entry is streaming.
     pub streaming: bool,

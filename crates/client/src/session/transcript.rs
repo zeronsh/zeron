@@ -11,7 +11,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use loro::event::DiffEvent;
-use loro::{Container, ContainerID, ContainerTrait, Index, LoroDoc, LoroMap, ToJson, ValueOrContainer};
+use loro::{
+    Container, ContainerID, ContainerTrait, Index, LoroDoc, LoroMap, ToJson, ValueOrContainer,
+};
 use zeron_doc::{MessagePart, SessionMessageEntry};
 
 use super::snapshot::{AppendHint, Entry};
@@ -395,7 +397,9 @@ mod tests {
     fn streaming_redecodes_only_the_live_entry() {
         let mut rig = Rig::new();
         for i in 0..50 {
-            rig.doc.push_message(&user(&format!("u{i}"), "hello")).unwrap();
+            rig.doc
+                .push_message(&user(&format!("u{i}"), "hello"))
+                .unwrap();
         }
         let first = rig.refresh().unwrap();
         assert!(first.reset);

@@ -32,7 +32,7 @@ final class SessionFlowTests: XCTestCase {
     }
 
     func testSendEchoesAndStreamsReply() {
-        let app = launch(["-route", "chat:chat-blog"])
+        let app = launch(["-route", "chat:chat-deploy"])
         let input = app.textViews["composer-input"]
         XCTAssertTrue(input.waitForExistence(timeout: 10))
         input.tap()
@@ -48,7 +48,7 @@ final class SessionFlowTests: XCTestCase {
     }
 
     func testQuestionPanelAnswersAndResumes() {
-        let app = launch(["-route", "chat:chat-blog"])
+        let app = launch(["-route", "chat:chat-deploy"])
         let input = app.textViews["composer-input"]
         XCTAssertTrue(input.waitForExistence(timeout: 10))
         input.tap()
@@ -62,7 +62,7 @@ final class SessionFlowTests: XCTestCase {
     }
 
     func testQueueWhileWorking() {
-        let app = launch(["-route", "chat:chat-blog", "-longreply"], fast: false)
+        let app = launch(["-route", "chat:chat-home", "-longreply"], fast: false)
         let input = app.textViews["composer-input"]
         XCTAssertTrue(input.waitForExistence(timeout: 10))
         input.tap()

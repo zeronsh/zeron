@@ -71,7 +71,11 @@ pub(crate) fn chat_ws(edge: &str, chat_id: &str, token: &str, device_id: &str) -
 }
 
 pub(crate) fn chat_checkpoint(edge: &str, chat_id: &str) -> String {
-    format!("{}/chat2/{}/checkpoint", edge.trim_end_matches('/'), encode(chat_id))
+    format!(
+        "{}/chat2/{}/checkpoint",
+        edge.trim_end_matches('/'),
+        encode(chat_id)
+    )
 }
 
 pub(crate) fn chat_rows(edge: &str, chat_id: &str, after: u64, device_id: &str) -> String {
@@ -94,7 +98,11 @@ pub(crate) fn chat_push(edge: &str, chat_id: &str, batch_id: &str, device_id: &s
 }
 
 pub(crate) fn nudge(edge: &str, host_device_id: &str) -> String {
-    format!("{}/device/{}/nudge", edge.trim_end_matches('/'), encode(host_device_id))
+    format!(
+        "{}/device/{}/nudge",
+        edge.trim_end_matches('/'),
+        encode(host_device_id)
+    )
 }
 
 pub(crate) fn health(edge: &str) -> String {
@@ -117,7 +125,13 @@ mod tests {
             chat_ws("https://e.sh", "c1", "t@o", "ios-1"),
             "wss://e.sh/chat2/c1/ws?token=t%40o&device=ios-1"
         );
-        assert_eq!(registry_rows("https://e.sh", "o", "d", 0), "https://e.sh/registry/o/rows?device=d&beat=1");
-        assert_eq!(nudge("https://e.sh", "dev-mac"), "https://e.sh/device/dev-mac/nudge");
+        assert_eq!(
+            registry_rows("https://e.sh", "o", "d", 0),
+            "https://e.sh/registry/o/rows?device=d&beat=1"
+        );
+        assert_eq!(
+            nudge("https://e.sh", "dev-mac"),
+            "https://e.sh/device/dev-mac/nudge"
+        );
     }
 }

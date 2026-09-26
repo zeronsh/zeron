@@ -5,7 +5,7 @@
 //! for benchmarks, and the scripted streaming reply.
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolDiffStat};
-use zeron_proto::{ToolCall, TodoItem, UserInputQuestion};
+use zeron_proto::{TodoItem, ToolCall, UserInputQuestion};
 
 pub(crate) const PHONE: &str = "ios-demo";
 
@@ -211,7 +211,12 @@ fn veil(host: &str, now: i64) -> Vec<SessionMessageEntry> {
         now - 60_000,
         vec![
             text("t0", "Opening the PR now. Running the checks first:"),
-            tool("k1", exec("cargo test -p zeron-ui veil -- --nocapture"), false, Some("test result: ok. 14 passed; 0 failed; 0 ignored")),
+            tool(
+                "k1",
+                exec("cargo test -p zeron-ui veil -- --nocapture"),
+                false,
+                Some("test result: ok. 14 passed; 0 failed; 0 ignored"),
+            ),
             text("t1", VEIL_LIVE_PREFIX),
         ],
     );
@@ -224,28 +229,82 @@ fn veil(host: &str, now: i64) -> Vec<SessionMessageEntry> {
             host,
             now - 3_400_000,
             vec![
-                reasoning("r0", "The veil must be paint-only. Check how veil.rs splits chunk spans and where the fade duration comes from before touching the Swift side."),
+                reasoning(
+                    "r0",
+                    "The veil must be paint-only. Check how veil.rs splits chunk spans and where the fade duration comes from before touching the Swift side.",
+                ),
                 text("t0", VEIL_PLAN),
                 tool("k1", read("crates/ui/src/markdown/veil.rs"), false, None),
-                tool("k2", ToolCall::Search { pattern: "VEIL_".into(), path: Some("crates/ui".into()) }, false, Some("crates/ui/src/markdown/veil.rs:12: pub const VEIL_MIN_FADE_MS")),
+                tool(
+                    "k2",
+                    ToolCall::Search {
+                        pattern: "VEIL_".into(),
+                        path: Some("crates/ui".into()),
+                    },
+                    false,
+                    Some("crates/ui/src/markdown/veil.rs:12: pub const VEIL_MIN_FADE_MS"),
+                ),
                 edit("k3", "apps/ios/Zeron/Transcript/Veil.swift", 84, 12),
-                tool("k4", exec("xcodebuild -scheme Zeron -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build"), false, Some("** BUILD SUCCEEDED **")),
+                tool(
+                    "k4",
+                    exec(
+                        "xcodebuild -scheme Zeron -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build",
+                    ),
+                    false,
+                    Some("** BUILD SUCCEEDED **"),
+                ),
                 text("t1", VEIL_IMPL),
             ],
         ),
-        user("m3", now - 1_800_000, "Also check it handles CJK and emoji — 日本語のテキストと絵文字 🎉 must fade per grapheme, not per byte."),
+        user(
+            "m3",
+            now - 1_800_000,
+            "Also check it handles CJK and emoji — 日本語のテキストと絵文字 🎉 must fade per grapheme, not per byte.",
+        ),
         assistant(
             "m4",
             host,
             now - 1_700_000,
             vec![
-                tool("k1", ToolCall::Glob { pattern: "crates/ui/src/markdown/**/*.rs".into() }, false, None),
-                tool("k2", ToolCall::WebFetch { url: "https://www.unicode.org/reports/tr29/#Grapheme_Cluster_Boundaries".into(), prompt: None }, false, None),
-                tool("k3", ToolCall::Todo { items: vec![
-                    TodoItem { text: "Snap chunk splits to grapheme clusters".into(), done: true },
-                    TodoItem { text: "Table test for ZWJ sequences".into(), done: true },
-                    TodoItem { text: "Measure veil cost on 600-turn transcript".into(), done: false },
-                ] }, false, None),
+                tool(
+                    "k1",
+                    ToolCall::Glob {
+                        pattern: "crates/ui/src/markdown/**/*.rs".into(),
+                    },
+                    false,
+                    None,
+                ),
+                tool(
+                    "k2",
+                    ToolCall::WebFetch {
+                        url: "https://www.unicode.org/reports/tr29/#Grapheme_Cluster_Boundaries"
+                            .into(),
+                        prompt: None,
+                    },
+                    false,
+                    None,
+                ),
+                tool(
+                    "k3",
+                    ToolCall::Todo {
+                        items: vec![
+                            TodoItem {
+                                text: "Snap chunk splits to grapheme clusters".into(),
+                                done: true,
+                            },
+                            TodoItem {
+                                text: "Table test for ZWJ sequences".into(),
+                                done: true,
+                            },
+                            TodoItem {
+                                text: "Measure veil cost on 600-turn transcript".into(),
+                                done: false,
+                            },
+                        ],
+                    },
+                    false,
+                    None,
+                ),
                 edit("k4", "crates/ui/src/markdown/veil.rs", 31, 4),
                 text("t0", CJK_REPLY),
             ],
@@ -257,15 +316,30 @@ fn veil(host: &str, now: i64) -> Vec<SessionMessageEntry> {
 
 fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     vec![
-        user("m1", now - 400_000, "The model picker shows stale catalogs after switching devices — where should the catalog come from?"),
+        user(
+            "m1",
+            now - 400_000,
+            "The model picker shows stale catalogs after switching devices — where should the catalog come from?",
+        ),
         assistant(
             "m2",
             host,
             now - 380_000,
             vec![
-                tool("k1", ToolCall::Search { pattern: "list_models".into(), path: None }, false, None),
+                tool(
+                    "k1",
+                    ToolCall::Search {
+                        pattern: "list_models".into(),
+                        path: None,
+                    },
+                    false,
+                    None,
+                ),
                 tool("k2", read("crates/ui/src/shell/pickers.rs"), false, None),
-                text("t0", "Two viable sources — the local device's harness install, or the space's owning device. The desktop recently moved to the latter (`aa128a6`). Before I wire the RPC, two decisions:"),
+                text(
+                    "t0",
+                    "Two viable sources — the local device's harness install, or the space's owning device. The desktop recently moved to the latter (`aa128a6`). Before I wire the RPC, two decisions:",
+                ),
                 MessagePart::Input {
                     id: "req-1".into(),
                     request_id: "req-1".into(),
@@ -273,15 +347,26 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                         UserInputQuestion {
                             id: "q1".into(),
                             header: "Catalog source".into(),
-                            question: "Which device should serve harness/model catalogs for the picker?".into(),
-                            options: vec!["Space's device (Recommended)".into(), "Local device".into(), "Union of both".into()],
+                            question:
+                                "Which device should serve harness/model catalogs for the picker?"
+                                    .into(),
+                            options: vec![
+                                "Space's device (Recommended)".into(),
+                                "Local device".into(),
+                                "Union of both".into(),
+                            ],
                             multi_select: false,
                         },
                         UserInputQuestion {
                             id: "q2".into(),
                             header: "Harnesses".into(),
                             question: "Which harnesses should the picker offer on phones?".into(),
-                            options: vec!["Claude Code".into(), "Codex".into(), "OpenCode".into(), "Grok".into()],
+                            options: vec![
+                                "Claude Code".into(),
+                                "Codex".into(),
+                                "OpenCode".into(),
+                                "Grok".into(),
+                            ],
                             multi_select: true,
                         },
                     ],
@@ -294,17 +379,42 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
 
 fn tabs(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     vec![
-        user("m1", now - 1_000_000, "Tool group headers turn red when any child fails — they should stay quiet, chips carry the error."),
+        user(
+            "m1",
+            now - 1_000_000,
+            "Tool group headers turn red when any child fails — they should stay quiet, chips carry the error.",
+        ),
         assistant(
             "m2",
             host,
             now - 950_000,
             vec![
-                tool("k1", ToolCall::Search { pattern: "group_header_color".into(), path: None }, false, None),
-                tool("k2", exec("cargo test -p zeron-ui tool_group"), true, Some("error[E0425]: cannot find value `danger_muted` in this scope")),
+                tool(
+                    "k1",
+                    ToolCall::Search {
+                        pattern: "group_header_color".into(),
+                        path: None,
+                    },
+                    false,
+                    None,
+                ),
+                tool(
+                    "k2",
+                    exec("cargo test -p zeron-ui tool_group"),
+                    true,
+                    Some("error[E0425]: cannot find value `danger_muted` in this scope"),
+                ),
                 edit("k3", "crates/ui/src/shell/transcript.rs", 6, 9),
-                tool("k4", exec("cargo test -p zeron-ui tool_group"), false, Some("test result: ok. 9 passed")),
-                text("t0", "Done — the header keeps `text_muted` even on failure; only the chip label and the summary segment (\"1 failed\") pick up `danger`. Matches the desktop fix in `1749890`."),
+                tool(
+                    "k4",
+                    exec("cargo test -p zeron-ui tool_group"),
+                    false,
+                    Some("test result: ok. 9 passed"),
+                ),
+                text(
+                    "t0",
+                    "Done — the header keeps `text_muted` even on failure; only the chip label and the summary segment (\"1 failed\") pick up `danger`. Matches the desktop fix in `1749890`.",
+                ),
             ],
         ),
     ]
@@ -316,8 +426,16 @@ fn errored(host: &str, now: i64) -> Vec<SessionMessageEntry> {
         host,
         now - 2_000_000,
         vec![
-            text("t0", "Reproducing the flush-timer wake on a hibernated Durable Object:"),
-            tool("k1", exec("npx wrangler dev --test-scheduled"), true, Some("✘ [ERROR] Could not resolve \"node:async_hooks\"")),
+            text(
+                "t0",
+                "Reproducing the flush-timer wake on a hibernated Durable Object:",
+            ),
+            tool(
+                "k1",
+                exec("npx wrangler dev --test-scheduled"),
+                true,
+                Some("✘ [ERROR] Could not resolve \"node:async_hooks\""),
+            ),
             MessagePart::Error {
                 id: "e0".into(),
                 message: "Harness exited with status 1: rate limited — retry in 2m".into(),
@@ -326,7 +444,11 @@ fn errored(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     );
     failed.status = Some(MessageStatus::Aborted);
     vec![
-        user("m1", now - 2_100_000, "Why does the flush timer wake hibernated rooms every 5s?"),
+        user(
+            "m1",
+            now - 2_100_000,
+            "Why does the flush timer wake hibernated rooms every 5s?",
+        ),
         failed,
     ]
 }
@@ -343,7 +465,9 @@ fn scroll(host: &str, now: i64) -> Vec<SessionMessageEntry> {
             host,
             now - 4_900_000,
             vec![
-                text("t0", r#"## Root cause
+                text(
+                    "t0",
+                    r#"## Root cause
 
 "Blank until scroll" means the content offset is stranded **past the end** of the content after a geometry change:
 
@@ -364,8 +488,14 @@ override func layoutSubviews() {
 ```
 
 - See `TranscriptScrollMatrixTests` for the 36-case matrix
-- [UIScrollView docs](https://developer.apple.com/documentation/uikit/uiscrollview)"#),
-                tool("k1", exec("xcodebuild test -only-testing:ZeronTests/TranscriptScrollMatrixTests"), false, Some("Executed 36 tests, with 0 failures")),
+- [UIScrollView docs](https://developer.apple.com/documentation/uikit/uiscrollview)"#,
+                ),
+                tool(
+                    "k1",
+                    exec("xcodebuild test -only-testing:ZeronTests/TranscriptScrollMatrixTests"),
+                    false,
+                    Some("Executed 36 tests, with 0 failures"),
+                ),
             ],
         ),
     ]
@@ -373,14 +503,25 @@ override func layoutSubviews() {
 
 fn home(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     vec![
-        user("m1", now - 7_200_000, "Clean up ~/Downloads — anything older than 90 days goes to an archive folder."),
+        user(
+            "m1",
+            now - 7_200_000,
+            "Clean up ~/Downloads — anything older than 90 days goes to an archive folder.",
+        ),
         assistant(
             "m2",
             host,
             now - 7_100_000,
             vec![
-                tool("k1", exec("find ~/Downloads -maxdepth 1 -mtime +90 | wc -l"), false, Some("412")),
-                text("t0", r#"Found **412** items older than 90 days. Plan:
+                tool(
+                    "k1",
+                    exec("find ~/Downloads -maxdepth 1 -mtime +90 | wc -l"),
+                    false,
+                    Some("412"),
+                ),
+                text(
+                    "t0",
+                    r#"Found **412** items older than 90 days. Plan:
 
 - [x] Create `~/Downloads/_archive-2026`
 - [x] Move files, keep folder structure
@@ -396,7 +537,8 @@ find ~/Downloads -maxdepth 1 -mtime +90 ! -name '_archive-*' \
 
 ```json
 { "moved": 377, "deleted": 35, "freedBytes": 18432000000 }
-```"#),
+```"#,
+                ),
             ],
         ),
     ]
@@ -404,12 +546,18 @@ find ~/Downloads -maxdepth 1 -mtime +90 ! -name '_archive-*' \
 
 fn cjk(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     vec![
-        user("m1", now - 600_000, "テキストのレイアウトを多言語で確認して 🌏 — 中文、한국어、emoji も。"),
+        user(
+            "m1",
+            now - 600_000,
+            "テキストのレイアウトを多言語で確認して 🌏 — 中文、한국어、emoji も。",
+        ),
         assistant(
             "m2",
             host,
             now - 590_000,
-            vec![text("t0", r#"# 多言語レイアウト確認 🌏
+            vec![text(
+                "t0",
+                r#"# 多言語レイアウト確認 🌏
 
 日本語の長い段落です。禁則処理により、句読点（、。）や閉じ括弧」は行頭に来ません。長い文章でも自然に折り返されることを確認してください。これはテスト用の文章です。
 
@@ -428,7 +576,8 @@ fn cjk(host: &str, now: i64) -> Vec<SessionMessageEntry> {
 | 日本語 | 吾輩は猫である |
 | 中文 | 我思故我在 |
 | 한국어 | 안녕하세요 |
-| emoji | 🎉🚀✨🧪 |"#)],
+| emoji | 🎉🚀✨🧪 |"#,
+            )],
         ),
     ]
 }
@@ -451,12 +600,42 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
         "chat-ios-scroll" => scroll(host, now),
         "chat-home" => home(host, now),
         "chat-cjk" => cjk(host, now),
-        "chat-deploy" => short(host, now, "Audit the wrangler config for hibernation hygiene.", "Flush timer now only arms while dirty; ping/pong uses the auto-response path so the DO never wakes for keepalives."),
-        "chat-ios-keyboard" => short(host, now, "The composer jumps when the keyboard animates in.", "Tracking `keyboardLayoutGuide` instead of the notification frame fixes it — the composer now rides the guide with the system curve."),
-        "chat-blog" => short(host, now, "Draft the launch post outline.", "## Outline\n\n1. Why a phone viewport\n2. The CRDT under the hood\n3. What's next"),
-        "chat-side" => short(host, now, "What EMA window does the veil use?", "α = 0.2 over inter-append gaps, seeded from the first two chunks."),
-        "chat-oklch" => short(host, now, "OKLCH conversion drifts from the desktop.", "Gamma encode matches now."),
-        "chat-presence" => short(host, now, "Presence beats spam the DO.", "Batched to one beat per 25s."),
+        "chat-deploy" => short(
+            host,
+            now,
+            "Audit the wrangler config for hibernation hygiene.",
+            "Flush timer now only arms while dirty; ping/pong uses the auto-response path so the DO never wakes for keepalives.",
+        ),
+        "chat-ios-keyboard" => short(
+            host,
+            now,
+            "The composer jumps when the keyboard animates in.",
+            "Tracking `keyboardLayoutGuide` instead of the notification frame fixes it — the composer now rides the guide with the system curve.",
+        ),
+        "chat-blog" => short(
+            host,
+            now,
+            "Draft the launch post outline.",
+            "## Outline\n\n1. Why a phone viewport\n2. The CRDT under the hood\n3. What's next",
+        ),
+        "chat-side" => short(
+            host,
+            now,
+            "What EMA window does the veil use?",
+            "α = 0.2 over inter-append gaps, seeded from the first two chunks.",
+        ),
+        "chat-oklch" => short(
+            host,
+            now,
+            "OKLCH conversion drifts from the desktop.",
+            "Gamma encode matches now.",
+        ),
+        "chat-presence" => short(
+            host,
+            now,
+            "Presence beats spam the DO.",
+            "Batched to one beat per 25s.",
+        ),
         _ => Vec::new(),
     }
 }
@@ -496,7 +675,10 @@ pub(crate) fn synthetic(turns: u32, host: &str, start: i64) -> Vec<SessionMessag
             at,
             &format!("Turn {i}: the ref dropdown still hangs on open — dig into it."),
         ));
-        let mut parts = vec![text("t0", &format!("## Pass {i}: where the dropdown stalls\n\n{PROSE}"))];
+        let mut parts = vec![text(
+            "t0",
+            &format!("## Pass {i}: where the dropdown stalls\n\n{PROSE}"),
+        )];
         for t in 0..4i64 {
             let index = i * 4 + t;
             let call = match index % 4 {

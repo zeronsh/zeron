@@ -12125,6 +12125,7 @@ dependencies = [
 name = "zeron-client"
 version = "0.2.93"
 dependencies = [
+ "async-trait",
  "chrono",
  "futures",
  "loro",
@@ -12134,6 +12135,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "uuid",

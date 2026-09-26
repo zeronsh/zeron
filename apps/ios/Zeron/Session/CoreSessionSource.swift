@@ -40,7 +40,7 @@ final class CoreSessionSource: SessionSource {
         next.title = c.title
         let project = row?.project?.name ?? "No project"
         next.subtitle = c.host.name.map { "\(project) @ \($0)" } ?? project
-        next.running = c.live.canInterrupt || c.live.indicator == .working
+        next.running = c.live.turnRunning
         next.canSteer = c.host.capabilities.midTurnSteering ?? false
         next.placeholder = "Message \(row?.harnessLabel ?? "the agent")"
         var chips: [ComposerChip] = []
@@ -58,6 +58,8 @@ final class CoreSessionSource: SessionSource {
         next.chips = chips
         if c.sendState == .failed {
             next.banner = .notDelivered
+        } else if c.sendState == .queued {
+            next.banner = .failed("\(c.host.name ?? "Host") is offline — will send when it's back")
         } else if let p = c.transferProgress {
             next.banner = .uploading(progress: p)
         } else if app?.connectivity?.state == .offline {

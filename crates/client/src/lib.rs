@@ -33,6 +33,7 @@ pub mod connectivity;
 mod demo;
 pub mod error;
 pub mod events;
+mod live;
 pub mod rpc;
 pub mod runtime;
 pub mod session;
@@ -48,8 +49,8 @@ pub use events::{ClientEvent, ClientListener};
 pub use session::{
     AppendHint, BusyPolicy, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest,
     LiveStatus, LocalEcho, OutgoingAttachment, PendingKind, PendingSend, QueueEditAction,
-    QueueEditFinish, QueueEditLease, QueueEditStart, QueueGate, QueueItem, RoomState,
-    SendOutcome, SendRequest, SessionHandle, SessionSnapshot, SnapshotDelta, SnapshotWatch,
+    QueueEditFinish, QueueEditLease, QueueEditStart, QueueGate, QueueItem, RoomState, SendOutcome,
+    SendRequest, SessionHandle, SessionSnapshot, SnapshotDelta, SnapshotWatch,
 };
 pub use workspace::{
     DeviceView, FrontPage, ProjectRef, ProjectView, PullRequestGroups, SearchField, SearchHit,
@@ -70,15 +71,19 @@ pub(crate) fn now_ms() -> i64 {
 }
 
 pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub(crate) fn read<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
-    lock.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub(crate) fn write<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
-    lock.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+    lock.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Lowercase v4 uuid (the id format every writer in the fleet mints).

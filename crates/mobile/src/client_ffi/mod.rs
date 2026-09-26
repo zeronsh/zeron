@@ -134,7 +134,12 @@ impl CoreClient {
     }
 
     pub fn projects(&self) -> Vec<ProjectView> {
-        self.client.workspace().projects.iter().map(Into::into).collect()
+        self.client
+            .workspace()
+            .projects
+            .iter()
+            .map(Into::into)
+            .collect()
     }
 
     pub fn project(&self, space_id: String) -> Option<ProjectView> {
@@ -155,7 +160,12 @@ impl CoreClient {
     }
 
     pub fn devices(&self) -> Vec<DeviceView> {
-        self.client.workspace().devices.iter().map(Into::into).collect()
+        self.client
+            .workspace()
+            .devices
+            .iter()
+            .map(Into::into)
+            .collect()
     }
 
     /// Devices that can run sessions (new-session / new-project pickers).
@@ -170,7 +180,10 @@ impl CoreClient {
 
     /// Any chat row (archived and child chats included).
     pub fn session_row(&self, chat_id: String) -> Option<SessionRow> {
-        self.client.workspace().session(&chat_id).map(|r| (&**r).into())
+        self.client
+            .workspace()
+            .session(&chat_id)
+            .map(|r| (&**r).into())
     }
 
     /// Side chats / subagent chats of `parent_id`, recency order.
@@ -179,7 +192,10 @@ impl CoreClient {
     }
 
     pub fn session_config(&self, chat_id: String) -> Option<ChatConfig> {
-        self.client.session_config(&chat_id).as_ref().map(Into::into)
+        self.client
+            .session_config(&chat_id)
+            .as_ref()
+            .map(Into::into)
     }
 
     pub fn search(&self, query: String, limit: u32) -> Vec<SearchHit> {
@@ -235,7 +251,12 @@ impl CoreClient {
     }
 
     /// Reorder a pin between neighbours (`None` at either end).
-    pub fn move_pin(&self, chat_id: String, after: Option<String>, before: Option<String>) -> CoreResult<()> {
+    pub fn move_pin(
+        &self,
+        chat_id: String,
+        after: Option<String>,
+        before: Option<String>,
+    ) -> CoreResult<()> {
         Ok(self.client.move_pin(&chat_id, after, before)?)
     }
 
@@ -262,9 +283,15 @@ impl CoreClient {
     }
 
     /// Create (or find) the project for `path` on `device_id`. Returns its id.
-    pub async fn create_project(&self, device_id: String, path: String, git_detected: bool) -> CoreResult<String> {
+    pub async fn create_project(
+        &self,
+        device_id: String,
+        path: String,
+        git_detected: bool,
+    ) -> CoreResult<String> {
         let client = self.client.clone();
-        on_runtime(async move { client.create_project(&device_id, &path, git_detected).await }).await
+        on_runtime(async move { client.create_project(&device_id, &path, git_detected).await })
+            .await
     }
 
     pub fn rename_project(&self, space_id: String, name: Option<String>) -> CoreResult<()> {
@@ -329,22 +356,38 @@ impl CoreClient {
             .collect()
     }
 
-    pub async fn list_refs(&self, device_id: String, repo_path: String) -> CoreResult<Vec<RepoRef>> {
+    pub async fn list_refs(
+        &self,
+        device_id: String,
+        repo_path: String,
+    ) -> CoreResult<Vec<RepoRef>> {
         let client = self.client.clone();
-        let refs = on_runtime(async move { client.list_refs(&device_id, &repo_path).await }).await?;
+        let refs =
+            on_runtime(async move { client.list_refs(&device_id, &repo_path).await }).await?;
         Ok(refs.into_iter().map(Into::into).collect())
     }
 
     /// Browse folders on a device (`None` = its home folder).
-    pub async fn list_folders(&self, device_id: String, path: Option<String>) -> CoreResult<FolderListing> {
+    pub async fn list_folders(
+        &self,
+        device_id: String,
+        path: Option<String>,
+    ) -> CoreResult<FolderListing> {
         let client = self.client.clone();
-        Ok(on_runtime(async move { client.list_folders(&device_id, path).await })
-            .await?
-            .into())
+        Ok(
+            on_runtime(async move { client.list_folders(&device_id, path).await })
+                .await?
+                .into(),
+        )
     }
 
     /// `git checkout <ref>` in `repo_path` on the device.
-    pub async fn switch_ref(&self, device_id: String, repo_path: String, ref_name: String) -> CoreResult<()> {
+    pub async fn switch_ref(
+        &self,
+        device_id: String,
+        repo_path: String,
+        ref_name: String,
+    ) -> CoreResult<()> {
         let client = self.client.clone();
         on_runtime(async move { client.switch_ref(&device_id, &repo_path, &ref_name).await }).await
     }
@@ -358,7 +401,12 @@ impl CoreClient {
         base: String,
     ) -> CoreResult<String> {
         let client = self.client.clone();
-        on_runtime(async move { client.create_worktree(&device_id, &space_id, &repo_path, &base).await }).await
+        on_runtime(async move {
+            client
+                .create_worktree(&device_id, &space_id, &repo_path, &base)
+                .await
+        })
+        .await
     }
 
     /// Chunked upload of one file; returns its durable path on the host.
@@ -370,15 +418,21 @@ impl CoreClient {
         progress: Option<Arc<dyn UploadProgress>>,
     ) -> CoreResult<String> {
         let client = self.client.clone();
-        let progress: Option<zc::rpc::ProgressFn> =
-            progress.map(|p| Arc::new(move |fraction: f64| p.on_progress(fraction)) as zc::rpc::ProgressFn);
-        on_runtime(async move { client.upload_attachment(&device_id, &name, data, progress).await }).await
+        let progress: Option<zc::rpc::ProgressFn> = progress
+            .map(|p| Arc::new(move |fraction: f64| p.on_progress(fraction)) as zc::rpc::ProgressFn);
+        on_runtime(async move {
+            client
+                .upload_attachment(&device_id, &name, data, progress)
+                .await
+        })
+        .await
     }
 
     /// Attachment bytes (LRU-cached): host paths and own `pending://` refs.
     pub async fn read_attachment(&self, device_id: String, path: String) -> CoreResult<Vec<u8>> {
         let client = self.client.clone();
-        let bytes = on_runtime(async move { client.read_attachment(&device_id, &path).await }).await?;
+        let bytes =
+            on_runtime(async move { client.read_attachment(&device_id, &path).await }).await?;
         Ok(bytes.as_ref().clone())
     }
 
@@ -453,9 +507,11 @@ pub async fn auth_refresh(
     refresh_token: String,
     organization_id: Option<String>,
 ) -> CoreResult<AuthTokens> {
-    Ok(zc::auth::refresh(&edge_url, &refresh_token, organization_id.as_deref())
-        .await?
-        .into())
+    Ok(
+        zc::auth::refresh(&edge_url, &refresh_token, organization_id.as_deref())
+            .await?
+            .into(),
+    )
 }
 
 /// A JWT's `exp` claim (epoch seconds).
