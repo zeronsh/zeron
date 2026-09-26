@@ -17,19 +17,22 @@
   "workers_dev": true,
   // Public hostname on the zeron.sh zone, plus the install surface carved out
   // of the landing host: path routes beat the landing worker's custom
-  // domain, so `curl -fsSL https://zeron.sh/install.sh | sh` installs Zeron
-  // while the rest of zeron.sh serves the landing page.
+  // domain, so `curl -fsSL https://zeron.sh/install.sh | sh` and
+  // `irm https://zeron.sh/install.ps1 | iex` install Zeron while the rest of
+  // zeron.sh serves the landing page.
   "routes": [
     { "pattern": "edge.zeron.sh", "custom_domain": true },
     { "pattern": "zeron.sh/install.sh", "zone_name": "zeron.sh" },
+    { "pattern": "zeron.sh/install.ps1", "zone_name": "zeron.sh" },
     { "pattern": "zeron.sh/releases/*", "zone_name": "zeron.sh" },
     // Legacy comet hostnames — keep until 0.1.x clients are gone.
     { "pattern": "edge.comet.zeron.sh", "custom_domain": true },
     { "pattern": "comet.zeron.sh/install.sh", "zone_name": "zeron.sh" },
+    { "pattern": "comet.zeron.sh/install.ps1", "zone_name": "zeron.sh" },
     { "pattern": "comet.zeron.sh/releases/*", "zone_name": "zeron.sh" }
   ],
-  // Serve src/install.sh as a string (the /install.sh route).
-  "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
+  // Serve the installers as strings (the /install.sh and /install.ps1 routes).
+  "rules": [{ "type": "Text", "globs": ["**/*.sh", "**/*.ps1"], "fallthrough": true }],
   // loro-crdt's default entry loads its WASM via URL fetch, which workerd
   // cannot do at runtime; the base64 entry inlines the module instead.
   "alias": {
