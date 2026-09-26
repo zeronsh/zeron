@@ -62,6 +62,7 @@ use crate::workspace_links::resolve_workspace_file_link;
 mod actions_ui;
 mod command_palette;
 mod files_panel;
+mod navigation_focus;
 mod project_icon;
 mod side_chats;
 mod sidebar_pins;
@@ -1976,6 +1977,7 @@ pub struct Shell {
     /// settle, preserving focus on mounted controls.
     focus_sub: Option<Subscription>,
     shortcut_focus: FocusHandle,
+    navigation_focus: navigation_focus::NavigationFocus,
     /// Neutral shortcut target after clicking away from an input.
     unfocused: FocusHandle,
     /// Clears the jump hints when the window deactivates: a Cmd+Tab away
@@ -2322,6 +2324,7 @@ impl Shell {
             splash_task: None,
             focus_sub: None,
             shortcut_focus: cx.focus_handle(),
+            navigation_focus: navigation_focus::NavigationFocus::new(cx),
             unfocused: cx.focus_handle(),
             activation_sub: None,
             _ticker: ticker,
@@ -9452,6 +9455,10 @@ impl Shell {
         // such as a pane resize.
         div()
             .id("chat-dropzone")
+            .track_focus(&self.navigation_focus.main)
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                this.capture_navigation_focus(false, false, window, cx);
+            }))
             .relative()
             .flex_1()
             .min_w_0()
@@ -10022,6 +10029,11 @@ impl Shell {
         // lives outside this clipped container, on the root layout's seam.
         let panel_bg = theme.panel_bg();
         let panel = div()
+            .id("right-pane-focus")
+            .track_focus(&self.navigation_focus.right)
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                this.capture_navigation_focus(true, false, window, cx);
+            }))
             .size_full()
             .flex()
             .flex_col()
@@ -10274,6 +10286,10 @@ impl Shell {
         let scroll_for_drag = self.right_tab_scroll.clone();
         let mut strip = div()
             .id("right-surface-strip")
+            .track_focus(&self.navigation_focus.tabs)
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                this.capture_navigation_focus(true, true, window, cx);
+            }))
             .flex()
             .flex_row()
             .items_center()
@@ -11491,6 +11507,8 @@ fn header_icon_button(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.navigation_focus
+            .remember(&self.shortcut_focus, window, cx);
         if let Some(command) = self.pending_workspace_command.take() {
             use crate::composer::WorkspaceCommand;
             match command {
@@ -11680,12 +11698,7 @@ impl Render for Shell {
         if self.focus_sub.is_none() {
             self.focus_sub = Some(cx.on_focus_lost(window, |this: &mut Shell, window, cx| {
                 let root = this.shortcut_focus.clone();
-                let unfocused = this.unfocused.clone();
-                let preferred = if matches!(this.route, Route::Settings(_)) {
-                    this.settings_focus.clone()
-                } else {
-                    this.composer.focus_handle(cx)
-                };
+                let (preferred, unfocused) = this.navigation_focus_fallback(cx);
                 window.on_next_frame(move |window, cx| {
                     restore_mounted_focus(&root, &preferred, &unfocused, window, cx);
                 });
@@ -11701,12 +11714,7 @@ impl Render for Shell {
             window.on_next_frame(move |window, cx| window.focus(&target, cx));
         }
         let shortcut_focus = self.shortcut_focus.clone();
-        let unfocused = self.unfocused.clone();
-        let preferred_focus = if matches!(self.route, Route::Settings(_)) {
-            self.settings_focus.clone()
-        } else {
-            self.composer.focus_handle(cx)
-        };
+        let (preferred_focus, unfocused) = self.navigation_focus_fallback(cx);
         window.defer(cx, move |window, cx| {
             restore_mounted_focus(&shortcut_focus, &preferred_focus, &unfocused, window, cx);
         });
