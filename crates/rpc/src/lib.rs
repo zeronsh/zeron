@@ -184,6 +184,18 @@ pub mod methods {
     pub const WATCH_WORKSPACE_GIT_STATUS: &str = "WatchWorkspaceGitStatus";
     /// Current pull request for one checkout, resolved on the checkout's host device.
     pub const WATCH_CHECKOUT_CHANGE_REQUEST: &str = "WatchCheckoutChangeRequest";
+    /// Legacy listing method. Current engines require an explicit repository.
+    pub const LIST_OPEN_CHANGE_REQUESTS: &str = "ListOpenChangeRequests";
+    /// Repository-scoped listing. A distinct method prevents old engines from
+    /// silently ignoring the filter and issuing a global GitHub search.
+    pub const LIST_REPOSITORY_CHANGE_REQUESTS: &str = "ListRepositoryChangeRequests";
+    /// Filter-aware contract; older engines must not silently return authored results.
+    pub const LIST_FILTERED_CHANGE_REQUESTS: &str = "ListFilteredChangeRequests";
+    /// Resolve a selected checkout through local Git metadata only.
+    pub const GET_CHANGE_REQUEST_REPOSITORY: &str = "GetChangeRequestRepository";
+    pub const GET_CHANGE_REQUEST: &str = "GetChangeRequest";
+    pub const POST_CHANGE_REQUEST_COMMENT: &str = "PostChangeRequestComment";
+    pub const GET_CHANGE_REQUEST_DIFF: &str = "GetChangeRequestDiff";
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
     /// Permanently restore one chat-owned checkout to its current HEAD and
     /// remove only its untracked, non-ignored paths.
@@ -212,12 +224,25 @@ pub mod methods {
     pub const APPLY_UPDATE: &str = "ApplyUpdate";
 }
 
+/// Stable capability error codes transported without provider stderr.
+pub mod capability_errors {
+    pub const PULL_REQUESTS_CLI_UNAVAILABLE: &str = "pull_requests.cli_unavailable";
+    pub const PULL_REQUESTS_AUTHENTICATION: &str = "pull_requests.authentication";
+    pub const PULL_REQUESTS_RATE_LIMITED: &str = "pull_requests.rate_limited";
+    pub const PULL_REQUESTS_TIMEOUT: &str = "pull_requests.timeout";
+    pub const PULL_REQUESTS_DECODE: &str = "pull_requests.decode";
+    pub const PULL_REQUESTS_COMMAND_FAILED: &str = "pull_requests.command_failed";
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RpcError {
     #[error("unknown method: {0}")]
     UnknownMethod(String),
     #[error("bad params: {0}")]
     BadParams(String),
+    /// Stable machine-readable capability failure preserved across transports.
+    #[error("capability error: {0}")]
+    Capability(String),
     #[error("{0}")]
     Failed(String),
     #[error("transport: {0}")]
@@ -304,6 +329,11 @@ mod tests {
         dropped: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     }
 
+    struct CancelAwareCallService {
+        started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        dropped: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    }
+
     struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
 
     impl Drop for DropSignal {
@@ -335,6 +365,27 @@ mod tests {
     }
 
     #[async_trait]
+    impl RpcService for CancelAwareCallService {
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<RpcReply, RpcError> {
+            match method {
+                "PendingCall" => {
+                    if let Some(started) = self.started.lock().unwrap().take() {
+                        let _ = started.send(());
+                    }
+                    let _guard = DropSignal(self.dropped.lock().unwrap().take());
+                    std::future::pending().await
+                }
+                "Echo" => Ok(RpcReply::Value(params)),
+                other => Err(RpcError::UnknownMethod(other.into())),
+            }
+        }
+    }
+
+    #[async_trait]
     impl RpcService for TestService {
         async fn handle(
             &self,
@@ -351,6 +402,9 @@ mod tests {
                 }
                 "Never" => Ok(RpcReply::Stream(futures::stream::pending().boxed())),
                 "Boom" => Err(RpcError::Failed("boom".into())),
+                "Capability" => Err(RpcError::Capability(
+                    capability_errors::PULL_REQUESTS_AUTHENTICATION.into(),
+                )),
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
         }
@@ -388,6 +442,16 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, RpcError::Failed(m) if m == "boom"));
+
+        let err = client
+            .call("Capability", serde_json::Value::Null)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            RpcError::Capability(code)
+                if code == capability_errors::PULL_REQUESTS_AUTHENTICATION
+        ));
     }
 
     #[tokio::test]
@@ -455,6 +519,31 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_unary_call_cancels_pending_server_task() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let client = memory_client(Arc::new(CancelAwareCallService {
+            started: Mutex::new(Some(started_tx)),
+            dropped: Mutex::new(Some(dropped_tx)),
+        }));
+        let mut call = Box::pin(client.call("PendingCall", serde_json::Value::Null));
+
+        tokio::select! {
+            result = &mut call => panic!("pending call completed unexpectedly: {result:?}"),
+            started = started_rx => started.expect("server started pending call"),
+        }
+        drop(call);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("server call cancelled")
+            .expect("drop signal");
+
+        let echoed = client.call("Echo", serde_json::json!(2)).await.unwrap();
+        assert_eq!(echoed, serde_json::json!(2));
     }
 
     #[tokio::test]

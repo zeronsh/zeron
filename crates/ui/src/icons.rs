@@ -88,6 +88,7 @@ icon_assets![
     (GIT_BRANCH, "git-branch"),
     // Provider-neutral pull-request glyph, drawn in the same linear family.
     (PULL_REQUEST, "pull-request"),
+    (PULL_REQUEST_DRAFT, "pull-request-draft"),
     // Compact history-ref glyphs, drawn in the same linear style.
     (CLOUD, "cloud"),
     (TAG, "tag"),
@@ -251,6 +252,8 @@ pub fn claude_brand() -> Hsla {
 /// An icon element for an embedded asset path. Size and colour are set by the
 /// caller (`.size(..)`, `.text_color(..)`), matching the web app's
 /// `[&_svg]:size-4` idiom.
+/// GPUI's SVG painter reads the SVG's own text color; a color on its parent
+/// does not provide the paint input. Always set `.text_color(..)` on the icon.
 pub fn icon(path: &'static str) -> Svg {
     svg().path(path).flex_none()
 }
@@ -258,6 +261,43 @@ pub fn icon(path: &'static str) -> Svg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_request_icons_produce_visible_pixels() {
+        let renderer = gpui::SvgRenderer::new(std::sync::Arc::new(Assets));
+        for path in [
+            PULL_REQUEST,
+            DOCUMENT,
+            FILE_CODE,
+            FOLDER_WITH_FILES,
+            CHECK,
+            CHECKLIST,
+            DANGER_TRIANGLE,
+            CLOCK_CIRCLE,
+            GLOBAL,
+            COPY,
+            REFRESH,
+            ALT_ARROW_LEFT,
+            ALT_ARROW_DOWN,
+            ARROW_UP_RIGHT,
+            EXPAND_ARROWS,
+            COLLAPSE_ARROWS,
+            CHAT_ROUND_LINE,
+            GIT_BRANCH,
+            CLOSE_CIRCLE,
+        ] {
+            let bytes = Assets.load(path).unwrap().unwrap();
+            let image = renderer.render_single_frame(&bytes, 1.0).unwrap();
+            assert!(
+                image
+                    .as_bytes(0)
+                    .unwrap()
+                    .chunks_exact(4)
+                    .any(|pixel| pixel[3] != 0),
+                "{path} rasterizes to an empty image"
+            );
+        }
+    }
 
     #[test]
     fn every_registered_icon_loads_and_parses() {

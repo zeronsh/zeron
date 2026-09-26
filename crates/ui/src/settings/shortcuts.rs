@@ -15,7 +15,8 @@ use crate::popover::{self, ScrollRailHost};
 mod appshots_page;
 use crate::settings::widgets;
 use crate::settings::{
-    ComposerSendBehavior, KeymapConfig, ShortcutId, combo_from_keystroke, display_combo,
+    ComposerSendBehavior, KeymapConfig, PullRequestDestination, SavePolicy, ShortcutId,
+    combo_from_keystroke, display_combo,
 };
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -77,6 +78,7 @@ pub struct ShortcutsPage {
     appshot_destination: AppshotDestination,
     appshot_capabilities: AppshotCapabilities,
     send_select: widgets::SelectState,
+    pull_request_destination_select: widgets::SelectState,
     destination_select: widgets::SelectState,
     capture_access_prompted: bool,
     semantic_access_prompted: bool,
@@ -118,6 +120,7 @@ impl ShortcutsPage {
             appshot_destination,
             appshot_capabilities: crate::appshots::capabilities(),
             send_select: widgets::SelectState::default(),
+            pull_request_destination_select: widgets::SelectState::default(),
             destination_select: widgets::SelectState::default(),
             capture_access_prompted: false,
             semantic_access_prompted: false,
@@ -617,6 +620,46 @@ impl Render for ShortcutsPage {
                 })),
             );
         if self.general_page {
+            let pull_request_destination = crate::settings::current(cx).pull_request_destination;
+            let pull_request_destination_control = widgets::select(
+                "pull-request-destination",
+                "Open pull requests in",
+                &theme,
+                |page: &mut Self| &mut page.pull_request_destination_select,
+            )
+            .options(
+                PullRequestDestination::ALL
+                    .into_iter()
+                    .map(|destination| widgets::SelectOption::new(destination.label())),
+                PullRequestDestination::ALL
+                    .into_iter()
+                    .position(|destination| destination == pull_request_destination)
+                    .unwrap_or_default(),
+            )
+            .width(160.0)
+            .on_select(|_, ix, _, cx| {
+                crate::settings::update(SavePolicy::Immediate, cx, |settings| {
+                    settings.pull_request_destination = PullRequestDestination::ALL[ix];
+                });
+                cx.refresh_windows();
+            })
+            .render(&self.pull_request_destination_select, cx);
+            let pull_request_destination_row = widgets::card_row(&theme, true)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(160.0))
+                        .child(widgets::row_title(&theme, "Open pull requests in"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child("Applies to PR badges and the pull request board.")
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(pull_request_destination_control);
             let scrollbar = self.render_scrollbar(&theme, cx);
             return div()
                 .id("general-settings-page-host")
@@ -642,6 +685,13 @@ impl Render for ShortcutsPage {
                                             .child(compact_mode_row)
                                             .child(escape_behavior_row),
                                     )
+                                    .child(widgets::section(
+                                        &theme,
+                                        "Links",
+                                        widgets::section_card(&theme)
+                                            .mt_0()
+                                            .child(pull_request_destination_row),
+                                    ))
                                     .child(self.thread_naming.clone()),
                             ),
                     )

@@ -247,6 +247,25 @@ pub enum SavePolicy {
     Immediate,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PullRequestDestination {
+    #[default]
+    #[serde(alias = "browser")]
+    Native,
+    External,
+}
+
+impl PullRequestDestination {
+    pub const ALL: [Self; 2] = [Self::Native, Self::External];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Native => "PR view",
+            Self::External => "Default browser",
+        }
+    }
+}
+
 /// The sole in-process owner and writer of `ui-settings.json`.
 ///
 /// Mutations land in `current` before any timer starts. Replacing a pending
@@ -797,6 +816,11 @@ pub struct UiSettings {
     /// the narration between them) fold into one collapsed accordion, so only
     /// the reply text stays visible.
     pub transcript_compact_mode: bool,
+    /// Destination shared by PR badges and the pull-request board.
+    pub pull_request_destination: PullRequestDestination,
+    /// Last explicitly selected PR scope, restored when no project is selected.
+    pub last_pull_request_repository: Option<String>,
+    pub last_pull_request_device: Option<String>,
     /// Save edited workspace files automatically after the configured delay.
     pub files_autosave_enabled: bool,
     /// Idle time before an edited workspace file is saved automatically.
@@ -881,6 +905,9 @@ impl Default for UiSettings {
             transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
             open_web_links_in_zeron: true,
             transcript_compact_mode: false,
+            pull_request_destination: PullRequestDestination::Native,
+            last_pull_request_repository: None,
+            last_pull_request_device: None,
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
@@ -1675,6 +1702,29 @@ mod tests {
     }
 
     #[test]
+    fn pull_request_destinations_migrate_and_round_trip() {
+        let legacy: UiSettings =
+            serde_json::from_str(r#"{"sidebarWidth":300,"openWebLinksInZeron":false}"#).unwrap();
+        assert_eq!(
+            legacy.pull_request_destination,
+            PullRequestDestination::Native
+        );
+        assert!(!legacy.open_web_links_in_zeron);
+        let browser: UiSettings = serde_json::from_str(r#"{"pullRequestDestination":"browser"}"#).unwrap();
+        assert_eq!(browser.pull_request_destination, PullRequestDestination::Native);
+        for destination in PullRequestDestination::ALL {
+            let settings = UiSettings {
+                pull_request_destination: destination,
+                ..legacy.clone()
+            };
+            let loaded: UiSettings =
+                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            assert_eq!(loaded.pull_request_destination, destination);
+            assert_eq!(loaded.sidebar_width, 300.0);
+        }
+    }
+
+    #[test]
     fn composer_send_behavior_is_opt_in_for_old_and_partial_settings() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -2297,6 +2347,9 @@ mod tests {
             transcript_width: 960.0,
             open_web_links_in_zeron: false,
             transcript_compact_mode: true,
+            pull_request_destination: PullRequestDestination::External,
+            last_pull_request_repository: Some("acme/zeron".into()),
+            last_pull_request_device: Some("remote-device".into()),
             files_autosave_enabled: true,
             files_autosave_delay_ms: 1_500,
             files_word_wrap: true,

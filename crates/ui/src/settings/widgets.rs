@@ -330,7 +330,7 @@ pub fn page_header(theme: &Theme, title: &str, count: Option<usize>) -> gpui::Di
         .px(px(SECTION_LABEL_INSET))
         .flex()
         .flex_row()
-        .items_baseline()
+        .items_center()
         .gap(px(10.0))
         .child(
             div()

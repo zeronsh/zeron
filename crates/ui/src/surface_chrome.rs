@@ -44,3 +44,41 @@ pub(crate) fn toolbar(theme: &Theme) -> Div {
             theme.surface
         })
 }
+
+/// Neutral navigation chip shared by the right-panel strip and PR navigation.
+pub(crate) fn tab_frame(
+    id: impl Into<gpui::ElementId>,
+    selected: bool,
+    theme: &Theme,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(CONTROL_SIZE))
+        .flex_none()
+        .rounded(px(CONTROL_RADIUS))
+        .flex()
+        .items_center()
+        .gap(px(CONTROL_GAP))
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_selected(selected)
+        .tab_index(0)
+        .text_size(px(12.0))
+        .text_color(if selected {
+            theme.text
+        } else {
+            theme.text_muted
+        })
+        .focus_visible(|style| style.bg(crate::theme::wash(0.14)))
+        .when(selected, |el| el.bg(crate::theme::wash(0.10)))
+}
+
+pub(crate) fn tab(
+    id: impl Into<gpui::ElementId>,
+    selected: bool,
+    theme: &Theme,
+) -> gpui::Stateful<Div> {
+    tab_frame(id, selected, theme).when(!selected, |el| {
+        el.hover(|style| style.bg(crate::theme::wash(0.06)))
+    })
+}

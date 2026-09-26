@@ -95,13 +95,13 @@ const DIFF_TEXT_SIZE_RATIO: f32 = DIFF_TEXT_SIZE / crate::typography::CODE_FONT_
 
 /// Size of the painted diff body text, and the size the column measurement in
 /// [`DiffHorizontalGeometry::resolve`] must use: they desync otherwise.
-fn diff_text_size(theme: &Theme) -> f32 {
+pub(crate) fn diff_text_size(theme: &Theme) -> f32 {
     crate::typography::clamp_font_size(theme.code_font_size * DIFF_TEXT_SIZE_RATIO)
 }
 
 /// The row box and the painted line box must agree, or code clips once the
 /// user moves the code font size off [`DIFF_TEXT_SIZE`].
-fn diff_line_height(theme: &Theme) -> f32 {
+pub(crate) fn diff_line_height(theme: &Theme) -> f32 {
     diff_text_size(theme) * (DIFF_LINE_HEIGHT / DIFF_TEXT_SIZE)
 }
 
@@ -335,7 +335,7 @@ fn max_shaped_text_width(
 
 /// Count terminal-style display columns, including tab stops and wide
 /// Unicode glyphs. This is only a floor; actual shaped runs determine the extent.
-fn visual_columns(text: &str) -> usize {
+pub(crate) fn visual_columns(text: &str) -> usize {
     text.chars().fold(0usize, |columns, ch| {
         if ch == '\t' {
             columns + (DIFF_TAB_SIZE - columns % DIFF_TAB_SIZE)
@@ -1076,7 +1076,7 @@ fn excerpt_side(
     }))
 }
 
-fn excerpt_highlights(file: &FileDiff, language: Lang) -> Option<DiffHighlights> {
+pub(crate) fn excerpt_highlights(file: &FileDiff, language: Lang) -> Option<DiffHighlights> {
     if !zeron_syntax::supports_language(language) {
         return None;
     }
@@ -4395,6 +4395,17 @@ fn code_text_viewport(
         }
         None => viewport.into_any_element(),
     }
+}
+
+/// Read-only unified row for PR diffs; reuse the Changes pane's gutters,
+/// source text, font settings, markers and semantic colors. The caller owns
+/// virtualization and the shared horizontal viewport.
+pub(crate) fn readonly_diff_line(
+    line: &DiffLine,
+    spans: &[zeron_syntax::HighlightSpan],
+    theme: &Theme,
+) -> AnyElement {
+    diff_line_row(line, spans, theme, GUTTER_WIDTH, DiffCodeWidth::Clipped, None)
 }
 
 /// One +/−/context/meta diff line: coloured accent bar, dual line-number

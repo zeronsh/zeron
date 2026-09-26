@@ -7,7 +7,10 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::{AnyElement, Context, Render, SharedString, Window, div, prelude::*, px};
-use zeron_proto::{ChangeRequestSummary, Chat, CheckoutChangeRequestStatus, Space};
+use zeron_proto::{
+    ChangeRequestListItem, ChangeRequestState, ChangeRequestSummary, Chat,
+    CheckoutChangeRequestStatus, Space,
+};
 
 use crate::theme::Theme;
 
@@ -38,17 +41,19 @@ pub(crate) struct ChangeRequestBadgeModel {
 
 impl ChangeRequestBadgeModel {
     pub fn from_summary(summary: &ChangeRequestSummary) -> Self {
-        use zeron_proto::ChangeRequestState;
+        Self::from_fields(summary.number, &summary.title, summary.state)
+    }
 
-        let (state_label, tone) = match summary.state {
+    fn from_fields(number: u64, title: &str, state: ChangeRequestState) -> Self {
+        let (state_label, tone) = match state {
             ChangeRequestState::Open => ("Open", ChangeRequestBadgeTone::Open),
             ChangeRequestState::Merged => ("Merged", ChangeRequestBadgeTone::Merged),
             ChangeRequestState::Closed => ("Closed", ChangeRequestBadgeTone::Closed),
         };
         Self {
-            number: format!("#{}", summary.number).into(),
+            number: format!("#{number}").into(),
             state_label,
-            title: summary.title.replace(['\r', '\n'], " ").into(),
+            title: title.replace(['\r', '\n'], " ").into(),
             tone,
         }
     }
@@ -56,14 +61,6 @@ impl ChangeRequestBadgeModel {
 
 pub(crate) struct ChangeRequestTooltip {
     model: ChangeRequestBadgeModel,
-}
-
-impl ChangeRequestTooltip {
-    pub fn new(summary: &ChangeRequestSummary) -> Self {
-        Self {
-            model: ChangeRequestBadgeModel::from_summary(summary),
-        }
-    }
 }
 
 impl Render for ChangeRequestTooltip {
@@ -114,9 +111,10 @@ pub(crate) fn pull_request_badge(
     id: SharedString,
     summary: ChangeRequestSummary,
     surface: ChangeRequestBadgeSurface,
+    device: Option<String>,
     theme: &Theme,
 ) -> AnyElement {
-    pull_request_badge_with_query(id, summary, surface, None, theme)
+    pull_request_badge_with_query(id, summary, surface, None, device, theme)
 }
 
 pub(crate) fn pull_request_badge_with_query(
@@ -124,9 +122,10 @@ pub(crate) fn pull_request_badge_with_query(
     summary: ChangeRequestSummary,
     surface: ChangeRequestBadgeSurface,
     query: Option<&str>,
+    device: Option<String>,
     theme: &Theme,
 ) -> AnyElement {
-    render_pull_request_badge(id, summary, surface, query, true, theme)
+    render_pull_request_badge(id, summary, surface, query, true, device, theme)
 }
 
 /// The same badge geometry without hover, tooltip, or click behavior in drag previews.
@@ -136,7 +135,7 @@ pub(crate) fn pull_request_badge_preview(
     surface: ChangeRequestBadgeSurface,
     theme: &Theme,
 ) -> AnyElement {
-    render_pull_request_badge(id, summary, surface, None, false, theme)
+    render_pull_request_badge(id, summary, surface, None, false, None, theme)
 }
 
 fn render_pull_request_badge(
@@ -145,13 +144,54 @@ fn render_pull_request_badge(
     surface: ChangeRequestBadgeSurface,
     query: Option<&str>,
     interactive: bool,
+    device: Option<String>,
     theme: &Theme,
 ) -> AnyElement {
     let model = ChangeRequestBadgeModel::from_summary(&summary);
+    render_badge_model(
+        id,
+        model,
+        summary.url,
+        surface,
+        query,
+        interactive,
+        device,
+        theme,
+    )
+}
+
+/// Listing surfaces use the exact sidebar badge renderer without inventing checkout refs.
+pub(crate) fn pull_request_list_badge(
+    id: SharedString,
+    item: &ChangeRequestListItem,
+    theme: &Theme,
+) -> AnyElement {
+    render_badge_model(
+        id,
+        ChangeRequestBadgeModel::from_fields(item.number, &item.title, item.state),
+        item.url.clone(),
+        ChangeRequestBadgeSurface::Sidebar,
+        None,
+        true,
+        None,
+        theme,
+    )
+}
+
+fn render_badge_model(
+    id: SharedString,
+    model: ChangeRequestBadgeModel,
+    url: String,
+    surface: ChangeRequestBadgeSurface,
+    query: Option<&str>,
+    interactive: bool,
+    device: Option<String>,
+    theme: &Theme,
+) -> AnyElement {
     let color = model.tone.color(theme);
-    let url = summary.url.clone();
-    let tooltip_summary = summary;
+    let tooltip_model = model.clone();
     let composer = surface == ChangeRequestBadgeSurface::Composer;
+    let accessible_label = format!("Open pull request {}: {}", model.number, model.title);
 
     div()
         .id(id)
@@ -168,15 +208,21 @@ fn render_pull_request_badge(
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(color.opacity(0.85))
         .when(interactive, |el| {
-            el.cursor_pointer()
+            el.role(gpui::Role::Link)
+                .aria_label(accessible_label)
+                .tab_index(0)
+                .focus_visible(move |style| style.bg(color.opacity(0.16)).text_color(color))
+                .cursor_pointer()
                 .hover(move |style| style.bg(color.opacity(0.16)).text_color(color))
-                .on_click(move |_, _, cx| {
+                .on_click(move |_, window, cx| {
                     cx.stop_propagation();
-                    cx.open_url(&url);
+                    crate::pull_request_detail::open_on_device(&url, device.clone(), window, cx);
                 })
                 .tooltip(move |_, cx| {
-                    cx.new(|_| ChangeRequestTooltip::new(&tooltip_summary))
-                        .into()
+                    cx.new(|_| ChangeRequestTooltip {
+                        model: tooltip_model.clone(),
+                    })
+                    .into()
                 })
                 .tooltip_show_delay(std::time::Duration::from_millis(350))
         })

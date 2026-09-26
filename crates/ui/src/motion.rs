@@ -653,6 +653,42 @@ impl FadeEntry {
     }
 }
 
+/// Interruptible height tween for the shared collapsible sections.
+/// The rendered element owns the frame clock; this state preserves the current
+/// interpolated height when a second click reverses an in-flight transition.
+#[derive(Clone, Copy)]
+pub(crate) struct DisclosureMotion {
+    pub(crate) epoch: u64,
+    pub(crate) from: f32,
+    pub(crate) to: f32,
+    pub(crate) started: std::time::Instant,
+}
+
+impl DisclosureMotion {
+    pub(crate) fn new(epoch: u64, from: f32, to: f32) -> Self {
+        Self {
+            epoch,
+            from,
+            to,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    pub(crate) fn current(self) -> f32 {
+        let total = COLLAPSE.total().as_secs_f32();
+        let raw = if total > 0.0 {
+            self.started.elapsed().as_secs_f32() / total
+        } else {
+            1.0
+        };
+        lerp(self.from, self.to, COLLAPSE.progress(raw))
+    }
+
+    pub(crate) fn animating(self) -> bool {
+        self.started.elapsed() < COLLAPSE.total() + Duration::from_millis(120)
+    }
+}
+
 /// Per-key hover progress store. Pure core (explicit `now`) — unit-testable;
 /// the thread-local wrappers below feed it wall time.
 #[derive(Default)]
