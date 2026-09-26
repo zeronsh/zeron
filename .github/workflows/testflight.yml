@@ -95,6 +95,14 @@ jobs:
           echo "BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
           echo "Preparing $AUDIENCE TestFlight build $build_number from $GITHUB_SHA."
 
+      - name: Rust toolchain + iOS targets
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios-core
+
       - name: Xcode version
         run: xcodebuild -version
 

@@ -1,0 +1,33 @@
+[package]
+name = "zeron-mobile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The mobile core: one UniFFI library that iOS (Swift) and Android (Kotlin)
+# link. Platform code paints, scrolls and handles gestures; everything that
+# decides *what* to paint and *where* lives here.
+[lib]
+name = "zeron_mobile"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+uniffi = "0.32"
+zeron-markdown.workspace = true
+zeron-text.workspace = true
+zeron-doc.workspace = true
+zeron-proto.workspace = true
+zeron-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zeron-syntax.workspace = true
+thiserror.workspace = true

@@ -78,17 +78,10 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A1000000000000000000B001 /* Loro in Frameworks */,
-				A1000000000000000000B002 /* Markdown in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
-
-/* Begin PBXBuildFile section */
-		A1000000000000000000B001 /* Loro in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000P002 /* Loro */; };
-		A1000000000000000000B002 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000P004 /* Markdown */; };
-/* End PBXBuildFile section */
 
 /* Begin PBXGroup section */
 		A1000000000000000000G000 = {
@@ -118,6 +111,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = A1000000000000000000C001 /* Build configuration list for PBXNativeTarget "Zeron" */;
 			buildPhases = (
+				A1000000000000000000SH01 /* Rust core */,
 				A1000000000000000000S001 /* Sources */,
 				A1000000000000000000F001 /* Frameworks */,
 				A1000000000000000000R001 /* Resources */,
@@ -131,8 +125,6 @@
 			);
 			name = Zeron;
 			packageProductDependencies = (
-				A1000000000000000000P002 /* Loro */,
-				A1000000000000000000P004 /* Markdown */,
 			);
 			productName = Zeron;
 			productReference = A1000000000000000000PR01 /* Zeron.app */;
@@ -204,10 +196,6 @@
 			);
 			mainGroup = A1000000000000000000G000;
 			minimizedProjectReferenceProxies = 1;
-			packageReferences = (
-				A1000000000000000000P001 /* XCRemoteSwiftPackageReference "loro-swift" */,
-				A1000000000000000000P003 /* XCRemoteSwiftPackageReference "swift-markdown" */,
-			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A1000000000000000000G002 /* Products */;
 			projectDirPath = "";
@@ -229,6 +217,29 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A1000000000000000000SH01 /* Rust core */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Rust core";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "exec \"$SRCROOT/../../scripts/ios/build-core.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		A1000000000000000000S001 /* Sources */ = {
@@ -308,12 +319,24 @@
 		A1000000000000000000BC03 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos";
+				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator";
+				OTHER_LDFLAGS = (
+					"-lzeron_mobile",
+					"-lc++",
+					"-framework",
+					Security,
+					"-framework",
+					SystemConfiguration,
+				);
+				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos/include";
+				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator/include";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 5XY3M483YQ;
-				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Zeron/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -334,12 +357,24 @@
 		A1000000000000000000BC04 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos";
+				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator";
+				OTHER_LDFLAGS = (
+					"-lzeron_mobile",
+					"-lc++",
+					"-framework",
+					Security,
+					"-framework",
+					SystemConfiguration,
+				);
+				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos/include";
+				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator/include";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 5XY3M483YQ;
-				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Zeron/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -360,6 +395,8 @@
 		A2000000000000000000BC03 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos/include";
+				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator/include";
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -396,6 +433,8 @@
 		A2000000000000000000BC04 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos/include";
+				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator/include";
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -470,37 +509,6 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		A1000000000000000000P001 /* XCRemoteSwiftPackageReference "loro-swift" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/loro-dev/loro-swift.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.13.3;
-			};
-		};
-		A1000000000000000000P003 /* XCRemoteSwiftPackageReference "swift-markdown" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/swiftlang/swift-markdown.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.4.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		A1000000000000000000P002 /* Loro */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A1000000000000000000P001 /* XCRemoteSwiftPackageReference "loro-swift" */;
-			productName = Loro;
-		};
-		A1000000000000000000P004 /* Markdown */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A1000000000000000000P003 /* XCRemoteSwiftPackageReference "swift-markdown" */;
-			productName = Markdown;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A1000000000000000000PJ01 /* Project object */;
 }

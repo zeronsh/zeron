@@ -1,0 +1,1091 @@
+//! `prepare()`: normalize, segment, and measure once; the result lays out at any width.
+
+use std::ops::Range;
+
+use crate::analysis::{self, BRK_SOFT_HYPHEN, RawSeg};
+use crate::cache::{PairContext, UnitsRef, WidthCache, char_needs_fallback, needs_fallback};
+use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
+
+use crate::chars::{is_hard_break, is_strong_rtl};
+use crate::font::{FontBook, StyleId};
+
+/// CSS `white-space` modes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum WhiteSpace {
+    /// Collapse runs of spaces/tabs/newlines to one space, trim both ends, wrap.
+    #[default]
+    Normal,
+    /// Collapse spaces/tabs, keep `\n` as a forced break (spaces around it removed), wrap.
+    PreLine,
+    /// Preserve spaces and tabs, `\n` forces a break, wrap; trailing spaces/tabs hang.
+    PreWrap,
+    /// Preserve everything, break only at `\n`, never wrap.
+    Pre,
+}
+
+/// CSS `overflow-wrap`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum OverflowWrap {
+    /// An unbreakable run wider than the line overflows it.
+    Normal,
+    /// An unbreakable run wider than the line breaks between grapheme clusters.
+    #[default]
+    Anywhere,
+}
+
+/// Options for [`prepare`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PrepareOptions {
+    /// Whitespace processing and wrapping mode.
+    pub white_space: WhiteSpace,
+    /// What to do with runs wider than the line.
+    pub overflow_wrap: OverflowWrap,
+    /// Tab stop interval in space widths (`PreWrap`/`Pre`; 0 renders tabs zero-width).
+    pub tab_size: u8,
+}
+
+impl Default for PrepareOptions {
+    fn default() -> Self {
+        Self {
+            white_space: WhiteSpace::Normal,
+            overflow_wrap: OverflowWrap::Anywhere,
+            tab_size: 4,
+        }
+    }
+}
+
+/// A styled run of the input. Spans must cover the text contiguously and in order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Span {
+    /// Byte range into the text (input text for [`prepare`], normalized text in
+    /// [`Prepared::spans`]).
+    pub range: Range<usize>,
+    /// Style the run is measured in.
+    pub style: StyleId,
+    /// Extra advance before the span's first grapheme (e.g. inline-code chip padding).
+    pub pad_start: f32,
+    /// Extra advance after the span's last grapheme.
+    pub pad_end: f32,
+    /// Lay the whole span out as one unbreakable unit (a mention chip): line breaking treats it
+    /// like a CSS atomic inline (U+FFFC).
+    pub atomic: bool,
+}
+
+impl Span {
+    /// A plain span.
+    pub fn new(range: Range<usize>, style: StyleId) -> Self {
+        Self {
+            range,
+            style,
+            pad_start: 0.0,
+            pad_end: 0.0,
+            atomic: false,
+        }
+    }
+
+    /// Sets `pad_start`/`pad_end`.
+    pub fn with_padding(mut self, start: f32, end: f32) -> Self {
+        self.pad_start = start;
+        self.pad_end = end;
+        self
+    }
+
+    /// Sets `atomic`.
+    pub fn with_atomic(mut self, atomic: bool) -> Self {
+        self.atomic = atomic;
+        self
+    }
+}
+
+/// How a line may end after a segment ([`Prepared::segment_breaks`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SegmentBreak {
+    /// A forced break (newline, paragraph end).
+    Mandatory,
+    /// A UAX #14 break opportunity.
+    Allowed,
+    /// A soft hyphen: breaking here shows a hyphen.
+    SoftHyphen,
+    /// Whitespace inside a UAX #14 segment (`( x`, `a !`): the line may end after it only when
+    /// it overflows *within* the whitespace, as CoreText does. Such breaks make line counts
+    /// non-monotone in width, exactly like CoreText's.
+    WhitespaceOverflow,
+}
+
+// Segment flags.
+pub(crate) const F_DYN_W: u8 = 1; // content contains a tab: width depends on line position
+pub(crate) const F_DYN_H: u8 = 2; // hang contains a tab
+pub(crate) const F_BREAKABLE: u8 = 4; // overflow-wrap may split the content (>1 unit)
+/// Glyphs were substituted across the boundary before this segment (`-|>` in Geist): `Cold::lead`
+/// applies when it continues a line, and a line starting here is shaped anew.
+pub(crate) const F_LEAD: u8 = 8;
+
+// Piece kinds.
+pub(crate) const P_TEXT: u8 = 0;
+pub(crate) const P_TAB: u8 = 1;
+pub(crate) const P_ATOMIC: u8 = 2;
+
+/// Per-segment data the line walker touches on every step.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Hot {
+    /// Advance of the visible content (static unless `F_DYN_W`).
+    pub width: f32,
+    /// Advance of the trailing hanging whitespace when the line continues past it.
+    pub hang: f32,
+    pub brk: u8,
+    pub flags: u8,
+}
+
+/// Per-segment data needed for ranges, fragments, splits and soft hyphens.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Cold {
+    pub start: u32,
+    pub content_end: u32,
+    pub ws_end: u32,
+    /// Stored pieces: content at `pieces..pieces + n_content`, hanging whitespace right after
+    /// (`n_hang`). A region that is one non-tab run of one span (the common case) stores no
+    /// piece: it is implied by the segment's byte range, `span`/`hang_span`, and `Hot`.
+    pub pieces: u32,
+    pub n_content: u32,
+    pub n_hang: u32,
+    pub span: u32,
+    pub hang_span: u32,
+    /// Breakable units (grapheme clusters; an atomic span or a tab is one unit) live at
+    /// `units..units + n_units` in [`Prepared::units`] when `F_BREAKABLE`.
+    pub units: u32,
+    pub n_units: u32,
+    /// Hyphen advance shown when the line breaks at this segment's soft hyphen.
+    pub hyphen: f32,
+    /// Change to the first glyph's advance when the segment continues a line (`F_LEAD`): the
+    /// right half of the pair context across the preceding boundary (a ligature or contextual
+    /// form spanning it, like `-|>`, puts its advance on the left side).
+    pub lead: f32,
+    /// The part of the content advance that is pure kerning with the grapheme after it: dropped
+    /// when the line was re-shaped from an `F_LEAD` start (CoreText then ends it with a
+    /// standalone glyph). A ligature across the end boundary still counts in full.
+    pub tail: f32,
+    /// Kind of the implicit content piece.
+    pub kind: u8,
+}
+
+/// A same-span, same-kind slice of a segment.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Piece {
+    pub start: u32,
+    pub end: u32,
+    pub span: u32,
+    /// Advance including span padding; for tabs, the tab-stop interval.
+    pub width: f32,
+    /// Index of the piece's first unit within its segment, and how many units it has.
+    pub unit0: u32,
+    pub n_units: u32,
+    pub kind: u8,
+}
+
+/// Text measured once and ready to lay out at any width with pure arithmetic.
+///
+/// Holds the normalized text, spans remapped onto it, per-segment widths, and per-grapheme
+/// advances for segments that `overflow-wrap: anywhere` may have to split.
+#[derive(Clone, Debug)]
+pub struct Prepared {
+    pub(crate) text: String,
+    pub(crate) spans: Vec<Span>,
+    pub(crate) hot: Vec<Hot>,
+    pub(crate) cold: Vec<Cold>,
+    pub(crate) pieces: Vec<Piece>,
+    pub(crate) units: Vec<f32>,
+    pub(crate) wrap: bool,
+    /// Wrapping with `overflow-wrap: anywhere`.
+    pub(crate) anywhere: bool,
+    pub(crate) tab_size: u8,
+    pub(crate) ascii: bool,
+    pub(crate) rtl: bool,
+    pub(crate) options: PrepareOptions,
+}
+
+impl Prepared {
+    fn empty(text: String, spans: Vec<Span>, opts: &PrepareOptions) -> Self {
+        Self {
+            ascii: text.is_ascii(),
+            text,
+            spans,
+            hot: Vec::new(),
+            cold: Vec::new(),
+            pieces: Vec::new(),
+            units: Vec::new(),
+            wrap: opts.white_space != WhiteSpace::Pre,
+            anywhere: opts.white_space != WhiteSpace::Pre
+                && opts.overflow_wrap == OverflowWrap::Anywhere,
+            tab_size: opts.tab_size,
+            rtl: false,
+            options: *opts,
+        }
+    }
+
+    /// The normalized text every byte range refers to.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The input spans remapped onto [`Prepared::text`] (same count and order; a span whose
+    /// text collapsed away has an empty range). `Fragment::span` indexes this slice.
+    pub fn spans(&self) -> &[Span] {
+        &self.spans
+    }
+
+    /// Options this was prepared with.
+    pub fn options(&self) -> &PrepareOptions {
+        &self.options
+    }
+
+    /// Whether the text contains any strong right-to-left character (bidi class R or AL).
+    /// Fragments are always in logical order; RTL-bearing paragraphs should be drawn a whole
+    /// line at a time by a bidi-aware renderer.
+    pub fn has_rtl(&self) -> bool {
+        self.rtl
+    }
+
+    /// True when there is nothing to lay out (zero lines at any width).
+    pub fn is_empty(&self) -> bool {
+        self.hot.is_empty()
+    }
+
+    /// Number of break-opportunity segments (diagnostics).
+    pub fn segment_count(&self) -> usize {
+        self.hot.len()
+    }
+
+    /// UTF-16 code-unit offset of byte offset `byte` in [`Prepared::text`].
+    pub fn utf16_offset(&self, byte: usize) -> usize {
+        if self.ascii {
+            return byte;
+        }
+        utf16_len(&self.text.as_bytes()[..byte])
+    }
+
+    /// Segment byte ranges `(content, hanging whitespace, forced-break char)` (diagnostics and
+    /// tests; the three ranges of a segment are adjacent and segments tile the text).
+    pub fn segment_ranges(&self) -> Vec<(Range<usize>, Range<usize>, Range<usize>)> {
+        self.cold
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let end = self
+                    .cold
+                    .get(i + 1)
+                    .map_or(self.text.len(), |n| n.start as usize);
+                let (s, ce, we) = (c.start as usize, c.content_end as usize, c.ws_end as usize);
+                (s..ce, ce..we, we..end)
+            })
+            .collect()
+    }
+
+    /// How a line may end after each segment (diagnostics and tests; parallel to
+    /// [`Prepared::segment_ranges`]).
+    pub fn segment_breaks(&self) -> impl ExactSizeIterator<Item = SegmentBreak> + '_ {
+        self.hot.iter().map(|h| match h.brk {
+            analysis::BRK_MANDATORY => SegmentBreak::Mandatory,
+            analysis::BRK_ALLOWED => SegmentBreak::Allowed,
+            analysis::BRK_SOFT_HYPHEN => SegmentBreak::SoftHyphen,
+            _ => SegmentBreak::WhitespaceOverflow,
+        })
+    }
+
+    /// Content pieces of segment `i`.
+    #[inline]
+    pub(crate) fn content_run(&self, i: usize) -> Run<'_> {
+        let c = &self.cold[i];
+        if c.n_content > 0 {
+            Run::Stored(&self.pieces[c.pieces as usize..(c.pieces + c.n_content) as usize])
+        } else if c.content_end > c.start {
+            Run::One(Piece {
+                start: c.start,
+                end: c.content_end,
+                span: c.span,
+                width: self.hot[i].width,
+                unit0: 0,
+                n_units: c.n_units,
+                kind: c.kind,
+            })
+        } else {
+            Run::Stored(&[])
+        }
+    }
+
+    /// Hanging-whitespace pieces of segment `i`.
+    #[inline]
+    pub(crate) fn hang_run(&self, i: usize) -> Run<'_> {
+        let c = &self.cold[i];
+        if c.n_hang > 0 {
+            let a = (c.pieces + c.n_content) as usize;
+            Run::Stored(&self.pieces[a..a + c.n_hang as usize])
+        } else if c.ws_end > c.content_end {
+            Run::One(Piece {
+                start: c.content_end,
+                end: c.ws_end,
+                span: c.hang_span,
+                width: self.hot[i].hang,
+                unit0: 0,
+                n_units: 0,
+                kind: P_TEXT,
+            })
+        } else {
+            Run::Stored(&[])
+        }
+    }
+
+    /// Heap bytes held (diagnostics).
+    pub fn heap_bytes(&self) -> usize {
+        self.text.capacity()
+            + self.spans.capacity() * std::mem::size_of::<Span>()
+            + self.hot.capacity() * std::mem::size_of::<Hot>()
+            + self.cold.capacity() * std::mem::size_of::<Cold>()
+            + self.pieces.capacity() * std::mem::size_of::<Piece>()
+            + self.units.capacity() * 4
+    }
+}
+
+/// A segment region's pieces: stored, or the single implicit one.
+pub(crate) enum Run<'a> {
+    Stored(&'a [Piece]),
+    One(Piece),
+}
+
+impl Run<'_> {
+    #[inline]
+    pub(crate) fn as_slice(&self) -> &[Piece] {
+        match self {
+            Run::Stored(s) => s,
+            Run::One(p) => std::slice::from_ref(p),
+        }
+    }
+}
+
+/// Adds a kerning adjustment to the last glyph-bearing unit (a ligature's tail units carry no
+/// advance and must stay zero so the walker never splits before them).
+fn add_to_last_unit(units: &mut [f32], k: f32) {
+    if let Some(u) = units.iter_mut().rev().find(|u| **u != 0.0) {
+        *u += k;
+    } else if let Some(u) = units.last_mut() {
+        *u += k;
+    }
+}
+
+fn is_hard_break_str(g: &str) -> bool {
+    g.chars().next().is_some_and(is_hard_break)
+}
+
+/// UTF-16 length of UTF-8 bytes: one unit per scalar, two for 4-byte scalars.
+#[inline]
+pub(crate) fn utf16_len(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .map(|&b| ((b & 0xC0) != 0x80) as usize + (b >= 0xF0) as usize)
+        .sum()
+}
+
+/// Prepares `text` for layout: normalizes whitespace per `opts.white_space`, finds UAX #14 break
+/// opportunities, splits styled pieces, and measures every piece through `cache`.
+///
+/// `spans` must cover `text` contiguously in order; invalid spans are debug-asserted and
+/// repaired (each span clamped to follow the previous one, the last extended to the end).
+/// Empty text — or text that normalizes to nothing — yields a `Prepared` with zero lines.
+///
+/// # Panics
+/// If a span references a `StyleId` that is not from `book`.
+pub fn prepare(
+    book: &FontBook,
+    cache: &mut WidthCache,
+    text: &str,
+    spans: &[Span],
+    opts: &PrepareOptions,
+) -> Prepared {
+    cache.bind(book);
+    if text.is_empty() || spans.is_empty() {
+        debug_assert!(text.is_empty(), "prepare: spans must cover the text");
+        let spans = spans
+            .iter()
+            .map(|s| Span {
+                range: 0..0,
+                ..s.clone()
+            })
+            .collect();
+        return Prepared::empty(text.to_owned(), spans, opts);
+    }
+    let repaired = analysis::repair_spans(text, spans);
+    debug_assert!(
+        repaired.is_none(),
+        "prepare: spans must cover the text contiguously in order on char boundaries"
+    );
+    let spans = repaired.as_deref().unwrap_or(spans);
+
+    let (ntext, nspans) = analysis::normalize(text, spans, opts.white_space);
+    if ntext.is_empty() {
+        return Prepared::empty(ntext, nspans, opts);
+    }
+
+    let mut scratch = std::mem::take(&mut cache.scratch);
+    analysis::break_opportunities(&ntext, &nspans, opts.white_space, &mut scratch.breaks);
+    analysis::segments(
+        &ntext,
+        &nspans,
+        &scratch.breaks,
+        opts.white_space,
+        &mut scratch.segs,
+    );
+
+    let ctx = if book.fallback().is_some() && !ntext.is_ascii() && !cache.runs_unsupported {
+        FallbackRuns::build(book, cache, &ntext, &nspans)
+    } else {
+        FallbackRuns::default()
+    };
+
+    if !ntext.is_ascii() {
+        let fallback = book.fallback().is_some();
+        let spans = &nspans;
+        analysis::script_breaks(
+            &ntext,
+            |i, c| {
+                if !fallback {
+                    return false;
+                }
+                let k = spans
+                    .partition_point(|s| s.range.end <= i)
+                    .min(spans.len() - 1);
+                let face = book.face_data(book.style(spans[k].style).face);
+                char_needs_fallback(face, c)
+            },
+            &mut scratch.scripts,
+        );
+        // CoreText shapes per bidi run (visual order), so no kerning or contextual shaping
+        // crosses a bidi level change either (`T.` in `…V.A.T.שלום` in a right-to-left
+        // paragraph).
+        if ntext.chars().any(is_strong_rtl) {
+            let bidi = unicode_bidi::BidiInfo::new(&ntext, None);
+            let levels = &bidi.levels;
+            let mut extra = false;
+            for (i, _) in ntext.char_indices().skip(1) {
+                if levels[i] != levels[i - 1] {
+                    scratch.scripts.push(i as u32);
+                    extra = true;
+                }
+            }
+            if extra {
+                scratch.scripts.sort_unstable();
+                scratch.scripts.dedup();
+            }
+        }
+    } else {
+        scratch.scripts.clear();
+    }
+    let scripts = std::mem::take(&mut scratch.scripts);
+
+    let wrap = opts.white_space != WhiteSpace::Pre;
+    let tabs =
+        matches!(opts.white_space, WhiteSpace::PreWrap | WhiteSpace::Pre) && ntext.contains('\t');
+    scratch.pieces.clear();
+    scratch.units.clear();
+    let mut b = Builder {
+        lead: PairContext::NONE,
+        scripts,
+        book,
+        cache,
+        ctx: &ctx,
+        text: &ntext,
+        spans: &nspans,
+        tabs,
+        tab_size: opts.tab_size,
+        want_units: wrap && opts.overflow_wrap == OverflowWrap::Anywhere,
+        pieces: std::mem::take(&mut scratch.pieces),
+        units: std::mem::take(&mut scratch.units),
+        span: 0,
+    };
+    let n = scratch.segs.len();
+    let mut hot = Vec::with_capacity(n);
+    let mut cold = Vec::with_capacity(n);
+    for seg in &scratch.segs {
+        let (h, c) = b.segment(seg);
+        hot.push(h);
+        cold.push(c);
+    }
+    // Exact-size copies; the growable buffers go back to the cache for the next prepare.
+    let pieces = b.pieces.as_slice().to_vec();
+    let units = b.units.as_slice().to_vec();
+    scratch.pieces = std::mem::take(&mut b.pieces);
+    scratch.units = std::mem::take(&mut b.units);
+    scratch.scripts = std::mem::take(&mut b.scripts);
+    b.cache.scratch = scratch;
+    let ascii = ntext.is_ascii();
+    let rtl = !ascii && ntext.chars().any(is_strong_rtl);
+    Prepared {
+        text: ntext,
+        spans: nspans,
+        hot,
+        cold,
+        pieces,
+        units,
+        wrap,
+        anywhere: wrap && opts.overflow_wrap == OverflowWrap::Anywhere,
+        tab_size: opts.tab_size,
+        ascii,
+        rtl,
+        options: *opts,
+    }
+}
+
+/// In-context advances of the paragraph's fallback runs (maximal same-span runs of graphemes the
+/// face can't draw), from [`crate::FallbackMeasurer::measure_run`].
+#[derive(Default)]
+struct FallbackRuns {
+    /// `(start, end, first grapheme index)`, in text order.
+    runs: Vec<(u32, u32, u32)>,
+    /// Byte start of every grapheme in every run, in order.
+    starts: Vec<u32>,
+    /// Advance of every grapheme in every run (no letter spacing).
+    adv: Vec<f32>,
+}
+
+impl FallbackRuns {
+    fn build(book: &FontBook, cache: &mut WidthCache, text: &str, spans: &[Span]) -> Self {
+        let mut out = Self::default();
+        // Runs continue across span boundaries that don't change the font: same style, no
+        // padding or atomic box between (Arabic joining and CJK font choice need the context).
+        let mut run: Option<(usize, usize, StyleId)> = None;
+        let mut flush = |run: &mut Option<(usize, usize, StyleId)>, out: &mut Self| -> bool {
+            let Some((a, b, style)) = run.take() else {
+                return true;
+            };
+            let Some(adv) = cache.run_advances(book, style, &text[a..b]) else {
+                return !cache.runs_unsupported;
+            };
+            out.runs.push((a as u32, b as u32, out.starts.len() as u32));
+            out.starts.extend(
+                text[a..b]
+                    .grapheme_indices(true)
+                    .map(|(i, _)| (a + i) as u32),
+            );
+            out.adv.extend_from_slice(adv);
+            debug_assert_eq!(out.starts.len(), out.adv.len());
+            true
+        };
+        let mut prev: Option<&Span> = None;
+        for span in spans {
+            if span.range.is_empty() {
+                continue;
+            }
+            let joins = prev.is_some_and(|p| {
+                p.style == span.style
+                    && !p.atomic
+                    && !span.atomic
+                    && p.pad_end == 0.0
+                    && span.pad_start == 0.0
+            });
+            if !joins && !flush(&mut run, &mut out) {
+                return Self::default();
+            }
+            prev = Some(span);
+            if span.atomic {
+                continue;
+            }
+            let face = book.face_data(book.style(span.style).face);
+            let (start, end) = (span.range.start, span.range.end);
+            let sub = &text[..end];
+            // Scan chars (cheap); only around a char the face lacks, walk graphemes.
+            let mut i = start;
+            while i < end {
+                let Some((j, c)) = sub[i..]
+                    .char_indices()
+                    .map(|(k, c)| (i + k, c))
+                    .find(|&(_, c)| char_needs_fallback(face, c))
+                else {
+                    break;
+                };
+                // The grapheme containing `j`, clamped to the span.
+                let mut cur = GraphemeCursor::new(j, end, true);
+                let a = if cur.is_boundary(sub, 0).unwrap_or(true) {
+                    j
+                } else {
+                    cur.prev_boundary(sub, 0)
+                        .ok()
+                        .flatten()
+                        .unwrap_or(j)
+                        .max(start)
+                };
+                let mut cur = GraphemeCursor::new(j + c.len_utf8(), end, true);
+                let mut b = if cur.is_boundary(sub, 0).unwrap_or(true) {
+                    j + c.len_utf8()
+                } else {
+                    cur.next_boundary(sub, 0).ok().flatten().unwrap_or(end)
+                };
+                // Extend over following graphemes that also need the fallback.
+                while b < end {
+                    let mut cur = GraphemeCursor::new(b, end, true);
+                    let nb = cur.next_boundary(sub, 0).ok().flatten().unwrap_or(end);
+                    if !needs_fallback(face, &sub[b..nb]) {
+                        break;
+                    }
+                    b = nb;
+                }
+                match &mut run {
+                    Some(r) if r.1 == a && r.2 == span.style => r.1 = b,
+                    _ => {
+                        if !flush(&mut run, &mut out) {
+                            return Self::default();
+                        }
+                        run = Some((a, b, span.style));
+                    }
+                }
+                i = b;
+            }
+            // A run continues into the next span only if it reaches this span's end.
+            if run.is_some_and(|r| r.1 < end) && !flush(&mut run, &mut out) {
+                return Self::default();
+            }
+        }
+        if !flush(&mut run, &mut out) {
+            return Self::default();
+        }
+        out
+    }
+
+    /// Index of the first run ending after `pos`.
+    #[inline]
+    fn first_after(&self, pos: u32) -> usize {
+        self.runs.partition_point(|r| r.1 <= pos)
+    }
+
+    #[inline]
+    fn overlaps(&self, a: u32, b: u32) -> bool {
+        self.runs.get(self.first_after(a)).is_some_and(|r| r.0 < b)
+    }
+}
+
+struct Builder<'a> {
+    /// Pair context carried from the previous segment's end to the next segment.
+    lead: PairContext,
+    /// Shaping-run boundaries — script runs (see [`analysis::script_breaks`]) and bidi level
+    /// changes: pieces split there and no pair context crosses them.
+    scripts: Vec<u32>,
+    book: &'a FontBook,
+    cache: &'a mut WidthCache,
+    ctx: &'a FallbackRuns,
+    text: &'a str,
+    spans: &'a [Span],
+    tabs: bool,
+    tab_size: u8,
+    want_units: bool,
+    pieces: Vec<Piece>,
+    units: Vec<f32>,
+    /// Span containing the current position (monotone).
+    span: usize,
+}
+
+struct Region {
+    width: f32,
+    has_tab: bool,
+    n_units: u32,
+}
+
+impl Builder<'_> {
+    fn segment(&mut self, seg: &RawSeg) -> (Hot, Cold) {
+        let pieces = self.pieces.len() as u32;
+        let units = self.units.len() as u32;
+        // Context across the boundary before this segment (computed with the previous one).
+        let lead = std::mem::replace(&mut self.lead, PairContext::NONE);
+        let mut content = self.region(seg.start, seg.content_end, true);
+        let mut hang_lead = 0.0;
+        let mut tail = 0.0;
+        if seg.content_end > seg.start {
+            // The content's last glyph kerns with whatever follows it in the paragraph (its
+            // hanging space, or the next segment): like CoreText, count it in the advance.
+            let pc = self.kern_at(seg.content_end as usize);
+            if pc.left != 0.0 {
+                content.width += pc.left;
+                if !pc.substituted {
+                    tail = pc.left;
+                }
+                self.add_to_last(pieces, units, pc.left);
+            }
+            if seg.ws_end > seg.content_end {
+                hang_lead = pc.right;
+            } else {
+                self.lead = pc;
+            }
+        }
+        let (n_content, span, kind) = self.implicit(pieces);
+        let hang_at = self.pieces.len() as u32;
+        let mut hang = self.region(seg.content_end, seg.ws_end, false);
+        if seg.ws_end > seg.content_end {
+            let pc = self.kern_at(seg.ws_end as usize);
+            if pc.left != 0.0 {
+                hang.width += pc.left;
+                self.add_to_last(hang_at, self.units.len() as u32, pc.left);
+            }
+            if hang_lead != 0.0 {
+                hang.width += hang_lead;
+                if let Some(p) = self.pieces.get_mut(hang_at as usize) {
+                    p.width += hang_lead;
+                }
+            }
+            self.lead = pc;
+        }
+        let (n_hang, hang_span, _) = self.implicit(hang_at);
+        let hyphen = if seg.brk == BRK_SOFT_HYPHEN && seg.content_end > seg.start {
+            let last = if n_content > 0 {
+                self.pieces[(pieces + n_content) as usize - 1].span
+            } else {
+                span
+            };
+            self.cache
+                .hyphen_width(self.book, self.spans[last as usize].style)
+        } else {
+            0.0
+        };
+        let breakable = self.want_units && content.n_units > 1;
+        if !breakable {
+            self.units.truncate(units as usize);
+        }
+        let mut flags = 0;
+        if content.has_tab {
+            flags |= F_DYN_W;
+        }
+        if hang.has_tab {
+            flags |= F_DYN_H;
+        }
+        if breakable {
+            flags |= F_BREAKABLE;
+        }
+        if lead.right != 0.0 || lead.substituted {
+            flags |= F_LEAD;
+        }
+        (
+            Hot {
+                width: content.width,
+                hang: hang.width,
+                brk: seg.brk,
+                flags,
+            },
+            Cold {
+                start: seg.start,
+                content_end: seg.content_end,
+                ws_end: seg.ws_end,
+                pieces,
+                n_content,
+                n_hang,
+                span,
+                hang_span,
+                units: if breakable { units } else { 0 },
+                n_units: if breakable { content.n_units } else { 0 },
+                hyphen,
+                lead: lead.right,
+                tail,
+                kind,
+            },
+        )
+    }
+
+    /// Adds `k` to the advance of the last piece pushed since `from` (and to its last unit, if
+    /// it has units pushed since `units_from`).
+    fn add_to_last(&mut self, from: u32, units_from: u32, k: f32) {
+        if self.pieces.len() as u32 > from
+            && let Some(p) = self.pieces.last_mut()
+        {
+            p.width += k;
+            if p.n_units > 0 && self.units.len() as u32 > units_from {
+                let first = self.units.len() - p.n_units as usize;
+                add_to_last_unit(&mut self.units[first..], k);
+            }
+        }
+    }
+
+    /// Pair context `(Δleft, Δright)` between the grapheme ending at `pos` and the one starting
+    /// there (see [`WidthCache::pair_context`]), when a single shaping run would contain both:
+    /// same style, no padding or atomic box between them, both drawn with the style's face,
+    /// neither a control character. Zero otherwise.
+    fn kern_at(&mut self, pos: usize) -> PairContext {
+        let text = self.text;
+        let bytes = text.as_bytes();
+        let len = text.len();
+        if pos == 0 || pos >= len {
+            return PairContext::NONE;
+        }
+        if self.scripts.binary_search(&(pos as u32)).is_ok() {
+            return PairContext::NONE;
+        }
+        let (l, r) = (bytes[pos - 1], bytes[pos]);
+        if l < 0x20 || r < 0x20 || l == 0x7F || r == 0x7F {
+            return PairContext::NONE;
+        }
+        let a0 = if l < 0x80 && r < 0x80 {
+            pos - 1
+        } else {
+            let mut c = GraphemeCursor::new(pos, len, true);
+            if !c.is_boundary(text, 0).unwrap_or(false) {
+                return PairContext::NONE;
+            }
+            match c.prev_boundary(text, 0) {
+                Ok(Some(p)) => p,
+                _ => return PairContext::NONE,
+            }
+        };
+        let b1 = if r < 0x80 && bytes.get(pos + 1).is_none_or(|&c| c < 0x80) {
+            pos + 1
+        } else {
+            let mut c = GraphemeCursor::new(pos, len, true);
+            match c.next_boundary(text, 0) {
+                Ok(Some(p)) => p,
+                _ => return PairContext::NONE,
+            }
+        };
+        let ls = self.spans.partition_point(|s| s.range.end < pos);
+        let rs = self.spans.partition_point(|s| s.range.end <= pos);
+        let (sl, sr) = (&self.spans[ls], &self.spans[rs]);
+        if sl.style != sr.style
+            || sl.atomic
+            || sr.atomic
+            || (ls != rs && (sl.pad_end != 0.0 || sr.pad_start != 0.0))
+        {
+            return PairContext::NONE;
+        }
+        let style = sl.style;
+        let (a, b) = (&text[a0..pos], &text[pos..b1]);
+        if is_hard_break_str(a) || is_hard_break_str(b) {
+            return PairContext::NONE;
+        }
+        if !self.cache.is_shaped(self.book, style, a) || !self.cache.is_shaped(self.book, style, b)
+        {
+            return PairContext::NONE;
+        }
+        self.cache.pair_context(self.book, style, a, b)
+    }
+
+    /// Drops the pieces pushed since `from` when they are a single non-tab piece (implied by
+    /// the segment instead). Returns (stored count, implicit span, implicit kind).
+    fn implicit(&mut self, from: u32) -> (u32, u32, u8) {
+        let n = self.pieces.len() as u32 - from;
+        match self.pieces.last() {
+            Some(p) if n == 1 && p.kind != P_TAB => {
+                let p = self.pieces.pop().unwrap();
+                (0, p.span, p.kind)
+            }
+            _ => (n, 0, P_TEXT),
+        }
+    }
+
+    /// Splits `[a, b)` at span boundaries (and tabs), measuring each piece.
+    fn region(&mut self, a: u32, b: u32, content: bool) -> Region {
+        let text = self.text;
+        let bytes = text.as_bytes();
+        let (a, b) = (a as usize, b as usize);
+        let want_units = content && self.want_units;
+        let mut r = Region {
+            width: 0.0,
+            has_tab: false,
+            n_units: 0,
+        };
+        let first_piece = self.pieces.len();
+        let units_base = self.units.len() as u32;
+        let mut p = a;
+        while p < b {
+            while self.spans[self.span].range.end <= p {
+                self.span += 1;
+            }
+            let span = &self.spans[self.span];
+            let mut run_end = span.range.end.min(b);
+            if !self.scripts.is_empty() && !span.atomic {
+                let k = self.scripts.partition_point(|&x| x as usize <= p);
+                if let Some(&x) = self.scripts.get(k) {
+                    run_end = run_end.min(x as usize);
+                }
+            }
+            // An atomic span is one box: tabs inside it don't advance to tab stops.
+            let split_tabs = self.tabs && !span.atomic;
+            if split_tabs && bytes[p] == b'\t' {
+                let stop = self.tab_size as f32 * self.cache.space_width(self.book, span.style);
+                if want_units {
+                    self.units.push(stop);
+                }
+                self.pieces.push(Piece {
+                    start: p as u32,
+                    end: p as u32 + 1,
+                    span: self.span as u32,
+                    width: stop,
+                    unit0: r.n_units,
+                    n_units: want_units as u32,
+                    kind: P_TAB,
+                });
+                r.n_units += want_units as u32;
+                r.has_tab = true;
+                p += 1;
+                continue;
+            }
+            let q = if split_tabs {
+                bytes[p..run_end]
+                    .iter()
+                    .position(|&c| c == b'\t')
+                    .map_or(run_end, |i| p + i)
+            } else {
+                run_end
+            };
+            let piece = &text[p..q];
+            let atomic = span.atomic;
+            let pad_start = if p == span.range.start {
+                span.pad_start
+            } else {
+                0.0
+            };
+            let pad_end = if q == span.range.end {
+                span.pad_end
+            } else {
+                0.0
+            };
+            let (base, n_units) = if !content && q - p == 1 && bytes[p] == b' ' {
+                (self.cache.space_width(self.book, span.style), 0)
+            } else if !atomic && self.ctx.overlaps(p as u32, q as u32) {
+                let units_at = self.units.len();
+                let (w, n) = self.composite(span.style, p, q, want_units);
+                if n > 0 {
+                    self.units[units_at] += pad_start;
+                    *self.units.last_mut().unwrap() += pad_end;
+                }
+                (w, n)
+            } else {
+                let units = want_units && !atomic;
+                let idx = self.cache.lookup(self.book, span.style, piece, units);
+                let n = if units {
+                    self.push_units(idx, pad_start, pad_end)
+                } else {
+                    0
+                };
+                (self.cache.width(idx), n)
+            };
+            let width = base + pad_start + pad_end;
+            let n_units = if want_units && atomic {
+                self.units.push(width);
+                1
+            } else {
+                n_units
+            };
+            self.pieces.push(Piece {
+                start: p as u32,
+                end: q as u32,
+                span: self.span as u32,
+                width,
+                unit0: r.n_units,
+                n_units,
+                kind: if atomic { P_ATOMIC } else { P_TEXT },
+            });
+            r.width += width;
+            r.n_units += n_units;
+            p = q;
+        }
+        // Kerning across piece boundaries inside the region (span changes in one style).
+        for i in first_piece..self.pieces.len().saturating_sub(1) {
+            let pc = self.pieces[i];
+            if pc.kind == P_TAB || self.pieces[i + 1].kind == P_TAB {
+                continue;
+            }
+            let PairContext {
+                left: dl,
+                right: dr,
+                substituted,
+            } = self.kern_at(pc.end as usize);
+            let next = self.pieces[i + 1];
+            if substituted && pc.n_units > 0 && next.n_units > 0 {
+                // A ligature across a span change (same font): one glyph, so the right side's
+                // first unit folds into the left side and becomes an unsplittable zero-advance
+                // tail, like a ligature inside one piece.
+                let a = (units_base + pc.unit0) as usize;
+                let first_right = (units_base + next.unit0) as usize;
+                let r0 = self.units[first_right];
+                add_to_last_unit(&mut self.units[a..a + pc.n_units as usize], dl + r0 + dr);
+                self.units[first_right] = 0.0;
+                self.pieces[i].width += dl + r0 + dr;
+                self.pieces[i + 1].width -= r0;
+                r.width += dl + dr;
+                continue;
+            }
+            if dl != 0.0 {
+                self.pieces[i].width += dl;
+                r.width += dl;
+                if pc.n_units > 0 {
+                    let a = (units_base + pc.unit0) as usize;
+                    add_to_last_unit(&mut self.units[a..a + pc.n_units as usize], dl);
+                }
+            }
+            if dr != 0.0 {
+                self.pieces[i + 1].width += dr;
+                r.width += dr;
+                if next.n_units > 0 {
+                    self.units[(units_base + next.unit0) as usize] += dr;
+                }
+            }
+        }
+        r
+    }
+
+    /// Measures `[p, q)` of one span where it overlaps fallback runs: run parts from their
+    /// in-context advances, the rest shaped (or host-measured) through the cache. No kerning
+    /// between the parts: they are set in different fonts. Pushes per-grapheme units when
+    /// `want_units`; returns (width with letter spacing, unit count).
+    fn composite(&mut self, style: StyleId, p: usize, q: usize, want_units: bool) -> (f32, u32) {
+        let ls = self.book.style(style).options.letter_spacing;
+        let ctx = self.ctx;
+        let (mut a, mut width, mut n) = (p as u32, 0.0f32, 0u32);
+        let mut r = ctx.first_after(a);
+        while a < q as u32 {
+            match ctx.runs.get(r) {
+                Some(&(rs, re, g0)) if rs <= a => {
+                    let b = re.min(q as u32);
+                    let g_end = ctx
+                        .runs
+                        .get(r + 1)
+                        .map_or(ctx.starts.len(), |n| n.2 as usize);
+                    let gs = &ctx.starts[g0 as usize..g_end];
+                    let lo = g0 as usize + gs.partition_point(|&s| s < a);
+                    let hi = g0 as usize + gs.partition_point(|&s| s < b);
+                    for &adv in &ctx.adv[lo..hi] {
+                        let w = adv + ls;
+                        width += w;
+                        if want_units {
+                            self.units.push(w);
+                        }
+                        n += 1;
+                    }
+                    a = b;
+                    r += 1;
+                }
+                next => {
+                    let b = next.map_or(q as u32, |run| run.0.min(q as u32));
+                    let idx = self.cache.lookup(
+                        self.book,
+                        style,
+                        &self.text[a as usize..b as usize],
+                        want_units,
+                    );
+                    width += self.cache.width(idx);
+                    if want_units {
+                        n += self.push_units(idx, 0.0, 0.0);
+                    }
+                    a = b;
+                }
+            }
+        }
+        (width, if want_units { n } else { 0 })
+    }
+
+    /// Appends the cached per-grapheme advances of entry `idx`, with the span padding folded
+    /// into the first and last unit. Returns the unit count.
+    fn push_units(&mut self, idx: u32, pad_start: f32, pad_end: f32) -> u32 {
+        let base = self.units.len();
+        match self.cache.units(idx) {
+            UnitsRef::Single(w) => self.units.push(w),
+            UnitsRef::Many(us) => self.units.extend_from_slice(us),
+        }
+        self.units[base] += pad_start;
+        if let Some(last) = self.units.last_mut() {
+            *last += pad_end;
+        }
+        (self.units.len() - base) as u32
+    }
+}
