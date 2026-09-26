@@ -13,7 +13,9 @@ final class LiveStackTests: XCTestCase {
     func testSendRoundTripsThroughRealEngine() throws {
         let edge = try XCTUnwrap(ProcessInfo.processInfo.environment["ZERON_LIVE_EDGE"], "set TEST_RUNNER_ZERON_LIVE_EDGE")
         let app = XCUIApplication()
-        app.launchArguments = ["-signedout", "-dev", "alice", "org1", "-edge", edge]
+        // The draft's harness wins over the engine's ZERON_HARNESS default:
+        // pin the mock so the test never starts a real agent.
+        app.launchArguments = ["-signedout", "-dev", "alice", "org1", "-edge", edge, "-harness", "mock"]
         app.launch()
 
         let accessory = app.buttons["new-session"]

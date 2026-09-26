@@ -46,7 +46,13 @@ final class AppModel {
 
     var onSignedIn: (() -> Void)?
     var onSignOut: (() -> Void)?
-    var lastDraft = NewSessionDraft()
+    var lastDraft: NewSessionDraft = {
+        var d = NewSessionDraft()
+        // `-harness mock`: live-stack tests must never start a real agent.
+        let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: "-harness"), i + 1 < args.count { d.harness = args[i + 1] }
+        return d
+    }()
 
     var isSignedIn: Bool { client != nil }
     var isDemo: Bool { client?.isDemo() ?? false }
