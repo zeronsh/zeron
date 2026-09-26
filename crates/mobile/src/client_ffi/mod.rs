@@ -367,6 +367,26 @@ impl CoreClient {
         Ok(refs.into_iter().map(Into::into).collect())
     }
 
+    /// Files matching `query` in the chat's (or project's) workspace, for
+    /// composer `@` mentions.
+    pub async fn search_files(
+        &self,
+        device_id: String,
+        chat_id: Option<String>,
+        space_id: Option<String>,
+        query: String,
+    ) -> CoreResult<Vec<FileMatch>> {
+        let client = self.client.clone();
+        let files = on_runtime(async move { client.search_files(&device_id, chat_id, space_id, &query).await }).await?;
+        Ok(files
+            .into_iter()
+            .map(|f| FileMatch {
+                path: f.path,
+                is_dir: f.is_dir,
+            })
+            .collect())
+    }
+
     /// Browse folders on a device (`None` = its home folder).
     pub async fn list_folders(
         &self,

@@ -45,6 +45,8 @@ final class ComposerBar: UIView, UITextViewDelegate {
     var onChipTap: ((String, UIView) -> Void)?
     var onHeightChange: (() -> Void)?
     var onFocusChange: ((Bool) -> Void)?
+    /// `@` file search (nil disables mentions).
+    var mentionSearch: ((String) async -> [FileMatch])?
 
     // State
     var running = false { didSet { refreshAction() } }
@@ -79,6 +81,10 @@ final class ComposerBar: UIView, UITextViewDelegate {
     private var thumbsHeight: NSLayoutConstraint!
     private var chipsHeight: NSLayoutConstraint!
     private var currentAction: Action = .send
+    private var mentions = MentionIndex()
+    private let suggestions = MentionSuggestions()
+    private var mentionQuery: (range: NSRange, query: String)?
+    private var mentionTask: Task<Void, Never>?
 
     private let font = Fonts.ui(.sans, UIFontMetrics(forTextStyle: .body).scaledValue(for: 16.5))
     private var maxLines: Int { traitCollection.verticalSizeClass == .compact ? 3 : 7 }
@@ -204,7 +210,88 @@ final class ComposerBar: UIView, UITextViewDelegate {
             actionButton.widthAnchor.constraint(equalToConstant: 34),
             actionButton.heightAnchor.constraint(equalToConstant: 34),
         ])
+        suggestions.isHidden = true
+        suggestions.translatesAutoresizingMaskIntoConstraints = false
+        suggestions.onPick = { [weak self] file in self?.insertMention(file) }
+        addSubview(suggestions)
+        NSLayoutConstraint.activate([
+            suggestions.leadingAnchor.constraint(equalTo: leadingAnchor),
+            suggestions.trailingAnchor.constraint(equalTo: trailingAnchor),
+            suggestions.bottomAnchor.constraint(equalTo: glass.topAnchor, constant: -8),
+        ])
         refreshAction()
+    }
+
+    /// Suggestions float above the bar; let them take touches.
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        if !suggestions.isHidden, suggestions.frame.contains(point) { return true }
+        return super.point(inside: point, with: event)
+    }
+
+    // MARK: Mentions
+
+    private func updateMentionQuery() {
+        guard mentionSearch != nil else { return }
+        mentionQuery = MentionIndex.activeQuery(in: textView.text, cursor: textView.selectedRange.location)
+        mentionTask?.cancel()
+        guard let q = mentionQuery else {
+            setSuggestionsVisible(false)
+            return
+        }
+        mentionTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled, let self, let search = self.mentionSearch else { return }
+            let files = await search(q.query)
+            guard !Task.isCancelled, self.mentionQuery?.query == q.query else { return }
+            self.suggestions.show(files)
+            self.setSuggestionsVisible(!files.isEmpty)
+        }
+    }
+
+    private func setSuggestionsVisible(_ visible: Bool) {
+        guard suggestions.isHidden == visible else { return }
+        suggestions.isHidden = false
+        suggestions.alpha = visible ? 0 : 1
+        suggestions.transform = visible ? CGAffineTransform(translationX: 0, y: 8) : .identity
+        UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+            self.suggestions.alpha = visible ? 1 : 0
+            self.suggestions.transform = visible ? .identity : CGAffineTransform(translationX: 0, y: 8)
+        } completion: { _ in
+            if !visible { self.suggestions.isHidden = true }
+        }
+    }
+
+    private func insertMention(_ file: FileMatch) {
+        guard let q = mentionQuery else { return }
+        UISelectionFeedbackGenerator().selectionChanged()
+        let token = mentions.token(for: file) + " "
+        let ns = textView.text as NSString
+        textView.text = ns.replacingCharacters(in: q.range, with: token)
+        textView.selectedRange = NSRange(location: q.range.location + (token as NSString).length, length: 0)
+        mentionQuery = nil
+        setSuggestionsVisible(false)
+        textChanged()
+    }
+
+    /// Accent the live `@tokens`; everything else is plain body text.
+    private func styleMentions() {
+        guard !mentions.tokens.isEmpty, textView.markedTextRange == nil else { return }
+        let selected = textView.selectedRange
+        let base: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Palette.text]
+        let styled = NSMutableAttributedString(string: textView.text, attributes: base)
+        let ns = textView.text as NSString
+        for token in mentions.tokens.keys {
+            var search = NSRange(location: 0, length: ns.length)
+            while true {
+                let r = ns.range(of: token, options: [], range: search)
+                if r.location == NSNotFound { break }
+                styled.addAttributes([.foregroundColor: Palette.accent, .font: Fonts.ui(.sansMedium, font.pointSize)], range: r)
+                search = NSRange(location: r.upperBound, length: ns.length - r.upperBound)
+            }
+        }
+        textView.attributedText = styled
+        textView.selectedRange = selected
+        textView.typingAttributes = base
     }
 
     // MARK: Focus & chips
@@ -327,7 +414,15 @@ final class ComposerBar: UIView, UITextViewDelegate {
 
     // MARK: Text
 
-    func textViewDidChange(_ textView: UITextView) { textChanged() }
+    func textViewDidChange(_ textView: UITextView) {
+        textChanged()
+        styleMentions()
+        updateMentionQuery()
+    }
+
+    func textViewDidChangeSelection(_ textView: UITextView) {
+        if mentionQuery != nil { updateMentionQuery() }
+    }
 
     func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
         true
@@ -418,9 +513,11 @@ final class ComposerBar: UIView, UITextViewDelegate {
     private func send(_ mode: DeliveryMode) {
         guard hasContent else { return }
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        let body = textView.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = mentions.encode(textView.text.trimmingCharacters(in: .whitespacesAndNewlines))
         let staged = images
         onSend?(body, staged, mode)
+        mentions.reset()
+        setSuggestionsVisible(false)
         textView.text = ""
         images = []
         textChanged()

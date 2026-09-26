@@ -1063,3 +1063,16 @@ impl From<zc::attachments::ParsedUserMessage> for ParsedUserMessage {
         }
     }
 }
+
+/// A workspace file or folder for `@` mentions.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FileMatch {
+    pub path: String,
+    pub is_dir: bool,
+}
+
+/// The canonical mention link the host understands (`[name](zeron-file:path)`).
+#[uniffi::export]
+pub fn file_mention_link(path: String, is_dir: bool) -> String {
+    zeron_proto::file_mentions::local_file_link(&path, is_dir)
+}

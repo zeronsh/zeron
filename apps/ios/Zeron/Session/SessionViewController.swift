@@ -60,6 +60,7 @@ final class SessionViewController: UIViewController {
         }
         composer.onStop = { [weak self] in self?.source.stop() }
         composer.text = Drafts.load(chatId)
+        composer.mentionSearch = { [weak self] q in await self?.source.searchFiles(q) ?? [] }
         composer.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
         questions.onSubmit = { [weak self] answers in
             guard let self, let id = self.shown.questions?.requestId else { return }

@@ -202,6 +202,10 @@ final class CoreSessionSource: SessionSource {
         try? client.setSessionConfig(chatId: chatId, config: config)
     }
 
+    func searchFiles(_ query: String) async -> [FileMatch] {
+        (try? await client.searchFiles(deviceId: hostDevice, chatId: chatId, spaceId: nil, query: query)) ?? []
+    }
+
     private static let images = NSCache<NSString, UIImage>()
 
     func loadImage(_ reference: String, into view: UIImageView) {

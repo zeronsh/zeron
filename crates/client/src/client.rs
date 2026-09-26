@@ -1170,6 +1170,53 @@ impl Client {
         }
     }
 
+    /// Workspace file search for composer `@` mentions (host `SearchFiles`,
+    /// gitignore-aware; an empty query returns the chat's featured files).
+    pub async fn search_files(
+        &self,
+        device_id: &str,
+        chat_id: Option<String>,
+        space_id: Option<String>,
+        query: &str,
+    ) -> Result<Vec<zeron_proto::FileSearchMatch>> {
+        match self.inner.backend() {
+            Backend::Demo(_) => {
+                const FILES: &[&str] = &[
+                    "crates/mobile/src/layout/mod.rs",
+                    "crates/mobile/src/layout/markdown.rs",
+                    "crates/mobile/src/layout/rows.rs",
+                    "crates/text/src/layout.rs",
+                    "crates/text/src/prepare.rs",
+                    "crates/markdown/src/parser.rs",
+                    "apps/ios/Zeron/Transcript/TranscriptListView.swift",
+                    "apps/ios/Zeron/Composer/ComposerBar.swift",
+                    "docs/mobile-rewrite.md",
+                    "README.md",
+                ];
+                let q = query.to_lowercase();
+                Ok(FILES
+                    .iter()
+                    .filter(|p| q.is_empty() || p.to_lowercase().contains(&q))
+                    .map(|p| zeron_proto::FileSearchMatch {
+                        path: (*p).to_owned(),
+                        is_dir: false,
+                    })
+                    .collect())
+            }
+            Backend::Live(live) => {
+                let value = live
+                    .relay
+                    .call(
+                        device_id,
+                        zeron_rpc::methods::SEARCH_FILES,
+                        serde_json::json!({ "query": query, "chatId": chat_id, "spaceId": space_id }),
+                    )
+                    .await?;
+                serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+            }
+        }
+    }
+
     /// Browse folders on a device (`None` = its home folder).
     pub async fn list_folders(
         &self,

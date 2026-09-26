@@ -1020,6 +1020,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func search(query: String, limit: UInt32)  -> [SearchHit]
     
     /**
+     * Files matching `query` in the chat's (or project's) workspace, for
+     * composer `@` mentions.
+     */
+    func searchFiles(deviceId: String, chatId: String?, spaceId: String?, query: String) async throws  -> [FileMatch]
+    
+    /**
      * An already-open session.
      */
     func session(chatId: String)  -> SessionHandle?
@@ -1622,6 +1628,26 @@ open func search(query: String, limit: UInt32) -> [SearchHit]  {
         FfiConverterUInt32.lower(limit),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Files matching `query` in the chat's (or project's) workspace, for
+     * composer `@` mentions.
+     */
+open func searchFiles(deviceId: String, chatId: String?, spaceId: String?, query: String)async throws  -> [FileMatch]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_search_files(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterOptionString.lower(chatId),FfiConverterOptionString.lower(spaceId),FfiConverterString.lower(query)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFileMatch.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -4689,6 +4715,63 @@ public func FfiConverterTypeFaceData_lift(_ buf: RustBuffer) throws -> FaceData 
 #endif
 public func FfiConverterTypeFaceData_lower(_ value: FaceData) -> RustBuffer {
     return FfiConverterTypeFaceData.lower(value)
+}
+
+
+/**
+ * A workspace file or folder for `@` mentions.
+ */
+public struct FileMatch: Equatable, Hashable {
+    public var path: String
+    public var isDir: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: String, isDir: Bool) {
+        self.path = path
+        self.isDir = isDir
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FileMatch: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFileMatch: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FileMatch {
+        return
+            try FileMatch(
+                path: FfiConverterString.read(from: &buf), 
+                isDir: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FileMatch, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterBool.write(value.isDir, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFileMatch_lift(_ buf: RustBuffer) throws -> FileMatch {
+    return try FfiConverterTypeFileMatch.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFileMatch_lower(_ value: FileMatch) -> RustBuffer {
+    return FfiConverterTypeFileMatch.lower(value)
 }
 
 
@@ -11281,6 +11364,31 @@ fileprivate struct FfiConverterSequenceTypeFaceData: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFileMatch: FfiConverterRustBuffer {
+    typealias SwiftType = [FileMatch]
+
+    public static func write(_ value: [FileMatch], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFileMatch.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FileMatch] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FileMatch]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFileMatch.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFolderEntry: FfiConverterRustBuffer {
     typealias SwiftType = [FolderEntry]
 
@@ -12116,6 +12224,18 @@ public func workosAuthorizeUrl(state: String) -> String  {
 })
 }
 /**
+ * The canonical mention link the host understands (`[name](zeron-file:path)`).
+ */
+public func fileMentionLink(path: String, isDir: Bool) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_file_mention_link(
+        FfiConverterString.lower(path),
+        FfiConverterBool.lower(isDir),uniffiCallStatus
+    )
+})
+}
+/**
  * Rust's line breaks for `text` in one face/size at `width`, as UTF-16
  * offsets of each line start — the accuracy harness compares these with
  * CoreText's own framesetter (platform engine as ground truth).
@@ -12213,6 +12333,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_workos_authorize_url() != 35994) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_file_mention_link() != 14340) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_debug_line_starts() != 43822) {
@@ -12339,6 +12462,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_search() != 33140) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_search_files() != 31096) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_session() != 12772) {

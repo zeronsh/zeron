@@ -384,6 +384,11 @@ final class AppModel {
         return out
     }
 
+    func searchFiles(deviceId: String, spaceId: String, query: String) async -> [FileMatch] {
+        guard let client else { return [] }
+        return (try? await client.searchFiles(deviceId: deviceId, chatId: nil, spaceId: spaceId, query: query)) ?? []
+    }
+
     func refs(projectId: String) async -> [String] {
         guard let client, let p = rawProjects.first(where: { $0.id == projectId }) else { return [] }
         let refs = (try? await client.listRefs(deviceId: p.deviceId, repoPath: p.path)) ?? []

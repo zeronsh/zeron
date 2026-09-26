@@ -67,6 +67,8 @@ protocol SessionSource: AnyObject {
     /// Menu for a composer chip (model, effort, branch…), or nil.
     func chipMenu(_ id: String) -> UIMenu?
     func loadImage(_ reference: String, into view: UIImageView)
+    /// Workspace files for `@` mentions.
+    func searchFiles(_ query: String) async -> [FileMatch]
 }
 
 enum QueueAction {
@@ -213,4 +215,5 @@ final class FixtureSessionSource: SessionSource {
         }
     }
     func loadImage(_ reference: String, into view: UIImageView) {}
+    func searchFiles(_ query: String) async -> [FileMatch] { [] }
 }
