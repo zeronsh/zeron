@@ -4,7 +4,7 @@
 //! The rows live on the session doc ([`zeron_doc::QueuedMessage`]), so the phone
 //! shows the same queue and either device can reorder it.
 //!
-//! Each row exposes a `Send now` control that interrupts the active response.
+//! Text rows steer the live agent; attachment rows offer an explicit interrupt.
 //! Editing moves the message into the composer while its leased row reserves
 //! its position.
 
@@ -88,24 +88,36 @@ const QUEUE_ICON_SIZE: f32 = 13.0;
 /// The single trailing action a queue row advertises and executes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueuePrimaryAction {
+    Steer,
+    SendNext,
     SendNow,
 }
 
 impl QueuePrimaryAction {
     fn tooltip(self) -> &'static str {
         match self {
+            Self::Steer => "Steer (keep current work running)",
+            Self::SendNext => "Send at the next turn (this agent cannot steer mid-turn)",
             Self::SendNow => "Send now (interrupt)",
         }
     }
 }
 
-/// All providers use Send now. Only host support and edit/review gates
-/// determine whether the action is available.
+/// Text uses the live mailbox, including providers that consume at turn boundaries.
+/// Attachments still require a new request and advertise the interruption.
 fn available_queue_primary_action(
     delivery_blocked: bool,
     host_supports_actions: bool,
+    has_attachments: bool,
+    steers_mid_turn: bool,
 ) -> Option<QueuePrimaryAction> {
-    (!delivery_blocked && host_supports_actions).then_some(QueuePrimaryAction::SendNow)
+    (!delivery_blocked && host_supports_actions).then_some(if has_attachments {
+        QueuePrimaryAction::SendNow
+    } else if steers_mid_turn {
+        QueuePrimaryAction::Steer
+    } else {
+        QueuePrimaryAction::SendNext
+    })
 }
 
 fn queue_latest_shortcut_visible(
@@ -442,8 +454,12 @@ impl Composer {
                 this.remove_queued(drop_id.clone(), cx);
             }),
         );
-        let resolved_primary =
-            available_queue_primary_action(interaction_blocked, host_supports_actions);
+        let resolved_primary = available_queue_primary_action(
+            interaction_blocked,
+            host_supports_actions,
+            !item.attachments.is_empty(),
+            self.pickers().read(cx).steers_mid_turn(cx),
+        );
         let primary_action = resolved_primary.unwrap_or(QueuePrimaryAction::SendNow);
         let primary_id = item.id.clone();
         let primary = self.queue_primary_action_button(
@@ -968,7 +984,7 @@ impl Composer {
             .into_any_element()
     }
 
-    /// Send now interrupts the current response before delivering the row.
+    /// Advertise the exact delivery action taken by the row.
     fn queue_primary_action_button(
         &self,
         key: &SharedString,
@@ -1037,7 +1053,13 @@ impl Composer {
                     .text_color(theme.text_muted)
                     .into_any_element()
             } else {
-                div().child("Send now").into_any_element()
+                div()
+                    .child(match action {
+                        QueuePrimaryAction::Steer => "Steer",
+                        QueuePrimaryAction::SendNext => "Send next",
+                        QueuePrimaryAction::SendNow => "Send now",
+                    })
+                    .into_any_element()
             })
             .into_any_element()
     }
@@ -1218,18 +1240,24 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         match action {
+            QueuePrimaryAction::Steer | QueuePrimaryAction::SendNext => self.queue_rpc(
+                methods::STEER_QUEUED_MESSAGE_NOW,
+                serde_json::json!({ "id": id }),
+                "Couldn't send that message",
+                cx,
+            ),
             QueuePrimaryAction::SendNow => self.send_queued_now(id, cx),
         }
     }
 
     /// Cmd/Ctrl+Enter on an empty composer activates the same action shown on
-    /// the most recently queued row: Send now, interrupting the current response.
+    /// the most recently queued row: steer text, or send attachments with an interrupt.
     /// An edit/review gate or an old chat host makes it a no-op.
     pub(crate) fn activate_latest_queued(&mut self, cx: &mut Context<Self>) {
         if self.editing_queued.is_some() {
             return;
         }
-        let (id, delivery_blocked, host_supports_actions) = {
+        let (id, delivery_blocked, host_supports_actions, has_attachments) = {
             let state = self.state.read(cx);
             let Some(chat_id) = state.selected_chat.as_deref() else {
                 return;
@@ -1244,10 +1272,15 @@ impl Composer {
                     chat_id,
                     zeron_proto::capabilities::MESSAGE_QUEUE_ACTIONS_V1,
                 ),
+                !item.attachments.is_empty(),
             )
         };
-        let Some(action) = available_queue_primary_action(delivery_blocked, host_supports_actions)
-        else {
+        let Some(action) = available_queue_primary_action(
+            delivery_blocked,
+            host_supports_actions,
+            has_attachments,
+            self.pickers().read(cx).steers_mid_turn(cx),
+        ) else {
             return;
         };
         self.activate_queued_primary(id, action, cx);
@@ -1818,11 +1851,25 @@ mod tests {
     #[test]
     fn available_primary_action_obeys_row_and_host_gates() {
         assert_eq!(
-            available_queue_primary_action(false, true),
+            available_queue_primary_action(false, true, false, false),
+            Some(QueuePrimaryAction::SendNext)
+        );
+        assert_eq!(
+            available_queue_primary_action(false, true, true, true),
             Some(QueuePrimaryAction::SendNow)
         );
-        assert_eq!(available_queue_primary_action(true, true), None);
-        assert_eq!(available_queue_primary_action(false, false), None);
+        assert_eq!(
+            available_queue_primary_action(false, true, false, true),
+            Some(QueuePrimaryAction::Steer)
+        );
+        assert_eq!(
+            available_queue_primary_action(true, true, false, true),
+            None
+        );
+        assert_eq!(
+            available_queue_primary_action(false, false, false, true),
+            None
+        );
     }
 
     #[test]

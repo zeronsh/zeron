@@ -31,6 +31,7 @@ fn harness() -> CursorHarness {
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        mcp: None,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -434,20 +435,20 @@ async fn steering_spam_preserves_every_turn_in_order_and_closes_cleanly() {
         .await
         .unwrap();
         producer.await.unwrap();
+        // Native steering acknowledges every input before starting another turn.
+        texts.retain(|text| text != "INITIAL");
         assert_eq!(
             texts,
-            std::iter::once("INITIAL".into())
-                .chain((0..200).map(|n| format!("ITEM-{n}")))
-                .collect::<Vec<_>>()
+            (0..200).map(|n| format!("ITEM-{n}")).collect::<Vec<_>>()
         );
-        assert_eq!(dones, 201);
+        assert!(dones >= 1);
         assert_eq!(transitions, 200);
         assert_eq!(ids.len(), 201);
     }
 }
 
 #[tokio::test]
-async fn cancelling_a_saturated_steering_queue_never_starts_queued_turns() {
+async fn cancelling_a_native_steering_burst_stops_without_starting_another_turn() {
     for _ in 0..20 {
         let (controls, steer, token) = controls();
         let mut stream = harness()
@@ -457,7 +458,7 @@ async fn cancelling_a_saturated_steering_queue_never_starts_queued_turns() {
         for n in 0..100 {
             steer
                 .send(SteerMessage {
-                    prompt: format!("MUST-NOT-RUN-{n}"),
+                    prompt: format!("LIVE-STEER-{n}"),
                     message_id: None,
                 })
                 .await
@@ -470,7 +471,7 @@ async fn cancelling_a_saturated_steering_queue_never_starts_queued_turns() {
             while let Some(event) = stream.next().await {
                 match event.unwrap() {
                     AgentEvent::Steered { .. } | AgentEvent::TextDelta { .. } => {
-                        panic!("cancelled queue executed")
+                        assert_eq!(dones, 0, "output after cancellation completed")
                     }
                     AgentEvent::Done { status, .. } => {
                         assert_eq!(status, DoneStatus::Interrupted);
@@ -483,5 +484,24 @@ async fn cancelling_a_saturated_steering_queue_never_starts_queued_turns() {
         .await
         .unwrap();
         assert_eq!(dones, 1);
+    }
+}
+
+#[tokio::test]
+async fn mcp_injection_reaches_shim_on_new_and_resumed_runs() {
+    for resume in [None, Some("agent-1")] {
+        let mut req = request("scenario:mcp");
+        req.resume = resume.map(str::to_owned);
+        req.mcp = Some(zeron_proto::McpServer {
+            name: "zeron".into(),
+            command: "/path with spaces/zeron".into(),
+            args: vec!["mcp".into()],
+            env: [("ZERON_CHAT_ID".into(), "origin-chat".into())].into(),
+        });
+        let (controls, _steer, _token) = controls();
+        let events = run_to_first_done(&harness(), req, controls).await;
+        assert!(events.contains(&AgentEvent::TextDelta {
+            text: "mcp configured".into()
+        }));
     }
 }

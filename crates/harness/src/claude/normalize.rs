@@ -251,9 +251,7 @@ impl Normalizer {
                         return Vec::new();
                     }
                     let status = match f.status.as_deref().unwrap_or("") {
-                        "completed" | "complete" | "succeeded" | "success" => {
-                            DoneStatus::Completed
-                        }
+                        "completed" | "complete" | "succeeded" | "success" => DoneStatus::Completed,
                         "failed" | "errored" | "error" => DoneStatus::Errored,
                         "killed" | "cancelled" | "canceled" | "stopped" | "interrupted" => {
                             DoneStatus::Interrupted
@@ -413,12 +411,14 @@ impl Normalizer {
                             .flatten()
                             .and_then(Value::as_str)
                             .filter(|p| !p.trim().is_empty())
-                            .map(|prompt| tag(
-                                &b.id,
-                                AgentEvent::UserMessage {
-                                    text: prompt.to_owned(),
-                                },
-                            ));
+                            .map(|prompt| {
+                                tag(
+                                    &b.id,
+                                    AgentEvent::UserMessage {
+                                        text: prompt.to_owned(),
+                                    },
+                                )
+                            });
                         // A SendMessage steer never echoes on the child feed
                         // (live-verified) — surface it from the parent's own
                         // call, re-keyed onto the spawn it addresses.
@@ -841,8 +841,7 @@ mod tests {
         ] {
             let ev = normalize_one(frame);
             assert!(
-                !ev.iter()
-                    .any(|e| matches!(e, AgentEvent::Subagent { .. })),
+                !ev.iter().any(|e| matches!(e, AgentEvent::Subagent { .. })),
                 "{frame}: {ev:?}"
             );
         }
@@ -1018,10 +1017,12 @@ mod tests {
             r#"{"type":"system","subtype":"task_notification","tool_use_id":"toolu_agent","status":"running"}"#,
         )
         .is_empty());
-        assert!(normalize_one(
-            r#"{"type":"system","subtype":"task_notification","status":"completed"}"#,
-        )
-        .is_empty());
+        assert!(
+            normalize_one(
+                r#"{"type":"system","subtype":"task_notification","status":"completed"}"#,
+            )
+            .is_empty()
+        );
     }
 
     #[test]

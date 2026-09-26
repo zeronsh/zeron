@@ -53,6 +53,7 @@ async fn check_persistence(
     let dir = tempfile::tempdir().unwrap();
     let (core, profile) = assemble(dir.path());
     let request = RunRequest {
+        mcp: None,
         prompt: format!("scenario:{scenario}"),
         harness: None,
         model: None,

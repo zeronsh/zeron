@@ -38,6 +38,7 @@ fn harness() -> ClaudeHarness {
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        mcp: None,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -418,6 +419,18 @@ async fn steering_lines_are_written_to_stdin_mid_run() {
             _ => None,
         })
         .expect("Steered emitted");
+    let boundary = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Steered { .. }))
+        .unwrap();
+    let continuation = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "-still-first"))
+        .unwrap();
+    assert!(
+        continuation < boundary,
+        "sending input must not split unconsumed response text"
+    );
     assert!(steered.0.is_some() && steered.1.is_some());
     assert_ne!(steered.0, steered.1);
 
@@ -841,4 +854,80 @@ async fn claude_skills_follow_native_availability_and_dollar_selection_keeps_arg
         harness_prompt(&format!("{} 123", invocation.link()), HarnessId::ClaudeCode),
         "/review 123"
     );
+}
+
+/// Rapid `now` steers: the CLI replays only the last one. The replay must
+/// confirm every earlier steer too, and the run must still end.
+#[tokio::test]
+async fn a_replay_confirms_superseded_steers_and_the_turn_ends() {
+    let (controls, steer, _token) = controls("A");
+    for prompt in ["first steer", "second steer"] {
+        steer
+            .send(SteerMessage {
+                prompt: prompt.into(),
+                message_id: None,
+            })
+            .await
+            .expect("steer queued");
+    }
+    let events = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        run_to_end(&harness(), request("scenario:superseded-steers"), controls),
+    )
+    .await
+    .expect("run must end");
+    let steered = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::Steered { .. }))
+        .count();
+    assert_eq!(steered, 2, "{events:?}");
+    let dones: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::Done { .. }))
+        .collect();
+    assert_eq!(dones.len(), 1, "{events:?}");
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "answered-both".into()
+    }));
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+}
+
+/// A steer the CLI never replays must not hold the turn end forever.
+#[tokio::test]
+async fn an_unreplayed_steer_releases_the_turn_end() {
+    let (controls, steer, _token) = controls("A");
+    steer
+        .send(SteerMessage {
+            prompt: "absorbed steer".into(),
+            message_id: None,
+        })
+        .await
+        .expect("steer queued");
+    let started = std::time::Instant::now();
+    let mut stream = harness()
+        .run(request("scenario:absorbed-steer"), controls)
+        .await
+        .expect("run starts");
+    let mut steered = 0;
+    let done = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        while let Some(event) = stream.next().await {
+            match event.expect("event") {
+                AgentEvent::Steered { .. } => steered += 1,
+                AgentEvent::Done { status, .. } => return status,
+                _ => {}
+            }
+        }
+        panic!("stream ended without Done");
+    })
+    .await
+    .expect("turn end must be released");
+    assert_eq!(done, DoneStatus::Completed);
+    assert_eq!(steered, 1);
+    assert!(started.elapsed() >= std::time::Duration::from_secs(4));
 }

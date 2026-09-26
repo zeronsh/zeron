@@ -1485,3 +1485,34 @@ fn sidebar_sections_honor_pin_toggles_from_older_clients() {
         ["session"]
     );
 }
+
+#[test]
+fn side_chat_origin_syncs_and_survives_updates_and_restart() {
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    let mut side = chat("side", "dev-a");
+    side.parent_chat_id = Some("main".into());
+    side.room_gen = Some(2);
+    a.upsert_chat(&side).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(b.chat("side").unwrap(), Some(side.clone()));
+    b.rename_chat("side", "Investigate caching").unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(
+        a.chat("side").unwrap().unwrap().parent_chat_id.as_deref(),
+        Some("main")
+    );
+    let persisted = a.to_bytes().unwrap();
+    let restored = RegistryDoc::from_bytes(&persisted, "dev-a").unwrap();
+    assert_eq!(
+        restored
+            .chat("side")
+            .unwrap()
+            .unwrap()
+            .parent_chat_id
+            .as_deref(),
+        Some("main")
+    );
+}

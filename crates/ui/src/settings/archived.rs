@@ -13,7 +13,8 @@ use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
-/// Archived rows in sidebar (recency) order. Pure.
+/// Archived rows in sidebar (recency) order. Pure. Side chats stay listed:
+/// once archived and closed, this is the only place to restore them.
 pub fn archived_chats(chats: &[Chat]) -> Vec<&Chat> {
     chats.iter().filter(|c| c.archived).collect()
 }
@@ -453,5 +454,17 @@ mod tests {
         let rows = archived_chats(&chats);
         let ids: Vec<&str> = rows.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["b", "c"]);
+    }
+
+    #[test]
+    fn archived_side_chats_stay_restorable() {
+        let mut side = chat("side", true);
+        side.parent_chat_id = Some("main".into());
+        let chats = vec![chat("main", false), side];
+        let ids: Vec<&str> = archived_chats(&chats)
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(ids, ["side"]);
     }
 }

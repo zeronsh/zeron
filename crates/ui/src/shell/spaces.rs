@@ -2118,7 +2118,7 @@ pub(super) struct RenameSpaceDialog {
 }
 
 /// Dot color for a chat's display status (tab dots + Sessions rows).
-pub(super) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hsla {
+pub(crate) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hsla {
     match status {
         // Preset activity tone, not warning amber: running is routine.
         // Non-done statuses sit well below full

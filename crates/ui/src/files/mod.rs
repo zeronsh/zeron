@@ -28,6 +28,7 @@ mod markdown_preview;
 pub mod model;
 pub mod preview;
 pub mod search;
+mod sections;
 pub mod tree;
 pub mod watch;
 
@@ -137,17 +138,36 @@ pub(crate) fn workspace_path_drag_ghost(
     cx.new(|_| WorkspacePathDragGhost { payload })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum FilesEvent {
     OpenFile(String),
     RevealFile(String),
     OpenWebLink(crate::markdown::render::LinkActivation),
     TitleChanged,
-    FileRenamed { old_path: String, new_path: String },
+    FileRenamed {
+        old_path: String,
+        new_path: String,
+    },
     WordWrapChanged(bool),
     ShowAllFilesChanged(bool),
     CloseReady,
     CloseCancelled,
+    /// A footer row: open this subagent's transcript in the right pane.
+    OpenSubagent {
+        doc_id: String,
+        title: String,
+        frozen: bool,
+    },
+    /// A footer row: open this side chat (by id) in the right pane.
+    OpenChildChat(String),
+    ChildChatContextMenu {
+        chat_id: String,
+        position: Point<Pixels>,
+    },
+    /// The Chats header's "+": start a fresh side chat of the active chat.
+    NewChildChat,
+    /// The Chats header's fork: fork the active chat into a side chat.
+    ForkChat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +230,8 @@ pub struct FilesSurface {
     loads: HashMap<(String, Option<String>), Task<()>>,
     error: Option<SharedString>,
     started: bool,
+    /// The Subagents / Chats footer under the tree.
+    sections: sections::ExplorerSections,
     _observe: Subscription,
     _search_events: Subscription,
 }
@@ -235,6 +257,9 @@ impl Render for FilesSurface {
             self.render_explorer(&theme, cx).into_any_element()
         };
         let editor_context_menu = self.render_editor_context_menu(&theme, cx);
+        // The explorer docks its Subagents / Chats sections under the tree;
+        // an editor surface has no footer.
+        let sections = (!is_editor).then(|| self.render_sections(&theme, cx));
         div()
             .id(SharedString::from(format!(
                 "files-surface-{}",
@@ -249,6 +274,7 @@ impl Render for FilesSurface {
             .flex_col()
             .children(header)
             .child(div().flex_1().min_h_0().w_full().child(body))
+            .children(sections)
             .children(editor_context_menu)
     }
 }
@@ -259,6 +285,19 @@ impl FilesSurface {
         theme: &crate::theme::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        let projectless_root = {
+            let state = self.state.read(cx);
+            state
+                .chats
+                .iter()
+                .find(|chat| chat.id == self.chat_id && chat.space_id.is_none())
+                .map(|chat| {
+                    let device = state
+                        .device_name(&chat.device_id)
+                        .unwrap_or(&chat.device_id);
+                    format!("Files in {} · {device}", chat.cwd.as_deref().unwrap_or("~"))
+                })
+        };
         let phase = self.tree.node("").map(|root| root.load.clone());
         let content = if !self.search_state.query.is_empty() {
             self.render_search_results(cx)
@@ -313,6 +352,19 @@ impl FilesSurface {
             .min_w_0()
             .flex()
             .flex_col()
+            .when_some(projectless_root, |element, label| {
+                element.child(
+                    div()
+                        .id("files-projectless-root")
+                        .flex_none()
+                        .px(px(10.0))
+                        .py(px(5.0))
+                        .text_size(px(10.0))
+                        .text_color(theme.text_faint)
+                        .truncate()
+                        .child(SharedString::from(label)),
+                )
+            })
             .when_some(self.git_status_notice(cx), |element, notice| {
                 element.child(
                     div()
@@ -488,6 +540,9 @@ impl FilesSurface {
                 this.ensure_loaded(cx);
             }
             this.sync_active_markdown_comments(cx);
+            if !this.presentation.is_editor() {
+                this.refresh_sections(cx);
+            }
         });
         // The list state exposes no scroll handle, so the floating rail
         // bridges scroll activity through the scroll handler (the
@@ -537,6 +592,7 @@ impl FilesSurface {
             loads: HashMap::new(),
             error: None,
             started: false,
+            sections: sections::ExplorerSections::default(),
             _observe: observe,
             _search_events: search_events,
         };
@@ -701,7 +757,18 @@ impl FilesSurface {
         if self.request_context.is_none() {
             return;
         }
-        self.ensure_watch(cx);
+        // A projectless explorer may not have a resolvable home on its host.
+        // Start its watcher only after the root listing succeeds.
+        let projectless_explorer = !self.presentation.is_editor()
+            && self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .any(|chat| chat.id == self.chat_id && chat.space_id.is_none());
+        if !projectless_explorer {
+            self.ensure_watch(cx);
+        }
         if self.presentation.is_editor()
             && !self.preview.has_active()
             && let Some(path) = self.editor_path.clone()
@@ -881,6 +948,9 @@ impl FilesSurface {
                     Ok(page) => {
                         surface.error = None;
                         surface.tree.apply_page(page, generation);
+                        if directory.is_empty() {
+                            surface.ensure_watch(cx);
+                        }
                     }
                     Err(error) => {
                         let message = error.to_string();
@@ -1036,13 +1106,10 @@ impl FilesSurface {
                     .cursor_text()
                     .hover(|style| style.bg(crate::theme::ink(0.055)))
                     // Clicking the field's padding focuses the input too.
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        move |_, window, cx| {
-                            window.focus(&search_focus, cx);
-                            cx.stop_propagation();
-                        },
-                    )
+                    .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                        window.focus(&search_focus, cx);
+                        cx.stop_propagation();
+                    })
                     .child(
                         crate::icons::icon(crate::icons::MAGNIFER)
                             .size(px(12.0))
@@ -1123,10 +1190,7 @@ mod explorer_tests {
         cx.update(|window, cx| window.draw(cx).clear());
         // The explorer header is the same band as the editor header.
         let header = cx.debug_bounds("files-explorer-header").unwrap();
-        assert_eq!(
-            header.size.height,
-            px(crate::surface_chrome::HEADER_HEIGHT)
-        );
+        assert_eq!(header.size.height, px(crate::surface_chrome::HEADER_HEIGHT));
         let bounds = cx.debug_bounds("files-search").unwrap();
         assert!(bounds.top() >= header.top() && bounds.bottom() <= header.bottom());
         // Click the field padding, not just the input's text hitbox.

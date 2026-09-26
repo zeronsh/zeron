@@ -44,6 +44,10 @@ struct PanelTitlebarWidths {
     files_controls: f32,
 }
 
+/// The session header's "+" and fork buttons (28px each, 2px gap) plus the
+/// row gap they cost the project-actions control.
+const SESSION_CONTROLS_WIDTH: f32 = 28.0 * 2.0 + 2.0 + 8.0;
+
 /// The two fixed right-edge anchors: the explorer toggle and the pane toggle
 /// (28px each) with the same 4px gap the surface strip keeps between its
 /// controls, so the two never render as one fused block.
@@ -323,7 +327,11 @@ impl Shell {
                 .h_full()
                 .flex()
                 .flex_row()
-                .items_center();
+                .items_center()
+                // The transcript extends under this band (it fades beneath
+                // the tab strip); a wheel over the tabs must scroll the
+                // strip, never the surface behind it.
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
             if right_pane_open {
                 // The right pane's SURFACE TABS (t3 RightPanelTabs) — the diff
                 // options that used to live here moved into the pane's own
@@ -416,6 +424,46 @@ impl Shell {
             )
         };
 
+        // The session's own side-chat controls: "+" mints a fresh side chat
+        // under this session, fork copies its history into one. Same pair
+        // the side-chat header carries, so a family reads the same from
+        // either end.
+        let session_controls = (!takeover && !on_canvas).then(|| {
+            let busy = self.side_chat_creating;
+            div()
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(2.0))
+                .child(
+                    header_icon_button(
+                        "session-new-side-chat",
+                        icons::PLUS,
+                        &theme,
+                        cx.listener(|this, _, _, cx| this.create_child_chat(None, cx)),
+                    )
+                    .role(gpui::Role::Button)
+                    .aria_label("New side chat")
+                    .when(busy, |el| el.opacity(0.4)),
+                )
+                .child(
+                    header_icon_button(
+                        "session-fork",
+                        icons::GIT_BRANCH,
+                        &theme,
+                        cx.listener(|this, _, _, cx| this.create_side_chat(cx)),
+                    )
+                    .role(gpui::Role::Button)
+                    .aria_label("Fork this session")
+                    .when(busy, |el| el.opacity(0.4)),
+                )
+        });
+        let available_titlebar_width = if session_controls.is_some() {
+            (available_titlebar_width - SESSION_CONTROLS_WIDTH).max(0.0)
+        } else {
+            available_titlebar_width
+        };
         let actions = (!takeover && !on_canvas)
             .then(|| {
                 self.render_project_actions_control(available_titlebar_width, viewport_height, cx)
@@ -478,6 +526,7 @@ impl Shell {
                 )
             })
             .child(div().flex_1())
+            .children(session_controls)
             .children(actions)
             .children(trailing);
 

@@ -73,6 +73,7 @@ fn start(core: &EngineCore, cwd: &std::path::Path, prompt: String) {
             SessionCommandPayload::Run {
                 message_id: uuid::Uuid::new_v4().to_string(),
                 request: RunRequest {
+                    mcp: None,
                     prompt,
                     harness: Some(HarnessId::Cursor),
                     model: Some("muse-spark-1.3".into()),

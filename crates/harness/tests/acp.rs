@@ -37,6 +37,7 @@ fn harness() -> AcpHarness {
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        mcp: None,
         prompt: prompt.into(),
         harness: None,
         model: Some("grok-4.5".into()),
@@ -502,7 +503,7 @@ fn descriptor_surface_matches_registry_expectations() {
     assert_eq!(harness.id(), HarnessId::Grok);
     assert_eq!(harness.display_name(), "Grok");
     assert!(harness.supports_steering());
-    assert_eq!(harness.steering_mode(), SteeringMode::TurnBoundary);
+    assert_eq!(harness.steering_mode(), SteeringMode::StepBoundary);
     assert_eq!(
         harness.reasoning_levels(),
         &[
@@ -619,7 +620,7 @@ fn hermes_and_pi_descriptor_surfaces_match_registry_expectations() {
     assert_eq!(devin.id(), HarnessId::Devin);
     assert_eq!(devin.display_name(), "Devin");
     assert!(devin.supports_steering());
-    assert_eq!(devin.steering_mode(), SteeringMode::TurnBoundary);
+    assert_eq!(devin.steering_mode(), SteeringMode::StepBoundary);
     assert!(devin.reasoning_levels().is_empty());
 
     let hermes = AcpHarness::hermes();
@@ -633,7 +634,7 @@ fn hermes_and_pi_descriptor_surfaces_match_registry_expectations() {
     assert_eq!(pi.id(), HarnessId::Pi);
     assert_eq!(pi.display_name(), "Pi");
     assert!(pi.supports_steering());
-    assert_eq!(pi.steering_mode(), SteeringMode::TurnBoundary);
+    assert_eq!(pi.steering_mode(), SteeringMode::StepBoundary);
     assert_eq!(
         pi.reasoning_levels(),
         &[
@@ -1894,7 +1895,6 @@ async fn pi_boundary_steer(scenario: &str, trigger_on_done: bool) {
     })
     .await
     .unwrap();
-    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None); 2]);
     assert_eq!(
         events
             .iter()
@@ -1902,15 +1902,28 @@ async fn pi_boundary_steer(scenario: &str, trigger_on_done: bool) {
             .count(),
         1
     );
-    let first_done = events
-        .iter()
-        .position(|e| matches!(e, AgentEvent::Done { .. }))
-        .unwrap();
     let second_text = events
         .iter()
         .position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "second"))
         .unwrap();
-    assert!(first_done < second_text);
+    if trigger_on_done {
+        // Idle between turns: the steer is simply the next turn.
+        assert_eq!(dones(&events), vec![(DoneStatus::Completed, None); 2]);
+        let first_done = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::Done { .. }))
+            .unwrap();
+        assert!(first_done < second_text);
+    } else {
+        // Mid-turn: the steer preempts (here the turn ended first anyway) and
+        // continues the run behind a Steered boundary — one run, one Done.
+        assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+        let steered = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::Steered { .. }))
+            .expect("steer boundary");
+        assert!(steered < second_text);
+    }
 }
 
 #[tokio::test]
@@ -2026,6 +2039,58 @@ async fn antigravity_detection_subprocess() {
                 .all(|entry| entry.file_name() == "antigravity-acp"))
             .unwrap_or(true)
     );
+}
+
+#[tokio::test]
+async fn mcp_injection_all_acp_harnesses_new_resume_and_fallback() {
+    for harness in [
+        AcpHarness::grok(),
+        AcpHarness::devin(),
+        AcpHarness::hermes(),
+        AcpHarness::pi(),
+        AcpHarness::antigravity(),
+    ] {
+        let harness = harness.with_executable(fixture_path());
+        for resume in [None, Some("mcp-loaded"), Some("load-fail")] {
+            let mut req = request("scenario:mcp");
+            req.model = None;
+            req.resume = resume.map(str::to_owned);
+            req.mcp = Some(zeron_proto::McpServer {
+                name: "zeron".into(),
+                command: "/path with spaces/zeron".into(),
+                args: vec!["mcp".into()],
+                env: [
+                    ("ZERON_CHAT_ID".into(), "origin-chat".into()),
+                    ("ZERON_IPC_PORT".into(), "27699".into()),
+                ]
+                .into(),
+            });
+            let (controls, _steer, _token) = controls();
+            let mut stream = harness.run(req, controls).await.unwrap();
+            let events = tokio::time::timeout(Duration::from_secs(10), async {
+                let mut events = Vec::new();
+                while let Some(event) = stream.next().await {
+                    let event = event.unwrap();
+                    let done = matches!(event, AgentEvent::Done { .. });
+                    events.push(event);
+                    if done {
+                        break;
+                    }
+                }
+                events
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{:?} {resume:?} timed out", harness.id()));
+
+            assert!(
+                events.contains(&AgentEvent::TextDelta {
+                    text: "mcp configured".into()
+                }),
+                "{:?} {resume:?}: {events:?}",
+                harness.id()
+            );
+        }
+    }
 }
 
 #[tokio::test]

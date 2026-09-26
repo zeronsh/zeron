@@ -81,6 +81,8 @@ pub(crate) struct Delta {
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct MessageFrame {
     #[serde(default)]
+    pub uuid: Option<String>,
+    #[serde(default)]
     pub parent_tool_use_id: Option<String>,
     #[serde(default)]
     pub message: MessageBody,
@@ -214,6 +216,19 @@ pub(crate) fn user_message_line(text: &str) -> String {
     .to_string()
 }
 
+/// Fold this input into the next model step without aborting tools or tasks.
+/// A steer line. `immediate` → `priority: "now"`: streaming text/thinking
+/// stops at once and the steer is answered next (verified against CLI
+/// 2.1.280). But `now` also aborts an in-flight MCP tool call ("The tool call
+/// was interrupted before a result was received"), so while any tool is open
+/// the steer goes as `next`: the tool finishes and the steer lands right after
+/// its result, in the same turn. An interrupted turn still emits a `result`.
+pub(crate) fn steer_message_line(text: &str, id: &str, immediate: bool) -> String {
+    serde_json::json!({"type":"user", "uuid":id, "priority": if immediate { "now" } else { "next" },
+        "message":{"role":"user","content":text}, "parent_tool_use_id":null})
+    .to_string()
+}
+
 /// One inline image for a stdin user turn (Anthropic base64 image source).
 pub(crate) struct ImageBlock {
     /// One of the API-supported media types (png/jpeg/gif/webp).
@@ -283,6 +298,17 @@ pub(crate) fn interrupt_request_line(request_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steer_priority_follows_tool_state() {
+        let now: serde_json::Value =
+            serde_json::from_str(&steer_message_line("hi", "u1", true)).unwrap();
+        let next: serde_json::Value =
+            serde_json::from_str(&steer_message_line("hi", "u2", false)).unwrap();
+        assert_eq!(now["priority"], "now");
+        assert_eq!(next["priority"], "next");
+        assert_eq!(next["uuid"], "u2");
+    }
 
     #[test]
     fn parses_known_and_unknown_frames() {

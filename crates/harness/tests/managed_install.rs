@@ -35,6 +35,7 @@ async fn managed_install_reaches_session_started() {
         interrupt: interrupt.clone(),
     };
     let request = RunRequest {
+        mcp: None,
         prompt: "say the word ok and stop".into(),
         harness: None,
         model: None,

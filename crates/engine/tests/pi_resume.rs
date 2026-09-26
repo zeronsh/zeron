@@ -20,6 +20,7 @@ async fn pi_idle_crash_next_dispatch_loads_stored_session() {
     let handle = core.doc_host.open(chat).unwrap();
     for prompt in ["idle-crash", "require-resume"] {
         let req = RunRequest {
+            mcp: None,
             prompt: prompt.into(),
             harness: None,
             model: None,

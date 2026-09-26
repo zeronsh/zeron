@@ -93,6 +93,7 @@ async fn execution_lease_outlives_dropped_run_and_title_streams_until_child_is_r
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        mcp: None,
         prompt: prompt.into(),
         harness: None,
         model: Some("gpt-5.6-sol".into()),

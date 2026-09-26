@@ -118,6 +118,7 @@ fn complete_assistant_count(core: &EngineCore) -> usize {
 fn run_payload(message_id: &str, pending_ref: &str) -> SessionCommandPayload {
     SessionCommandPayload::Run {
         request: RunRequest {
+            mcp: None,
             prompt: format!(
                 "look at this\n\nAttached images (local files — open them to view):\n- {pending_ref}"
             ),

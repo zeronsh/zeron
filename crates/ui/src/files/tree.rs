@@ -15,6 +15,9 @@ use crate::{
     theme::Theme,
 };
 
+/// Fade band under the tree's edges (the sidebar's 24px).
+const TREE_FADE_BAND: f32 = 24.0;
+
 pub const TREE_ROW_HEIGHT: f32 = 27.0;
 pub(super) const TREE_INDENT: f32 = 14.0;
 
@@ -194,12 +197,26 @@ impl FilesSurface {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_tree_key_down(event, window, cx)
             }))
-            .child(
-                list(self.tree_list.clone(), cx.processor(Self::render_tree_row))
-                    .flex_1()
-                    .min_h_0()
-                    .with_sizing_behavior(ListSizingBehavior::Auto),
-            )
+            .child({
+                // The sidebar's overflow treatment: rows fade under the top
+                // and bottom edges while there is more to scroll to, read
+                // from the list's own offset at paint time.
+                let overflow = self.tree_list.clone();
+                crate::edge_fade::edge_faded(
+                    TREE_FADE_BAND,
+                    true,
+                    true,
+                    list(self.tree_list.clone(), cx.processor(Self::render_tree_row))
+                        .flex_1()
+                        .min_h_0()
+                        .with_sizing_behavior(ListSizingBehavior::Auto),
+                )
+                .fade_overflow_y_with(move |_| {
+                    let offset = f32::from(overflow.scroll_px_offset_for_scrollbar().y);
+                    let max = f32::from(overflow.max_offset_for_scrollbar().y);
+                    (offset > 0.5, offset < max - 0.5)
+                })
+            })
             .children(scrollbar)
             .into_any_element()
     }

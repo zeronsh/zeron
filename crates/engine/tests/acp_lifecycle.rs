@@ -53,6 +53,7 @@ async fn quiet_acp_prompt_stays_working_until_response() {
         SessionCommandPayload::Run {
             message_id: "first-user".into(),
             request: RunRequest {
+                mcp: None,
                 prompt: "tools".into(),
                 harness: None,
                 model: None,
@@ -125,12 +126,30 @@ async fn quiet_acp_prompt_stays_working_until_response() {
             .all(|entry| entry.status == Some(MessageStatus::Complete)),
         "{entries:?}"
     );
-    assert!(
-        assistants[0].parts.iter().any(
-            |part| matches!(part, MessagePart::Text { text, .. } if text.contains("finished"))
-        ),
+    // The steer landed with no tool open, so it preempted the model wait
+    // (the peer answers `session/cancel` without "finished"). The original
+    // output stays in its turn and the steer is answered in the next one.
+    let texts = |entry: &zeron_doc::SessionMessageEntry| {
+        entry
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(texts(assistants[0]), vec!["working"], "{entries:?}");
+    assert_eq!(
+        assistants[0]
+            .parts
+            .iter()
+            .filter(|part| matches!(part, MessagePart::Tool { resolved: true, .. }))
+            .count(),
+        4,
         "original output must stay in its turn: {entries:?}"
     );
+    assert_eq!(texts(assistants[1]), vec!["second"], "{entries:?}");
     // ACP can still emit unowned autonomous activity. It has no pending
     // session/prompt response, so the existing fallback must remain enabled.
     queue(

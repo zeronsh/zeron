@@ -204,6 +204,20 @@ pub enum MessagePart {
         id: String,
         message: String,
     },
+    /// The seam in a forked chat's transcript: everything above was copied
+    /// from `source_chat_id` when the fork was cut, everything below is this
+    /// chat's own. Written once by the fork RPC; renders as a labeled
+    /// divider. Old desktop builds' unknown-kind fallback yields an empty
+    /// text part (invisible); iOS drops unknown kinds.
+    #[serde(rename_all = "camelCase")]
+    Fork {
+        id: String,
+        source_chat_id: String,
+        /// The source's title as of the fork — the transcript reads it
+        /// without a registry lookup, and a later rename or delete of the
+        /// source does not rewrite history.
+        source_title: String,
+    },
 }
 
 impl MessagePart {
@@ -214,7 +228,8 @@ impl MessagePart {
             | MessagePart::Reasoning { id, .. }
             | MessagePart::Tool { id, .. }
             | MessagePart::Input { id, .. }
-            | MessagePart::Error { id, .. } => id,
+            | MessagePart::Error { id, .. }
+            | MessagePart::Fork { id, .. } => id,
         }
     }
 
@@ -247,6 +262,11 @@ impl MessagePart {
                 mime_type,
             } => id.len() + path.len() + name.len() + mime_type.len(),
             MessagePart::Error { message, .. } => message.len(),
+            MessagePart::Fork {
+                source_chat_id,
+                source_title,
+                ..
+            } => source_chat_id.len() + source_title.len(),
         }
     }
 }

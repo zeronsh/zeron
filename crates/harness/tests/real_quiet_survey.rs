@@ -52,6 +52,7 @@ struct ProbeOutcome {
 async fn probe_once(harness: AcpHarness) -> ProbeOutcome {
     let (controls, steer_tx, _token) = controls();
     let req = RunRequest {
+        mcp: None,
         prompt: "Use your shell tool to run `echo probe-one`. After you see its output, \
                  run `echo probe-two` as a second separate command. After that, reply \
                  with exactly the word PROBE-DONE."

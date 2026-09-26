@@ -73,7 +73,7 @@ use crate::diff_sync::CheckoutDiffSync;
 use crate::doc_host::DocHost;
 use crate::project_actions::ProjectActionsStore;
 use crate::registry::HarnessRegistry;
-use crate::repos::{Repos, home_dir};
+use crate::repos::{Repos, session_home_dir};
 use crate::sessions::SessionsEngine;
 use crate::terminals::Terminals;
 use crate::uploads::Uploads;
@@ -390,7 +390,7 @@ fn resolve_open_terminal_cwd(
     explicit: Option<String>,
     chat_cwd: Option<String>,
     space_cwd: Option<String>,
-) -> String {
+) -> Result<String, &'static str> {
     let raw = meaningful_cwd(explicit)
         .or_else(|| meaningful_cwd(chat_cwd))
         .or_else(|| meaningful_cwd(space_cwd))
@@ -774,7 +774,7 @@ impl EngineRpc {
     async fn catalog_root(&self, p: &FileSearchParams) -> Result<std::path::PathBuf, RpcError> {
         if p.space_id.is_none() && p.path.is_none() {
             let Some(chat_id) = &p.chat_id else {
-                return Ok(home_dir());
+                return session_home_dir().map_err(|error| RpcError::Failed(error.to_string()));
             };
             let chat = self
                 .workspace
@@ -785,10 +785,10 @@ impl EngineRpc {
                 return Err(RpcError::BadParams("chat belongs to another device".into()));
             }
             if chat.space_id.is_none() {
-                return Ok(chat
-                    .cwd
-                    .map(|cwd| std::path::PathBuf::from(crate::repos::expand_home(&cwd)))
-                    .unwrap_or_else(home_dir));
+                let cwd = chat.cwd.as_deref().unwrap_or("~");
+                return crate::repos::expand_home(cwd)
+                    .map(std::path::PathBuf::from)
+                    .map_err(|error| RpcError::Failed(error.to_string()));
             }
         }
         self.file_search_root(p).await
@@ -1336,7 +1336,8 @@ const LOGIN_TUNNEL_TTL: Duration = Duration::from_secs(15 * 60);
 fn forwardable(method: &str) -> bool {
     matches!(
         method,
-        methods::LIST_HARNESSES
+        methods::FORK_SIDE_CHAT
+            | methods::LIST_HARNESSES
             | methods::INSTALL_HARNESS
             | methods::CANCEL_INSTALL
             | methods::GET_TITLE_SETTINGS
@@ -1850,6 +1851,125 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "outcome": outcome }))
+            }
+            methods::FORK_SIDE_CHAT => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct ForkParams {
+                    chat_id: String,
+                    source_chat_id: String,
+                    /// Where the fork hangs in the tree. Defaults to the
+                    /// source; a side chat's own fork button passes the
+                    /// side chat's parent so the copy lists as a sibling.
+                    #[serde(default)]
+                    parent_chat_id: Option<String>,
+                }
+                let p: ForkParams = parse_params(params)?;
+                let parent_chat_id = p
+                    .parent_chat_id
+                    .clone()
+                    .filter(|id| !id.trim().is_empty())
+                    .unwrap_or_else(|| p.source_chat_id.clone());
+                let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
+                let source = self
+                    .workspace
+                    .chat(&p.source_chat_id)
+                    .map_err(failed)?
+                    .ok_or_else(|| RpcError::Failed("Source chat no longer exists".into()))?;
+                if source.device_id != self.doc_host.device_id() {
+                    return Err(RpcError::Failed(
+                        "Fork must be created on the source device".into(),
+                    ));
+                }
+                if let Some(existing) = self.workspace.chat(&p.chat_id).map_err(failed)? {
+                    if existing.parent_chat_id.as_deref() == Some(parent_chat_id.as_str()) {
+                        return RpcReply::value(&existing);
+                    }
+                    return Err(RpcError::Failed("Chat id already exists".into()));
+                }
+                let source_doc = self.doc_host.open(&p.source_chat_id).map_err(failed)?;
+                let entries = source_doc
+                    .doc()
+                    .read_entries()
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let boundary = entries
+                    .iter()
+                    .rposition(|entry| {
+                        entry.role == zeron_doc::MessageRole::Assistant
+                            && entry.status == Some(zeron_doc::MessageStatus::Complete)
+                    })
+                    .ok_or_else(|| {
+                        RpcError::Failed(
+                            "Wait for a completed response before starting a side chat".into(),
+                        )
+                    })?;
+                let mut chat = source.clone();
+                chat.id = p.chat_id;
+                chat.parent_chat_id = Some(parent_chat_id);
+                chat.title = None; // First side-chat turn receives its own generated title.
+                chat.archived = false;
+                chat.created_at = chrono::Utc::now();
+                chat.last_message_at = None;
+                chat.last_message_preview = None;
+                chat.last_seen_at = None;
+                chat.harness_session_id = None;
+                chat.harness_session_cwd = None;
+                chat.room_gen = Some(2);
+                // Missing rows open on chat2. Persist history before publishing
+                // the registry row so a crash cannot leave a discoverable empty fork.
+                let target = self.doc_host.open(&chat.id).map_err(failed)?;
+                let existing = target
+                    .doc()
+                    .read_entries()
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                for entry in entries[..=boundary]
+                    .iter()
+                    .filter(|entry| !existing.iter().any(|e| e.id == entry.id))
+                {
+                    let mut entry = entry.clone();
+                    // Historical approvals belong to the source runtime; they
+                    // must never block or send answers from the new composer.
+                    for part in &mut entry.parts {
+                        if let zeron_doc::MessagePart::Input { resolved, .. } = part {
+                            *resolved = true;
+                        }
+                    }
+                    target
+                        .doc()
+                        .push_message(&entry)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                }
+                // The seam: everything above came from the source. Its own
+                // entry (system role, complete) so the copied history and the
+                // fork's first turn never share a row.
+                let marker_id = format!("fork:{}", chat.id);
+                if !existing.iter().any(|e| e.id == marker_id) {
+                    let source_title = source
+                        .title
+                        .clone()
+                        .or_else(|| source.last_message_preview.clone())
+                        .unwrap_or_else(|| "New session".into());
+                    target
+                        .doc()
+                        .push_message(&zeron_doc::SessionMessageEntry {
+                            duration_ms: None,
+                            id: marker_id.clone(),
+                            role: zeron_doc::MessageRole::System,
+                            parts: vec![zeron_doc::MessagePart::Fork {
+                                id: marker_id,
+                                source_chat_id: source.id.clone(),
+                                source_title,
+                            }],
+                            created_at: chrono::Utc::now().timestamp_millis(),
+                            device_id: self.doc_host.device_id().to_owned(),
+                            status: Some(zeron_doc::MessageStatus::Complete),
+                            continuation_of: None,
+                        })
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                }
+                self.doc_host.persist_fork(&target).map_err(failed)?;
+                self.workspace.import_chat_row(&chat).map_err(failed)?;
+                RpcReply::value(&chat)
             }
             methods::FOCUS_CHAT => {
                 let p: ChatParams = parse_params(params)?;
@@ -3101,7 +3221,8 @@ impl RpcService for EngineRpc {
                         .flatten()
                         .map(|space| space.path)
                 });
-                let cwd = resolve_open_terminal_cwd(p.cwd, chat_cwd, space_cwd);
+                let cwd = resolve_open_terminal_cwd(p.cwd, chat_cwd, space_cwd)
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
                 let session = self
                     .terminals
                     .open(&cwd, p.cols, p.rows)
@@ -3741,35 +3862,39 @@ mod tests {
 
     #[test]
     fn open_terminal_cwd_prefers_explicit_then_chat_then_space_then_home() {
-        let home = crate::repos::home_dir().to_string_lossy().into_owned();
+        let home = crate::repos::session_home_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             resolve_open_terminal_cwd(
                 Some("/proj".into()),
                 Some("/chat".into()),
                 Some("/space".into())
-            ),
+            )
+            .unwrap(),
             "/proj"
         );
         assert_eq!(
-            resolve_open_terminal_cwd(None, Some("/chat".into()), Some("/space".into())),
+            resolve_open_terminal_cwd(None, Some("/chat".into()), Some("/space".into())).unwrap(),
             "/chat"
         );
         assert_eq!(
-            resolve_open_terminal_cwd(Some("~".into()), None, Some("/space".into())),
+            resolve_open_terminal_cwd(Some("~".into()), None, Some("/space".into())).unwrap(),
             "/space",
             "tilde is a fallback, not an override of the selected project"
         );
         assert_eq!(
-            resolve_open_terminal_cwd(None, None, Some("/space".into())),
+            resolve_open_terminal_cwd(None, None, Some("/space".into())).unwrap(),
             "/space"
         );
-        assert_eq!(resolve_open_terminal_cwd(None, None, None), home);
+        assert_eq!(resolve_open_terminal_cwd(None, None, None).unwrap(), home);
         assert_eq!(
-            resolve_open_terminal_cwd(Some("~".into()), Some("/chat".into()), None),
+            resolve_open_terminal_cwd(Some("~".into()), Some("/chat".into()), None).unwrap(),
             "/chat"
         );
         assert_eq!(
-            resolve_open_terminal_cwd(Some("  ".into()), Some("/chat".into()), None),
+            resolve_open_terminal_cwd(Some("  ".into()), Some("/chat".into()), None).unwrap(),
             "/chat"
         );
         assert_eq!(canvas_space_id("space-canvas:s1"), Some("s1"));

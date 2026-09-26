@@ -373,7 +373,7 @@ final class AppModel {
     var overviewChats: [Chat] {
         if let demo {
             let liveIds = Set(demo.spaces.map(\.id))
-            let live = demo.chats.filter { !$0.archived && ($0.spaceId.map(liveIds.contains) ?? true) }
+            let live = demo.chats.filter { !$0.archived && $0.parentChatId == nil && ($0.spaceId.map(liveIds.contains) ?? true) }
             return sortPinnedFirst(live, pinnedSessionIds: demoPinnedSessionIds)
         }
         return workspace?.overviewChats ?? []
@@ -382,7 +382,7 @@ final class AppModel {
     func chats(in spaceId: String) -> [Chat] {
         if let demo {
             return sortPinnedFirst(
-                demo.chats.filter { !$0.archived && $0.spaceId == spaceId },
+                demo.chats.filter { !$0.archived && $0.parentChatId == nil && $0.spaceId == spaceId },
                 pinnedSessionIds: demoPinnedSessionIds
             )
         }

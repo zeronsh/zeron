@@ -19,6 +19,6 @@ const rl=readline.createInterface({input:process.stdin});
 rl.on('line',line=>{
   const msg=JSON.parse(line);
   if(msg.op==='interrupt') {clearTimeout(timer);busy=false;out({ev:'turn',status:'cancelled'});}
-  else if(msg.op==='user') turn(msg.prompt,1);
+  else if(msg.op==='steer') {out({ev:'steered'}); if(busy) out({ev:'text',text:msg.prompt}); else turn(msg.prompt,1);}
 });
 rl.on('close',()=>{clearTimeout(timer);});

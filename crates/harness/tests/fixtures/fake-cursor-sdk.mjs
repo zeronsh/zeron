@@ -53,7 +53,41 @@ function instance(store) {
         await store.agents.update({agent:{...doc,status:'idle',activeRunId:null}});
         resolve({status});
       };
+      let toolFinished = prompt !== 'native-tool';
+      if (!toolFinished) {
+        onDelta({update:{type:'tool-call-started',callId:'active-shell',toolCall:{type:'shell'}}});
+        setTimeout(() => {
+          toolFinished = true;
+          onDelta({update:{type:'tool-call-completed',callId:'active-shell',toolCall:{type:'shell'}}});
+        },80);
+      }
+      let steerTimer;
+      const concurrent = [];
       return {id:runId,
+        async steer(text){
+          if (['native-concurrent','native-mixed'].includes(prompt)) {
+            onDelta({update:{type:'thinking-delta',text:'submitted:'+text}});
+            const acknowledgment = new Promise(resolve => concurrent.push({text,resolve}));
+            if (concurrent.length === 3) {
+              onDelta({update:{type:'text-delta',text:'NATIVE:'+text}});
+              for (const entry of [...concurrent].reverse()) {
+                if (prompt === 'native-mixed' && entry === concurrent[0]) entry.resolve('revert_to_followup');
+                else { store.logPrompt(entry.text); entry.resolve('complete_delivered'); }
+              }
+              setTimeout(()=>finish('finished'),50);
+            }
+            return acknowledgment;
+          }
+          if(prompt === 'native-revert') {await finish('finished'); return 'revert_to_followup';}
+          if (!toolFinished) throw new Error('steering killed the active shell');
+          if(!['native-steer','native-tool'].includes(prompt)) return 'revert_to_followup';
+          store.logPrompt(text);
+          onDelta({update:{type:'text-delta',text:'NATIVE:'+text}});
+          clearTimeout(steerTimer);
+          steerTimer=setTimeout(()=>finish('finished'),150);
+          await new Promise(resolve=>setTimeout(resolve,10));
+          return 'complete_delivered';
+        },
         async cancel(){if(prompt==='hung-cancel')return new Promise(()=>{});await finish('cancelled');},
         async wait(){
           if(prompt==='wait-error')throw new Error('stream disconnected');
@@ -67,7 +101,7 @@ function instance(store) {
             return pending;
           }
           if(prompt==='auth-error')return {status:'error',error:{message:'ERROR_NOT_LOGGED_IN'}};
-          if(['hang','hung-cancel'].includes(prompt))return pending;
+          if(['hang','hung-cancel','native-steer','native-revert','native-tool','native-concurrent','native-mixed'].includes(prompt))return pending;
           await finish('finished');return {status:'finished'};
         },
       };
@@ -84,12 +118,14 @@ function startupLimit() {
 }
 export const Agent={
   messages:{list:async(_id,{store,limit,offset,cwd,runtime})=>{if(runtime!=='local'||cwd!==(await store.agents.get({})).cwd)throw new Error('history must use the owning workspace');return store.userMessages().slice(offset,offset+limit).map((text,i)=>({type:'user',message:i%3===0?{agentConversationTurn:{user_message:{text}}}:i%3===1?{agentConversationTurn:{userMessage:{text}}}:{turn:{case:'agentConversationTurn',value:{userMessage:{text}}}}}));}},
-  async create({local}) {
+  async create({local, mcpServers}) {
+    if (mcpServers) fs.writeFileSync(new URL("../../../mcp-options.json", import.meta.url), JSON.stringify(mcpServers));
     startupLimit();
     await local.store.agents.create({agent:{agentId:'agent-fixture',cwd:local.cwd,status:'idle',activeRunId:null,latestCheckpoint:checkpoint,sdkMetadata:{mustKeep:true}}});
     return instance(local.store);
   },
-  async resume(id,{local}) {
+  async resume(id,{local, mcpServers}) {
+    if (mcpServers) fs.writeFileSync(new URL("../../../mcp-options.json", import.meta.url), JSON.stringify(mcpServers));
     startupLimit();
     const doc=await local.store.agents.get({agentId:id});
     if(doc.latestCheckpoint.rootBlobId!==checkpoint.rootBlobId || !doc.sdkMetadata.mustKeep)throw new Error('conversation history was lost');

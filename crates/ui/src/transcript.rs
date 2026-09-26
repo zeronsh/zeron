@@ -1056,6 +1056,12 @@ pub enum RowKind {
     ErrorChip {
         message: SharedString,
     },
+    /// The fork seam: a labeled divider between copied history and the
+    /// chat's own turns.
+    ForkMarker {
+        source_chat_id: SharedString,
+        source_title: SharedString,
+    },
 }
 
 fn generated_image_devices(owner: &str, fallback: &[String]) -> Vec<String> {
@@ -1309,6 +1315,7 @@ pub fn rows_for_entry(
         // Lifted before the mention projection, so a comment body's own
         // Markdown never lands in the bubble.
         let (body, badges) = crate::badges::split(&parsed.text);
+        let body = agent_message_display(&body);
         let (text, mentions) = match crate::composer::sent_mention_display(&body) {
             Some((display, spans)) => (display, spans),
             None => (body, Vec::new()),
@@ -1618,6 +1625,25 @@ pub fn rows_for_entry(
                             compact_fold: None,
                         });
                     }
+                    MessagePart::Fork {
+                        id: part_id,
+                        source_chat_id,
+                        source_title,
+                    } => {
+                        rows.push(Row {
+                            id: format!("{}#{}", entry.id, part_id).into(),
+                            version: fnv1a(source_title.as_bytes()),
+                            turn_start: false,
+                            kind: RowKind::ForkMarker {
+                                source_chat_id: source_chat_id.clone().into(),
+                                source_title: single_line(source_title).into(),
+                            },
+                            entry_id: entry_id.clone(),
+                            timestamp: None,
+                            copy_text: None,
+                            compact_fold: None,
+                        });
+                    }
                     // Tools and thoughts are grouped by the outer arms;
                     // nothing reaches here.
                     MessagePart::Tool { .. } | MessagePart::Reasoning { .. } => {}
@@ -1700,7 +1726,10 @@ pub fn rows_for_entry(
     // (chat-view.tsx: "No timestamp hover mid-stream"). The version bit keeps
     // the diff key honest for last-row kinds whose own version wouldn't
     // change when streaming flips off (chips).
-    if !streaming && let Some(last) = rows.last_mut() {
+    if !streaming
+        && let Some(last) = rows.last_mut()
+        && !matches!(last.kind, RowKind::ForkMarker { .. })
+    {
         last.timestamp = Some(entry.created_at);
         last.copy_text = assistant_copy_text(entry);
         last.version ^= 1 << 62;
@@ -6514,6 +6543,7 @@ impl Transcript {
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
+            RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
         };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
@@ -7558,6 +7588,28 @@ impl Transcript {
 /// run when there are none), with the same selection machinery as rendered
 /// markdown — the element registers into the frame's document-ordered
 /// registry, so drags select, span into adjacent rows, and Cmd+C copies.
+/// Keep routing instructions in the stored prompt for agents, but show a
+/// concise attribution in the human transcript (including existing messages).
+fn agent_message_display(text: &str) -> String {
+    let Some(rest) = text.strip_prefix("[Message from Zeron chat ") else {
+        return text.to_owned();
+    };
+    let Some((header, body)) = rest.split_once("]\n\n") else {
+        return text.to_owned();
+    };
+    let Some((label, id)) =
+        header.rsplit_once(". Reply to it with the Zeron `send_message` tool, chat ")
+    else {
+        return text.to_owned();
+    };
+    let Some(id) = id.strip_suffix('.') else {
+        return text.to_owned();
+    };
+    let suffix = format!(" ({id})");
+    let name = label.strip_suffix(&suffix).unwrap_or(label);
+    format!("Message from {name}\n\n{body}")
+}
+
 fn user_bubble_text(
     row_id: &SharedString,
     text: SharedString,
@@ -7596,6 +7648,39 @@ fn user_bubble_text(
     }
     if at < text.len() {
         runs.push(body_run(text.len() - at));
+    }
+    // Attribution names are bold sans text, never Markdown/italic. Split
+    // existing runs so file-mention styling and selection offsets stay intact.
+    if let Some(rest) = text.strip_prefix("Message from ")
+        && let Some((name, _)) = rest.split_once("\n\n")
+    {
+        let bold = "Message from ".len().."Message from ".len() + name.len();
+        let mut offset = 0;
+        runs = runs
+            .into_iter()
+            .flat_map(|run| {
+                let end = offset + run.len;
+                let mut pieces = Vec::new();
+                while offset < end {
+                    let in_name = bold.contains(&offset);
+                    let next = if offset < bold.start {
+                        end.min(bold.start)
+                    } else if in_name {
+                        end.min(bold.end)
+                    } else {
+                        end
+                    };
+                    let mut piece = run.clone();
+                    piece.len = next - offset;
+                    if in_name {
+                        piece.font.weight = gpui::FontWeight::BOLD;
+                    }
+                    pieces.push(piece);
+                    offset = next;
+                }
+                pieces
+            })
+            .collect();
     }
     let styled = StyledText::new(text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
@@ -7664,6 +7749,49 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
             notice_chip(theme, false, "Error", message, Tile)
                 .overflow_hidden()
                 .w_full(),
+        )
+        .into_any_element()
+}
+
+/// A quiet fork seam. The source gets its own constrained line so long
+/// titles cannot widen a narrow side-chat pane. No message metadata lane.
+fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
+    let rule = || div().flex_1().min_w_0().h(px(1.0)).bg(theme.border_strong);
+    div()
+        .py(px(14.0))
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .child(rule())
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted.opacity(0.7))
+                        .child("Forked from"),
+                )
+                .child(rule()),
+        )
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .truncate()
+                .text_center()
+                .text_size(crate::typography::ui_rems(13.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text_muted)
+                .child(source_title),
         )
         .into_any_element()
 }
@@ -8284,7 +8412,7 @@ fn strip_spawn_prefix(text: &str) -> &str {
 /// a fixed-width tab spent on "Agent: " never shows the task, so the genus
 /// is stripped here and the call input's description/prompt fields back up
 /// a bare name (older docs); "Subagent" only as the last resort.
-fn subagent_tab_title(call: &ToolCall) -> SharedString {
+pub(crate) fn subagent_tab_title(call: &ToolCall) -> SharedString {
     let (name, input) = match call {
         ToolCall::Unknown { name, input } => (name.as_str(), input.as_ref()),
         ToolCall::Mcp { tool, input, .. } => (tool.as_str(), input.as_ref()),

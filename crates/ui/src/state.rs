@@ -359,6 +359,9 @@ impl EngineHandle {
         let runtime = Arc::new(tokio::sync::Mutex::new(None));
         let runtime_for_boot = runtime.clone();
         let service_for_boot = assembled_service.clone();
+        // Agents only learn a port THIS window serves: a lost bind race must
+        // not point their injected MCP server at some other engine.
+        let served_ipc_port = ipc_task.as_ref().map(|_| engine_config.ipc_port);
         // The instance lock rides into the boot task and is consumed by
         // assembly — held through sign-in onboarding too, because this process
         // owns the data dir from the moment it decided to embed.
@@ -394,6 +397,9 @@ impl EngineHandle {
             match Engine::assemble_runtime_with_lock(&engine_config, auth, profile, lock).await {
                 Ok(engine_runtime) => {
                     let service: Arc<dyn RpcService> = engine_runtime.core().rpc_service();
+                    if let Some(port) = served_ipc_port {
+                        engine_runtime.core().sessions.set_ipc_port(port);
+                    }
                     *runtime_for_boot.lock().await = Some(engine_runtime);
                     if service_for_boot.set(service).is_err() {
                         state_tx.send_replace(DeferredEngineState::Failed(
@@ -683,6 +689,11 @@ pub struct AppState {
     pub spaces: Vec<Space>,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
+    /// Fork RPC may arrive ahead of its registry row on a remote device.
+    pending_side_chat: Option<Chat>,
+    /// `pending_side_chat` was started by hand and nothing has minted it:
+    /// no registry row, no doc, until its first send.
+    unsaved_side_chat: bool,
     pub sessions: Vec<Session>,
     /// Synced user/org sidebar pin state. Local workspaces deliberately ignore
     /// this and continue reading their device-local settings entry.
@@ -809,6 +820,8 @@ impl AppState {
             connectivity_observed: false,
             spaces: Vec::new(),
             chats: Vec::new(),
+            pending_side_chat: None,
+            unsaved_side_chat: false,
             sessions: Vec::new(),
             sidebar_preferences: SidebarPreferencesState::default(),
             session_presentation: None,
@@ -1022,6 +1035,13 @@ impl AppState {
     }
 
     pub fn apply_chats(&mut self, mut chats: Vec<Chat>) {
+        if let Some(pending) = &self.pending_side_chat {
+            if chats.iter().any(|chat| chat.id == pending.id) {
+                self.pending_side_chat = None;
+            } else {
+                chats.push(pending.clone());
+            }
+        }
         sort_chats(&mut chats);
         self.chats = chats;
         self.chats_synced = true;
@@ -1102,6 +1122,15 @@ impl AppState {
     /// the chips update on click; the next chats watch frame carries the same
     /// value once the engine applies the LWW write.
     pub fn apply_chat_config(&mut self, chat_id: &str, config: zeron_proto::ChatConfig) {
+        // The pending side chat's copy is what `apply_chats` re-inserts and
+        // what an unsaved one is minted from.
+        if let Some(chat) = self
+            .pending_side_chat
+            .as_mut()
+            .filter(|chat| chat.id == chat_id)
+        {
+            chat.config = Some(config.clone());
+        }
         if let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) {
             chat.config = Some(config);
         }
@@ -1624,6 +1653,28 @@ impl AppState {
         }
     }
 
+    /// A send the host held for the next turn shows as its queue row, not
+    /// as an echo: drop echoes (and the pending-send overlay) for queued ids.
+    pub fn apply_queue(&mut self, items: Vec<zeron_doc::QueuedMessage>) {
+        if let Some(chat_id) = self.selected_chat.as_deref() {
+            if let Some(echoes) = self.echoes.get_mut(chat_id) {
+                let before = echoes.len();
+                echoes.retain(|echo| !items.iter().any(|q| q.id == echo.id));
+                if echoes.len() != before {
+                    self.transcript_revision = self.transcript_revision.wrapping_add(1);
+                }
+            }
+            if self
+                .pending_sends
+                .get(chat_id)
+                .is_some_and(|p| items.iter().any(|q| q.id == p.message_id))
+            {
+                self.pending_sends.remove(chat_id);
+            }
+        }
+        self.queue = items;
+    }
+
     /// Unconfirmed echoes for the selected chat, in send order.
     pub fn pending_echoes(&self) -> &[SessionMessageEntry] {
         self.selected_chat
@@ -1879,6 +1930,8 @@ impl AppState {
         self.session_presence_presentation.clear();
         self.spaces.clear();
         self.chats.clear();
+        self.pending_side_chat = None;
+        self.unsaved_side_chat = false;
         self.sessions.clear();
         self.sidebar_preferences = SidebarPreferencesState::default();
         self.session_presentation = None;
@@ -1903,6 +1956,93 @@ impl AppState {
         self.local_device_id = None;
         self.update = None;
         cx.notify();
+    }
+
+    /// Independent selection and transcript subscriptions over the same engine.
+    /// An `unsaved` chat is a hand-started side chat nothing has written yet:
+    /// it opens no doc until its first send mints it (see
+    /// [`Self::unsaved_side_chat_create`]).
+    pub(crate) fn side_chat_state(
+        parent: &Entity<Self>,
+        chat: Chat,
+        unsaved: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let source = parent.read(cx);
+        let engine = source.engine.clone();
+        let mut state = Self::new();
+        state.chats = source.chats.clone();
+        if !state.chats.iter().any(|c| c.id == chat.id) {
+            state.chats.push(chat.clone());
+        }
+        state.spaces = source.spaces.clone();
+        state.devices = source.devices.clone();
+        state.data_dir = source.data_dir.clone();
+        state.auto_selected = true;
+        state.pending_side_chat = Some(chat.clone());
+        state.unsaved_side_chat = unsaved;
+        if let Some(engine) = engine {
+            state.attach_engine(engine, cx);
+        }
+        state.select_chat(Some(chat.id), cx);
+        state
+    }
+
+    /// This is a side chat's state whose chat its first send has yet to mint.
+    pub(crate) fn side_chat_unsaved(&self) -> bool {
+        self.unsaved_side_chat
+    }
+
+    fn is_unsaved_side_chat(&self, chat_id: &str) -> bool {
+        self.unsaved_side_chat
+            && self
+                .pending_side_chat
+                .as_ref()
+                .is_some_and(|chat| chat.id == chat_id)
+    }
+
+    /// The `Mutate createChat` params that mint the unsaved side chat
+    /// `chat_id` on its first send; `None` once it exists.
+    pub(crate) fn unsaved_side_chat_create(&self, chat_id: &str) -> Option<serde_json::Value> {
+        if !self.is_unsaved_side_chat(chat_id) {
+            return None;
+        }
+        let chat = self.pending_side_chat.as_ref()?;
+        Some(serde_json::json!({
+            "op": "createChat",
+            "chatId": chat.id,
+            "deviceId": chat.device_id,
+            "spaceId": chat.space_id,
+            "config": chat.config,
+            "branch": chat.branch,
+            "cwd": chat.cwd,
+            "parentChatId": chat.parent_chat_id,
+        }))
+    }
+
+    /// The unsaved side chat now exists: attach the doc watches it deferred.
+    pub(crate) fn side_chat_saved(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        if !self.is_unsaved_side_chat(chat_id) {
+            return;
+        }
+        self.unsaved_side_chat = false;
+        if self.selected_chat.as_deref() == Some(chat_id) {
+            self.focus_chat_sync(chat_id, cx);
+            self.start_chat_watches(chat_id.to_owned(), cx);
+        }
+    }
+
+    fn start_chat_watches(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        let Some(handle) = self.engine.clone() else {
+            return;
+        };
+        self.transcript_task = Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
+        if handle
+            .engine_info()
+            .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
+        {
+            self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
+        }
     }
 
     // ---- gpui glue ----
@@ -2134,7 +2274,9 @@ impl AppState {
     /// watch server-side. Selecting a chat also lands in its space and marks it
     /// seen (a global-list click must switch the tab strip too).
     pub fn select_chat(&mut self, chat_id: Option<String>, cx: &mut Context<Self>) {
-        if let Some(id) = &chat_id {
+        if let Some(id) = &chat_id
+            && !self.is_unsaved_side_chat(id)
+        {
             self.focus_chat_sync(id, cx);
         }
         if self.selected_chat == chat_id {
@@ -2250,14 +2392,12 @@ impl AppState {
             }
             self.mark_chat_seen(id, cx);
         }
-        if let (Some(chat_id), Some(handle)) = (chat_id, self.engine.clone()) {
-            self.transcript_task =
-                Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
-            if handle
-                .engine_info()
-                .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
-            {
-                self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
+        if let Some(chat_id) = chat_id {
+            if self.is_unsaved_side_chat(&chat_id) {
+                // Nothing to watch yet, and opening its doc would start one.
+                self.transcript_replayed = true;
+            } else {
+                self.start_chat_watches(chat_id, cx);
             }
         }
         cx.notify();
@@ -2777,7 +2917,7 @@ fn spawn_queue_watch(
                 let alive = this.update(cx, |state, cx| {
                     // Guard against a stale pump racing a newer selection.
                     if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
-                        state.queue = frame.items;
+                        state.apply_queue(frame.items);
                         cx.notify();
                     }
                 });
@@ -4323,6 +4463,42 @@ mod tests {
     }
 
     #[test]
+    fn side_chats_remain_addressable_but_do_not_appear_in_sidebar() {
+        let mut state = AppState::new();
+        let main = chat("main", 0, None);
+        let mut side = chat("side", 1, Some(2));
+        side.parent_chat_id = Some(main.id.clone());
+        state.apply_chats(vec![main, side]);
+        assert_eq!(
+            state
+                .visible_chats()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            ["main"]
+        );
+        state.selected_chat = Some("side".into());
+        assert_eq!(
+            state.selected_chat_row().unwrap().parent_chat_id.as_deref(),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn remote_fork_waits_for_registry_then_observes_deletion() {
+        let mut state = AppState::new();
+        let mut side = chat("side", 1, None);
+        side.parent_chat_id = Some("main".into());
+        state.selected_chat = Some(side.id.clone());
+        state.pending_side_chat = Some(side.clone());
+        state.apply_chats(vec![]);
+        assert_eq!(state.selected_chat.as_deref(), Some("side"));
+        state.apply_chats(vec![side]);
+        assert!(state.pending_side_chat.is_none());
+        state.apply_chats(vec![]);
+        assert_eq!(state.selected_chat, None);
+    }
+
+    #[test]
     fn jump_slots_count_the_rows_the_sidebar_draws() {
         let now = Utc::now();
         let mut state = AppState::new();
@@ -4371,6 +4547,44 @@ mod tests {
         // An already archived chat stays put — the shortcut never unarchives.
         state.selected_chat = Some("a".into());
         assert_eq!(state.archivable_selected_chat(), None);
+    }
+
+    #[test]
+    fn a_send_held_in_the_queue_drops_its_echo_and_pending_overlay() {
+        let mut state = AppState::new();
+        state.selected_chat = Some("c1".into());
+        let echo = |id: &str| SessionMessageEntry {
+            id: id.into(),
+            role: zeron_doc::MessageRole::User,
+            parts: vec![],
+            created_at: 0,
+            device_id: "local".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let row = |id: &str| zeron_doc::QueuedMessage {
+            id: id.into(),
+            text: "held".into(),
+            attachments: vec![],
+            hold_for_turn_end: false,
+            issued_by: "local".into(),
+            issued_at: 0,
+            edited_at: None,
+            delivery_gate: None,
+        };
+        state.push_echo("c1", echo("held"));
+        state.push_echo("c1", echo("sent"));
+        state.begin_pending_send("c1", "held", Utc::now());
+        state.apply_queue(vec![row("held")]);
+        let ids: Vec<_> = state
+            .pending_echoes()
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["sent"]);
+        assert!(!state.pending_sends.contains_key("c1"));
+        assert_eq!(state.queue.len(), 1);
     }
 
     #[test]

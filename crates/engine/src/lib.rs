@@ -901,6 +901,9 @@ impl Engine {
             stop_tx,
         });
         let server = serve_ipc(config.ipc_port, service).await?;
+        // Only a port this process actually serves goes to agents: the
+        // injected MCP server must dial back into THIS engine.
+        runtime.core().sessions.set_ipc_port(config.ipc_port);
 
         tokio::select! {
             result = shutdown_signal() => result?,

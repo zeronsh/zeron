@@ -438,11 +438,11 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 frame(window, cx, None, "inactive-event").await;
                 window
                     .update(cx, |shell, _, _| {
-                        assert!(
-                            !shell
-                                .file_surface_keys
-                                .contains_key(&("second".into(), "README.md".into()))
-                        )
+                        assert!(!shell.file_surface_keys.contains_key(&(
+                            "second".into(),
+                            "second".into(),
+                            "README.md".into()
+                        )))
                     })
                     .unwrap();
                 state.update(cx, |state, cx| state.select_chat(Some("first".into()), cx));
@@ -462,11 +462,12 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 )
                 .unwrap();
                 wait_for(window, cx, "renamed file and tab", |shell, cx| {
-                    shell
-                        .file_surface_keys
-                        .contains_key(&("first".into(), "src/nested/renamed.rs".into()))
-                        && shell.files["first"].read(cx).tree().selected()
-                            == Some("src/nested/renamed.rs")
+                    shell.file_surface_keys.contains_key(&(
+                        "first".into(),
+                        "first".into(),
+                        "src/nested/renamed.rs".into(),
+                    )) && shell.files["first"].read(cx).tree().selected()
+                        == Some("src/nested/renamed.rs")
                 })
                 .await;
                 std::fs::remove_file(project.join("src/nested/renamed.rs")).unwrap();

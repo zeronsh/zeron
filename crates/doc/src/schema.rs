@@ -92,6 +92,12 @@ struct DocPartJson {
     resolved: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+    /// Fork seam (`kind: "fork"`, additive): the chat the history above was
+    /// copied from, and its title at the time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_title: Option<String>,
     /// Tool output summary (additive — absent on old rows and old writers;
     /// pre-strip writers stored up to 4KB of capped output here).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -207,6 +213,17 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             message: Some(message.clone()),
             ..Default::default()
         },
+        MessagePart::Fork {
+            id,
+            source_chat_id,
+            source_title,
+        } => DocPartJson {
+            id: id.clone(),
+            kind: "fork".into(),
+            source_chat_id: Some(source_chat_id.clone()),
+            source_title: Some(source_title.clone()),
+            ..Default::default()
+        },
     })
 }
 
@@ -256,6 +273,11 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
         "reasoning" => MessagePart::Reasoning {
             id: p.id,
             text: p.reasoning.unwrap_or_default(),
+        },
+        "fork" => MessagePart::Fork {
+            id: p.id,
+            source_chat_id: p.source_chat_id.unwrap_or_default(),
+            source_title: p.source_title.unwrap_or_default(),
         },
         _ => MessagePart::Text {
             id: p.id,
@@ -350,6 +372,25 @@ impl SessionDoc {
     pub fn clear_context_usage(&self) -> Result<(), DocError> {
         self.doc.get_map("meta").delete("contextUsage")?;
         self.doc.commit();
+        Ok(())
+    }
+
+    /// The provider session that received a fork's copied history — a side
+    /// chat's bootstrap is owed to any other session it continues in.
+    pub fn fork_history_session(&self) -> Option<String> {
+        match self.doc.get_map("meta").get("forkHistorySession") {
+            Some(loro::ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),
+            _ => None,
+        }
+    }
+
+    pub fn set_fork_history_session(&self, session_id: &str) -> Result<(), DocError> {
+        if self.fork_history_session().as_deref() != Some(session_id) {
+            self.doc
+                .get_map("meta")
+                .insert("forkHistorySession", session_id)?;
+            self.doc.commit();
+        }
         Ok(())
     }
 
@@ -823,6 +864,14 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     }
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
+    }
+    for (key, value) in [
+        ("sourceChatId", &doc_part.source_chat_id),
+        ("sourceTitle", &doc_part.source_title),
+    ] {
+        if let Some(value) = value {
+            map.insert(key, value.as_str())?;
+        }
     }
     if let Some(output) = &doc_part.output {
         map.insert("output", output.as_str())?;
@@ -1353,6 +1402,31 @@ pub fn materialize_tail(
 mod tests {
     use super::*;
     use crate::parts::fold_event_into_parts;
+
+    #[test]
+    fn fork_seam_round_trips_through_the_doc() {
+        let doc = SessionDoc::init("fork").unwrap();
+        let seam = MessagePart::Fork {
+            id: "fork:side".into(),
+            source_chat_id: "main".into(),
+            source_title: "Main conversation".into(),
+        };
+        doc.push_message(&SessionMessageEntry {
+            duration_ms: None,
+            id: "fork:side".into(),
+            role: MessageRole::System,
+            parts: vec![seam.clone()],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        })
+        .unwrap();
+        let entries = doc.read_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].role, MessageRole::System);
+        assert_eq!(entries[0].parts, vec![seam]);
+    }
     use zeron_proto::{AgentEvent, ToolCall};
 
     #[test]

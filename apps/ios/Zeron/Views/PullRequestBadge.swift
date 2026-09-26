@@ -35,11 +35,9 @@ struct PullRequestBadge: View {
             guard let url = URL(string: summary.url) else { return }
             openURL(url)
         } label: {
-            HStack(spacing: composer ? 6 : 0) {
-                if composer {
-                    LineIconView(.pullRequest, size: 14, color: summary.state.badgeColor.opacity(0.9))
-                }
-                Text("#\(summary.number)")
+            HStack(spacing: composer ? 6 : 3) {
+                LineIconView(.pullRequest, size: composer ? 14 : 10, color: summary.state.badgeColor.opacity(0.9))
+                Text("\(summary.number)")
                     .font(Theme.mono(composer ? 12 : 10, weight: .medium))
                     .lineLimit(1)
             }

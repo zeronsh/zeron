@@ -909,6 +909,7 @@ impl RegistryDoc {
                 opt_str(chat.harness_session_cwd.as_deref()),
             ),
             ("spaceId", opt_str(chat.space_id.as_deref())),
+            ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
             ("lastSeenAt", opt_ms(chat.last_seen_at)),
             (
                 "roomGen",
@@ -1332,6 +1333,7 @@ impl RegistryDoc {
                         opt_str(chat.harness_session_cwd.as_deref()),
                     ),
                     ("spaceId", opt_str(chat.space_id.as_deref())),
+                    ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
                     ("lastSeenAt", opt_ms(chat.last_seen_at)),
                     ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
                 ]),

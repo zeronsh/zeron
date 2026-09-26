@@ -557,6 +557,11 @@ pub struct ChatDocHandle {
     /// the turn and starting its own the chat reads Idle, and an idle chat with
     /// a queue is exactly what the flush drains.
     drain_lock: tokio::sync::Mutex<()>,
+    /// Serialize prompt commands while still allowing interrupt/input controls.
+    command_drain_lock: tokio::sync::Mutex<()>,
+    /// Queue rows held as explicit steers for a turn-boundary agent. They
+    /// lead ordinary queued rows, in the order they were steered.
+    steered_rows: Mutex<Vec<String>>,
     /// An explicit user interrupt freezes automatic queue delivery. The next
     /// explicit prompt or queue send resumes it; incidental doc/status changes
     /// must not turn Cancel into "send the next row".
@@ -713,6 +718,20 @@ impl ChatDocHandle {
         let rx = self.queue_tx.subscribe();
         self.publish_queue();
         rx
+    }
+
+    /// Where a newly steered row goes: after the rows already steered, ahead
+    /// of every ordinary row. Records `id` as steered.
+    fn steer_slot(&self, id: &str) -> Result<usize, DocError> {
+        let mut steered = lock(&self.steered_rows);
+        let queue = self.doc.read_queue()?;
+        steered.retain(|row| queue.iter().any(|q| &q.id == row));
+        let slot = queue
+            .iter()
+            .take_while(|row| steered.contains(&row.id))
+            .count();
+        steered.push(id.to_string());
+        Ok(slot)
     }
 
     fn publish_queue(&self) {
@@ -1477,6 +1496,8 @@ impl DocHost {
             transcript_history,
             queue_tx,
             drain_lock: tokio::sync::Mutex::new(()),
+            command_drain_lock: tokio::sync::Mutex::new(()),
+            steered_rows: Mutex::new(Vec::new()),
             queue_paused: AtomicBool::new(recovered_queue_pending),
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
@@ -3848,8 +3869,8 @@ impl DocHost {
 
     /// Promote one held row without ever interrupting a turn. A live,
     /// steerable turn receives it as steering; if that turn has already ended,
-    /// it starts normally as the next turn. Unsupported harnesses and
-    /// attachment-bearing rows stay untouched.
+    /// it starts normally as the next turn. Turn-boundary providers retain it
+    /// in their mailbox until ready. Attachment-bearing rows stay untouched.
     pub async fn steer_queued_now(&self, chat_id: &str, id: &str) -> Result<bool, EngineError> {
         if !self.is_host(chat_id) {
             return Err(EngineError::Other(format!(
@@ -3859,14 +3880,6 @@ impl DocHost {
         }
         let handle = self.open(chat_id)?;
         let _drain = handle.drain_lock.lock().await;
-        let Some(sessions) = self.sessions() else {
-            return Err(EngineError::Other("sessions engine not wired".into()));
-        };
-        if !sessions.steers_mid_turn(self.harness_for(chat_id)) {
-            return Err(EngineError::Other(
-                "the selected agent cannot accept mid-turn steering".into(),
-            ));
-        }
         let Some(candidate) = handle
             .doc
             .read_queue()?
@@ -3884,6 +3897,22 @@ impl DocHost {
             return Err(EngineError::Other(
                 "queued message is blocked for editing or review".into(),
             ));
+        }
+        if self
+            .sessions()
+            .is_some_and(|sessions| sessions.defers_to_turn_end(chat_id, None))
+        {
+            // Send next: lead the ordinary rows; the drain delivers it the
+            // moment the current turn ends.
+            let Some(item) = handle.doc.take_queued(id)? else {
+                return Ok(false);
+            };
+            handle
+                .doc
+                .insert_queued(handle.steer_slot(&item.id)?, &item)?;
+            handle.queue_paused.store(false, Ordering::Release);
+            handle.publish_queue();
+            return Ok(true);
         }
         let Some(item) = handle.doc.take_queued(id)? else {
             return Ok(false);
@@ -3972,6 +4001,7 @@ impl DocHost {
             let Ok(Some(item)) = handle.doc.take_queued(&head.id) else {
                 return;
             };
+            lock(&handle.steered_rows).retain(|row| row != &item.id);
             handle.publish_queue();
             if let Err(err) = self.dispatch_queued(handle, &item, send).await {
                 tracing::warn!(chat = %handle.chat_id, error = %err, "queued send failed");
@@ -4487,6 +4517,14 @@ impl DocHost {
         let sessions = self
             .sessions()
             .ok_or_else(|| EngineError::Other("executor unavailable".into()))?;
+        let _prompt_guard = if matches!(
+            entry.payload,
+            SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
+        ) {
+            Some(handle.command_drain_lock.lock().await)
+        } else {
+            None
+        };
         let commands = handle.doc.read_commands()?;
         let messages = handle.doc.read_entries().unwrap_or_default();
         let current_turn_id = messages.last().map(|m| m.id.clone());
@@ -4768,12 +4806,24 @@ impl DocHost {
     /// Drain pending commands (host-only): evaluate → mark processed BEFORE execute →
     /// execute → write the outcome as the sole outcome writer.
     pub async fn drain_commands(&self, handle: &Arc<ChatDocHandle>) {
+        self.drain_command_kind(handle, false).await;
+    }
+
+    async fn drain_command_kind(&self, handle: &Arc<ChatDocHandle>, controls_only: bool) {
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet (or retired); the set_sessions kick re-drains
         };
         if !self.is_host(&handle.chat_id) {
             return;
         }
+        // Do not let another drain overtake a prompt waiting for mailbox
+        // capacity (or preflight). Controls bypass this lock so a stalled
+        // provider can still be interrupted or have its question answered.
+        let mut prompt_guard = if controls_only {
+            None
+        } else {
+            handle.command_drain_lock.try_lock().ok()
+        };
         // Entries this pass decided to leave alone (processed dedupe hits).
         let mut skipped: HashSet<String> = HashSet::new();
         loop {
@@ -4814,9 +4864,21 @@ impl DocHost {
                     c.status == SessionCommandStatus::Pending
                         && !skipped.contains(&c.id)
                         && !is_processed(&c.id)
+                        && (prompt_guard.is_some()
+                            || !matches!(
+                                c.payload,
+                                SessionCommandPayload::Run { .. }
+                                    | SessionCommandPayload::Steer { .. }
+                            ))
                 })
                 .cloned()
             else {
+                if prompt_guard.is_none() && !controls_only {
+                    // Wait after handling controls, then re-read: simply
+                    // returning here could miss a newly appended prompt.
+                    prompt_guard = Some(handle.command_drain_lock.lock().await);
+                    continue;
+                }
                 return;
             };
             let messages = handle.doc.read_entries().unwrap_or_default();
@@ -5094,6 +5156,19 @@ impl DocHost {
                         tracing::warn!(chat = %chat_id, error = %err, "run-config backfill failed");
                     }
                 }
+                if sessions.defers_to_turn_end(chat_id, Some((harness, &request))) {
+                    self.hold_until_turn_end(
+                        handle,
+                        message_id,
+                        &request.prompt,
+                        entry.issued_at,
+                        false,
+                    )?;
+                    return Ok((
+                        SessionCommandStatus::Applied,
+                        Some("held until the turn ends".into()),
+                    ));
+                }
                 // Timestamp canonicalization: the user message lands in
                 // history at the moment the user SENT it (the entry's
                 // issued_at, clamped against clock skew) — not whenever this
@@ -5205,6 +5280,43 @@ impl DocHost {
         }
     }
 
+    /// Park a prompt for a turn-boundary agent in the visible queue instead
+    /// of its mailbox, keeping the message id so the transcript entry written
+    /// at delivery is the same message. Steers lead ordinary rows.
+    fn hold_until_turn_end(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        message_id: &str,
+        prompt: &str,
+        issued_at: i64,
+        steer: bool,
+    ) -> Result<(), EngineError> {
+        let item = QueuedMessage {
+            id: message_id.to_string(),
+            text: prompt.to_string(),
+            attachments: Vec::new(),
+            hold_for_turn_end: false,
+            issued_by: self.inner.config.device_id.clone(),
+            issued_at: issued_at.min(now_ms()),
+            edited_at: None,
+            delivery_gate: None,
+        };
+        if handle.doc.read_queue()?.iter().any(|row| row.id == item.id) {
+            return Ok(()); // a redelivered command: already held
+        }
+        if steer {
+            handle
+                .doc
+                .insert_queued(handle.steer_slot(&item.id)?, &item)?;
+        } else {
+            handle.doc.push_queued(&item)?;
+        }
+        // Sending is the deliberate action that thaws a queue frozen by Cancel.
+        handle.queue_paused.store(false, Ordering::Release);
+        handle.publish_queue();
+        Ok(())
+    }
+
     /// Put a typed prompt in front of a live agent: steer it in, or — with no
     /// live steerable run — deliver the durable command as the next turn.
     /// After an engine restart `last_request` is empty too, so rebuild the run
@@ -5212,8 +5324,7 @@ impl DocHost {
     /// the chat row the same way — sessions.ts:601-620); dispatch's engine-owned
     /// resume then reattaches the prior harness conversation.
     ///
-    /// A working agent that only takes prompts at a turn boundary is the
-    /// exception: see [`Self::held_until_turn_end`].
+    /// Turn-boundary drivers retain explicit steers until their next boundary.
     async fn deliver_prompt(
         &self,
         sessions: &SessionsEngine,
@@ -5223,14 +5334,29 @@ impl DocHost {
         issued_at: i64,
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
-        // Keep upstream's queued-attachment rewrite and send-time canonical
-        // history while preserving the personal cut's turn-boundary queue.
+        // Explicit steering uses the run mailbox when the agent reads it
+        // mid-turn. A turn-boundary agent would read it only after the turn,
+        // so it waits in the queue, ahead of ordinary rows, and reaches the
+        // transcript when it is actually delivered. Never interrupt to hurry
+        // steering.
         let prompt = self.resolve_prompt_attachments(prompt);
-        if self.held_until_turn_end(sessions, chat_id, &prompt, message_id.as_deref())? {
+        if !prompt.trim().is_empty() && sessions.defers_to_turn_end(chat_id, None) {
+            let id = message_id.unwrap_or_else(new_id);
+            self.hold_until_turn_end(handle, &id, &prompt, issued_at, true)?;
             return Ok((
                 SessionCommandStatus::Applied,
                 Some("held until the turn ends".into()),
             ));
+        }
+        // The transcript shows the send while mailbox backpressure holds it.
+        // A pending agent update instead holds it in the queue below, where a
+        // transcript copy would duplicate it until the update finishes.
+        if !sessions.live_run_update_pending(chat_id)
+            && let Some(message_id) = message_id.as_deref()
+            && let Err(err) =
+                handle.write_user_message(message_id, &prompt, issued_at.min(now_ms()))
+        {
+            tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
         }
         match sessions
             .steer_at(chat_id, &prompt, message_id.clone(), issued_at)
@@ -5268,7 +5394,8 @@ impl DocHost {
                 ))
             }
             SteerOutcome::DeferredByUpdate => {
-                self.hold_prompt(chat_id, &prompt, message_id.as_deref())?;
+                let id = message_id.unwrap_or_else(new_id);
+                self.hold_until_turn_end(handle, &id, &prompt, issued_at, true)?;
                 // The completed turn's status publication normally re-drains
                 // this queue. Also cover completion racing the enqueue itself.
                 self.drain_queue(handle).await;
@@ -5278,61 +5405,6 @@ impl DocHost {
                 ))
             }
         }
-    }
-
-    /// Put `prompt` in the pending-message queue instead of a run mailbox when
-    /// the agent is working and takes prompts only between turns. `true` when it
-    /// was queued.
-    ///
-    /// A turn-boundary agent has no mid-turn mailbox: what it has is a next
-    /// prompt. Posting into the run's mailbox anyway made delivery depend on how
-    /// the turn ended — a turn that was interrupted or errored discarded the
-    /// mailbox, and the message sat in the transcript looking sent, unread. The
-    /// queue is the honest home: shown as pending rather than sent, editable,
-    /// and flushed by the turn-end watcher, which is where [`Self::drain_queue`]
-    /// already sends a typed message for exactly this agent. `steers_mid_turn`
-    /// is a catalog lookup — no spawn, no probe.
-    fn held_until_turn_end(
-        &self,
-        sessions: &SessionsEngine,
-        chat_id: &str,
-        prompt: &str,
-        message_id: Option<&str>,
-    ) -> Result<bool, EngineError> {
-        // A persistent session parked BETWEEN turns DOES take the next prompt
-        // through its mailbox (the warm-child fast path), so the question is
-        // whether a turn is in flight — including one parked on a question,
-        // which is the state a question's own follow-up arrives in. An empty
-        // prompt is no message to queue.
-        if !sessions.turn_in_flight(chat_id)
-            || prompt.trim().is_empty()
-            || sessions.steers_mid_turn(self.harness_for(chat_id))
-        {
-            return Ok(false);
-        }
-        self.hold_prompt(chat_id, prompt, message_id)?;
-        Ok(true)
-    }
-
-    fn hold_prompt(
-        &self,
-        chat_id: &str,
-        prompt: &str,
-        message_id: Option<&str>,
-    ) -> Result<(), EngineError> {
-        let handle = self.open(chat_id)?;
-        handle.doc.push_queued(&QueuedMessage {
-            id: message_id.map(str::to_string).unwrap_or_else(new_id),
-            text: prompt.to_string(),
-            attachments: Vec::new(),
-            hold_for_turn_end: false,
-            issued_by: self.inner.config.device_id.clone(),
-            issued_at: now_ms(),
-            edited_at: None,
-            delivery_gate: None,
-        })?;
-        handle.publish_queue();
-        Ok(())
     }
 
     async fn capture_source_context(&self, cwd: &str) -> Option<ConversationSourceContext> {
@@ -5510,6 +5582,7 @@ impl DocHost {
         };
         let config = chat.config;
         Some(zeron_proto::RunRequest {
+            mcp: None,
             prompt: prompt.to_string(),
             harness: config.as_ref().map(|c| c.harness),
             model: config.as_ref().and_then(|c| c.model.clone()),
@@ -5561,6 +5634,14 @@ impl DocHost {
                 tracing::warn!(chat = %handle.chat_id, error = %err, "snapshot export failed");
             }
         }
+    }
+
+    /// A fork must be durable before publishing its discoverable registry row.
+    pub(crate) fn persist_fork(&self, handle: &ChatDocHandle) -> Result<(), EngineError> {
+        let bytes = handle.doc.export_snapshot()?;
+        self.inner.store.save_snapshot(&handle.chat_id, &bytes)?;
+        handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
+        Ok(())
     }
 
     /// Persist every open doc now (shutdown path; bypasses the debounce).
@@ -5975,6 +6056,23 @@ mod queued_message_prompt_tests {
 /// by re-publishing the transcript watch, draining commands, and debouncing snapshots.
 /// Holds only a weak handle so a dropped host tears the task down.
 async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: watch::Receiver<u64>) {
+    // Prompt delivery may wait for mailbox capacity. Keep a separate watcher
+    // for interrupt/question controls so that wait cannot block recovery.
+    let control_host = host.clone();
+    let control_weak = weak.clone();
+    let mut control_changes = changed_rx.clone();
+    host.spawn_worker(async move {
+        loop {
+            let Some(handle) = control_weak.upgrade() else {
+                break;
+            };
+            control_host.drain_command_kind(&handle, true).await;
+            drop(handle);
+            if control_changes.changed().await.is_err() {
+                break;
+            }
+        }
+    });
     // Initial pass: the snapshot may already carry pending commands. The
     // mirror stays lazy — it materializes on the first watch attach.
     {

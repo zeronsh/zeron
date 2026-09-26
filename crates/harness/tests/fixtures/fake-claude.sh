@@ -118,9 +118,38 @@ case "$first" in
   emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"first"}}}'
   # The queued steering user line, applied at "the step boundary" (here: now).
   read -r steer || exit 1
+  case "$steer" in *'"priority":"now"'*) ;; *) exit 9 ;; esac
+  # Old output continues until Claude actually consumes the input.
+  emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"-still-first"}}}'
+  emit "$steer"
   content=$(printf '%s\n' "$steer" | sed 's/.*"content":"\([^"]*\)".*/\1/')
   emit "{\"type\":\"stream_event\",\"parent_tool_use_id\":null,\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"steered:$content\"}}}"
   emit '{"type":"result","subtype":"success","result":"steered","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-steer"}'
+  ;;
+
+*scenario:superseded-steers*)
+  # CLI 2.1.280 with rapid `now` steers: the second interrupts the turn the
+  # first started before it is replayed; only the last steer is replayed.
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-sup"}'
+  emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"story"}}}'
+  read -r steer1 || exit 1
+  read -r steer2 || exit 1
+  emit '{"type":"result","subtype":"success","result":"story","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-sup"}'
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-sup"}'
+  emit '{"type":"result","subtype":"error_during_execution","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-sup"}'
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-sup"}'
+  emit "$steer2"
+  emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"answered-both"}}}'
+  emit '{"type":"result","subtype":"success","result":"answered-both","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-sup"}'
+  ;;
+
+*scenario:absorbed-steer*)
+  # A steer whose replay never comes: the turn end must not be held forever.
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-abs"}'
+  read -r steer || exit 1
+  emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"absorbed"}}}'
+  emit '{"type":"result","subtype":"success","result":"absorbed","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-abs"}'
+  exec sleep 30
   ;;
 
 *scenario:interrupt*)

@@ -15,6 +15,7 @@ struct TurnWire {
     requests: mpsc::UnboundedReceiver<String>,
     events: mpsc::Receiver<Result<AgentEvent, HarnessError>>,
     interrupt: tokio_util::sync::CancellationToken,
+    steering: Option<mpsc::Sender<crate::SteerMessage>>,
     polls: Arc<std::sync::atomic::AtomicUsize>,
     command_failure_release: Option<tokio::sync::oneshot::Sender<()>>,
     server: tokio::task::JoinHandle<()>,
@@ -240,7 +241,10 @@ impl TurnWire {
                 .await
                 .unwrap();
         }
-        drop(steer_tx);
+        let retained_steering = overrides["keepSteering"]
+            .as_bool()
+            .unwrap_or(false)
+            .then_some(steer_tx);
         let interrupt = tokio_util::sync::CancellationToken::new();
         let mut request = json!({"prompt": if native_command_reply.is_some() { "/project-review" } else { "first" }, "cwd":"", "sandbox":"workspace-write", "autoApprove": auto_approve, "model": if v2 { Some("opencode/muse") } else { None }, "reasoning": "low"});
         request
@@ -290,6 +294,7 @@ impl TurnWire {
             requests,
             events,
             interrupt,
+            steering: retained_steering,
             polls,
             command_failure_release: matches!(
                 native_command_reply,
@@ -298,6 +303,26 @@ impl TurnWire {
             .then_some(command_failure_release),
             server,
             run,
+        }
+    }
+
+    /// Requests whose relative order the fixture's concurrent HTTP handlers
+    /// do not preserve.
+    async fn requests_any_order(&mut self, suffixes: &[&str]) {
+        let mut seen = Vec::new();
+        for _ in suffixes {
+            seen.push(
+                tokio::time::timeout(Duration::from_secs(5), self.requests.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        for suffix in suffixes {
+            assert!(
+                seen.iter().any(|path| path.ends_with(suffix)),
+                "missing {suffix}: {seen:?}"
+            );
         }
     }
 
@@ -363,10 +388,51 @@ impl TurnWire {
 }
 
 #[tokio::test]
+async fn completed_turn_keeps_mailbox_alive_for_the_next_queued_request() {
+    let mut wire = TurnWire::start_config(
+        false,
+        false,
+        true,
+        None,
+        "1.18.21",
+        json!({ "keepSteering": true }),
+        false,
+    )
+    .await;
+    wire.request("/prompt_async").await;
+    wire.status("busy");
+    wire.status("idle");
+    wire.idle();
+    assert_eq!(wire.done().await.0, DoneStatus::Completed);
+    assert!(!wire.run.is_finished());
+    wire.steering
+        .as_ref()
+        .unwrap()
+        .send(crate::SteerMessage {
+            prompt: "after completion".into(),
+            message_id: Some("second".into()),
+        })
+        .await
+        .unwrap();
+    wire.request("/prompt_async").await;
+    wire.status("busy");
+    wire.status("idle");
+    wire.idle();
+    assert_eq!(wire.done().await.0, DoneStatus::Completed);
+    assert!(!wire.run.is_finished());
+    drop(wire.steering.take());
+    tokio::time::timeout(Duration::from_secs(5), &mut wire.run)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn queued_turn_ignores_previous_turn_duplicate_idle() {
     for status_first in [true, false] {
         let mut wire = TurnWire::start(true).await;
-        wire.request("/prompt_async").await;
+        // The queued steer preempts the generation at once.
+        wire.requests_any_order(&["/prompt_async", "/abort"]).await;
         wire.status("busy");
         // Both completion encodings belong to the first turn. The first frame
         // submits the queued prompt; the second must not finish that new turn.
@@ -436,7 +502,8 @@ async fn native_command_http_failures_settle_the_current_turn() {
 #[tokio::test]
 async fn late_native_command_failure_does_not_poison_the_queued_turn() {
     let mut wire = TurnWire::start_native_command(true, NativeCommandReply::DelayedHttp404).await;
-    wire.request("/command").await;
+    // The queued steer preempts the generation at once.
+    wire.requests_any_order(&["/command", "/abort"]).await;
     wire.status("busy");
     wire.status("idle");
     wire.request("/prompt_async").await;
@@ -1038,6 +1105,29 @@ fn tool_parts_open_and_resolve_once() {
         [AgentEvent::ToolResult { id, is_error: false, output: Some(o), .. }]
             if id == "call-1" && o == "ok\n"
     ));
+}
+
+/// A running tool that takes no arguments is open too: steering preempts
+/// only when no tool is open, so an unseen one would be aborted.
+#[test]
+fn a_running_tool_without_arguments_opens_before_it_completes() {
+    let mut feed = feed_with_assistant("msg_a");
+    let pending = json!({
+        "id": "prt_w", "messageID": "msg_a", "sessionID": "ses_1",
+        "type": "tool", "tool": "slow_slow_wait", "callID": "call-w",
+        "state": {"status": "pending", "input": {}},
+    });
+    assert!(part_snapshot_events(&mut feed, &pending, true, None).is_empty());
+    let running = json!({
+        "id": "prt_w", "messageID": "msg_a", "sessionID": "ses_1",
+        "type": "tool", "tool": "slow_slow_wait", "callID": "call-w",
+        "state": {"status": "running", "input": {}},
+    });
+    let events = part_snapshot_events(&mut feed, &running, true, None);
+    assert!(
+        matches!(events.as_slice(), [AgentEvent::ToolCall { id, .. }] if id == "call-w"),
+        "{events:?}"
+    );
 }
 
 #[test]

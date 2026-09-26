@@ -225,9 +225,11 @@ pub struct Chat {
     /// dials the room the registry names. Per-chat and instantly revertible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_gen: Option<u32>,
-    /// The chat whose agent created this one (via the Zeron MCP server):
-    /// a parent → child link for orchestration trees. Absent for chats a
-    /// human started; a dangling id (parent deleted) is tolerated.
+    /// The chat this one hangs off: the conversation a side chat was forked
+    /// from, or the chat whose agent spawned this one through the Zeron MCP
+    /// server. Children stay out of the main sidebar and list under their
+    /// parent instead. Absent for top-level chats; a dangling id (parent
+    /// deleted) is tolerated rather than cascaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
 }

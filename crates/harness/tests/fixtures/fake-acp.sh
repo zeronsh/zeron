@@ -53,6 +53,10 @@ if has "$line" '"method":"session/load"'; then
     # drain these without emitting events (the doc already has them) and
     # without deadlocking on a full incoming channel.
     i=0
+    if has "$line" '"sessionId":"mcp-loaded"'; then
+      SID="mcp-loaded"
+      i=300
+    fi
     while [ $i -lt 300 ]; do
       update '{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"old prompt"}}'
       update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"old reply"}}'
@@ -65,7 +69,7 @@ if has "$line" '"method":"session/load"'; then
     fi
   fi
 elif has "$line" '"method":"session/new"'; then
-  has "$line" '"mcpServers":[]' || exit 1
+  has "$line" '"mcpServers":[]' || has "$line" '"name":"zeron"' || exit 1
   # Advertise config options: model (current differs from the tests' request,
   # forcing a set) and thought_level (current high). The model config option
   # feeds discovery first; the first-class `models` state (SessionModelState)
@@ -104,6 +108,15 @@ has "$promptline" '"method":"session/prompt"' || exit 1
 pid=$(rid "$promptline")
 
 case "$promptline" in
+
+*scenario:mcp*)
+  has "$line" '"command":"/path with spaces/zeron"' || exit 1
+  has "$line" '"args":["mcp"]' || exit 1
+  has "$line" '"name":"ZERON_CHAT_ID","value":"origin-chat"' || exit 1
+  has "$line" '"name":"ZERON_IPC_PORT","value":"27699"' || exit 1
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"mcp configured"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
 
 *scenario:model-api*)
   if has "$MODEL_SETS" '"modelId":"grok-4.5"'; then
