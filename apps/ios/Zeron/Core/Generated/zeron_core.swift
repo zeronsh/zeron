@@ -3144,6 +3144,12 @@ public func FfiConverterTypeTextSystem_lower(_ value: TextSystem) -> UInt64 {
  */
 public protocol TranscriptViewProtocol: AnyObject, Sendable {
     
+    /**
+     * Follow a session's transcript: every snapshot (coalesced by the
+     * client) becomes a layout input. Returns false for an unknown chat.
+     */
+    func attach(client: CoreClient, chatId: String)  -> Bool
+    
     func close() 
     
     /**
@@ -3229,6 +3235,21 @@ public convenience init(text: TextSystem, listener: LayoutListener) {
 
     
 
+    
+    /**
+     * Follow a session's transcript: every snapshot (coalesced by the
+     * client) becomes a layout input. Returns false for an unknown chat.
+     */
+open func attach(client: CoreClient, chatId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_transcriptview_attach(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeCoreClient_lower(client),
+        FfiConverterString.lower(chatId),uniffiCallStatus
+    )
+})
+}
     
 open func close()  {try! rustCall() {
         uniffiCallStatus in
@@ -10374,7 +10395,13 @@ public enum WidgetKind: Equatable, Hashable {
     case image(reference: String
     )
     /**
-     * Working indicator at the tail of a live turn.
+     * Working indicator at the tail of a live turn. The painter ticks the
+     * elapsed label itself so time never forces a relayout.
+     */
+    case working(sinceMs: Int64?, streaming: Bool
+    )
+    /**
+     * A small activity spinner (running tools).
      */
     case spinner
     /**
@@ -10414,9 +10441,12 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
         case 4: return .image(reference: try FfiConverterString.read(from: &buf)
         )
         
-        case 5: return .spinner
+        case 5: return .working(sinceMs: try FfiConverterOptionInt64.read(from: &buf), streaming: try FfiConverterBool.read(from: &buf)
+        )
         
-        case 6: return .icon(name: try FfiConverterString.read(from: &buf), color: try FfiConverterTypeColorRole.read(from: &buf)
+        case 6: return .spinner
+        
+        case 7: return .icon(name: try FfiConverterString.read(from: &buf), color: try FfiConverterTypeColorRole.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -10447,12 +10477,18 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
             FfiConverterString.write(reference, into: &buf)
             
         
-        case .spinner:
+        case let .working(sinceMs,streaming):
             writeInt(&buf, Int32(5))
+            FfiConverterOptionInt64.write(sinceMs, into: &buf)
+            FfiConverterBool.write(streaming, into: &buf)
+            
+        
+        case .spinner:
+            writeInt(&buf, Int32(6))
         
         
         case let .icon(name,color):
-            writeInt(&buf, Int32(6))
+            writeInt(&buf, Int32(7))
             FfiConverterString.write(name, into: &buf)
             FfiConverterTypeColorRole.write(color, into: &buf)
             
@@ -12420,6 +12456,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_platformmeasurer_measure() != 59931) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_transcriptview_attach() != 3138) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_transcriptview_close() != 21021) {

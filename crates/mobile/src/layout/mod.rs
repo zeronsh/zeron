@@ -314,6 +314,8 @@ struct Shared {
 pub struct TranscriptView {
     tx: Mutex<Sender<Msg>>,
     shared: Arc<Shared>,
+    /// Live session subscription (Rust→Rust; rows never cross FFI).
+    watch: Mutex<Option<zeron_client::SnapshotWatch>>,
 }
 
 #[uniffi::export]
@@ -332,7 +334,36 @@ impl TranscriptView {
         Arc::new(Self {
             tx: Mutex::new(tx),
             shared,
+            watch: Mutex::new(None),
         })
+    }
+
+    /// Follow a session's transcript: every snapshot (coalesced by the
+    /// client) becomes a layout input. Returns false for an unknown chat.
+    pub fn attach(&self, client: Arc<crate::client_ffi::CoreClient>, chat_id: String) -> bool {
+        let Some(handle) = client.session_handle(&chat_id) else {
+            return false;
+        };
+        let tx = Mutex::new(self.tx.lock().unwrap().clone());
+        let guard = handle.watch(move |snap| {
+            let input = TranscriptInput {
+                entries: snap.transcript_messages(),
+                pending: snap
+                    .pending
+                    .iter()
+                    .map(|p| PendingUser {
+                        id: p.message_id.clone(),
+                        text: p.text.clone(),
+                    })
+                    .collect(),
+                working: snap.working,
+                working_since_ms: snap.working_since_ms,
+                streaming: snap.streaming,
+            };
+            let _ = tx.lock().unwrap().send(Msg::Input(input));
+        });
+        *self.watch.lock().unwrap() = Some(guard);
+        true
     }
 
     pub fn set_viewport(&self, width: f32, text_scale: f32) {
@@ -358,6 +389,7 @@ impl TranscriptView {
     }
 
     pub fn close(&self) {
+        self.watch.lock().unwrap().take();
         self.send(Msg::Shutdown);
     }
 }
@@ -401,6 +433,8 @@ pub(crate) fn debug_input(entries: Vec<DebugEntry>, working: bool) -> Transcript
             .collect(),
         pending: Vec::new(),
         working,
+        working_since_ms: None,
+        streaming: working,
     }
 }
 

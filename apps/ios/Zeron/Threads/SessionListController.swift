@@ -281,21 +281,6 @@ final class FolderViewController: SessionListController {
     }
 }
 
-/// Every project with its sessions, collapsible like desktop's space groups.
-final class ProjectsViewController: SessionListController {
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        title = "Projects"
-        navigationItem.largeTitleDisplayMode = .always
-    }
-
-    override func buildSections() -> [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] {
-        app.projects.map { p in
-            (p.id, "\(p.name)  ·  \(p.device)", [], p.sessions)
-        }
-    }
-}
-
 final class PullRequestsViewController: SessionListController {
     override func viewDidLoad() {
         super.viewDidLoad()

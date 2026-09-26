@@ -124,6 +124,8 @@ final class RowView: UIView {
                 view = iv
             case .spinner:
                 view = DotGridView(style: .working)
+            case let .working(sinceMs, streaming):
+                view = WorkingIndicatorView(since: sinceMs.map { Date(timeIntervalSince1970: Double($0) / 1000) }, streaming: streaming)
             case let .icon(name, color):
                 let iv = UIImageView(image: UIImage(systemName: name, withConfiguration: UIImage.SymbolConfiguration(pointSize: rect.height * 0.8, weight: .medium)))
                 iv.tintColor = Palette.color(color)
@@ -233,5 +235,49 @@ final class ToolStatusView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         subviews.forEach { $0.frame = bounds }
+    }
+}
+
+/// Tail-of-turn indicator: dot-grid wave + "Working · 12s", ticking locally.
+final class WorkingIndicatorView: UIView {
+    private let grid = DotGridView(style: .working)
+    private let label = UILabel()
+    private let since: Date?
+    private let word: String
+    private var timer: Timer?
+
+    init(since: Date?, streaming: Bool) {
+        self.since = since
+        self.word = streaming ? "Writing" : "Working"
+        super.init(frame: .zero)
+        isUserInteractionEnabled = false
+        label.font = Fonts.ui(.sansMedium, UIFontMetrics(forTextStyle: .body).scaledValue(for: 13.5))
+        label.textColor = Palette.tertiary
+        addSubview(grid)
+        addSubview(label)
+        tick()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func tick() {
+        let secs = since.map { max(0, Int(Date().timeIntervalSince($0))) } ?? 0
+        label.text = secs > 0 ? "\(word) · \(StatusPill.elapsed(secs))" : "\(word)…"
+        label.sizeToFit()
+        setNeedsLayout()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        timer?.invalidate()
+        guard window != nil else { return }
+        tick()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        grid.frame = CGRect(x: 0, y: (bounds.height - 14) / 2, width: 14, height: 14)
+        label.frame = CGRect(x: 22, y: (bounds.height - label.bounds.height) / 2, width: label.bounds.width, height: label.bounds.height)
     }
 }

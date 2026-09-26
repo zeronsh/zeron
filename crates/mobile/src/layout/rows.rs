@@ -46,6 +46,8 @@ pub struct TranscriptInput {
     pub pending: Vec<PendingUser>,
     /// A turn is running (drives the tail working indicator).
     pub working: bool,
+    pub working_since_ms: Option<i64>,
+    pub streaming: bool,
 }
 
 pub(crate) fn row_key(id: &str) -> u64 {
@@ -97,7 +99,7 @@ pub(crate) enum Content {
     Tools(ToolGroup),
     Chip(Chip),
     Image { reference: String },
-    Working(PText),
+    Working { since_ms: Option<i64>, streaming: bool },
 }
 
 /// A width-independent row: identity, top gap class and prepared content.
@@ -289,22 +291,24 @@ impl RowBuilder {
         self.pending.retain(|id, _| live_pending.contains(id));
 
         if input.working {
-            let core = self
+            let stale = self
                 .working
-                .get_or_insert_with(|| {
-                    let (size, lh) = TYPE.small;
-                    let style = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
-                    let lh = ctx.typo.px(lh);
-                    Arc::new(RowCore {
-                        key: row_key("#working"),
-                        version: next_version(),
-                        kind: RowKind::Working,
-                        entry_id: Arc::from(""),
-                        content: Content::Working(prepare_plain(ctx, "Working…", style, lh, ColorRole::TextTertiary, WhiteSpace::Pre)),
-                        copy_text: String::new(),
-                    })
-                })
-                .clone();
+                .as_ref()
+                .is_none_or(|w| !matches!(&w.content, Content::Working { since_ms, streaming } if *since_ms == input.working_since_ms && *streaming == input.streaming));
+            if stale {
+                self.working = Some(Arc::new(RowCore {
+                    key: row_key("#working"),
+                    version: next_version(),
+                    kind: RowKind::Working,
+                    entry_id: Arc::from(""),
+                    content: Content::Working {
+                        since_ms: input.working_since_ms,
+                        streaming: input.streaming,
+                    },
+                    copy_text: String::new(),
+                }));
+            }
+            let core = self.working.clone().expect("set above");
             out.push(Placed { core, gap: Gap::Reply });
         }
         out
@@ -617,12 +621,17 @@ pub(crate) fn place_row(core: &RowCore, gap: Gap, px: Px, width: f32, mut out: O
             }
             side
         }
-        Content::Working(label) => {
+        Content::Working { since_ms, streaming } => {
             let h = px.v(WORKING);
             if let Some(out) = out {
-                let s = px.v(14.0);
-                out.widget(WidgetKind::Spinner, (x, top + (h - s) / 2.0, s, s), None);
-                place_text(label, x + px.v(22.0), top + (h - label.lh) / 2.0, cw, Some(out));
+                out.widget(
+                    WidgetKind::Working {
+                        since_ms: *since_ms,
+                        streaming: *streaming,
+                    },
+                    (x, top, cw, h),
+                    None,
+                );
             }
             h
         }

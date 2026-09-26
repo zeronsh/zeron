@@ -125,7 +125,10 @@ pub enum WidgetKind {
     ToolStatus { running: bool, failed: bool },
     /// A remote image to load into the rect (generated images, attachments).
     Image { reference: String },
-    /// Working indicator at the tail of a live turn.
+    /// Working indicator at the tail of a live turn. The painter ticks the
+    /// elapsed label itself so time never forces a relayout.
+    Working { since_ms: Option<i64>, streaming: bool },
+    /// A small activity spinner (running tools).
     Spinner,
     /// A small SF-symbol-like icon by name.
     Icon { name: String, color: ColorRole },
