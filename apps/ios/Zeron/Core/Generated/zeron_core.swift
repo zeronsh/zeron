@@ -646,6 +646,11 @@ public protocol LayoutFrameProtocol: AnyObject, Sendable {
     
     func placement(index: UInt32)  -> RowPlacement?
     
+    /**
+     * The whole transcript as markdown-ish plain text (Copy Transcript).
+     */
+    func plainText()  -> String
+    
     func revision()  -> UInt64
     
     func rowCount()  -> UInt32
@@ -781,6 +786,18 @@ open func placement(index: UInt32) -> RowPlacement?  {
     uniffi_zeron_mobile_fn_method_layoutframe_placement(
             self.uniffiCloneHandle(),
         FfiConverterUInt32.lower(index),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The whole transcript as markdown-ish plain text (Copy Transcript).
+     */
+open func plainText() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_layoutframe_plain_text(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -3655,6 +3672,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_layoutframe_placement() != 14501) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_layoutframe_plain_text() != 48003) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_layoutframe_revision() != 35752) {

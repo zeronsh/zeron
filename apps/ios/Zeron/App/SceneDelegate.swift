@@ -15,6 +15,13 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             ? MainTabController.nav(TranscriptLabViewController())
             : MainTabController(app: AppModel())
         window.rootViewController = root
+        if let tabs = root as? MainTabController, let i = args.firstIndex(of: "-route"), i + 1 < args.count {
+            let route = args[i + 1]
+            DispatchQueue.main.async {
+                if route.hasPrefix("chat:") { tabs.openSession(String(route.dropFirst(5))) }
+                if route == "new" { tabs.presentNewSession() }
+            }
+        }
         window.makeKeyAndVisible()
         self.window = window
     }

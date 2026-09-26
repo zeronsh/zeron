@@ -105,6 +105,15 @@ final class TranscriptListView: UIScrollView, RowViewDelegate {
         }
     }
 
+    /// The system scroll-edge effect only engages after an on-screen scroll;
+    /// the first frame positions us mid-transition, so settle once visible.
+    func settleEdgeEffect() {
+        guard current != nil else { return }
+        let target = following ? maxOffsetY : contentOffset.y
+        contentOffset.y = target - 1
+        contentOffset.y = target
+    }
+
     // MARK: Frames
 
     func apply(_ frame: LayoutFrame) {

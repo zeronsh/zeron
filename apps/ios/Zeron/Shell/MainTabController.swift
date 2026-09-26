@@ -19,7 +19,7 @@ final class MainTabController: UITabBarController {
         tabBar.tintColor = Palette.accent
         tabBarMinimizeBehavior = .onScrollDown
 
-        let projects = UITab(title: "Projects", image: UIImage(systemName: "square.stack"), identifier: "projects") { [app] _ in
+        let projects = UITab(title: "Projects", image: UIImage(systemName: "square.grid.2x2"), identifier: "projects") { [app] _ in
             Self.nav(ProjectsViewController(app: app))
         }
         let sessions = UITab(title: "Sessions", image: UIImage(systemName: "list.bullet"), identifier: "sessions") { [app] _ in
@@ -38,13 +38,26 @@ final class MainTabController: UITabBarController {
         tabs = [projects, sessions, prs, more, search]
         selectedTab = sessions
 
-        let accessory = AskAnythingAccessory { [weak self] in self?.presentNewSession() }
-        bottomAccessory = UITabAccessory(contentView: accessory)
+        bottomAccessory = accessory
+    }
+
+    private lazy var accessory = UITabAccessory(contentView: AskAnythingAccessory { [weak self] in self?.presentNewSession() })
+
+    /// Pushed sessions carry their own composer; the accessory steps aside.
+    func setAccessoryVisible(_ visible: Bool, animated: Bool) {
+        let target = visible ? accessory : nil
+        guard bottomAccessory !== target else { return }
+        setBottomAccessory(target, animated: animated)
     }
 
     static func nav(_ root: UIViewController) -> UINavigationController {
         let nav = UINavigationController(rootViewController: root)
         nav.navigationBar.prefersLargeTitles = true
+        // Setting an appearance object drops iOS 26's scroll-edge effect;
+        // style titles through the bar's own attributes instead.
+        nav.navigationBar.largeTitleTextAttributes = [.font: Fonts.ui(.sansSemibold, 30), .foregroundColor: Palette.text]
+        nav.navigationBar.titleTextAttributes = [.font: Fonts.ui(.sansSemibold, 17), .foregroundColor: Palette.text]
+        nav.navigationBar.tintColor = Palette.text
         return nav
     }
 

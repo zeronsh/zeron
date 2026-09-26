@@ -40,7 +40,7 @@ struct FolderRowVM: Hashable {
 /// Two-line session row, laid out by hand: fixed height, no Auto Layout
 /// solving per cell, no text measurement beyond single-line labels.
 final class SessionCell: UICollectionViewListCell {
-    static let height: CGFloat = 64
+    static let height: CGFloat = 60
 
     private let dot = UIView()
     private let title = UILabel()
@@ -81,6 +81,12 @@ final class SessionCell: UICollectionViewListCell {
         bg.cornerRadius = 14
         bg.backgroundInsets = NSDirectionalEdgeInsets(top: 1, leading: 8, bottom: 1, trailing: 8)
         backgroundConfiguration = bg
+    }
+
+    /// Fixed height: skip Auto Layout self-sizing entirely.
+    override func preferredLayoutAttributesFitting(_ attrs: UICollectionViewLayoutAttributes) -> UICollectionViewLayoutAttributes {
+        attrs.size.height = Self.height
+        return attrs
     }
 
     func configure(_ vm: SessionRowVM) {
@@ -159,7 +165,12 @@ final class SessionCell: UICollectionViewListCell {
 
 /// Folder row: icon, name, count, chevron.
 final class FolderCell: UICollectionViewListCell {
-    static let height: CGFloat = 50
+    static let height: CGFloat = 46
+
+    override func preferredLayoutAttributesFitting(_ attrs: UICollectionViewLayoutAttributes) -> UICollectionViewLayoutAttributes {
+        attrs.size.height = Self.height
+        return attrs
+    }
 
     func configure(_ vm: FolderRowVM) {
         var c = UIListContentConfiguration.cell()

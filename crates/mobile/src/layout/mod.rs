@@ -198,6 +198,23 @@ impl LayoutFrame {
         })
     }
 
+    /// The whole transcript as markdown-ish plain text (Copy Transcript).
+    pub fn plain_text(&self) -> String {
+        let mut out = String::new();
+        let mut last: Option<&str> = None;
+        for r in &self.rows {
+            if r.core.copy_text.is_empty() {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push_str(if last == Some(&*r.core.entry_id) { "\n\n" } else { "\n\n---\n\n" });
+            }
+            out.push_str(&r.core.copy_text);
+            last = Some(&r.core.entry_id);
+        }
+        out
+    }
+
     /// Copyable text of the whole message owning `index` (context menus).
     pub fn message_text(&self, index: u32) -> Option<String> {
         let entry = &self.rows.get(index as usize)?.core.entry_id;

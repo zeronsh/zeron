@@ -71,6 +71,11 @@ final class TranscriptLabViewController: UIViewController {
         }
     }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        list.settleEdgeEffect()
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         let covered = view.bounds.maxY - composer.frame.minY + 8
