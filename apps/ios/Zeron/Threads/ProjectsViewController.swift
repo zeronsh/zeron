@@ -32,6 +32,13 @@ final class ProjectsViewController: UIViewController, UICollectionViewDelegate {
         super.viewDidLoad()
         view.backgroundColor = Palette.background
         navigationItem.largeTitleDisplayMode = .always
+        navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .add, primaryAction: UIAction { [weak self] _ in
+            guard let self else { return }
+            let nav = UINavigationController(rootViewController: NewProjectViewController(app: self.app))
+            if let sheet = nav.sheetPresentationController { sheet.detents = [.large()]; sheet.prefersGrabberVisible = true }
+            self.present(nav, animated: true)
+        })
+        navigationItem.rightBarButtonItem?.accessibilityIdentifier = "new-project"
         var config = UICollectionLayoutListConfiguration(appearance: .plain)
         config.backgroundColor = .clear
         config.showsSeparators = false

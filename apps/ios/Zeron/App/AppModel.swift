@@ -389,6 +389,22 @@ final class AppModel {
         return out
     }
 
+    func listFolders(deviceId: String, path: String?) async -> FolderListing? {
+        try? await client?.listFolders(deviceId: deviceId, path: path)
+    }
+
+    func createProject(deviceId: String, path: String, gitDetected: Bool) async -> Bool {
+        guard let client else { return false }
+        do {
+            _ = try await client.createProject(deviceId: deviceId, path: path, gitDetected: gitDetected)
+            refreshWorkspace()
+            return true
+        } catch {
+            NSLog("create project failed: \(error)")
+            return false
+        }
+    }
+
     func searchFiles(deviceId: String, spaceId: String, query: String) async -> [FileMatch] {
         guard let client else { return [] }
         return (try? await client.searchFiles(deviceId: deviceId, chatId: nil, spaceId: spaceId, query: query)) ?? []

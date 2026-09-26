@@ -140,4 +140,20 @@ final class SessionFlowTests: XCTestCase {
         undo.tap()
         XCTAssertTrue(app.cells["session-chat-deploy"].waitForExistence(timeout: 5), "unarchived session returns")
     }
+
+    func testNewProjectFolderBrowser() {
+        let app = launch(["-route", "projects"])
+        let add = app.buttons["new-project"]
+        XCTAssertTrue(add.waitForExistence(timeout: 10))
+        add.tap()
+        let use = app.buttons["use-folder"]
+        XCTAssertTrue(use.waitForExistence(timeout: 5))
+        let firstFolder = app.collectionViews.cells.element(boundBy: 0)
+        XCTAssertTrue(firstFolder.waitForExistence(timeout: 5))
+        snapshot(app, "new-project")
+        firstFolder.tap()
+        XCTAssertTrue(use.waitForExistence(timeout: 5))
+        use.tap()
+        XCTAssertTrue(add.waitForExistence(timeout: 10), "sheet dismissed after creating")
+    }
 }
