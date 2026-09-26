@@ -1,6 +1,6 @@
 //! Settings → Devices (feature-inventory §1.5): the device registry — name,
 //! platform, last-seen, an Online/Offline badge, a "This device" badge, click-to-copy id,
-//! and a Rename dialog (Mutate renameDevice).
+//! and Rename/Remove dialogs (Mutate renameDevice/deleteDevice).
 
 use chrono::{DateTime, Utc};
 use gpui::{
@@ -65,6 +65,7 @@ pub struct DevicesPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
     rename: Option<RenameDialog>,
+    delete: Option<(String, String)>,
     /// Device id whose id-chip shows "Copied" right now.
     copied: Option<String>,
     error: Option<SharedString>,
@@ -80,6 +81,7 @@ impl DevicesPage {
             state,
             scroll: widgets::PageScroll::default(),
             rename: None,
+            delete: None,
             copied: None,
             error: None,
             task: None,
@@ -141,6 +143,30 @@ impl DevicesPage {
             this.update(cx, |page, cx| {
                 if let Err(err) = result {
                     page.error = Some(format!("Rename failed: {err}").into());
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn submit_delete(&mut self, cx: &mut Context<Self>) {
+        let Some((device_id, _)) = self.delete.take() else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = serde_json::json!({
+            "op": "deleteDevice",
+            "deviceId": device_id,
+        });
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::MUTATE, params).await;
+            this.update(cx, |page, cx| {
+                if let Err(err) = result {
+                    page.error = Some(format!("Remove failed: {err}").into());
                 }
                 cx.notify();
             })
@@ -221,6 +247,52 @@ impl DevicesPage {
         Some(popover::modal("rename-device-dialog", viewport, card))
     }
 
+    fn render_delete_dialog(
+        &mut self,
+        viewport: gpui::Size<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let theme = Theme::of(cx).for_popup();
+        let (_device_id, device_name) = self.delete.clone()?;
+        let card = popover::dialog_card(&theme)
+            .id("delete-device-card")
+            .role(gpui::Role::Dialog)
+            .aria_label("Remove device")
+            .child(popover::dialog_title(&theme, "Remove device"))
+            .child(
+                div()
+                    .mt(px(12.0))
+                    .child(format!(
+                        "Remove \"{device_name}\" and its spaces and chats from this workspace? Active runs on the device will be stopped when reachable."
+                    )),
+            )
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(&theme, "Cancel", "delete-device-cancel")
+                            .id("delete-device-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.delete = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_danger(&theme, "Remove")
+                            .id("delete-device-confirm")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.submit_delete(cx);
+                            })),
+                    ),
+            )
+            .into_any_element();
+        Some(popover::modal("delete-device-dialog", viewport, card))
+    }
+
     fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
         if self.scroll.set_list_hovered(*hovered) {
             cx.notify();
@@ -274,6 +346,7 @@ impl Render for DevicesPage {
         };
         let copied = self.copied.clone();
         let dialog = self.render_rename_dialog(window.viewport_size(), cx);
+        let delete_dialog = self.render_delete_dialog(window.viewport_size(), cx);
         // Split into this device and the rest; each renders as rows in one
         // block, like every other settings page.
         let (local, others): (Vec<_>, Vec<_>) = devices
@@ -287,6 +360,8 @@ impl Render for DevicesPage {
             let copy_id = device.id.clone();
             let rename_id = device.id.clone();
             let rename_name = device.name.clone();
+            let delete_id = device.id.clone();
+            let delete_name = device.name.clone();
             let mut meta: Vec<AnyElement> = vec![
                 div()
                     .child(SharedString::from(platform_label(&device.platform).to_string()))
@@ -356,6 +431,20 @@ impl Render for DevicesPage {
                                 })),
                         ),
                 )
+                .when(!is_local, |row| {
+                    row.child(
+                        widgets::text_action(&theme, widgets::ActionTone::Quiet, "Remove")
+                            .id(("device-remove", ix))
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .aria_label(format!("Remove {}", delete_name))
+                            .focus_visible(|s| s.border_2().border_color(theme.accent))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.delete = Some((delete_id.clone(), delete_name.clone()));
+                                cx.notify();
+                            })),
+                    )
+                })
                 .into_any_element()
         };
         let local_block = (!local.is_empty()).then(|| {
@@ -442,6 +531,7 @@ impl Render for DevicesPage {
             )
             .children(scrollbar)
             .when_some(dialog, |el, dialog| el.child(dialog))
+            .when_some(delete_dialog, |el, dialog| el.child(dialog))
     }
 }
 

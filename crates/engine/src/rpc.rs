@@ -11,7 +11,7 @@
 //! - `WatchSessions` → stream of `Session[]`: this engine's live statuses merged with
 //!   remote devices' workspace session rows
 //! - `Mutate {op, …}` → `{ok}` — workspace entity mutations (createChat, renameChat,
-//!   setChatArchived, deleteChat, renameDevice, markChatSeen)
+//!   setChatArchived, deleteChat, renameDevice, deleteDevice, markChatSeen)
 //! - `EngineInfo` → `{deviceId, workspaceScope}` — this runtime's fixed identity
 //!   and data boundary (never forwarded)
 //! - `LocalDevice` → `{deviceId}` — legacy engine identity (never forwarded)
@@ -533,6 +533,9 @@ enum MutateParams {
     /// Live runs hosted here are interrupted best-effort.
     #[serde(rename_all = "camelCase")]
     DeleteSpace { space_id: String },
+    /// Remove a device and all of its registry-owned spaces and chats.
+    #[serde(rename_all = "camelCase")]
+    DeleteDevice { device_id: String },
     #[serde(rename_all = "camelCase")]
     RenameChat { chat_id: String, title: String },
     /// Set the chat's checkout branch label — the sidebar's
@@ -1160,6 +1163,20 @@ impl EngineRpc {
                 .rename_device(&device_id, &name)
                 .map_err(failed)
                 .map(drop),
+            MutateParams::DeleteDevice { device_id } => {
+                let deleted = self.workspace.delete_device(&device_id).map_err(failed)?;
+                let sessions = self.sessions.clone();
+                let doc_host = self.doc_host.clone();
+                tokio::spawn(async move {
+                    for chat_id in deleted.chat_ids {
+                        if let Err(err) = sessions.interrupt(&chat_id).await {
+                            tracing::debug!(chat = %chat_id, error = %err, "deleteDevice interrupt skipped");
+                        }
+                        doc_host.purge_chat(&chat_id);
+                    }
+                });
+                Ok(())
+            }
             MutateParams::MarkChatSeen { chat_id, at } => {
                 let at = at
                     .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)

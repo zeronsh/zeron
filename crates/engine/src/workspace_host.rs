@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use chrono::Utc;
 use tokio::sync::watch;
 
-use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
+use zeron_doc::{DeletedDevice, DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
 use zeron_proto::{Chat, ChatConfig, Device, Session, SidebarPreferencesState, Space};
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
@@ -1118,6 +1118,15 @@ impl WorkspaceHost {
 
     pub fn rename_device(&self, device_id: &str, name: &str) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.rename_device(device_id, name))?)
+    }
+
+    pub fn delete_device(&self, device_id: &str) -> Result<DeletedDevice, EngineError> {
+        if device_id == self.inner.config.device_id {
+            return Err(EngineError::Other(
+                "cannot delete the current device".into(),
+            ));
+        }
+        Ok(self.mutate(|doc| doc.delete_device(device_id))?)
     }
 
     // ── git metadata (diff-sync host writes) ────────────────────────────────
