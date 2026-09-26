@@ -5242,7 +5242,6 @@ pub struct Composer {
     /// Composer actions row plus the new-session floating target tab
     /// ([`Pickers::render_new_thread_target_selectors`]).
     pickers: Entity<Pickers>,
-    /// Draft text per chat key ("" = new-chat canvas), surviving navigation.
     drafts: HashMap<String, String>,
     /// Staged-but-unsent attachments per chat key (use-attachments.ts `stash`):
     /// navigating away and back restores them; memory-only, like the original.

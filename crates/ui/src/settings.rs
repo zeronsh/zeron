@@ -2224,6 +2224,7 @@ mod tests {
                 "dev".into(),
             )]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
+            drafts: std::collections::HashMap::new(),
             space_filter: Some("space-1".into()),
             sidebar_sections_by_profile: HashMap::new(),
             sidebar_pinned_session_ids_by_profile: HashMap::from([
