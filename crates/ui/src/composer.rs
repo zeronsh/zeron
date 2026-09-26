@@ -7,6 +7,10 @@
 //! pending-input detection) lives in free functions/structs with unit tests;
 //! the gpui element only feeds them measurements.
 
+pub(crate) mod prompt_drafts;
+use crate::state::EngineHandle;
+use std::sync::Arc;
+
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -5244,6 +5248,15 @@ pub struct Composer {
     pickers: Entity<Pickers>,
     /// Draft text per chat key ("" = new-chat canvas), surviving navigation.
     drafts: HashMap<String, String>,
+    prompt_draft: Option<prompt_drafts::EditingDraft>,
+    prompt_draft_assets: HashMap<String, zeron_proto::DraftAsset>,
+    prompt_draft_engine: Option<EngineHandle>,
+    prompt_draft_recovery: Option<std::path::PathBuf>,
+    prompt_draft_recovery_task: Option<Task<()>>,
+    prompt_draft_debounce: Option<Task<()>>,
+    prompt_draft_loading: bool,
+    prompt_draft_load_generation: u64,
+    prompt_draft_gate: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     /// Staged-but-unsent attachments per chat key (use-attachments.ts `stash`):
     /// navigating away and back restores them; memory-only, like the original.
     pub(crate) attachments: HashMap<String, Vec<StagedAttachment>>,
@@ -5447,6 +5460,10 @@ impl Composer {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let editor = cx.entity().downgrade();
+        cx.default_global::<prompt_drafts::DraftQuitSavers>()
+            .0
+            .push(editor);
         cx.on_release(|this, cx| this.release_queue_previews(cx))
             .detach();
         let input = cx.new(|cx| {
@@ -5526,6 +5543,15 @@ impl Composer {
             queue_edit_draft: None,
             pickers,
             drafts: HashMap::new(),
+            prompt_draft_assets: HashMap::new(),
+            prompt_draft_engine: None,
+            prompt_draft_recovery: None,
+            prompt_draft_recovery_task: None,
+            prompt_draft: None,
+            prompt_draft_debounce: None,
+            prompt_draft_loading: false,
+            prompt_draft_load_generation: 0,
+            prompt_draft_gate: Arc::new(tokio::sync::Mutex::new(Default::default())),
             attachments: HashMap::new(),
             appshots: HashMap::new(),
             appshot_entrances: HashMap::new(),
@@ -6522,6 +6548,8 @@ impl Composer {
     }
 
     fn on_input_edited(&mut self, cx: &mut Context<Self>) {
+        self.cancel_prompt_draft_load();
+        self.capture_prompt_draft(cx);
         if self.wizard.is_some() {
             if self.mention.token.is_some() || self.mention_task.is_some() {
                 self.reset_mention(None, cx);
@@ -7238,6 +7266,32 @@ impl Composer {
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
+        if self.prompt_draft_engine.as_ref().is_some_and(|old| {
+            !self
+                .state
+                .read(cx)
+                .engine()
+                .is_some_and(|new| old.same_connection(new))
+        }) {
+            self.park_prompt_draft(cx);
+            self.prompt_draft_debounce = None;
+            self.prompt_draft_load_generation += 1;
+            self.prompt_draft_loading = false;
+            self.prompt_draft = None;
+            self.prompt_draft_engine = None;
+            self.prompt_draft_recovery_task = None;
+            self.prompt_draft_recovery = None;
+            self.prompt_draft_assets.clear();
+            self.prompt_draft_gate = Arc::new(tokio::sync::Mutex::new(Default::default()));
+            self.drafts.remove("");
+            self.attachments.remove("");
+            self.appshots.remove("");
+            if self.current_key.is_empty() {
+                self.input.update(cx, |input, cx| input.set_text("", cx));
+            }
+        }
+
+        self.resume_prompt_draft_saves(cx);
         {
             let state = self.state.read(cx);
             let now = chrono::Utc::now();
@@ -7298,6 +7352,10 @@ impl Composer {
 
         // Draft swap on chat navigation — the input entity itself survives.
         if key != self.current_key {
+            self.cancel_prompt_draft_load();
+            if self.current_key.is_empty() && !self.sending {
+                self.park_prompt_draft(cx);
+            }
             if !key.is_empty() && !self.current_key.is_empty() {
                 // Switching between established chats still snaps to the new
                 // draft; a tail from a hero transition belongs to its old chat.
@@ -7353,6 +7411,21 @@ impl Composer {
                 self.route_snap_until = Some(Instant::now() + Duration::from_millis(ROUTE_SNAP_MS));
             }
             self.input.update(cx, |input, cx| input.set_text(draft, cx));
+            if self.current_key.is_empty() {
+                if let Some(target) = self
+                    .prompt_draft
+                    .as_ref()
+                    .map(|d| d.snapshot.content.target.clone())
+                {
+                    self.state.update(cx, |state, cx| {
+                        state.select_space(target.space_id.clone(), cx);
+                        state.selected_device = Some(target.device_id.clone());
+                    });
+                    self.pickers.update(cx, |pickers, cx| {
+                        pickers.restore_prompt_draft_target(&target, cx)
+                    });
+                }
+            }
         }
 
         // A pending agent question must not take over an active queue edit.
@@ -7559,6 +7632,9 @@ impl Composer {
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
     /// reasoning / options on the Run request itself (§1.7).
     fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
+        if self.prompt_draft_loading {
+            return;
+        }
         if !self.check_reference_delivery(&text, cx) {
             return;
         }
@@ -7568,11 +7644,45 @@ impl Composer {
             cx.notify();
             return;
         };
+        self.capture_prompt_draft(cx);
+        let sending_draft = if self.state.read(cx).selected_chat.is_none() {
+            self.flush_prompt_draft(cx)
+        } else {
+            None
+        };
+        let draft_gate = self.prompt_draft_gate.clone();
+        if let Some(draft) = &sending_draft {
+            let state = self.state.read(cx);
+            let host = &draft.content.target.device_id;
+            if host != &engine.engine_info().device_id
+                && !state.devices.iter().any(|device| {
+                    &device.id == host && device.supports(zeron_proto::DRAFTS_CAPABILITY)
+                })
+            {
+                self.failure = Some("Update the selected device's Zeron to send this draft. Your draft is preserved.".into());
+                self.failure_key = Some(String::new());
+                cx.notify();
+                return;
+            }
+        }
+        if let Some(draft) = &sending_draft {
+            if let Err(error) = self.reserve_prompt_draft_attempt(draft) {
+                self.failure = Some(format!("Couldn't preserve draft send: {error}").into());
+                cx.notify();
+                return;
+            }
+        }
         // Chat id: existing selection, or client-minted for the new-chat canvas
         // (the chat then appears from the doc host once the doc materializes).
         let (chat_id, is_new) = match self.state.read(cx).selected_chat.clone() {
             Some(id) => (id, false),
-            None => (uuid::Uuid::new_v4().to_string(), true),
+            None => (
+                sending_draft
+                    .as_ref()
+                    .map(|d| format!("draft-{}", d.id))
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                true,
+            ),
         };
         // Where the new session runs (Current checkout / reuse an existing
         // worktree / fresh worktree off the picked base) — resolved NOW so
@@ -7662,7 +7772,10 @@ impl Composer {
         let typed = text.clone();
         let text = crate::comments::with_comments(&text, &comments);
         self.preview = None;
-        let message_id = uuid::Uuid::new_v4().to_string();
+        let message_id = sending_draft
+            .as_ref()
+            .map(|d| format!("draft-message-{}", d.id))
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let created_at = chrono::Utc::now().timestamp_millis();
         // Existing busy chats always queue; compatibility was checked before
         // taking the draft, attachments, or review comments.
@@ -7828,6 +7941,11 @@ impl Composer {
         let err_message_id = message_id.clone();
         self.send_task = Some(cx.spawn(async move |this, cx| {
             let result: Result<Option<String>, String> = async {
+                if let Some(draft) = &sending_draft {
+                    let mut known = draft_gate.lock().await;
+                    prompt_drafts::save_request(&engine, draft.clone(), &mut known).await?;
+                    engine.client().call(methods::CLAIM_DRAFT, serde_json::json!({ "id": draft.id, "revision": draft.revision })).await.map_err(|e| e.to_string())?;
+                }
                 // Attachments stage FIRST — before the chat row or anything
                 // else exists. Staging is chat-independent (keyed by
                 // uploadId), and ordering it first makes a new-chat send
@@ -8145,6 +8263,10 @@ impl Composer {
                 let command = serde_json::to_value(&command)
                     .map_err(|e| format!("Send failed: {e}"))?;
                 let mut params = serde_json::json!({ "chatId": chat_id, "command": command });
+                if let Some(draft) = &sending_draft {
+                    params["draftId"] = serde_json::json!(draft.id);
+                    params["draftRevision"] = serde_json::json!(draft.revision);
+                }
                 if !transfers.is_empty() {
                     params["transfers"] = serde_json::Value::Array(transfers);
                 }
@@ -8233,7 +8355,7 @@ impl Composer {
                 Ok(None)
             }
             .await;
-            if result.is_err() && is_new {
+            if result.is_err() && is_new && sending_draft.is_none() {
                 // A failed new-chat send must not strand a just-minted empty
                 // chat in the sidebar (v0.2.12 "empty transcript" report).
                 // Staging now runs before CreateChat, so usually nothing was
@@ -8251,6 +8373,13 @@ impl Composer {
             }
             this.update(cx, |composer, cx| {
                 composer.sending = false;
+                if result.is_ok() && sending_draft.is_some() {
+                    if let (Some(directory), Some(draft)) = (&composer.prompt_draft_recovery, &sending_draft) {
+                        prompt_drafts::clear_canvas_checkpoint(directory, &draft.id);
+                    }
+                    composer.prompt_draft = None;
+                    composer.prompt_draft_debounce = None;
+                }
                 composer
                     .state
                     .update(cx, |s, _| s.end_upload_progress());
@@ -8799,6 +8928,7 @@ impl Focusable for Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.capture_prompt_draft(cx);
         if self.focus_pending {
             self.focus_pending = false;
             let focus = self.input.focus_handle(cx);
@@ -9687,7 +9817,7 @@ impl Render for Composer {
 mod tests {
     use super::*;
 
-    fn composer_focus_window(
+    pub(super) fn composer_focus_window(
         cx: &mut gpui::TestAppContext,
     ) -> (tempfile::TempDir, gpui::WindowHandle<Composer>) {
         let dir = tempfile::tempdir().unwrap();

@@ -1958,7 +1958,7 @@ pub(super) fn sidebar_separator(theme: &Theme) -> gpui::Div {
     div().h(px(1.0)).bg(theme.border.opacity(0.6))
 }
 
-fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyElement) -> gpui::Div {
+pub(super) fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyElement) -> gpui::Div {
     div()
         .flex()
         .flex_row()

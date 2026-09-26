@@ -33,6 +33,13 @@ pub use server::{serve_connection, serve_ws_listener};
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
 pub mod methods {
+    pub const WATCH_DRAFTS: &str = "WatchDrafts";
+    pub const SAVE_DRAFT_ASSET: &str = "SaveDraftAsset";
+    pub const LOAD_DRAFT_ASSET: &str = "LoadDraftAsset";
+    pub const SAVE_DRAFT: &str = "SaveDraft";
+    pub const LOAD_DRAFT: &str = "LoadDraft";
+    pub const CHANGE_DRAFT: &str = "ChangeDraft";
+    pub const CLAIM_DRAFT: &str = "ClaimDraft";
     pub const WATCH_PREVIEWS: &str = "WatchPreviews";
     pub const LIST_HARNESSES: &str = "ListHarnesses";
     pub const CANCEL_INSTALL: &str = "CancelInstall";

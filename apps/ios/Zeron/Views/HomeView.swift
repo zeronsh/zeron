@@ -8,6 +8,7 @@ import SwiftUI
 enum Route: Hashable {
     case space(String)
     case chat(String)
+    case draft(String)
     case newSession(NewSessionDestination)
 
     // Keep existing project navigation and launch/deep-link call sites valid.
@@ -31,6 +32,7 @@ struct HomeView: View {
     var body: some View {
         NavigationStack(path: $path) {
             List {
+                draftsSection
                 sessionsSection
                 // The desktop's archived shelf sits under the active list,
                 // scoped by the same space filter.
@@ -49,6 +51,10 @@ struct HomeView: View {
                 switch route {
                 case .space(let id): SpaceView(spaceId: id, path: $path)
                 case .chat(let id): SessionView(chatId: id)
+                case .draft(let id):
+                    if let row = model.workspace?.promptDrafts.first(where: { $0.id == id }) {
+                        NewSessionView(destination: row.target.spaceId.map { .project(spaceId: $0) } ?? .projectless(deviceId: row.target.deviceId), path: $path, restoringDraft: row)
+                    } else { Text("Draft no longer available") }
                 case .newSession(let destination): NewSessionView(destination: destination, path: $path)
                 }
             }
@@ -256,6 +262,40 @@ struct HomeView: View {
     }
 
     // MARK: Sessions
+
+    @ViewBuilder private var draftsSection: some View {
+        if let workspace = model.workspace, !workspace.promptDrafts.isEmpty {
+            Section("Drafts") {
+                ForEach(workspace.promptDrafts) { row in
+                    NavigationLink(value: Route.draft(row.id)) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Label(row.target.projectName ?? "No project", systemImage: "square.and.pencil")
+                                .font(Theme.sans(12)).foregroundStyle(Theme.accent)
+                            Text(row.preview).font(Theme.sans(14)).lineLimit(1)
+                        }
+                    }
+                    .listRowBackground(Theme.accent.opacity(0.06))
+                    .contextMenu {
+                        Button("Move to top", systemImage: "arrow.up.to.line") {
+                            workspace.movePromptDraft(row.id, before: workspace.promptDrafts.first(where: { $0.id != row.id })?.id, after: nil)
+                        }
+                        Button("Move to bottom", systemImage: "arrow.down.to.line") {
+                            workspace.movePromptDraft(row.id, before: nil, after: workspace.promptDrafts.last(where: { $0.id != row.id })?.id)
+                        }
+                    }
+                    .swipeActions { Button("Discard", role: .destructive) { workspace.discardPromptDraft(row.id) } }
+                }
+                .onMove { source, destination in
+                    var ids = workspace.promptDrafts.map(\.id)
+                    let moved = source.sorted().map { ids[$0] }
+                    ids.move(fromOffsets: source, toOffset: destination)
+                    for id in moved {
+                        if let i = ids.firstIndex(of: id) { workspace.movePromptDraft(id, before: i + 1 < ids.count ? ids[i + 1] : nil, after: i > 0 ? ids[i - 1] : nil) }
+                    }
+                }
+            }
+        }
+    }
 
     private var sessionsSection: some View {
         Section {

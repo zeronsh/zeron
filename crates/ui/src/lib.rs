@@ -214,14 +214,23 @@ pub fn run_app(config: UiConfig) {
         let quit_state = state.clone();
         cx.on_app_quit(move |cx| {
             settings::flush(cx);
-            let shutdown =
-                quit_state.read(cx).engine().cloned().map(|handle| {
-                    gpui_tokio::Tokio::spawn(cx, async move { handle.shutdown().await })
-                });
-            async move {
-                if let Some(task) = shutdown {
-                    let _ = task.await;
+            let saves = composer::prompt_drafts::quit_saves(cx);
+            let handle = quit_state.read(cx).engine().cloned();
+            let shutdown = gpui_tokio::Tokio::spawn(cx, async move {
+                for (engine, draft, gate) in saves {
+                    let mut known = gate.lock().await;
+                    if let Err(error) =
+                        composer::prompt_drafts::save_request(&engine, draft, &mut known).await
+                    {
+                        tracing::warn!(%error, "draft flush before shutdown failed");
+                    }
                 }
+                if let Some(handle) = handle {
+                    handle.shutdown().await;
+                }
+            });
+            async move {
+                let _ = shutdown.await;
             }
         })
         .detach();

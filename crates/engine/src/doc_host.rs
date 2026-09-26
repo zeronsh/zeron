@@ -3323,8 +3323,28 @@ impl DocHost {
         payload: SessionCommandPayload,
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) -> Result<String, EngineError> {
+        self.queue_draft_command(chat_id, payload, transfers, new_id())
+    }
+
+    pub fn queue_draft_command(
+        &self,
+        chat_id: &str,
+        payload: SessionCommandPayload,
+        transfers: Vec<crate::uploads::AttachmentTransfer>,
+        id: String,
+    ) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
-        let id = new_id();
+        if handle
+            .doc
+            .read_commands()?
+            .iter()
+            .any(|entry| entry.id == id)
+        {
+            if id.starts_with("draft-command-") {
+                self.persist_draft_command(&handle)?;
+            }
+            return Ok(id);
+        }
         let now = now_ms();
         let based_on = handle.doc.read_entries()?.last().map(|m| CommandBasedOn {
             turn_id: Some(m.id.clone()),
@@ -3345,6 +3365,9 @@ impl DocHost {
             resolution: None,
         };
         handle.doc.queue_command(&entry)?;
+        if id.starts_with("draft-command-") {
+            self.persist_draft_command(&handle)?;
+        }
         // Sending a message revives an archived chat: the user is acting in it
         // again, so the LWW row flips back to active on every device. Best-
         // effort — the command itself is durable regardless.
@@ -3358,6 +3381,18 @@ impl DocHost {
         self.nudge_remote_host(chat_id);
         self.spawn_command_delivery(chat_id, entry, transfers);
         Ok(id)
+    }
+
+    fn persist_draft_command(&self, handle: &ChatDocHandle) -> Result<(), EngineError> {
+        if let Some(persistence) = &handle.persistence {
+            persistence.dirty(true);
+            persistence.flush_sync_result().map_err(EngineError::Other)
+        } else {
+            self.inner
+                .store
+                .save_snapshot(&handle.chat_id, &handle.doc.export_snapshot()?)?;
+            Ok(())
+        }
     }
 
     /// A send revives an archived chat on every device (best-effort).
@@ -4822,6 +4857,10 @@ impl DocHost {
         // Entries this pass decided to leave alone (processed dedupe hits).
         let mut skipped: HashSet<String> = HashSet::new();
         loop {
+            if let Err(error) = handle.doc.reconcile_command_outcomes() {
+                tracing::warn!(%error, "command outcome reconciliation failed");
+                return;
+            }
             let commands = match handle.doc.read_commands() {
                 Ok(commands) => commands,
                 Err(err) => {

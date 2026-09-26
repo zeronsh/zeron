@@ -603,6 +603,32 @@ pub struct Pickers {
 }
 
 impl Pickers {
+    pub(crate) fn prompt_draft_target(&self, cx: &App) -> zeron_proto::DraftTarget {
+        let state = self.state.read(cx);
+        let space = state.selected_space_row();
+        zeron_proto::DraftTarget {
+            device_id: state.effective_device_id().unwrap_or_default(),
+            space_id: space.map(|s| s.id.clone()),
+            project_name: space.map(|s| s.display_name().to_string()),
+            config: self.resolved(cx).chat_config(),
+            branch: self.config.branch.clone(),
+            new_worktree: self.config.checkout == CheckoutKind::NewWorktree,
+        }
+    }
+    pub(crate) fn restore_prompt_draft_target(&mut self, target: &zeron_proto::DraftTarget, cx: &mut Context<Self>) {
+        self.draft_owner = None;
+        self.space_owner = target.space_id.clone(); self.device_owner = Some(target.device_id.clone());
+        if let Some(config) = &target.config {
+            self.config.harness = Some(config.harness); self.config.model = config.model.clone(); self.config.reasoning = config.reasoning;
+            if let Some(model) = &config.model { *self.defaults.model_options_mut(config.harness, model) = config.model_options.clone(); }
+        }
+        self.config.branch = target.branch.clone();
+        self.config.checkout = if target.new_worktree { CheckoutKind::NewWorktree } else { CheckoutKind::Local };
+        self.refs = Loadable::Idle; self.refs_space = None;
+        self.harnesses = Loadable::Idle; self.models.clear();
+        cx.notify();
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         Self::build(state, None, cx)
     }

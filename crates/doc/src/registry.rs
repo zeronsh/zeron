@@ -36,6 +36,7 @@ pub const KIND_PREFERENCES: &str = "preferences";
 pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 mod sidebar_pins;
+mod drafts;
 mod sidebar_sections;
 
 /// Snapshot row id in the local `DocsStore` for the persisted registry state.
@@ -343,6 +344,7 @@ struct PersistedState {
 
 /// The local registry replica. Pure data — no I/O, no async; the transport
 /// (`zeron_sync::RegistryClient`) and the engine host drive it under a lock.
+#[derive(Clone)]
 pub struct RegistryDoc {
     device_id: String,
     /// kind → id → row (server truth).

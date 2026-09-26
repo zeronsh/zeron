@@ -533,19 +533,19 @@ final class AppModel {
 
     @discardableResult
     func createChat(space: Space, config chatConfig: ChatConfig,
-                    branch: String? = nil, cwd: String? = nil) -> String? {
+                    branch: String? = nil, cwd: String? = nil, draftId: String? = nil) -> String? {
         createChat(deviceId: space.deviceId, space: space, config: chatConfig,
-                   branch: branch, cwd: cwd)
+                   branch: branch, cwd: cwd, draftId: draftId)
     }
 
     @discardableResult
-    func createProjectlessChat(deviceId: String, config: ChatConfig) -> String? {
+    func createProjectlessChat(deviceId: String, config: ChatConfig, draftId: String? = nil) -> String? {
         guard executionDevices.contains(where: { $0.id == deviceId }) else { return nil }
-        return createChat(deviceId: deviceId, space: nil, config: config)
+        return createChat(deviceId: deviceId, space: nil, config: config, draftId: draftId)
     }
 
     private func createChat(deviceId: String, space: Space?, config chatConfig: ChatConfig,
-                            branch: String? = nil, cwd: String? = nil) -> String? {
+                            branch: String? = nil, cwd: String? = nil, draftId: String? = nil) -> String? {
         if let demo {
             let id = "chat-\(UUID().uuidString.lowercased().prefix(8))"
             demo.chats.append(Chat(id: id, deviceId: deviceId, title: nil, archived: false,
@@ -557,9 +557,9 @@ final class AppModel {
             return id
         }
         if let space {
-            return workspace?.createChat(space: space, config: chatConfig, branch: branch, cwd: cwd)
+            return workspace?.createChat(space: space, config: chatConfig, branch: branch, cwd: cwd, draftId: draftId)
         }
-        return workspace?.createProjectlessChat(deviceId: deviceId, config: chatConfig)
+        return workspace?.createProjectlessChat(deviceId: deviceId, config: chatConfig, draftId: draftId)
     }
 
     /// Browse folders on a remote device (the desktop add-space palette's data

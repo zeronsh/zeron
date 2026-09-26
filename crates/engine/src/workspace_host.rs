@@ -161,6 +161,9 @@ struct WorkspaceHostInner {
     sessions_tx: watch::Sender<Vec<Session>>,
     spaces_tx: watch::Sender<Vec<Space>>,
     sidebar_preferences_tx: watch::Sender<SidebarPreferencesState>,
+    draft_store: crate::drafts::DraftStore,
+    drafts_tx: watch::Sender<zeron_proto::DraftsState>,
+    draft_wake: Arc<tokio::sync::Notify>,
     room: Mutex<Option<Arc<RegistryClient>>>,
     /// Bumped on every registry change (local mutation or applied server
     /// frame) — drives republish + the snapshot debounce in `workspace_task`.
@@ -295,6 +298,12 @@ impl WorkspaceHost {
         });
         let (changed_tx, changed_rx) = watch::channel(0u64);
 
+        let draft_store = crate::drafts::DraftStore::new(
+            store.clone(),
+            config.edge.clone(),
+            config.org_id.clone(),
+        );
+        let (drafts_tx, _) = watch::channel(zeron_proto::DraftsState::default());
         let host = Self {
             inner: Arc::new(WorkspaceHostInner {
                 store,
@@ -305,6 +314,9 @@ impl WorkspaceHost {
                 sessions_tx,
                 spaces_tx,
                 sidebar_preferences_tx,
+                draft_store,
+                drafts_tx,
+                draft_wake: Arc::new(tokio::sync::Notify::new()),
                 room: Mutex::new(None),
                 changed_tx,
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
@@ -317,12 +329,94 @@ impl WorkspaceHost {
         // read again, so the registry snapshot must exist even if the process
         // dies before the first debounced save.
         host.inner.save_snapshot();
+        host.inner.publish_drafts();
+        tokio::spawn(draft_publication_task(Arc::downgrade(&host.inner)));
         host.join_room();
         tokio::spawn(workspace_task(Arc::downgrade(&host.inner), changed_rx));
         if host.inner.config.edge.is_some() {
             tokio::spawn(relay_probe_task(Arc::downgrade(&host.inner)));
         }
         Ok(host)
+    }
+
+    pub async fn claim_draft(&self, id: &str, revision: &str) -> Result<(), EngineError> {
+        // Content must be durable before reservation. Replaying the same
+        // reservation after an uncertain response returns the same identity.
+        for pending in self.inner.draft_store.pending()? {
+            if pending.id == id {
+                self.inner.draft_store.upload(&pending).await?;
+                lock(&self.inner.reg).publish_draft(&pending)?;
+                self.inner.persist_snapshot()?;
+            }
+        }
+        self.inner.draft_store.load(revision).await?;
+        self.inner.draft_store.claim(id, revision).await
+    }
+    pub fn save_draft_asset(
+        &self,
+        asset: &zeron_proto::DraftAssetChunk,
+    ) -> Result<(), EngineError> {
+        self.inner.draft_store.save_asset_chunk(asset)
+    }
+    pub async fn load_draft_asset(
+        &self,
+        blob: &str,
+        index: usize,
+    ) -> Result<zeron_proto::DraftAssetChunk, EngineError> {
+        self.inner.draft_store.load_asset_chunk(blob, index).await
+    }
+    pub async fn load_draft_content(
+        &self,
+        revision: &str,
+    ) -> Result<zeron_proto::DraftContent, EngineError> {
+        self.inner.draft_store.load_content(revision).await
+    }
+    pub fn watch_drafts(&self) -> watch::Receiver<zeron_proto::DraftsState> {
+        self.inner.drafts_tx.subscribe()
+    }
+    pub fn save_draft(&self, draft: zeron_proto::SaveDraft) -> Result<(), EngineError> {
+        if lock(&self.inner.reg).draft_discarded(&draft.id) {
+            return Err(EngineError::Other("Draft was already discarded".into()));
+        }
+        self.inner.draft_store.stage(draft)?;
+        self.inner.publish_drafts();
+        self.inner.draft_wake.notify_one();
+        Ok(())
+    }
+    pub async fn load_draft(
+        &self,
+        revision: &str,
+    ) -> Result<zeron_proto::DraftBundle, EngineError> {
+        self.inner.draft_store.load(revision).await
+    }
+    pub fn change_draft(&self, change: &zeron_proto::DraftChange) -> Result<(), EngineError> {
+        // A pending draft may not have been published yet. Its ordering is
+        // still available in the projection without exposing missing content.
+        let mut doc = lock(&self.inner.reg);
+        if let zeron_proto::DraftChange::Move { id, .. } = change {
+            let mut projected = doc.clone();
+            for pending in self.inner.draft_store.pending()? {
+                projected.publish_draft(&pending)?;
+            }
+            // Record the move on the projected row, then transfer only the
+            // index's ordering op; content publication remains upload-gated.
+            projected.change_draft(change)?;
+            if let Some(row) = projected.read_drafts().iter().find(|d| &d.id == id) {
+                doc.set_draft_order(id, &row.order_key)?;
+            }
+        } else {
+            doc.change_draft(change)?;
+        }
+        let bytes = doc.to_bytes()?;
+        self.inner.store.save_snapshot(REGISTRY_DOC_ID, &bytes)?;
+        drop(doc);
+        self.inner.bump_changed();
+        self.inner.publish_drafts();
+        if let Some(room) = lock(&self.inner.room).as_ref() {
+            room.nudge();
+        }
+        self.inner.draft_wake.notify_one();
+        Ok(())
     }
 
     /// Edge room join — offline-tolerant: a failed join logs and stays local-first.
@@ -1194,6 +1288,7 @@ impl WorkspaceHostInner {
             self.publish_sidebar_preferences(&doc, registry_synced);
             doc.read_all()
         };
+        self.publish_drafts();
         match snapshot {
             Ok(mut state) => {
                 self.overlay_presence(&mut state.devices);
@@ -1350,6 +1445,34 @@ impl WorkspaceHostInner {
             watch.dark_since_ms = 0;
             watch.probed = false;
         }
+    }
+
+    fn publish_drafts(&self) {
+        let pending = match self.draft_store.pending() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(%e, "draft outbox read failed");
+                return;
+            }
+        };
+        let mut doc = lock(&self.reg).clone();
+        for draft in &pending {
+            if let Err(e) = doc.publish_draft(draft) {
+                tracing::warn!(%e, "draft projection failed");
+            }
+        }
+        let mut drafts = doc.read_drafts();
+        for row in &mut drafts {
+            row.pending = pending.iter().any(|p| p.revision == row.revision);
+        }
+        self.drafts_tx.send_if_modified(|state| {
+            if state.drafts == drafts {
+                return false;
+            }
+            state.revision += 1;
+            state.drafts = drafts;
+            true
+        });
     }
 
     fn save_snapshot(&self) {
@@ -1692,6 +1815,66 @@ mod tests {
     use super::{device_name_on_boot, linked_worktree_root};
 
     #[tokio::test]
+    async fn drafts_watch_preserves_late_edits_and_durable_discard() {
+        use super::*;
+        use zeron_proto::{DraftChange, DraftContent, SaveDraft};
+        let dir = tempfile::tempdir().unwrap();
+        let config = WorkspaceHostConfig {
+            device_id: "device".into(),
+            device_name: "Test".into(),
+            platform: "linux".into(),
+            org_id: "org".into(),
+            user_id: "user".into(),
+            edge: None,
+        };
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = WorkspaceHost::open(store.clone(), config.clone()).unwrap();
+        let mut draft = SaveDraft {
+            deferred: true,
+            id: "draft".into(),
+            revision: "revision-1".into(),
+            base_revision: None,
+            created_at: 1,
+            content: DraftContent {
+                prompt: "Original".into(),
+                ..Default::default()
+            },
+            assets: vec![],
+        };
+        host.save_draft(draft.clone()).unwrap();
+        assert!(host.watch_drafts().borrow().drafts.is_empty());
+        draft.deferred = false;
+        host.save_draft(draft.clone()).unwrap();
+        let initial = host.watch_drafts().borrow().clone();
+        assert_eq!(initial.drafts.len(), 1);
+        host.change_draft(&DraftChange::Consume {
+            id: "draft".into(),
+            revision: "revision-1".into(),
+        })
+        .unwrap();
+        assert!(host.watch_drafts().borrow().drafts.is_empty());
+        draft.base_revision = Some(draft.revision.clone());
+        draft.revision = "revision-2".into();
+        draft.content.prompt = "Concurrent content".into();
+        host.save_draft(draft).unwrap();
+        let recovered = host.watch_drafts().borrow().clone();
+        assert!(recovered.revision > initial.revision);
+        assert_eq!(recovered.drafts[0].id, "revision-2");
+        assert_eq!(
+            host.load_draft("revision-2").await.unwrap().content.prompt,
+            "Concurrent content"
+        );
+        host.change_draft(&DraftChange::Discard {
+            id: "revision-2".into(),
+        })
+        .unwrap();
+        assert!(host.watch_drafts().borrow().drafts.is_empty());
+        drop(host);
+        let reopened = WorkspaceHost::open(store, config).unwrap();
+        assert!(reopened.watch_drafts().borrow().drafts.is_empty());
+    }
+
+    #[tokio::test]
     async fn registry_http_sync_retains_dns_cause() {
         use super::*;
         use crate::http_error::test_support::FailingDns;
@@ -1895,5 +2078,44 @@ mod tests {
         std::fs::create_dir_all(&odd).unwrap();
         std::fs::write(odd.join(".git"), "gitdir: /somewhere/else\n").unwrap();
         assert_eq!(linked_worktree_root(&odd), None);
+    }
+}
+
+// Weak ownership lets profile switches retire this worker. Offline writes stay
+// in SQLite; one worker publishes in order and retries with a bounded cadence.
+async fn draft_publication_task(weak: Weak<WorkspaceHostInner>) {
+    loop {
+        let Some(inner) = weak.upgrade() else {
+            return;
+        };
+        let wake = inner.draft_wake.clone();
+        if let Ok(pending) = inner.draft_store.pending() {
+            for draft in pending {
+                if !lock(&inner.reg).draft_discarded(&draft.id) {
+                    if let Err(error) = inner.draft_store.upload(&draft).await {
+                        tracing::debug!(%error, "draft publication deferred");
+                        break;
+                    }
+                    let result = lock(&inner.reg).publish_draft(&draft);
+                    if result.is_err() || inner.persist_snapshot().is_err() {
+                        break;
+                    }
+                    inner.bump_changed();
+                    if let Some(room) = lock(&inner.room).as_ref() {
+                        room.nudge();
+                    }
+                }
+                if inner
+                    .draft_store
+                    .acknowledge(&draft.publication_key())
+                    .is_err()
+                {
+                    break;
+                }
+                inner.publish_drafts();
+            }
+        }
+        drop(inner);
+        tokio::select! { _ = wake.notified() => {}, _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {} }
     }
 }

@@ -24,6 +24,9 @@ final class WorkspaceStore {
     private(set) var spaces: [Space] = []
     private(set) var chats: [Chat] = []
     private(set) var sessions: [String: SessionRow] = [:]
+    private(set) var promptDrafts: [PromptDraftRow] = []
+    @ObservationIgnored let draftStorage: PromptDraftStorage
+    @ObservationIgnored private var draftPublicationTask: Task<Void, Never>?
     private(set) var pinnedSessionIds: [String] = []
     private(set) var sidebarPreferencesInitialized = false
     private(set) var presence: [String: Int64] = [:]  // deviceId → last beat ms
@@ -58,6 +61,7 @@ final class WorkspaceStore {
 
     init(config: AppConfig, doc: RegistryDoc? = nil) {
         self.config = config
+        self.draftStorage = PromptDraftStorage(config: config)
         self.doc = doc ?? RegistryDoc(deviceId: config.deviceId)
         project()
     }
@@ -74,6 +78,7 @@ final class WorkspaceStore {
             doc = loaded
         }
         project()
+        publishPendingDrafts()
         saver = RegistrySaver(url: blobURL) { [weak self] in
             try? self?.doc.toData()
         }
@@ -99,6 +104,7 @@ final class WorkspaceStore {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 20_000_000_000)
                 guard let self, !Task.isCancelled else { return }
+                self.publishPendingDrafts()
                 if !self.connected {
                     await self.pushPendingOverHTTP()
                     await self.pullDelta()
@@ -262,6 +268,64 @@ final class WorkspaceStore {
         }
     }
 
+    private func projectPromptDrafts() {
+        guard let data = try? doc.toData(), let overlay = try? RegistryDoc.from(data: data, deviceId: config.deviceId) else { return }
+        for save in draftStorage.pending { overlay.publishPromptDraft(save) }
+        promptDrafts = overlay.promptDraftRows
+    }
+    func stagePromptDraft(_ save: PromptDraftSave, assets: [String: Data]) throws {
+        guard !doc.promptDraftClosed(save.id) else { throw CocoaError(.fileNoSuchFile) }
+        try draftStorage.stage(save, assets: assets)
+        projectPromptDrafts()
+        publishPendingDrafts()
+    }
+    private func publishPendingDrafts() {
+        guard draftPublicationTask == nil, !draftStorage.pending.isEmpty else { return }
+        draftPublicationTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.draftPublicationTask = nil }
+            for save in self.draftStorage.pending {
+                do {
+                    if !self.doc.promptDraftClosed(save.id) {
+                        try await self.draftStorage.upload(save)
+                        self.doc.publishPromptDraft(save)
+                        guard DocDisk.saveRegistry(data: try self.doc.toData(), to: DocDisk.registryURL(orgId: self.config.orgId, userId: self.config.userId)) else { return }
+                        self.afterLocalWrite()
+                    }
+                    try self.draftStorage.acknowledge(save.publicationKey)
+                    self.projectPromptDrafts()
+                } catch { return }
+            }
+        }
+    }
+    func consumePromptDraft(_ id: String, revision: String) {
+        draftStorage.clearCanvas(id)
+        doc.observePromptDraftClock(kind: "promptDrafts", id: id)
+        doc.write(kind: "promptDrafts", id: id, op: .upsert, set: ["sentRevision": .string(revision)])
+        afterLocalWrite(); flushToDisk()
+    }
+    func discardPromptDraft(_ id: String) {
+        draftStorage.clearCanvas(id)
+        doc.observePromptDraftClock(kind: "promptDrafts", id: id)
+        doc.write(kind: "promptDrafts", id: id, op: .upsert, set: ["closed": .bool(true)])
+        afterLocalWrite()
+        flushToDisk()
+    }
+    func movePromptDraft(_ id: String, before: String?, after: String?) {
+        // Pending uploads are projected too, but only the order leaves now.
+        guard let data = try? doc.toData(), let overlay = try? RegistryDoc.from(data: data, deviceId: config.deviceId) else { return }
+        for save in draftStorage.pending { overlay.publishPromptDraft(save) }
+        overlay.movePromptDraft(id, before: before, after: after)
+        if let row = overlay.promptDraftRows.first(where: { $0.id == id }) {
+            doc.setPromptDraftOrder(id, key: row.orderKey)
+            afterLocalWrite()
+        }
+    }
+    func claimPromptDraft(_ save: PromptDraftSave) async throws {
+        try await draftStorage.upload(save)
+        try await draftStorage.claim(id: save.id, revision: save.revision)
+    }
+
     /// Every local write: re-project the overlay, schedule the snapshot, and
     /// wake the client to push the fresh batch.
     private func afterLocalWrite() {
@@ -399,6 +463,7 @@ final class WorkspaceStore {
                                       updatedAt: f["updatedAt"]?.int64Value ?? 0)
         }
         sessions = rows
+        projectPromptDrafts()
 
         if doc.sidebarPinsInitialized {
             sidebarPreferencesInitialized = true
@@ -688,20 +753,21 @@ final class WorkspaceStore {
     /// via the registry.
     @discardableResult
     func createChat(space: Space, config chatConfig: ChatConfig,
-                    branch: String? = nil, cwd: String? = nil) -> String {
+                    branch: String? = nil, cwd: String? = nil, draftId: String? = nil) -> String {
         createChat(deviceId: space.deviceId, spaceId: space.id, cwd: cwd ?? space.path,
-                   config: chatConfig, branch: branch)
+                   config: chatConfig, branch: branch, draftId: draftId)
     }
 
     /// Same local registry write and offline outbox as project sessions.
     @discardableResult
-    func createProjectlessChat(deviceId: String, config: ChatConfig) -> String {
-        createChat(deviceId: deviceId, spaceId: nil, cwd: "~", config: config, branch: nil)
+    func createProjectlessChat(deviceId: String, config: ChatConfig, draftId: String? = nil) -> String {
+        createChat(deviceId: deviceId, spaceId: nil, cwd: "~", config: config, branch: nil, draftId: draftId)
     }
 
     private func createChat(deviceId: String, spaceId: String?, cwd: String,
-                            config chatConfig: ChatConfig, branch: String?) -> String {
-        let chatId = UUID().uuidString.lowercased()
+                            config chatConfig: ChatConfig, branch: String?, draftId: String? = nil) -> String {
+        let chatId = draftId.map { "draft-\($0)" } ?? UUID().uuidString.lowercased()
+        if doc.rowExists(kind: "chats", id: chatId) { return chatId }
         var set: [String: JSONValue] = [
             "id": .string(chatId),
             "deviceId": .string(deviceId),

@@ -288,13 +288,34 @@ impl Shell {
     ) -> AnyElement {
         let state = self.state.read(cx);
         let chat = state.chats.iter().find(|chat| chat.id == chat_id);
-        let space = chat.and_then(|chat| state.space_for_chat(chat));
+        let space = chat.and_then(|chat| state.space_for_chat(chat)).cloned();
+        let device_id = chat.map(|chat| chat.device_id.clone());
+        self.render_space_project_icon(
+            chat_id,
+            space.as_ref(),
+            device_id.as_deref(),
+            size,
+            selected,
+            cx,
+        )
+    }
+
+    pub(super) fn render_space_project_icon(
+        &self,
+        row_id: &str,
+        space: Option<&zeron_proto::Space>,
+        device_id: Option<&str>,
+        size: f32,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state = self.state.read(cx);
         let name = space
             .map(|space| space.display_name().to_string())
             .unwrap_or_else(|| "Home".into());
         // Same fallback as the row's "@ device" fragment.
-        let device = chat
-            .and_then(|chat| state.device_name(&chat.device_id))
+        let device = device_id
+            .and_then(|id| state.device_name(id))
             .unwrap_or("Unknown device")
             .to_string();
         let seed = space
@@ -313,7 +334,7 @@ impl Shell {
         });
         let Some(context) = context else {
             return project_icon_frame(
-                chat_id,
+                row_id,
                 &name,
                 &device,
                 size,
@@ -332,7 +353,7 @@ impl Shell {
         // Don't cache a remote miss before a connection exists.
         if context.target_device_id.is_some() && engine.is_none() {
             return project_icon_frame(
-                chat_id,
+                row_id,
                 &name,
                 &device,
                 size,
@@ -356,14 +377,14 @@ impl Shell {
         drop(cache);
         if entity.read(cx).media.is_none() {
             return project_icon_frame(
-                chat_id,
+                row_id,
                 &name,
                 &device,
                 size,
                 monogram(&name, &seed, selected, Theme::of(cx)),
             );
         }
-        project_icon_frame(chat_id, &name, &device, size, entity)
+        project_icon_frame(row_id, &name, &device, size, entity)
     }
 }
 

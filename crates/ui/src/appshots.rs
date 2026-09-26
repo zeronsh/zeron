@@ -269,7 +269,7 @@ impl AppshotDestination {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessibilitySnapshot {
     pub format_version: u32,
     pub content: String,
