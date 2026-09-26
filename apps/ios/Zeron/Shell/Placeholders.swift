@@ -62,6 +62,47 @@ final class AppModel {
     func createSection(_ name: String) {}
     func rename(_ id: String, _ title: String) {}
     func markSeen(_ id: String) {}
+    var accountName: String { "Demo" }
+    var accountDetail: String { "Offline demo workspace" }
+    var onSignOut: (() -> Void)?
+    func signOut() { onSignOut?() }
+    var onSignedIn: (() -> Void)?
+    private(set) var isSignedIn = !ProcessInfo.processInfo.arguments.contains("-signedout")
+    func enterDemo() {
+        isSignedIn = true
+        onSignedIn?()
+    }
+    func signIn(code: String) async throws {
+        isSignedIn = true
+        onSignedIn?()
+    }
+    func signOutLocally() { isSignedIn = false }
+    func didEnterBackground() {}
+    func willEnterForeground() {}
+
+    // MARK: New session
+
+    var lastDraft = NewSessionDraft()
+
+    var projectOptions: [ProjectOption] {
+        projects.map { ProjectOption(id: $0.id, name: $0.name, device: $0.device, online: true, git: true, colorIndex: $0.colorIndex) }
+    }
+
+    var hostOptions: [HostOption] { [HostOption(id: "wing-mbp", name: "wing-mbp", online: true)] }
+
+    func models(for deviceId: String) async -> [ModelChoice] {
+        [
+            ModelChoice(harness: "claude-code", harnessLabel: "Claude Code", id: "opus", label: "Opus 4.5", efforts: ["low", "medium", "high", "max"]),
+            ModelChoice(harness: "claude-code", harnessLabel: "Claude Code", id: "sonnet", label: "Sonnet 4.5", efforts: ["low", "medium", "high"]),
+            ModelChoice(harness: "codex", harnessLabel: "Codex", id: "gpt-5-codex", label: "GPT-5 Codex", efforts: ["low", "medium", "high"]),
+        ]
+    }
+
+    func refs(projectId: String) async -> [String] { ["main", "ios-rewrite", "release/0.2"] }
+
+    func createSession(draft: NewSessionDraft, text: String, images: [StagedImage]) -> String? {
+        frontPage.sessions.first?.id
+    }
 
     func sessionSource(_ chatId: String) -> SessionSource {
         let vm = session(chatId)
@@ -142,11 +183,3 @@ class PlaceholderViewController: UIViewController {
     }
 }
 
-final class MoreViewController: PlaceholderViewController {
-    init(app: AppModel) { super.init(app: app, title: "More") }
-    required init?(coder: NSCoder) { fatalError() }
-}
-final class NewSessionViewController: PlaceholderViewController {
-    init(app: AppModel, prompt: String?, onCreated: @escaping (String) -> Void) { super.init(app: app, title: "New Session") }
-    required init?(coder: NSCoder) { fatalError() }
-}

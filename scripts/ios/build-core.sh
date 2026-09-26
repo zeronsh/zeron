@@ -25,6 +25,12 @@ if [[ "${CONFIGURATION:-Debug}" == "Release" ]]; then PROFILE=mobile-dist; fi
 OUT="$ROOT/target/ios-core/$PLATFORM"
 mkdir -p "$OUT/include"
 
+# Iterating on Swift while the core is mid-edit: reuse the last good build.
+if [[ "${ZERON_SKIP_CORE:-}" == "1" && -f "$OUT/libzeron_mobile.a" ]]; then
+  echo "note: ZERON_SKIP_CORE=1 — reusing $OUT/libzeron_mobile.a"
+  exit 0
+fi
+
 # Xcode exports SDKROOT/deployment vars for the *app* SDK; host build scripts
 # (proc macros, build.rs) must not see them, so cargo runs in a clean env.
 run_cargo() {

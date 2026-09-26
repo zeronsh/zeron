@@ -54,10 +54,7 @@ final class SessionViewController: UIViewController {
             self?.list.scrollToBottom(animated: true)
         }
         composer.onStop = { [weak self] in self?.source.stop() }
-        composer.onChipTap = { [weak self] id, view in
-            guard let self else { return }
-            self.source.chipTapped(id, from: view, in: self)
-        }
+        composer.text = Drafts.load(chatId)
         composer.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
         questions.onSubmit = { [weak self] answers in
             guard let self, let id = self.shown.questions?.requestId else { return }
@@ -114,6 +111,7 @@ final class SessionViewController: UIViewController {
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        Drafts.save(chatId, composer.text)
         if isMovingFromParent {
             (tabBarController as? MainTabController)?.setAccessoryVisible(true, animated: animated)
             source.detach()
@@ -155,6 +153,9 @@ final class SessionViewController: UIViewController {
         composer.canSteer = c.canSteer
         composer.placeholder = c.placeholder
         composer.chips = c.chips
+        composer.chipMenus = Dictionary(uniqueKeysWithValues: c.chips.map { chip in
+            (chip.id, { [weak self] in self?.source.chipMenu(chip.id) })
+        })
         let changes = {
             let asking = c.questions != nil
             self.questions.isHidden = !asking
@@ -309,5 +310,21 @@ final class StatusPill: UIControl {
     override func willMove(toWindow newWindow: UIWindow?) {
         super.willMove(toWindow: newWindow)
         if newWindow == nil { timer?.invalidate() } else { update() }
+    }
+}
+
+/// Unsent composer text per session, kept across navigation and launches.
+enum Drafts {
+    private static let key = "drafts"
+
+    static func load(_ chatId: String) -> String {
+        (UserDefaults.standard.dictionary(forKey: key) as? [String: String])?[chatId] ?? ""
+    }
+
+    static func save(_ chatId: String, _ text: String) {
+        var all = (UserDefaults.standard.dictionary(forKey: key) as? [String: String]) ?? [:]
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        all[chatId] = trimmed.isEmpty ? nil : text
+        UserDefaults.standard.set(all, forKey: key)
     }
 }

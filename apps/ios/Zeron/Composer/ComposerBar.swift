@@ -52,6 +52,8 @@ final class ComposerBar: UIView, UITextViewDelegate {
     var preferredDelivery: DeliveryMode = .queue { didSet { refreshAction() } }
     var placeholder = "Message" { didSet { placeholderLabel.text = placeholder } }
     var chips: [ComposerChip] = [] { didSet { if chips != oldValue { rebuildChips() } } }
+    /// Chips with a menu open it on tap (native, glassy, lazily loaded).
+    var chipMenus: [String: () -> UIMenu?] = [:] { didSet { applyChipMenus() } }
     /// Chips stay visible without focus (new-session canvas).
     var chipsAlwaysVisible = false { didSet { updateChipsVisibility(animated: false) } }
     private(set) var images: [StagedImage] = [] { didSet { rebuildThumbs(); refreshAction() } }
@@ -95,6 +97,8 @@ final class ComposerBar: UIView, UITextViewDelegate {
         chipScroll.translatesAutoresizingMaskIntoConstraints = false
         chipStrip.axis = .horizontal
         chipStrip.spacing = 8
+        chipStrip.distribution = .fill
+        chipStrip.alignment = .center
         chipStrip.translatesAutoresizingMaskIntoConstraints = false
         chipScroll.addSubview(chipStrip)
         addSubview(chipScroll)
@@ -255,13 +259,26 @@ final class ComposerBar: UIView, UITextViewDelegate {
             }
             let b = UIButton(configuration: config)
             b.accessibilityIdentifier = "composer-chip-\(chip.id)"
+            b.setContentHuggingPriority(.required, for: .horizontal)
+            b.setContentCompressionResistancePriority(.required, for: .horizontal)
             b.addAction(UIAction { [weak self, weak b] _ in
                 guard let self, let b else { return }
                 self.onChipTap?(chip.id, b)
             }, for: .touchUpInside)
             chipStrip.addArrangedSubview(b)
         }
+        applyChipMenus()
         updateChipsVisibility(animated: false)
+    }
+
+    private func applyChipMenus() {
+        for case let b as UIButton in chipStrip.arrangedSubviews {
+            guard let id = b.accessibilityIdentifier?.replacingOccurrences(of: "composer-chip-", with: ""),
+                  let provider = chipMenus[id]
+            else { continue }
+            b.menu = provider()
+            b.showsMenuAsPrimaryAction = b.menu != nil
+        }
     }
 
     // MARK: Attachments

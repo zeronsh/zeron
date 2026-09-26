@@ -59,7 +59,8 @@ protocol SessionSource: AnyObject {
     func answer(requestId: String, answers: [(questionId: String, labels: [String])])
     func queueAction(_ id: String, _ action: QueueAction)
     func retryDelivery()
-    func chipTapped(_ id: String, from view: UIView, in vc: UIViewController)
+    /// Menu for a composer chip (model, effort, branch…), or nil.
+    func chipMenu(_ id: String) -> UIMenu?
     func loadImage(_ reference: String, into view: UIImageView)
 }
 
@@ -182,6 +183,27 @@ final class FixtureSessionSource: SessionSource {
     }
 
     func retryDelivery() {}
-    func chipTapped(_ id: String, from view: UIView, in vc: UIViewController) {}
+    func chipMenu(_ id: String) -> UIMenu? {
+        switch id {
+        case "model":
+            return UIMenu(title: "Model", children: ["Opus 4.5", "Sonnet 4.5", "Haiku 4.5"].map { m in
+                UIAction(title: m, state: chrome.chips.first { $0.id == "model" }?.title == m ? .on : .off) { [weak self] _ in
+                    self?.update { c in
+                        if let i = c.chips.firstIndex(where: { $0.id == "model" }) { c.chips[i] = ComposerChip(id: "model", title: m, symbol: nil) }
+                    }
+                }
+            })
+        case "effort":
+            return UIMenu(title: "Reasoning effort", children: ["Low", "Medium", "High", "Max"].map { e in
+                UIAction(title: e, state: chrome.chips.first { $0.id == "effort" }?.title == e ? .on : .off) { [weak self] _ in
+                    self?.update { c in
+                        if let i = c.chips.firstIndex(where: { $0.id == "effort" }) { c.chips[i] = ComposerChip(id: "effort", title: e, symbol: "gauge.with.dots.needle.67percent") }
+                    }
+                }
+            })
+        default:
+            return nil
+        }
+    }
     func loadImage(_ reference: String, into view: UIImageView) {}
 }
