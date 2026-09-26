@@ -2562,6 +2562,9 @@ impl EventEmitter<AppearanceSettingsEvent> for AppearancePage {}
 
 impl Render for AppearancePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.selected_font = typography::effective(cx);
+        self.selected_terminal_font = typography::terminal_effective(cx);
+        self.selected_code_font = typography::code_effective(cx);
         let theme = Theme::of(cx).for_settings_surface();
         let availability = typography::availability(cx);
         let fixed = theme.font_sans_fixed.clone();
@@ -3314,7 +3317,9 @@ mod tests {
         });
         let (_page, cx) = cx.add_window_view(|_, cx| AppearancePage::new(cx));
         cx.update(|window, cx| window.draw(cx).clear());
-        let trigger = cx.debug_bounds("appearance-surface").expect("glass trigger");
+        let trigger = cx
+            .debug_bounds("appearance-surface")
+            .expect("glass trigger");
         cx.simulate_click(trigger.center(), gpui::Modifiers::default());
         cx.update(|window, cx| window.draw(cx).clear());
         let frosted = cx

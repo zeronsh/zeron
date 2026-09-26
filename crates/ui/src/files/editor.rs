@@ -61,7 +61,7 @@ pub(super) fn new_file_editor(
     let menu_editor = editor.downgrade();
     editor.update(cx, |state, cx| {
         state.set_editor_style(super::editor_adapter::editor_style(theme));
-        state.set_readonly(false, cx);
+        state.set_readonly(crate::lifecycle::replacing(cx), cx);
         state.on_context_menu(Rc::new(move |_, capabilities, position, _, cx| {
             let clipboard_has_text = cx
                 .read_from_clipboard()

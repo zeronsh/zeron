@@ -40,6 +40,7 @@ impl EnterPress {
 enum Entry {
     NewChat,
     NewProject,
+    NewWindow,
     Settings,
     Theme(AppearanceMode),
     Chat(String),
@@ -50,6 +51,7 @@ impl Entry {
         match self {
             Self::NewChat => Some(("New chat", icons::PEN_NEW_SQUARE)),
             Self::NewProject => Some(("New project", icons::FOLDER)),
+            Self::NewWindow => Some(("New window", icons::WINDOW_RESTORE)),
             Self::Settings => Some(("Open settings", icons::SETTINGS)),
             Self::Theme(mode) => Some((
                 match mode {
@@ -73,6 +75,7 @@ fn actions_for(query: &str, is_dark: bool) -> Vec<Entry> {
     [
         Entry::NewChat,
         Entry::NewProject,
+        Entry::NewWindow,
         Entry::Settings,
         Entry::Theme(if is_dark {
             AppearanceMode::Light
@@ -205,6 +208,7 @@ impl Shell {
         match entry {
             Entry::NewChat => self.open_new_session(cx),
             Entry::NewProject => self.open_add_space(cx),
+            Entry::NewWindow => crate::app_menus::new_window(cx),
             Entry::Settings => self.open_last_settings(cx),
             Entry::Theme(_) => unreachable!(),
             Entry::Chat(id) => self.open_chat(id, cx),
@@ -246,24 +250,28 @@ impl Shell {
                 row = row.child(spaces::sidebar_separator(&theme).w_full().my(px(8.0)));
             }
             let content = if let Some((label, glyph)) = entry.action() {
-                let shortcut = match entry {
-                    Entry::NewChat | Entry::NewProject => {
-                        let id = if *entry == Entry::NewChat {
-                            ShortcutId::NewSession
-                        } else {
-                            ShortcutId::NewProject
-                        };
-                        let combo = self.settings.keymap.get(id);
-                        let valid = Keystroke::parse(&platform_combo(combo)).is_ok();
-                        Some(crate::settings::badge_combo(if valid {
-                            combo
-                        } else {
-                            id.default_combo()
-                        }))
-                    }
-                    Entry::Settings => Some(crate::settings::badge_combo("mod-,")),
-                    _ => None,
-                };
+                let shortcut =
+                    match entry {
+                        Entry::NewChat | Entry::NewProject => {
+                            let id = if *entry == Entry::NewChat {
+                                ShortcutId::NewSession
+                            } else {
+                                ShortcutId::NewProject
+                            };
+                            let combo = self.settings.keymap.get(id);
+                            let valid = Keystroke::parse(&platform_combo(combo)).is_ok();
+                            Some(crate::settings::badge_combo(if valid {
+                                combo
+                            } else {
+                                id.default_combo()
+                            }))
+                        }
+                        Entry::NewWindow => self.settings.keymap.new_window_binding().map(|_| {
+                            crate::settings::badge_combo(&self.settings.keymap.new_window)
+                        }),
+                        Entry::Settings => Some(crate::settings::badge_combo("mod-,")),
+                        _ => None,
+                    };
                 let entry = entry.clone();
                 popover::menu_row(&theme, ix == active, format!("command-action-{ix}"))
                     .id(("command-action", ix))
@@ -596,13 +604,14 @@ mod tests {
             vec![
                 Entry::NewChat,
                 Entry::NewProject,
+                Entry::NewWindow,
                 Entry::Settings,
                 Entry::Theme(AppearanceMode::Light)
             ]
         );
         assert_eq!(
             actions_for("new", true),
-            vec![Entry::NewChat, Entry::NewProject]
+            vec![Entry::NewChat, Entry::NewProject, Entry::NewWindow]
         );
         assert_eq!(actions_for("settings", true), vec![Entry::Settings]);
         assert_eq!(

@@ -6,12 +6,17 @@ license.workspace = true
 publish.workspace = true
 
 [features]
+multi-window-fixture = []
 project-palette-fixture = []
 
 browser-fixture = []
 windows-render-fixture = []
 appshots-fixture = ["gpui_platform/test-support"]
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
+
+[[example]]
+name = "multi-window-fixture"
+required-features = ["multi-window-fixture"]
 
 [[example]]
 name = "macos-resource-profile"

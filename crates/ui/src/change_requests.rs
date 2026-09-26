@@ -206,7 +206,7 @@ pub(crate) struct ChangeRequestWatchKey {
     pub checkout_id: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct ChangeRequestClientState {
     snapshots: HashMap<ChangeRequestWatchKey, CheckoutChangeRequestStatus>,
     /// The engine version that rejected this versioned capability. A device
