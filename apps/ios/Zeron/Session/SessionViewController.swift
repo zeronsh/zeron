@@ -124,7 +124,34 @@ final class SessionViewController: UIViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        (tabBarController as? MainTabController)?.setAccessoryVisible(false, animated: animated)
+        setAccessory(visible: false)
+    }
+
+    /// Swap the tab accessory *inside* the push/pop animation so it travels
+    /// with the tab bar instead of snapping ahead of it (no empty glass pill,
+    /// no composer ghosting over the tab bar).
+    private func setAccessory(visible: Bool) {
+        guard let tabs = tabBarController as? MainTabController else { return }
+        guard let coordinator = transitionCoordinator else {
+            return tabs.setAccessoryVisible(visible, animated: false)
+        }
+        // Our bottom glass (composer stack) and the tab bar's glass never
+        // overlap: the stack fades opposite to the tab bar, tracking an
+        // interactive swipe-back too.
+        let bottomStack = bottom
+        let jumpButton = jump
+        if visible { bottomStack.alpha = 1 } else { bottomStack.alpha = 0 }
+        coordinator.animate(alongsideTransition: { _ in
+            tabs.setAccessoryVisible(visible, animated: false)
+            bottomStack.alpha = visible ? 0 : 1
+            if visible { jumpButton.alpha = 0 }
+        }, completion: { context in
+            // An interactive pop that's cancelled keeps the session on screen.
+            if context.isCancelled {
+                tabs.setAccessoryVisible(!visible, animated: false)
+                bottomStack.alpha = 1
+            }
+        })
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -136,7 +163,7 @@ final class SessionViewController: UIViewController {
         super.viewWillDisappear(animated)
         Drafts.save(chatId, composer.text)
         if isMovingFromParent {
-            (tabBarController as? MainTabController)?.setAccessoryVisible(true, animated: animated)
+            setAccessory(visible: true)
             source.detach()
             engine.close()
             app.markSeen(chatId)
