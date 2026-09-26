@@ -82,14 +82,41 @@ pub(crate) fn home_dir() -> PathBuf {
 }
 
 /// `~` / `~/…` → this host's home directory. Anything else passes through.
-pub(crate) fn expand_home(cwd: &str) -> String {
+/// An unavailable home is an error so `~` never silently becomes `/`.
+pub(crate) fn expand_home(cwd: &str) -> Result<String, &'static str> {
     match cwd.strip_prefix('~') {
-        Some("") => home_dir().to_string_lossy().into_owned(),
-        Some(rest) if rest.starts_with('/') => {
-            home_dir().join(&rest[1..]).to_string_lossy().into_owned()
-        }
-        _ => cwd.to_string(),
+        Some("") => Ok(session_home_dir()?.to_string_lossy().into_owned()),
+        Some(rest) if rest.starts_with('/') => Ok(session_home_dir()?
+            .join(&rest[1..])
+            .to_string_lossy()
+            .into_owned()),
+        _ => Ok(cwd.to_string()),
     }
+}
+
+/// Resolve the host user's home for a session that explicitly uses `~`.
+/// An absent home must not silently turn a projectless session into `/`.
+pub(crate) fn session_home_dir() -> Result<PathBuf, &'static str> {
+    session_home_dir_with(|name| std::env::var_os(name))
+}
+
+fn session_home_dir_with(
+    mut env: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> Result<PathBuf, &'static str> {
+    #[cfg(windows)]
+    let names = ["USERPROFILE", "HOME"];
+    #[cfg(not(windows))]
+    let names = ["HOME", "USERPROFILE"];
+    for name in names {
+        let Some(value) = env(name).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let path = PathBuf::from(value);
+        if path.is_absolute() && path.is_dir() && path.to_str().is_some() {
+            return Ok(path);
+        }
+    }
+    Err("User home directory unavailable on this device")
 }
 
 /// Where new worktrees live. Deliberately NOT under the backend data dir —
@@ -1306,7 +1333,7 @@ impl Repos {
     ) -> Result<FolderListing, EngineError> {
         let target = match path.filter(|p| !p.trim().is_empty()) {
             Some(p) => absolutize(Path::new(&p)),
-            None => home_dir(),
+            None => session_home_dir().map_err(|error| EngineError::Other(error.to_string()))?,
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
         let spawned = std::thread::Builder::new()
@@ -2164,6 +2191,18 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn session_home_requires_an_explicit_usable_directory() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(
+            session_home_dir_with(|name| (name == "HOME").then(|| home.path().as_os_str().into()))
+                .unwrap(),
+            home.path()
+        );
+        assert!(session_home_dir_with(|_| None).is_err());
+        assert!(session_home_dir_with(|name| (name == "HOME").then(|| "relative".into())).is_err());
+    }
+
     fn history_commit(sha: String, parent_sha: Option<String>) -> GitHistoryCommit {
         GitHistoryCommit {
             subject: sha.clone(),
@@ -2195,11 +2234,14 @@ mod tests {
 
     #[test]
     fn expand_home_rewrites_tilde_and_leaves_other_paths() {
-        let home = home_dir();
-        assert_eq!(expand_home("~"), home.to_string_lossy());
-        assert_eq!(expand_home("~/proj"), home.join("proj").to_string_lossy());
-        assert_eq!(expand_home("/abs/path"), "/abs/path");
-        assert_eq!(expand_home("~nope"), "~nope");
+        let home = session_home_dir().unwrap();
+        assert_eq!(expand_home("~").unwrap(), home.to_string_lossy());
+        assert_eq!(
+            expand_home("~/proj").unwrap(),
+            home.join("proj").to_string_lossy()
+        );
+        assert_eq!(expand_home("/abs/path").unwrap(), "/abs/path");
+        assert_eq!(expand_home("~nope").unwrap(), "~nope");
     }
 
     #[test]

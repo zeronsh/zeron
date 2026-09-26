@@ -285,6 +285,19 @@ impl FilesSurface {
         theme: &crate::theme::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        let projectless_root = {
+            let state = self.state.read(cx);
+            state
+                .chats
+                .iter()
+                .find(|chat| chat.id == self.chat_id && chat.space_id.is_none())
+                .map(|chat| {
+                    let device = state
+                        .device_name(&chat.device_id)
+                        .unwrap_or(&chat.device_id);
+                    format!("Files in {} · {device}", chat.cwd.as_deref().unwrap_or("~"))
+                })
+        };
         let phase = self.tree.node("").map(|root| root.load.clone());
         let content = if !self.search_state.query.is_empty() {
             self.render_search_results(cx)
@@ -339,6 +352,19 @@ impl FilesSurface {
             .min_w_0()
             .flex()
             .flex_col()
+            .when_some(projectless_root, |element, label| {
+                element.child(
+                    div()
+                        .id("files-projectless-root")
+                        .flex_none()
+                        .px(px(10.0))
+                        .py(px(5.0))
+                        .text_size(px(10.0))
+                        .text_color(theme.text_faint)
+                        .truncate()
+                        .child(SharedString::from(label)),
+                )
+            })
             .when_some(self.git_status_notice(cx), |element, notice| {
                 element.child(
                     div()
@@ -731,7 +757,18 @@ impl FilesSurface {
         if self.request_context.is_none() {
             return;
         }
-        self.ensure_watch(cx);
+        // A projectless explorer may not have a resolvable home on its host.
+        // Start its watcher only after the root listing succeeds.
+        let projectless_explorer = !self.presentation.is_editor()
+            && self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .any(|chat| chat.id == self.chat_id && chat.space_id.is_none());
+        if !projectless_explorer {
+            self.ensure_watch(cx);
+        }
         if self.presentation.is_editor()
             && !self.preview.has_active()
             && let Some(path) = self.editor_path.clone()
@@ -911,6 +948,9 @@ impl FilesSurface {
                     Ok(page) => {
                         surface.error = None;
                         surface.tree.apply_page(page, generation);
+                        if directory.is_empty() {
+                            surface.ensure_watch(cx);
+                        }
                     }
                     Err(error) => {
                         let message = error.to_string();

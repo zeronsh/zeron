@@ -403,7 +403,8 @@ impl SessionsEngine {
     ) -> Result<String, EngineError> {
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
-        request.cwd = crate::repos::expand_home(&request.cwd);
+        request.cwd = crate::repos::expand_home(&request.cwd)
+            .map_err(|error| EngineError::Other(error.to_string()))?;
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)

@@ -306,15 +306,21 @@ impl FilesSurface {
         let Some(chat) = state.chats.iter().find(|chat| chat.id == self.chat_id) else {
             return;
         };
+        let Some(space) = &chat.space_id else {
+            let had_source = self.git_status.is_some();
+            self.release_git_status();
+            if had_source {
+                cx.notify();
+            }
+            return;
+        };
         let device = chat.device_id.clone();
         // A shared source must survive the first consuming chat disappearing.
-        if let Some(space) = &chat.space_id {
-            context.target = zeron_proto::WorkspaceTarget {
-                chat_id: None,
-                space_id: Some(space.clone()),
-                checkout_path: Some(context.cwd.clone()),
-            };
-        }
+        context.target = zeron_proto::WorkspaceTarget {
+            chat_id: None,
+            space_id: Some(space.clone()),
+            checkout_path: Some(context.cwd.clone()),
+        };
         if self
             .git_status
             .as_ref()
