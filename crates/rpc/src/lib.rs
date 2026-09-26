@@ -109,7 +109,7 @@ pub mod methods {
     pub const WATCH_SPACES: &str = "WatchSpaces";
     /// Entity mutations against the workspace doc (feature-inventory §2 DataRpc).
     /// Params are tagged `{op: createChat|createSpace|renameSpace|deleteSpace|
-    /// renameChat|setChatArchived|deleteChat|renameDevice|markChatSeen, …}`.
+    /// renameChat|setChatArchived|deleteChat|renameDevice|deleteDevice|markChatSeen, …}`.
     pub const MUTATE: &str = "Mutate";
     /// This engine's identity → `{deviceId}` (IPC-only; never relay-forwarded —
     /// the answer is about whichever engine you are directly connected to).

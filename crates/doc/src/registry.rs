@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use zeron_proto::{Chat, ChatConfig, Device, MAX_SIDEBAR_PINS, Session, SidebarPreferences, Space};
 
 use crate::schema::DocError;
-use crate::workspace::{DeletedSpace, WorkspaceState};
+use crate::workspace::{DeletedDevice, DeletedSpace, WorkspaceState};
 
 /// Row kinds — synced sidebar entities plus user preferences.
 pub const KIND_DEVICES: &str = "devices";
@@ -743,6 +743,47 @@ impl RegistryDoc {
             fields([("name", json!(name))]),
         );
         Ok(true)
+    }
+
+    /// Tombstone a device and all spaces, chats, and session index rows it owns.
+    /// The session documents themselves remain intact, just as with chat deletion.
+    pub fn delete_device(&mut self, device_id: &str) -> Result<DeletedDevice, DocError> {
+        let existed = self.row_exists(KIND_DEVICES, device_id);
+        let space_ids: Vec<String> = self
+            .read_spaces()?
+            .into_iter()
+            .filter(|space| space.device_id == device_id)
+            .map(|space| space.id)
+            .collect();
+        let space_set: std::collections::HashSet<_> = space_ids.iter().collect();
+        let chat_ids: Vec<String> = self
+            .read_chats()?
+            .into_iter()
+            .filter(|chat| {
+                chat.device_id == device_id
+                    || chat
+                        .space_id
+                        .as_ref()
+                        .is_some_and(|space_id| space_set.contains(space_id))
+            })
+            .map(|chat| chat.id)
+            .collect();
+
+        let mut keys = Vec::with_capacity(1 + space_ids.len() + chat_ids.len() * 2);
+        keys.push((KIND_DEVICES, device_id));
+        for space_id in &space_ids {
+            keys.push((KIND_SPACES, space_id));
+        }
+        for chat_id in &chat_ids {
+            keys.push((KIND_CHATS, chat_id));
+            keys.push((KIND_SESSIONS, chat_id));
+        }
+        self.delete_row_ops(&keys);
+        Ok(DeletedDevice {
+            existed,
+            space_ids,
+            chat_ids,
+        })
     }
 
     /// Stamp `lastSeenAt` on an existing device row (boot/shutdown only —

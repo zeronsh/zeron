@@ -537,6 +537,54 @@ fn field_mutators_round_trip() {
 }
 
 #[test]
+fn delete_device_cascades_owned_registry_rows() {
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.upsert_device(&device("dev-a", "laptop")).unwrap();
+    ws.upsert_device(&device("dev-b", "old vm")).unwrap();
+    ws.upsert_space(&space("space-b", "dev-b", "/tmp/old-vm"))
+        .unwrap();
+    let mut chat_space = chat("chat-space", "dev-b");
+    chat_space.space_id = Some("space-b".into());
+    ws.upsert_chat(&chat_space).unwrap();
+    ws.upsert_chat(&chat("chat-projectless", "dev-b")).unwrap();
+    ws.upsert_session(&session("chat-space", "dev-b", SessionStatus::Idle))
+        .unwrap();
+    ws.upsert_session(&session("chat-projectless", "dev-b", SessionStatus::Idle))
+        .unwrap();
+    ws.upsert_chat(&chat("chat-other", "dev-a")).unwrap();
+
+    let deleted = ws.delete_device("dev-b").unwrap();
+    assert!(deleted.existed);
+    assert_eq!(deleted.space_ids, vec!["space-b"]);
+    assert_eq!(deleted.chat_ids, vec!["chat-projectless", "chat-space"]);
+    assert!(ws.read_devices().unwrap().iter().all(|d| d.id != "dev-b"));
+    assert!(ws.read_spaces().unwrap().is_empty());
+    assert!(
+        ws.read_chats()
+            .unwrap()
+            .iter()
+            .all(|c| c.device_id == "dev-a")
+    );
+    assert!(ws.read_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn delete_device_is_idempotent_and_leaves_unrelated_rows() {
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.upsert_device(&device("dev-a", "laptop")).unwrap();
+    ws.upsert_device(&device("dev-b", "old vm")).unwrap();
+    ws.upsert_chat(&chat("chat-b", "dev-b")).unwrap();
+
+    let first = ws.delete_device("dev-b").unwrap();
+    let second = ws.delete_device("dev-b").unwrap();
+    assert!(first.existed);
+    assert!(!second.existed);
+    assert_eq!(second.chat_ids, Vec::<String>::new());
+    assert_eq!(ws.read_devices().unwrap().len(), 1);
+    assert_eq!(ws.read_chats().unwrap().len(), 0);
+}
+
+#[test]
 fn delete_chat_tombstones_row_and_session() {
     let mut ws = RegistryDoc::new("dev-a");
     ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
