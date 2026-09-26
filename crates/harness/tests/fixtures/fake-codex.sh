@@ -140,6 +140,16 @@ case "$turnline" in
   ;;
 
 
+*scenario:lease-shutdown*)
+  # Keep the child alive until the harness escalates and reaps it. The update
+  # writer must not acquire its gate just because the host drops the stream.
+  trap '' TERM
+  printf '%s\n' "$$" > lease-child.pid
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  exec sleep 30
+  ;;
+
 *scenario:image-*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"item/started","params":{"threadId":"th-1","item":{"id":"image-1","type":"imageGeneration","status":"in_progress","result":""}}}'

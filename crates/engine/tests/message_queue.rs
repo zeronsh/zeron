@@ -33,6 +33,7 @@ const CHAT: &str = "chat-queue";
 /// A turn that does not end until the test says so, so "the agent is busy" is
 /// a state the test controls rather than races.
 struct HeldHarness {
+    id: HarnessId,
     steering: SteeringMode,
     finish: tokio::sync::broadcast::Sender<()>,
     prompts: Arc<Mutex<Vec<String>>>,
@@ -53,10 +54,19 @@ impl HeldHarness {
     }
 
     fn build(steering: SteeringMode, asks: bool) -> (Arc<Self>, Arc<Mutex<Vec<String>>>) {
+        Self::build_as(HarnessId::Mock, steering, asks)
+    }
+
+    fn build_as(
+        id: HarnessId,
+        steering: SteeringMode,
+        asks: bool,
+    ) -> (Arc<Self>, Arc<Mutex<Vec<String>>>) {
         let (finish, _) = tokio::sync::broadcast::channel(16);
         let prompts = Arc::new(Mutex::new(Vec::new()));
         (
             Arc::new(Self {
+                id,
                 steering,
                 finish,
                 prompts: prompts.clone(),
@@ -72,7 +82,7 @@ impl HeldHarness {
 #[async_trait]
 impl Harness for HeldHarness {
     fn id(&self) -> HarnessId {
-        HarnessId::Mock
+        self.id
     }
     fn display_name(&self) -> &str {
         "Held"
@@ -1757,6 +1767,113 @@ async fn queue_completion_markers_distinguish_normal_turns_from_interrupts() {
         .await;
         core.shutdown().await;
     }
+}
+
+/// A pending agent update holds back only that agent's next turn. The single
+/// turn-end flush watcher drains chats one after another, so it must keep
+/// releasing held queues for chats on every other agent meanwhile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_update_does_not_stall_another_chats_queue_flush() {
+    const OTHER: &str = "chat-queue-other";
+    let tmp = tempfile::tempdir().unwrap();
+    let (updating, updating_prompts) =
+        HeldHarness::build_as(HarnessId::ClaudeCode, SteeringMode::TurnBoundary, false);
+    let (other, other_prompts) =
+        HeldHarness::build_as(HarnessId::Codex, SteeringMode::TurnBoundary, false);
+    let registry = Arc::new(HarnessRegistry::new());
+    registry.register(updating.clone());
+    registry.register(other.clone());
+    let core = EngineCore::assemble(
+        &tmp.path().join("data"),
+        registry.clone(),
+        HarnessId::ClaudeCode,
+        None,
+    )
+    .expect("engine core assembles");
+    create_chat(&core).await;
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat",
+                "chatId": OTHER,
+                "deviceId": core.device_id,
+                "config": { "harness": "codex", "model": null, "reasoning": null, "sandbox": "workspace-write" },
+            }),
+        )
+        .await
+        .expect("createChat");
+    core.workspace
+        .rename_chat(OTHER, "Pre-titled")
+        .expect("rename chat");
+
+    for (chat, prompts) in [(CHAT, &updating_prompts), (OTHER, &other_prompts)] {
+        core.doc_host
+            .queue_message(chat, "opening", Vec::new())
+            .expect("queue opening");
+        wait_for(
+            || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+            "each chat's first turn to start",
+        )
+        .await;
+        core.doc_host
+            .queue_message(chat, "next", Vec::new())
+            .expect("queue follow-up");
+    }
+
+    // Another Claude run keeps the accepted update waiting for idle.
+    let other_claude_run = registry.execution_lease(HarnessId::ClaudeCode).await;
+    registry.begin_update(HarnessId::ClaudeCode);
+    let writer = tokio::spawn({
+        let registry = registry.clone();
+        async move { registry.update_lease(HarnessId::ClaudeCode).await }
+    });
+
+    // Claude's turn ends first, so the watcher dispatches its held row before
+    // it reaches the Codex chat.
+    let _ = updating.finish.send(());
+    wait_for(
+        || {
+            core.doc_host
+                .open(CHAT)
+                .unwrap()
+                .doc()
+                .read_queue()
+                .unwrap()
+                .is_empty()
+        },
+        "the updating chat's row to leave the queue",
+    )
+    .await;
+    let _ = other.finish.send(());
+    wait_for(
+        || other_prompts.lock().unwrap().iter().any(|p| p == "next"),
+        "the unrelated chat's held row to flush while the update is pending",
+    )
+    .await;
+    assert!(registry.update_pending(HarnessId::ClaudeCode));
+    assert!(
+        !updating_prompts.lock().unwrap().iter().any(|p| p == "next"),
+        "the updating agent must not start a turn before its update"
+    );
+
+    drop(other_claude_run);
+    drop(
+        tokio::time::timeout(Duration::from_secs(5), writer)
+            .await
+            .expect("update acquires its gate once runs are idle")
+            .unwrap(),
+    );
+    registry.end_update(HarnessId::ClaudeCode);
+    wait_for(
+        || updating_prompts.lock().unwrap().iter().any(|p| p == "next"),
+        "the held Claude turn to start after the update",
+    )
+    .await;
+    let _ = updating.finish.send(());
+    let _ = other.finish.send(());
+    core.shutdown().await;
 }
 
 /// Send a Run the way the composer does before its busy state lands (or any

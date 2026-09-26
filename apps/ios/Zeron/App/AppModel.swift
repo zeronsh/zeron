@@ -196,6 +196,8 @@ final class AppModel {
                     }
                 } else if spec.hasPrefix("space:") {
                     launchRoute = .space(String(spec.dropFirst("space:".count)))
+                } else if spec.hasPrefix("updates:") {
+                    launchRoute = .agentUpdates(String(spec.dropFirst("updates:".count)))
                 }
             }
             if let ix = args.firstIndex(of: "-sheet"), ix + 1 < args.count {

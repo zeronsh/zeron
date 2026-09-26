@@ -41,7 +41,13 @@ The workflow uses the `AC_API_KEY_P8`, `AC_API_KEY_ID`, and
   id + org id; the bearer is `userId@orgId`.
 - **Demo mode**: fully offline dataset with a scripted streaming reply —
   explore the UI with no infrastructure. Launch args for screenshot rigs:
-  `-demo [-route chat:<id>|space:<id>] [-stream]`.
+  `-demo [-route chat:<id>|space:<id>|updates:<deviceId>] [-stream]`.
+  `-demo -route updates:dev-mac` opens the glass agent-update pane over Home
+  with a high-fidelity fixture
+  with available, active, failed, manual, cancellable, progress, and completed
+  states. Its buttons drive the same lifecycle contract as a live host.
+  `-demo -sheet devices` opens the adaptive glass device pane over Home;
+  selecting a host expands it to fit the agent updates.
 
 ### Sessions without a project
 

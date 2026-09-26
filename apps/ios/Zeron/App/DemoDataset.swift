@@ -15,6 +15,7 @@ final class DemoDataset {
     var chats: [Chat]
     var sessions: [String: SessionRow]
     var changeRequests: [String: ChangeRequestSummary]
+    @ObservationIgnored let harnessUpdates: DemoHarnessUpdates
     private var stores: [String: SessionStore] = [:]
     private var streamTask: Task<Void, Never>?
 
@@ -29,14 +30,17 @@ final class DemoDataset {
         self.chats = chats
         self.sessions = sessions
         self.changeRequests = changeRequests
+        self.harnessUpdates = DemoHarnessUpdates(devices: devices)
     }
 
     static func standard() -> DemoDataset {
         let now = nowMs()
         let mac = DeviceRow(id: "dev-mac", name: "MacBook Pro", platform: "macos",
-                            lastSeenAt: now, createdAt: now - 86_400_000 * 30)
+                            lastSeenAt: now, createdAt: now - 86_400_000 * 30,
+                            capabilities: [EngineCapability.harnessUpdatesV1])
         let vps = DeviceRow(id: "dev-vps", name: "hetzner-01", platform: "linux",
-                            lastSeenAt: now - 600_000, createdAt: now - 86_400_000 * 12)
+                            lastSeenAt: now - 600_000, createdAt: now - 86_400_000 * 12,
+                            capabilities: [EngineCapability.harnessUpdatesV1])
         let zeron = Space(id: "space-zeron", deviceId: "dev-mac",
                           path: "/Users/dev/zeron", name: nil, gitDetected: true,
                           gitCheckedAt: now, checkoutId: nil, createdAt: now - 86_400_000 * 9)
@@ -398,5 +402,17 @@ final class DemoDataset {
                 self.chats[ix].lastSeenAt = end
             }
         }
+    }
+}
+
+extension DemoDataset: HarnessUpdatesSource {
+    func watchHarnessUpdates(deviceId: String) async throws
+        -> AsyncThrowingStream<[HarnessUpdateStatus], Error> {
+        try harnessUpdates.watch(deviceId: deviceId)
+    }
+
+    func harnessUpdateAction(_ action: HarnessUpdateAction, harness: String?,
+                             deviceId: String) async throws {
+        try await harnessUpdates.action(action, harness: harness, deviceId: deviceId)
     }
 }

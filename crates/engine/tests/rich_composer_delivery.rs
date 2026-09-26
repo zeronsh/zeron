@@ -20,6 +20,7 @@ use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SteeringMode,
 };
+use zeron_rpc::RpcService;
 
 const CHAT: &str = "rich-delivery";
 const HARNESSES: [HarnessId; 9] = [
@@ -38,10 +39,24 @@ enum Delivery {
     Run(RunRequest),
     Steer(String),
 }
+struct DiscoveryGate {
+    started: mpsc::UnboundedSender<std::path::PathBuf>,
+    release: tokio::sync::Notify,
+}
 struct RecordingHarness {
+    discovery_gate: std::sync::Mutex<Option<Arc<DiscoveryGate>>>,
     id: HarnessId,
     delivery: mpsc::UnboundedSender<Delivery>,
     fail_start: AtomicBool,
+}
+impl RecordingHarness {
+    async fn discovery(&self, cwd: &std::path::Path) {
+        let gate = self.discovery_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.started.send(cwd.to_owned()).unwrap();
+            gate.release.notified().await;
+        }
+    }
 }
 #[async_trait]
 impl Harness for RecordingHarness {
@@ -67,6 +82,7 @@ impl Harness for RecordingHarness {
         &self,
         cwd: &std::path::Path,
     ) -> Result<Vec<zeron_proto::SlashCommand>, HarnessError> {
+        self.discovery(cwd).await;
         Ok(vec![zeron_proto::SlashCommand {
             name: "probe".into(),
             description: cwd.to_string_lossy().into_owned(),
@@ -77,6 +93,7 @@ impl Harness for RecordingHarness {
         &self,
         cwd: &std::path::Path,
     ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+        self.discovery(cwd).await;
         Ok(Some(vec![zeron_proto::invocation::Skill {
             name: "probe".into(),
             path: cwd.join("SKILL.md").to_string_lossy().into_owned(),
@@ -209,6 +226,7 @@ async fn setup(
     let tmp = tempfile::tempdir().unwrap();
     let (delivery, rx) = mpsc::unbounded_channel();
     let harness = Arc::new(RecordingHarness {
+        discovery_gate: Default::default(),
         id,
         delivery,
         fail_start: AtomicBool::new(false),
@@ -471,5 +489,72 @@ async fn projectless_catalogs_use_the_session_directory_and_reject_unknown_targe
             .await
             .unwrap();
         assert_eq!(result[0]["description"], cwd.to_str().unwrap(), "{method}");
+    }
+}
+
+#[tokio::test]
+async fn project_catalog_rpcs_hold_update_leases_through_cancelled_discovery_cleanup() {
+    for method in [
+        zeron_rpc::methods::LIST_COMMANDS,
+        zeron_rpc::methods::LIST_SKILLS,
+    ] {
+        let (tmp, core, harness, _rx) = setup(HarnessId::Codex).await;
+        let root = tmp.path().join("project-catalog");
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        core.workspace
+            .set_chat_cwd(CHAT, root.to_str().unwrap())
+            .unwrap();
+        let (started, mut starts) = mpsc::unbounded_channel();
+        let gate = Arc::new(DiscoveryGate {
+            started,
+            release: tokio::sync::Notify::new(),
+        });
+        *harness.discovery_gate.lock().unwrap() = Some(gate.clone());
+        core.registry.begin_update(HarnessId::Codex);
+        let installation = core.registry.update_lease(HarnessId::Codex).await;
+        let service = core.rpc_service();
+        let caller = tokio::spawn(async move {
+            service
+                .handle(
+                    method,
+                    serde_json::json!({"harness":"codex", "chatId":CHAT}),
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), starts.recv())
+                .await
+                .is_err(),
+            "{method} bypassed installation"
+        );
+        drop(installation);
+        core.registry.end_update(HarnessId::Codex);
+        let discovered_root = tokio::time::timeout(Duration::from_secs(2), starts.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(discovered_root, root, "{method} lost project context");
+        caller.abort();
+        assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+        core.registry.begin_update(HarnessId::Codex);
+        let registry = core.registry.clone();
+        let mut next_installation =
+            tokio::spawn(async move { registry.update_lease(HarnessId::Codex).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut next_installation)
+                .await
+                .is_err(),
+            "{method} released its lease before cleanup"
+        );
+        gate.release.notify_one();
+        drop(
+            tokio::time::timeout(Duration::from_secs(2), next_installation)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        core.registry.end_update(HarnessId::Codex);
+        core.shutdown().await;
     }
 }

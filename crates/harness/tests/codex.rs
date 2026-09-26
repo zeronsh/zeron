@@ -35,6 +35,62 @@ fn harness() -> CodexHarness {
     CodexHarness::new().with_executable(fixture_path())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn execution_lease_outlives_dropped_run_and_title_streams_until_child_is_reaped() {
+    for title_only in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+        let (mut controls, _steer, token) = controls("Yes");
+        controls.execution_lease = Some(Arc::new(gate.clone().read_owned().await));
+        let harness = harness().with_graces(Duration::from_millis(20), Duration::from_millis(200));
+        let mut req = request("scenario:lease-shutdown");
+        req.cwd = temp.path().display().to_string();
+        let mut stream = if title_only {
+            harness.run_title(req, controls).await
+        } else {
+            harness.run(req, controls).await
+        }
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    stream.next().await.unwrap().unwrap(),
+                    AgentEvent::Done { .. }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let pid: i32 = std::fs::read_to_string(temp.path().join("lease-child.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        token.cancel();
+        drop(stream);
+        assert!(
+            gate.clone().try_write_owned().is_err(),
+            "child still owns its lease"
+        );
+        let _writer = tokio::time::timeout(Duration::from_secs(5), gate.write_owned())
+            .await
+            .expect("child shutdown releases the lease");
+        // SAFETY: signal 0 only checks the fixture PID; it sends no signal.
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "lease released before child exit"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+}
+
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
         mcp: None,
@@ -59,6 +115,7 @@ fn controls(
     let (steer_tx, steer_rx) = mpsc::channel(8);
     let token = CancellationToken::new();
     let controls = RunControls {
+        execution_lease: None,
         request_input: Box::new(move |questions| {
             let (tx, rx) = oneshot::channel();
             let answers: Vec<UserInputAnswer> = questions
@@ -409,6 +466,7 @@ async fn approvals_round_trip_as_input_requests() {
     let token = CancellationToken::new();
     let seen = asked.clone();
     let controls = RunControls {
+        execution_lease: None,
         request_input: Box::new(move |questions| {
             seen.lock().unwrap().extend(questions.iter().cloned());
             let (tx, rx) = oneshot::channel();

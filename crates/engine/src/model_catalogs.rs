@@ -73,10 +73,37 @@ fn unchanged(harness: &dyn Harness, context: &ModelContext) -> bool {
         .is_some_and(|now| now.hash == context.hash)
 }
 
-pub(crate) async fn list(
+// Both the request and any background refresh retain the execution lease so
+// cancellation or an early disk-cache response cannot race a binary update.
+pub(crate) async fn list_with_lease(
     root: &Path,
     harness: Arc<dyn Harness>,
     force: bool,
+    lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
+) -> Result<Vec<Model>, HarnessError> {
+    let root = root.to_path_buf();
+    tokio::spawn(async move {
+        let _lease = lease.clone();
+        list_inner(&root, harness, force, lease).await
+    })
+    .await
+    .map_err(|error| HarnessError::Protocol(format!("model discovery task failed: {error}")))?
+}
+
+#[cfg(test)]
+async fn list(
+    root: &Path,
+    harness: Arc<dyn Harness>,
+    force: bool,
+) -> Result<Vec<Model>, HarnessError> {
+    list_with_lease(root, harness, force, None).await
+}
+
+async fn list_inner(
+    root: &Path,
+    harness: Arc<dyn Harness>,
+    force: bool,
+    lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
 ) -> Result<Vec<Model>, HarnessError> {
     let Some(context) = harness.model_context().map_err(|error| {
         let failure = CatalogFailure::from(error);
@@ -96,6 +123,7 @@ pub(crate) async fn list(
         let context = context.clone();
         let path = path.clone();
         async move {
+            let _lease = lease;
             let result = harness.model_catalog(force).await;
             if !unchanged(harness.as_ref(), &context) {
                 return Err(HarnessError::Protocol(
@@ -276,6 +304,56 @@ mod tests {
             unreachable!()
         }
     }
+    #[tokio::test]
+    async fn background_refresh_holds_lease_after_cached_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = Probe::new();
+        list(dir.path(), probe.clone(), false).await.unwrap();
+        probe.delay.store(true, SeqCst);
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+        let lease = Arc::new(gate.clone().read_owned().await);
+        list_with_lease(dir.path(), probe, true, Some(lease))
+            .await
+            .unwrap();
+        assert!(
+            gate.try_write().is_err(),
+            "background probe must block updates"
+        );
+        let _writer = tokio::time::timeout(Duration::from_secs(2), gate.write())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_catalog_request_holds_lease_until_probe_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let probe = Probe::new();
+        probe.delay.store(true, SeqCst);
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+        let lease = Arc::new(gate.clone().read_owned().await);
+        let task = tokio::spawn({
+            let probe = probe.clone();
+            async move { list_with_lease(&root, probe, true, Some(lease)).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !probe.forced.load(SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        let _ = task.await;
+        assert!(
+            gate.try_write().is_err(),
+            "cancelled RPC must not unlock a running probe"
+        );
+        let _writer = tokio::time::timeout(Duration::from_secs(2), gate.write())
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn auth_and_missing_binary_failures_retire_disk_instead_of_serving_it() {
         for message in ["not logged in", "spawn ENOENT"] {

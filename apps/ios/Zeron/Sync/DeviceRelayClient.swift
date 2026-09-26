@@ -320,13 +320,14 @@ actor DeviceRelayClient {
     /// attachment uploads pass longer ones (first chunk 90s for a cold dial,
     /// commit 150s to outlast the cross-device assemble — desktop state.ts).
     func call<Response: Decodable>(method: String, params: [String: Any],
-                                   timeoutSeconds: UInt64 = 10) async throws -> Response {
+                                   timeoutSeconds: UInt64 = 10,
+                                   retryOnDisconnect: Bool = true) async throws -> Response {
         for attempt in 0..<3 {
             do {
                 return try await callOnce(method: method, params: params,
                                           timeoutSeconds: timeoutSeconds)
             } catch let error as RelayError {
-                guard attempt < 2 else { throw error }
+                guard retryOnDisconnect, attempt < 2 else { throw error }
                 switch error {
                 case .hostOffline, .notConnected:
                     teardown(error: error)

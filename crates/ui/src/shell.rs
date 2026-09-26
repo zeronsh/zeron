@@ -62,6 +62,7 @@ use crate::workspace_links::resolve_workspace_file_link;
 mod actions_ui;
 mod command_palette;
 mod files_panel;
+mod harness_updates;
 mod project_icon;
 mod side_chats;
 mod sidebar_pins;
@@ -1854,6 +1855,18 @@ pub struct Shell {
     /// Persistent across AppState observer callbacks so simultaneous session
     /// failures and connectivity degradation produce one attention sound.
     attention_sound_gate: crate::sound::AttentionSoundGate,
+    /// `{device,harness,latest}` discoveries already delivered as a desktop
+    /// banner during this viewport lifetime.
+    harness_update_seen: std::collections::HashSet<String>,
+    /// Short debounce that aggregates providers finishing the same check at
+    /// slightly different times into one banner.
+    harness_update_banner_task: Option<Task<()>>,
+    /// Independent watches retain device identity across selection changes.
+    harness_update_devices: std::collections::BTreeMap<String, harness_updates::DeviceUpdates>,
+    harness_update_expanded: bool,
+    harness_update_transition: Option<WidthTween>,
+    harness_update_geometry: [Option<WidthTween>; 2],
+    harness_update_scroll: settings::widgets::PageScroll,
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
@@ -2264,6 +2277,13 @@ impl Shell {
             sound_prev: std::collections::HashMap::new(),
             connectivity_notifications: Default::default(),
             attention_sound_gate: Default::default(),
+            harness_update_seen: std::collections::HashSet::new(),
+            harness_update_banner_task: None,
+            harness_update_devices: Default::default(),
+            harness_update_expanded: false,
+            harness_update_transition: None,
+            harness_update_geometry: [None; 2],
+            harness_update_scroll: settings::widgets::PageScroll::default(),
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
             update_flow: UpdateFlow::Idle,
@@ -2389,6 +2409,7 @@ impl Shell {
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         self.prune_file_explorers(cx);
+        self.refresh_harness_update_watch(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
             self.side_chat_creating = false;
@@ -2590,6 +2611,75 @@ impl Shell {
                     crate::notify::post("Connection unavailable", body, None);
                 }
             }
+        }
+        // Agent release discoveries finish independently (bounded provider
+        // concurrency), so debounce the transition and deliver one aggregate
+        // banner. Versioned releases deduplicate by version. Versionless
+        // availability deduplicates until a confirmed Current/Updated status;
+        // transient checks, disconnections and cancellation do not reset it.
+        let has_unseen_harness_update = {
+            let state = state.read(cx);
+            let device = state.local_device_id.as_deref().unwrap_or("local");
+            for status in &state.harness_updates {
+                if matches!(
+                    status.phase,
+                    zeron_proto::HarnessUpdatePhase::Current
+                        | zeron_proto::HarnessUpdatePhase::Updated
+                ) {
+                    self.harness_update_seen.remove(
+                        &harness_updates::versionless_notification_key(device, status.harness),
+                    );
+                }
+            }
+            state.harness_updates.iter().any(|status| {
+                harness_updates::notification_key(device, status)
+                    .is_some_and(|key| !self.harness_update_seen.contains(&key))
+            })
+        };
+        if has_unseen_harness_update && self.harness_update_banner_task.is_none() {
+            self.harness_update_banner_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                this.update(cx, |this, cx| {
+                    this.harness_update_banner_task = None;
+                    let new: Vec<String> = {
+                        let state = this.state.read(cx);
+                        let device = state.local_device_id.as_deref().unwrap_or("local");
+                        state
+                            .harness_updates
+                            .iter()
+                            .filter_map(|status| harness_updates::notification_key(device, status))
+                            .filter(|key| !this.harness_update_seen.contains(key))
+                            .collect()
+                    };
+                    if new.is_empty() {
+                        return;
+                    }
+                    let count = new.len();
+                    for key in &new {
+                        this.harness_update_seen.insert(key.clone());
+                    }
+                    let focused = cx.active_window().is_some();
+                    if this.settings.notifications_enabled
+                        && this.settings.agent_update_notifications
+                        && !(this.settings.notifications_background_only && focused)
+                    {
+                        let body = if count == 1 {
+                            "A coding agent update is ready"
+                        } else {
+                            "Coding agent updates are ready"
+                        };
+                        crate::notify::post(
+                            &format!(
+                                "{count} agent update{} available",
+                                if count == 1 { "" } else { "s" }
+                            ),
+                            body,
+                            Some(crate::notify::AGENT_UPDATES_TARGET),
+                        );
+                    }
+                })
+                .ok();
+            }));
         }
         // An explicit projectless canvas must be visible in the sidebar:
         // retaining a project filter would hide the session on its first send.
@@ -4318,7 +4408,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+    pub(crate) fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         let section = section.canonical();
         self.command_palette = None;
         // Recreate per visit: the page's ListHarnesses load re-probes which
@@ -4563,6 +4653,7 @@ impl Shell {
                             self.settings.sound_attention_enabled,
                             self.settings.notifications_enabled,
                             self.settings.notifications_background_only,
+                            self.settings.agent_update_notifications,
                             cx,
                         )
                     });
@@ -4577,6 +4668,7 @@ impl Shell {
                                 attention_sound,
                                 desktop,
                                 background_only,
+                                agent_updates,
                             } = *event;
                             this.settings.sound_enabled = sound;
                             this.settings.sound_completion_enabled = completion_sound;
@@ -4584,6 +4676,7 @@ impl Shell {
                             this.settings.sound_attention_enabled = attention_sound;
                             this.settings.notifications_enabled = desktop;
                             this.settings.notifications_background_only = background_only;
+                            this.settings.agent_update_notifications = agent_updates;
                             this.schedule_save(cx);
                             cx.notify();
                         },
@@ -8623,6 +8716,10 @@ impl Shell {
         {
             return true;
         }
+        if self.harness_update_expanded {
+            self.set_harness_updates_expanded(false, cx);
+            return true;
+        }
         if self.rename_dialog.is_some() {
             self.rename_dialog = None;
             cx.notify();
@@ -9440,6 +9537,22 @@ impl Shell {
             Empty.into_any_element()
         };
 
+        // Share the dock's choreography: release the bottom chip early on
+        // departure, reveal it with the Home selectors on return. Absolute
+        // mounting keeps it out of composer measurements and centering.
+        let chip_opacity = if has_selection {
+            1.0 - crate::composer_dock::stage(dock_frame.dissolve(), 0.0, 0.22)
+        } else {
+            dock_frame.selectors()
+        } * self.composer_dock.borrow().opacity();
+        if has_selection {
+            self.set_harness_updates_expanded(false, cx);
+        }
+        let harness_update_card = if chip_opacity > 0.001 && (!has_selection || dock_frame.active) {
+            self.render_harness_update_card(window, main_content_width, cx)
+        } else {
+            None
+        };
         let status = self.render_status_strip(composer_width, cx);
         // Attachment dropzone over the ENTIRE conversation column (transcript
         // + composer, not just the pill). OS images keep using the upload
@@ -9585,6 +9698,22 @@ impl Shell {
                         ))
                     })
                     .child(self.render_terminal_container(window, cx))
+            })
+            .when_some(harness_update_card, |column, chip| {
+                column.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom(px(24.0 - 8.0 * (1.0 - chip_opacity)))
+                        .opacity(chip_opacity)
+                        .flex()
+                        .justify_center()
+                        .child(chip)
+                        .when(has_selection, |el| {
+                            el.child(div().absolute().inset_0().occlude())
+                        }),
+                )
             })
             .child(
                 div()
@@ -14801,6 +14930,72 @@ mod right_tab_mouse_regressions {
     }
 
     #[gpui::test]
+    fn update_banner_fires_during_continuous_state_changes(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.settings.notifications_enabled = false;
+            shell.state.update(cx, |state, _| {
+                state.harness_updates = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "harness": "codex", "phase": "available", "latestVersion": "2.0.0",
+                        "policy": "notify", "source": "unknown", "canApply": true
+                    }))
+                    .unwrap(),
+                    serde_json::from_value(serde_json::json!({
+                        "harness": "hermes", "phase": "available",
+                        "policy": "notify", "source": "unknown", "canApply": true
+                    }))
+                    .unwrap(),
+                ];
+            });
+        });
+        for _ in 0..12 {
+            shell.update(cx, |shell, cx| {
+                shell.on_state_changed(&shell.state.clone(), cx)
+            });
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(100));
+        }
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.harness_update_seen.len(), 2);
+            assert!(shell.harness_update_banner_task.is_none());
+        });
+        // Rechecks and repeated versionless availability remain deduplicated.
+        for phase in [
+            zeron_proto::HarnessUpdatePhase::Checking,
+            zeron_proto::HarnessUpdatePhase::Available,
+        ] {
+            shell.update(cx, |shell, cx| {
+                shell
+                    .state
+                    .update(cx, |state, _| state.harness_updates[1].phase = phase);
+                shell.on_state_changed(&shell.state.clone(), cx);
+                assert!(shell.harness_update_banner_task.is_none());
+            });
+        }
+        // A confirmed current state ends the availability episode, permitting
+        // another commit-only update to notify even if the version is unchanged.
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.harness_updates[1].phase = zeron_proto::HarnessUpdatePhase::Current
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.harness_update_seen.len(), 1);
+            shell.state.update(cx, |state, _| {
+                state.harness_updates[1].phase = zeron_proto::HarnessUpdatePhase::Available
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.harness_update_seen.len(), 2)
+        });
+    }
+
+    #[gpui::test]
     fn subagent_close_press_does_not_start_parent_drag(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
         let start = cx.debug_bounds("right-surface-close-0").unwrap().center();
@@ -14859,9 +15054,7 @@ mod right_tab_mouse_regressions {
             Some(MouseButton::Left),
             gpui::Modifiers::default(),
         );
-        cx.update(|_, cx| {
-            assert!(cx.has_active_drag(), "tab drag did not start")
-        });
+        cx.update(|_, cx| assert!(cx.has_active_drag(), "tab drag did not start"));
         cx.simulate_mouse_up(start, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_down(start, MouseButton::Middle, gpui::Modifiers::default());
         cx.simulate_mouse_up(start, MouseButton::Middle, gpui::Modifiers::default());

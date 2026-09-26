@@ -159,6 +159,13 @@ struct NewSessionView: View {
 
             composer
                 .padding(.bottom, 8)
+            if let deviceId {
+                HarnessUpdatesView(deviceId: deviceId, compact: true)
+                    .id(deviceId)
+                    // Keep update arrivals out of the composer's geometry.
+                    .frame(height: 40)
+                    .padding(.bottom, 8)
+            }
         }
         .background(Theme.bg.ignoresSafeArea())
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { viewWidth = $0 }
