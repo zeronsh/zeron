@@ -72,3 +72,11 @@ For each P0/P1 control, add a Windows regression covering mouse-down, approximat
 Comet now centralizes this distinction in `click_activation_drag_enabled()`. On Windows, the four P0/P1 control families above no longer register drag initiation on their click-activation hitboxes. Their primary click actions therefore survive pointer jitter. Drag-first controls remain unchanged, and macOS/Linux retain tab reordering and workspace-path dragging.
 
 The production right-tab visual regression reproduces an eight-pixel moving click. It failed before the change because GPUI entered an active drag, then passed after the Windows policy was applied. The complete `zeron-ui` library suite passed with 789 tests.
+
+## File tree actions (2026-09-23)
+
+Workspace rows now expose a dedicated drag handle on Windows. The row body
+still uses `click_activation_drag_enabled()` and retains the jitter protection;
+the handle starts the same workspace-relative payload used by the composer.
+Tree, search and file-tab payloads carry their originating surface and workspace
+context so a delayed drop cannot attach a path to a different session.

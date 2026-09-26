@@ -656,3 +656,87 @@ async fn write_rejects_changed_checkout_even_when_contents_match() {
         "hello\n"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_mutations_validate_revision_and_publish_semantic_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    let core = assemble(&temp.path().join("data"), "device-mutations");
+    core.workspace
+        .create_space(
+            "space",
+            &core.device_id,
+            &repo.to_string_lossy(),
+            None,
+            true,
+        )
+        .unwrap();
+    core.workspace
+        .create_chat("chat", Some("space"), None, None, None)
+        .unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let page: WorkspaceDirectoryPage = serde_json::from_value(
+        client
+            .call(
+                methods::LIST_WORKSPACE_DIRECTORY,
+                serde_json::json!({"chatId":"chat"}),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(page.mutation_capabilities.unwrap().delete_entry);
+    let revision = page
+        .entries
+        .iter()
+        .find(|e| e.path == "README.md")
+        .unwrap()
+        .mutation_revision
+        .clone()
+        .unwrap();
+    let checkout = page.checkout_id.unwrap();
+    let mut watch = client
+        .subscribe(
+            methods::WATCH_WORKSPACE_FILES,
+            serde_json::json!({"chatId":"chat"}),
+        )
+        .await
+        .unwrap();
+    watch.recv().await.unwrap();
+    let mut request = serde_json::json!({"chatId":"chat", "operationId":"rename", "expectedCheckoutId":checkout, "sourcePath":"README.md", "destinationPath":"src/read me.md", "expectedSourceRevision":revision, "expectedKind":"file"});
+    request["expectedCheckoutId"] = "wrong".into();
+    let rejected = client
+        .call(methods::MOVE_WORKSPACE_ENTRY, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(rejected["reason"], "workspaceChanged");
+    request["expectedCheckoutId"] = checkout.clone().into();
+    let moved = client
+        .call(methods::MOVE_WORKSPACE_ENTRY, request)
+        .await
+        .unwrap();
+    assert_eq!(moved["status"], "applied");
+    assert!(!repo.join("README.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(repo.join("src/read me.md")).unwrap(),
+        "hello\n"
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let frame: WorkspaceFileChanges =
+                serde_json::from_value(watch.recv().await.unwrap()).unwrap();
+            if frame.changes.iter().any(|c| {
+                c.operation_id.as_deref() == Some("rename")
+                    && c.old_path.as_deref() == Some("README.md")
+            }) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let deleted = client.call(methods::DELETE_WORKSPACE_ENTRY, serde_json::json!({"chatId":"chat", "operationId":"delete", "expectedCheckoutId":checkout, "path":"src/read me.md", "expectedSourceRevision":moved["entry"]["mutationRevision"], "expectedKind":"file", "recursive":false})).await.unwrap();
+    assert_eq!(deleted["status"], "applied");
+    assert!(!repo.join("src/read me.md").exists());
+}

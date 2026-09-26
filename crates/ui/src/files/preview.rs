@@ -97,7 +97,7 @@ enum ReloadDecision {
 
 pub(super) struct FilePreviewState {
     images_visible: bool,
-    documents: HashMap<String, FileDocument>,
+    pub(super) documents: HashMap<String, FileDocument>,
     document_recency: VecDeque<String>,
     active: Option<String>,
     highlights: HashMap<String, HighlightedFile>,
@@ -1483,7 +1483,10 @@ impl FilesSurface {
     }
 
     pub(super) fn schedule_autosave(&mut self, path: String, cx: &mut Context<Self>) {
-        if !self.preview.autosave_enabled || self.preview.autosave_paused_for_reload(&path) {
+        if self.mutation_blocks_path(&path)
+            || !self.preview.autosave_enabled
+            || self.preview.autosave_paused_for_reload(&path)
+        {
             return;
         }
         let delay = Duration::from_millis(self.preview.autosave_delay_ms);
@@ -1522,7 +1525,7 @@ impl FilesSurface {
     }
 
     pub(super) fn save_document(&mut self, path: String, cx: &mut Context<Self>) {
-        if self.target_change_pending {
+        if self.mutation_blocks_path(&path) || self.target_change_pending {
             return;
         }
         let Some(context) = self.request_context.clone() else {
@@ -1911,10 +1914,24 @@ impl FilesSurface {
             document.reconcile_task = None;
             document.pending_save = None;
             document.key.path = new_document_path.clone();
+            let was_markdown = super::markdown_preview::is_markdown(old_document_path);
+            let is_markdown = super::markdown_preview::is_markdown(new_document_path);
+            if was_markdown != is_markdown {
+                document.show_markdown = is_markdown;
+                if let Some(view) = document.markdown.take() {
+                    view.update(cx, |view, cx| view.suspend(cx));
+                }
+            }
             if let Some(file) = document.file.as_mut() {
                 file.path = new_document_path.clone();
             }
             if let Some(editor) = document.editor.clone() {
+                // Retarget the existing editor so selection and undo survive.
+                // Its previous adapter captures parsed spans for the old language.
+                editor.update(cx, |editor, cx| {
+                    editor.set_highlighter(new_document_path.clone(), cx);
+                    editor.set_highlighter_factory(Rc::new(|_| None), cx);
+                });
                 let event_path = new_document_path.clone();
                 document.editor_events =
                     Some(super::editor::subscribe_to_changes(&editor, event_path, cx));
@@ -1928,11 +1945,7 @@ impl FilesSurface {
             if self.editor_path.as_deref() == Some(old_document_path) {
                 self.editor_path = Some(new_document_path.clone());
             }
-            if let Some(highlight) = self.preview.highlights.remove(old_document_path) {
-                self.preview
-                    .highlights
-                    .insert(new_document_path.clone(), highlight);
-            }
+            self.preview.highlights.remove(old_document_path);
             if let Some(anchors) = self.preview.comment_anchors.remove(old_document_path) {
                 self.preview
                     .comment_anchors
@@ -1967,6 +1980,17 @@ impl FilesSurface {
                     .is_some_and(FileDocument::is_dirty)
             {
                 self.read_file(path.clone(), cx);
+            } else if let Some(document) = self.preview.documents.get(path) {
+                if let Some(editor) = &document.editor {
+                    let source = editor.read(cx).value().to_string();
+                    self.request_editor_highlight(path.clone(), source, document.revision, cx);
+                } else if let Some((text, hash)) = document
+                    .file
+                    .as_ref()
+                    .and_then(|file| file.text.clone().zip(file.content_hash.clone()))
+                {
+                    self.request_file_highlight(path.clone(), text, hash, cx);
+                }
             }
         }
         if !renames.is_empty() {
@@ -3269,6 +3293,142 @@ fn read_only_message(reason: Option<WorkspaceReadOnlyReason>) -> SharedString {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn renaming_markdown_to_text_keeps_dirty_editor_and_undo(cx: &mut TestAppContext) {
+        let (files, cx) = super::super::test_support::setup(cx);
+        let editor = files.update_in(cx, |files, window, cx| {
+            let theme = Theme::of(cx).clone();
+            let editor = super::super::editor::new_file_editor(
+                "# Original",
+                "note.md",
+                false,
+                &theme,
+                window,
+                cx,
+            );
+            let mut document = cached_document("note.md", "# Original");
+            document.set_loaded(zeron_proto::WorkspaceFileText {
+                checkout_id: "checkout".into(),
+                path: "note.md".into(),
+                text: Some("# Original".into()),
+                content_hash: Some("saved-hash".into()),
+                size: 10,
+                modified_at: None,
+                encoding: zeron_proto::WorkspaceTextEncoding::Utf8,
+                line_ending: Some(zeron_proto::WorkspaceLineEnding::Lf),
+                read_only_reason: None,
+                truncated: false,
+            });
+            editor.update(cx, |editor, cx| {
+                editor.set_selected_range(10..10, cx);
+                editor.replace(" unsaved", window, cx);
+                editor.set_selected_range(2..10, cx);
+            });
+            document.editor = Some(editor.clone());
+            document.mark_user_edit();
+            files.preview.documents.insert("note.md".into(), document);
+            files.preview.active = Some("note.md".into());
+            files.editor_path = Some("note.md".into());
+            files.presentation = super::super::FilesPresentation::Editor;
+            assert!(
+                files
+                    .prepare_markdown_preview("note.md", Some(&editor), cx)
+                    .is_some()
+            );
+            files.apply_semantic_mutation(
+                &zeron_proto::WorkspaceFileChange {
+                    operation_id: Some("rename-md".into()),
+                    kind: zeron_proto::WorkspaceFileChangeKind::Renamed,
+                    path: "note.txt".into(),
+                    old_path: Some("note.md".into()),
+                },
+                None,
+                true,
+                cx,
+            );
+            let document = &files.preview.documents["note.txt"];
+            assert!(!document.show_markdown);
+            assert!(document.markdown.is_none());
+            assert!(document.is_dirty());
+            assert_eq!(document.phase, DocumentPhase::Ready);
+            assert_eq!(document.editor.as_ref(), Some(&editor));
+            assert_eq!(editor.read(cx).value().as_ref(), "# Original unsaved");
+            assert_eq!(editor.read(cx).selected_range(), 2..10);
+            assert_eq!(document.saved_hash.as_deref(), Some("saved-hash"));
+            assert!(
+                files
+                    .prepare_markdown_preview("note.txt", Some(&editor), cx)
+                    .is_none()
+            );
+            editor.update(cx, |editor, cx| editor.focus(window, cx));
+            editor
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear();
+            window.dispatch_action(Box::new(gpui_base::input::Undo), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            editor.read_with(cx, |editor, _| editor.value().to_string()),
+            "# Original"
+        );
+    }
+
+    #[gpui::test]
+    fn rename_refreshes_language_and_preserves_markdown_view_choice(cx: &mut TestAppContext) {
+        let (files, cx) = super::super::test_support::setup(cx);
+        files.update_in(cx, |files, window, cx| {
+            let theme = Theme::of(cx).clone();
+            let editor = super::super::editor::new_file_editor(
+                "let value = 1;",
+                "note.txt",
+                false,
+                &theme,
+                window,
+                cx,
+            );
+            let mut document = cached_document("note.txt", "let value = 1;");
+            document.editor = Some(editor);
+            files.preview.documents.insert("note.txt".into(), document);
+            files.rename_documents("note.txt", "note.rs".into(), cx);
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(120));
+        cx.run_until_parked();
+        files.update_in(cx, |files, _, cx| {
+            let key = DocumentHighlightKey::new(
+                zeron_syntax::language_for_path("note.rs").unwrap(),
+                "let value = 1;",
+            );
+            assert!(
+                files.preview.syntax_cache.get(&key).is_some(),
+                "the open editor must be parsed in the new language without an edit"
+            );
+            files.rename_documents("note.rs", "note.md".into(), cx);
+            assert!(files.preview.documents["note.md"].show_markdown);
+            files
+                .preview
+                .documents
+                .get_mut("note.md")
+                .unwrap()
+                .show_markdown = false;
+            files.rename_documents("note.md", "renamed.md".into(), cx);
+            assert!(
+                !files.preview.documents["renamed.md"].show_markdown,
+                "renaming within Markdown must preserve the user's code view choice"
+            );
+            files.rename_documents("renamed.md", "renamed.txt".into(), cx);
+            assert!(
+                files.preview.documents["renamed.txt"]
+                    .highlight_task
+                    .is_none()
+            );
+            assert!(!files.preview.highlights.contains_key("renamed.txt"));
+        });
+    }
 
     // Rendering a preview needs a window, so this asserts on `line_height`,
     // the single source both the uniform-height hint passed to

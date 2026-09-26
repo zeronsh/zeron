@@ -18,7 +18,9 @@ use crate::{
 };
 
 pub mod client;
+mod context_menu;
 pub mod document;
+mod drag;
 pub mod editor;
 pub mod editor_adapter;
 mod git_status;
@@ -26,9 +28,13 @@ mod image_preview;
 pub(crate) mod markdown_media;
 mod markdown_preview;
 pub mod model;
+pub mod mutations;
 pub mod preview;
+mod rename;
 pub mod search;
 mod sections;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tree;
 pub mod watch;
 
@@ -73,13 +79,41 @@ pub(super) fn toolbar_button(id: &'static str, label: &'static str) -> gpui::Sta
 /// that workspace instead of leaking a path from the UI machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkspacePathDrag {
+    pub origin: Option<mutations::WorkspaceInteractionOrigin>,
+    pub source: WorkspacePathSource,
+    pub revision: Option<String>,
     pub path: String,
     pub is_directory: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspacePathSource {
+    Tree,
+    Search,
+    FileTab,
+}
+
 impl WorkspacePathDrag {
     pub(crate) fn new(path: String, is_directory: bool) -> Self {
-        Self { path, is_directory }
+        Self {
+            path,
+            is_directory,
+            origin: None,
+            source: WorkspacePathSource::Search,
+            revision: None,
+        }
+    }
+
+    pub(crate) fn with_origin(
+        mut self,
+        origin: Option<mutations::WorkspaceInteractionOrigin>,
+        source: WorkspacePathSource,
+        revision: Option<String>,
+    ) -> Self {
+        self.origin = origin;
+        self.source = source;
+        self.revision = revision;
+        self
     }
 
     fn title(&self) -> SharedString {
@@ -140,6 +174,16 @@ pub(crate) fn workspace_path_drag_ghost(
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FilesEvent {
+    AddToChat {
+        path: String,
+        is_directory: bool,
+        origin: mutations::WorkspaceInteractionOrigin,
+    },
+    HoldMutation {
+        origin: mutations::WorkspaceInteractionOrigin,
+        path: Option<String>,
+    },
+    Mutate(mutations::MutationIntent),
     OpenFile(String),
     RevealFile(String),
     OpenWebLink(crate::markdown::render::LinkActivation),
@@ -198,6 +242,18 @@ struct EditorContextMenu {
 }
 
 pub struct FilesSurface {
+    surface_id: gpui::EntityId,
+    interaction_generation: u64,
+    effective_checkout_id: Option<String>,
+    mutation_capabilities: Option<zeron_proto::WorkspaceMutationCapabilities>,
+    pending_mutation: Option<mutations::MutationIntent>,
+    deferred_file_changes: Vec<zeron_proto::WorkspaceFileChanges>,
+    applied_mutations: std::collections::VecDeque<String>,
+    mutation_error: Option<SharedString>,
+    mutation_hold: Option<String>,
+    tree_drag: drag::TreeDrag,
+    tree_rename: Option<rename::TreeRename>,
+    tree_delete: Option<rename::TreeDelete>,
     state: Entity<AppState>,
     chat_id: String,
     review_comment_flush_source: u64,
@@ -224,6 +280,7 @@ pub struct FilesSurface {
     watch_sequence: Option<u64>,
     watch_error: Option<SharedString>,
     preview: FilePreviewState,
+    tree_context_menu: crate::popover::Popup<context_menu::TreeContextMenu>,
     pending_line_navigation: Option<(u32, Option<u32>)>,
     line_navigation_generation: u64,
     editor_context_menu: crate::popover::Popup<EditorContextMenu>,
@@ -238,6 +295,9 @@ pub struct FilesSurface {
 
 impl Render for FilesSurface {
     fn render(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !cx.has_active_drag() || !self.is_current_target(cx) {
+            self.clear_tree_drag(window, cx);
+        }
         if std::mem::take(&mut self.search_restore_tree_focus) {
             self.tree_focus.focus(window, cx);
         }
@@ -274,8 +334,15 @@ impl Render for FilesSurface {
             .flex_col()
             .children(header)
             .child(div().flex_1().min_h_0().w_full().child(body))
+            .children(
+                self.mutation_error
+                    .as_ref()
+                    .map(|message| crate::popover::error_row(&theme, message).into_any_element()),
+            )
             .children(sections)
             .children(editor_context_menu)
+            .children(self.render_tree_context_menu(&theme, cx))
+            .children(self.render_tree_delete(&theme, window, cx))
     }
 }
 
@@ -555,6 +622,18 @@ impl FilesSurface {
                 .ok();
         });
         let mut surface = Self {
+            surface_id: cx.entity_id(),
+            interaction_generation: 0,
+            effective_checkout_id: None,
+            mutation_capabilities: None,
+            pending_mutation: None,
+            deferred_file_changes: Vec::new(),
+            applied_mutations: std::collections::VecDeque::new(),
+            mutation_error: None,
+            mutation_hold: None,
+            tree_drag: drag::TreeDrag::default(),
+            tree_rename: None,
+            tree_delete: None,
             state,
             chat_id,
             review_comment_flush_source: NEXT_REVIEW_COMMENT_FLUSH_SOURCE
@@ -586,6 +665,7 @@ impl FilesSurface {
                 word_wrap,
                 editor_font_size,
             ),
+            tree_context_menu: crate::popover::Popup::default(),
             pending_line_navigation: None,
             line_navigation_generation: 0,
             editor_context_menu: crate::popover::Popup::default(),
@@ -946,6 +1026,8 @@ impl FilesSurface {
                 let reload = surface.tree.node(&directory).is_some_and(|node| node.stale);
                 match result {
                     Ok(page) => {
+                        surface.effective_checkout_id = page.checkout_id.clone();
+                        surface.mutation_capabilities = page.mutation_capabilities;
                         surface.error = None;
                         surface.tree.apply_page(page, generation);
                         if directory.is_empty() {
@@ -1016,6 +1098,22 @@ impl FilesSurface {
     }
 
     fn apply_target(&mut self, next: Option<FilesRequestContext>, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.tree_delete.take() {
+            cx.emit(FilesEvent::HoldMutation {
+                origin: dialog.origin,
+                path: None,
+            });
+        }
+        self.tree_rename = None;
+        self.tree_drag = drag::TreeDrag::default();
+        self.mutation_hold = None;
+        self.interaction_generation = self.interaction_generation.wrapping_add(1);
+        self.effective_checkout_id = None;
+        self.mutation_capabilities = None;
+        self.pending_mutation = None;
+        self.deferred_file_changes.clear();
+        self.applied_mutations.clear();
+        self.mutation_error = None;
         self.release_git_status();
         self.suspend_images(cx);
         self.cancel_review_comment_flush(cx);
@@ -1023,6 +1121,7 @@ impl FilesSurface {
         self.watch_task = None;
         self.watch_sequence = None;
         self.watch_error = None;
+        self.tree_context_menu = crate::popover::Popup::default();
         self.editor_context_menu = crate::popover::Popup::default();
         self.preview.reset();
         self.pending_line_navigation = None;

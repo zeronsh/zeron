@@ -480,6 +480,10 @@ pub struct ListWorkspaceDirectoryRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceDirectoryPage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_capabilities: Option<WorkspaceMutationCapabilities>,
     pub directory: String,
     pub entries: Vec<WorkspaceEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -490,6 +494,8 @@ pub struct WorkspaceDirectoryPage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_revision: Option<String>,
     pub path: String,
     pub name: String,
     pub kind: WorkspaceEntryKind,
@@ -696,6 +702,8 @@ pub struct WorkspaceFileChanges {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceFileChange {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     pub kind: WorkspaceFileChangeKind,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1383,6 +1391,7 @@ mod tests {
             sequence: 4,
             resync_required: false,
             changes: vec![WorkspaceFileChange {
+                operation_id: None,
                 kind: WorkspaceFileChangeKind::Renamed,
                 path: "src/new.rs".into(),
                 old_path: Some("src/old.rs".into()),
@@ -1395,6 +1404,129 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<WorkspaceFileChanges>(value).unwrap(),
             changes
+        );
+    }
+}
+
+/// Host capabilities; absent fields keep older peers read-only for mutations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceMutationCapabilities {
+    #[serde(default)]
+    pub move_entry: bool,
+    #[serde(default)]
+    pub delete_entry: bool,
+}
+
+/// Rename and move share the same no-replacement operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveWorkspaceEntryRequest {
+    #[serde(flatten)]
+    pub target: WorkspaceTarget,
+    pub operation_id: String,
+    pub expected_checkout_id: String,
+    pub source_path: String,
+    pub destination_path: String,
+    pub expected_source_revision: String,
+    pub expected_kind: WorkspaceEntryKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteWorkspaceEntryRequest {
+    #[serde(flatten)]
+    pub target: WorkspaceTarget,
+    pub operation_id: String,
+    pub expected_checkout_id: String,
+    pub path: String,
+    pub expected_source_revision: String,
+    pub expected_kind: WorkspaceEntryKind,
+    /// Explicit consent to delete the directory's current contents.
+    pub recursive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum WorkspaceMutationOutcome {
+    #[serde(rename_all = "camelCase")]
+    Applied {
+        operation_id: String,
+        checkout_id: String,
+        change: WorkspaceFileChange,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<WorkspaceEntry>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Rejected {
+        operation_id: String,
+        reason: WorkspaceMutationRejection,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceMutationRejection {
+    InvalidPath,
+    WorkspaceChanged,
+    SourceMissing,
+    SourceChanged,
+    DestinationExists,
+    InvalidDestination,
+    PermissionDenied,
+    Unsupported,
+    Busy,
+    PartialFailure,
+}
+
+#[cfg(test)]
+mod mutation_contract_tests {
+    use super::*;
+    #[test]
+    fn old_peers_remain_readable_without_mutation_support() {
+        let page: WorkspaceDirectoryPage = serde_json::from_value(serde_json::json!({
+            "directory":"", "entries":[{"path":"a", "name":"a", "kind":"file", "ignored":false, "readOnly":false}],
+            "truncated":false
+        })).unwrap();
+        assert_eq!(page.checkout_id, None);
+        assert_eq!(page.mutation_capabilities, None);
+        assert_eq!(page.entries[0].mutation_revision, None);
+        let change: WorkspaceFileChange =
+            serde_json::from_value(serde_json::json!({"kind":"removed", "path":"a"})).unwrap();
+        assert_eq!(change.operation_id, None);
+    }
+    #[test]
+    fn mutation_requests_and_outcomes_round_trip() {
+        let request = serde_json::json!({"chatId":"chat", "operationId":"op", "expectedCheckoutId":"checkout", "sourcePath":"a", "destinationPath":"b", "expectedSourceRevision":"rev", "expectedKind":"file"});
+        let decoded: MoveWorkspaceEntryRequest = serde_json::from_value(request.clone()).unwrap();
+        let encoded = serde_json::to_value(decoded).unwrap();
+        for (key, value) in request.as_object().unwrap() {
+            assert_eq!(&encoded[key], value);
+        }
+        let delete: DeleteWorkspaceEntryRequest = serde_json::from_value(serde_json::json!({"chatId":"chat", "operationId":"op", "expectedCheckoutId":"checkout", "path":"a", "expectedSourceRevision":"rev", "expectedKind":"directory", "recursive":true})).unwrap();
+        assert_eq!(
+            serde_json::from_value::<DeleteWorkspaceEntryRequest>(
+                serde_json::to_value(&delete).unwrap()
+            )
+            .unwrap(),
+            delete
+        );
+        let outcome = WorkspaceMutationOutcome::Rejected {
+            operation_id: "op".into(),
+            reason: WorkspaceMutationRejection::DestinationExists,
+            message: "Destination exists".into(),
+        };
+        assert_eq!(
+            serde_json::from_value::<WorkspaceMutationOutcome>(
+                serde_json::to_value(&outcome).unwrap()
+            )
+            .unwrap(),
+            outcome
+        );
+        assert!(
+            serde_json::from_value::<WorkspaceMutationRejection>(serde_json::json!("overwrite"))
+                .is_err()
         );
     }
 }

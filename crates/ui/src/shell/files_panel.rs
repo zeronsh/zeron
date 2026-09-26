@@ -172,6 +172,36 @@ impl Shell {
                 &files,
                 window,
                 move |this: &mut Self, source, event, window, cx| match event {
+                    FilesEvent::HoldMutation { origin, path } => {
+                        let surfaces = this
+                            .files
+                            .values()
+                            .chain(this.file_surfaces.values())
+                            .filter(|s| s.read(cx).shares_workspace(origin))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        for surface in surfaces {
+                            surface.update(cx, |files, cx| files.hold_mutation(path.clone(), cx));
+                        }
+                    }
+                    FilesEvent::AddToChat {
+                        path,
+                        is_directory,
+                        origin,
+                    } => {
+                        let payload = WorkspacePathDrag::new(path.clone(), *is_directory)
+                            .with_origin(
+                                Some(origin.clone()),
+                                crate::files::WorkspacePathSource::Tree,
+                                None,
+                            );
+                        this.attach_workspace_drag(&payload, window, cx);
+                    }
+                    FilesEvent::Mutate(intent)
+                        if this.accepts_file_navigation(&owner, &source, cx) =>
+                    {
+                        this.start_file_mutation(source.clone(), intent.clone(), cx);
+                    }
                     FilesEvent::OpenFile(path)
                         if this.accepts_file_navigation(&owner, &source, cx) =>
                     {
@@ -241,6 +271,9 @@ impl Shell {
     pub(super) fn close_files_panel(&mut self, cx: &mut Context<Self>) {
         if !self.files_panel_open(cx) {
             return;
+        }
+        if let Some(files) = self.files.get(&self.panel_key(cx)).cloned() {
+            files.update(cx, |files, cx| files.suspend_tree_interactions(cx));
         }
         let from = self.files_visible_width(cx);
         self.panels
