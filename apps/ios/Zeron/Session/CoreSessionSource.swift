@@ -55,6 +55,17 @@ final class CoreSessionSource: SessionSource {
         } else if let b = row?.branch, !b.isEmpty {
             chips.append(ComposerChip(id: "branch", title: b, symbol: "arrow.triangle.branch"))
         }
+        if let usage = c.contextUsage, let tokens = usage.tokens, let window = usage.window, window > 0 {
+            let fraction = Double(tokens) / Double(window)
+            if fraction >= 0.5 {
+                chips.append(ComposerChip(
+                    id: "context",
+                    title: "\(Int((fraction * 100).rounded()))% context",
+                    symbol: fraction >= 0.85 ? "exclamationmark.circle" : "circle.lefthalf.filled",
+                    tint: fraction >= 0.85 ? Palette.warning : nil
+                ))
+            }
+        }
         next.chips = chips
         if c.sendState == .failed {
             next.banner = .notDelivered

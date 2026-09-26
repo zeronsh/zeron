@@ -338,6 +338,11 @@ final class AppModel {
     func archive(_ id: String) { attempt("archive") { try client?.archiveSession(chatId: id) } }
     func unarchive(_ id: String) { attempt("unarchive") { try client?.unarchiveSession(chatId: id) } }
     func move(_ id: String, toSection section: String?) { attempt("assign") { try client?.assignSection(chatId: id, sectionId: section) } }
+    func movePin(_ id: String, after: String?, before: String?) {
+        attempt("move pin") { try client?.movePin(chatId: id, after: after, before: before) }
+    }
+    func renameSection(_ id: String, _ name: String) { attempt("rename section") { try client?.renameSection(sectionId: id, name: name) } }
+    func deleteSection(_ id: String) { attempt("delete section") { try client?.deleteSection(sectionId: id) } }
     func createSection(_ name: String) { attempt("section") { _ = try client?.createSection(name: name) } }
     func rename(_ id: String, _ title: String) { attempt("rename") { try client?.renameSession(chatId: id, title: title) } }
     func markSeen(_ id: String) { attempt("seen") { try client?.markSeen(chatId: id) } }

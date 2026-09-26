@@ -19,6 +19,8 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     private var token: AnyObject?
     /// Rows indent under a group header (projects screen).
     var indentedSections: Set<String> = []
+    /// Show drag handles in edit mode (Pinned).
+    var reorderable = false
 
     init(app: AppModel) {
         self.app = app
@@ -46,6 +48,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             guard let self, let vm = self.sessions[id] else { return }
             cell.indent = self.indentedSections.contains(self.dataSource.sectionIdentifier(for: path.section) ?? "") ? 30 : 0
             cell.configure(vm)
+            cell.accessories = self.reorderable ? [.reorder(displayed: .whenEditing)] : []
         }
         let folderReg = UICollectionView.CellRegistration<FolderCell, String> { [weak self] cell, _, id in
             guard let vm = self?.folders[id] else { return }
@@ -274,10 +277,64 @@ final class FolderViewController: SessionListController {
         super.viewDidLoad()
         title = folder.name
         navigationItem.largeTitleDisplayMode = .always
+        if folder.id == "pinned" {
+            // Pins are an ordered list: drag to reorder (synced to desktop).
+            navigationItem.rightBarButtonItem = editButtonItem
+            reorderable = true
+            reload(animated: false)
+            dataSource.reorderingHandlers.canReorderItem = { _ in true }
+            dataSource.reorderingHandlers.didReorder = { [weak self] tx in self?.pinsReordered(tx) }
+        } else if folder.id != "archived" {
+            navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: UIMenu(children: [
+                UIAction(title: "Rename Section…", image: UIImage(systemName: "pencil")) { [weak self] _ in self?.renameSection() },
+                UIAction(title: "Delete Section", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in self?.deleteSection() },
+            ]))
+        }
+    }
+
+    override func setEditing(_ editing: Bool, animated: Bool) {
+        super.setEditing(editing, animated: animated)
+        collectionView.isEditing = editing
     }
 
     override func buildSections() -> [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] {
         [("sessions", nil, [], app.sessions(inFolder: folder.id))]
+    }
+
+    private func pinsReordered(_ tx: NSDiffableDataSourceTransaction<String, Item>) {
+        let ids = tx.finalSnapshot.itemIdentifiers.compactMap { item -> String? in
+            if case let .session(id) = item { return id }
+            return nil
+        }
+        for change in tx.difference.insertions {
+            guard case let .insert(offset, item, _) = change, case let .session(id) = item else { continue }
+            let after = offset > 0 ? ids[offset - 1] : nil
+            let before = offset + 1 < ids.count ? ids[offset + 1] : nil
+            app.movePin(id, after: after, before: before)
+        }
+    }
+
+    private func renameSection() {
+        let alert = UIAlertController(title: "Rename Section", message: nil, preferredStyle: .alert)
+        alert.addTextField { [folder] in $0.text = folder.name }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Rename", style: .default) { [weak self] _ in
+            guard let self, let name = alert.textFields?.first?.text?.trimmingCharacters(in: .whitespaces), !name.isEmpty else { return }
+            self.app.renameSection(self.folder.id, name)
+            self.title = name
+        })
+        present(alert, animated: true)
+    }
+
+    private func deleteSection() {
+        let alert = UIAlertController(title: "Delete “\(folder.name)”?", message: "Its sessions move back to the main list.", preferredStyle: .actionSheet)
+        alert.addAction(UIAlertAction(title: "Delete Section", style: .destructive) { [weak self] _ in
+            guard let self else { return }
+            self.app.deleteSection(self.folder.id)
+            self.navigationController?.popViewController(animated: true)
+        })
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        present(alert, animated: true)
     }
 }
 
