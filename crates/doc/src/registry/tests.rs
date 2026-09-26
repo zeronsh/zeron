@@ -599,6 +599,75 @@ fn chat_seen_is_monotonic() {
 }
 
 #[test]
+fn chat_unread_clears_the_value_retains_causality_and_is_idempotent() {
+    let mut ws = RegistryDoc::new("dev-a");
+    let mut row = chat("chat-1", "dev-a");
+    row.last_message_at = Some(ts(8_000));
+    ws.upsert_chat(&row).unwrap();
+
+    // A lagging viewer still stamps at least the message it has read.
+    assert!(ws.set_chat_seen("chat-1", ts(5_000)).unwrap());
+    assert_eq!(
+        ws.chat("chat-1").unwrap().unwrap().last_seen_at,
+        Some(ts(8_000))
+    );
+    let seen_clock = ws.overlay_row(KIND_CHATS, "chat-1").unwrap().clocks["lastSeenAt"].clone();
+
+    assert!(ws.set_chat_unread("chat-1").unwrap());
+    let unread = ws.overlay_row(KIND_CHATS, "chat-1").unwrap();
+    assert!(!unread.fields.contains_key("lastSeenAt"));
+    assert!(unread.clocks["lastSeenAt"] > seen_clock);
+    assert!(ws.chat("chat-1").unwrap().unwrap().unseen());
+
+    let before = ws.pending_len();
+    assert!(ws.set_chat_unread("chat-1").unwrap());
+    assert_eq!(
+        ws.pending_len(),
+        before,
+        "repeat unread must not mint a batch"
+    );
+
+    assert!(ws.set_chat_seen("chat-1", ts(9_000)).unwrap());
+    assert!(!ws.chat("chat-1").unwrap().unwrap().unseen());
+    assert!(!ws.set_chat_unread("missing",).unwrap());
+}
+
+#[test]
+fn chat_unread_observes_ahead_remote_clock_before_writing() {
+    let future = encode_hlc(9_000_000_000_000, 42, "remote");
+    let mut clocks = BTreeMap::new();
+    clocks.insert("id".into(), future.clone());
+    clocks.insert("deviceId".into(), future.clone());
+    clocks.insert("createdAt".into(), future.clone());
+    clocks.insert("lastMessageAt".into(), future.clone());
+    clocks.insert("lastSeenAt".into(), future.clone());
+    let row = RegistryRow {
+        kind: KIND_CHATS.into(),
+        id: "chat-1".into(),
+        seq: 1,
+        deleted: false,
+        del_hlc: None,
+        fields: fields([
+            ("id", json!("chat-1")),
+            ("deviceId", json!("remote")),
+            ("createdAt", json!(1)),
+            ("lastMessageAt", json!(2)),
+            ("lastSeenAt", json!(3)),
+        ]),
+        clocks,
+    };
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.apply_state(1, true, 0, vec![row]);
+
+    assert!(ws.set_chat_unread("chat-1").unwrap());
+    let op = &ws.pending.last().unwrap().ops[0];
+    assert!(
+        op.hlc > future,
+        "causally later intent must beat remote clock"
+    );
+}
+
+#[test]
 fn two_docs_converge_through_a_server() {
     let mut a = RegistryDoc::new("dev-a");
     let mut b = RegistryDoc::new("dev-b");

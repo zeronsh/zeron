@@ -549,6 +549,18 @@ final class RegistryDoc {
         clock.next(nowMs: nowMs(), device: deviceId)
     }
 
+    /// Advance the local HLC beyond a row this replica has observed before
+    /// issuing a causally subsequent intent. This protects user actions from
+    /// wall-clock skew between desktop and mobile devices.
+    func observeRow(kind: String, id: String) {
+        guard let latest = overlayRow(kind: kind, id: id)?.clocks.values.max() else { return }
+        let parts = latest.split(separator: "-", maxSplits: 2)
+        guard parts.count == 3, let ms = Int64(parts[0]), let counter = UInt32(parts[1]),
+              ms > clock.lastMs || (ms == clock.lastMs && counter > clock.counter) else { return }
+        clock.lastMs = ms
+        clock.counter = counter
+    }
+
     func enqueue(ops: [RegistryOp]) {
         guard !ops.isEmpty else { return }
         generation += 1

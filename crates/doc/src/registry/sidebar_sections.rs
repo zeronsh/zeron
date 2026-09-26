@@ -7,7 +7,7 @@ const SECTIONS: &str = "sidebarSections";
 const LOCATIONS: &str = "sidebarLocations";
 
 impl RegistryDoc {
-    pub(super) fn observe_sidebar_row(&mut self, kind: &str, id: &str) {
+    pub(super) fn observe_row(&mut self, kind: &str, id: &str) {
         if let Some(clock) = self
             .overlay_row(kind, id)
             .and_then(|r| r.max_clock().map(str::to_owned))
@@ -57,8 +57,8 @@ impl RegistryDoc {
     }
 
     pub(super) fn write_sidebar_location(&mut self, id: &str, location: &str) {
-        self.observe_sidebar_row(LOCATIONS, id);
-        self.observe_sidebar_row(KIND_SIDEBAR_PINS, id);
+        self.observe_row(LOCATIONS, id);
+        self.observe_row(KIND_SIDEBAR_PINS, id);
         self.write(
             LOCATIONS,
             id,
@@ -173,7 +173,7 @@ impl RegistryDoc {
             }
             Rename { id, name } => {
                 if self.live_sidebar_section(id) {
-                    self.observe_sidebar_row(SECTIONS, id);
+                    self.observe_row(SECTIONS, id);
                     self.write(
                         SECTIONS,
                         id,
@@ -184,7 +184,7 @@ impl RegistryDoc {
             }
             Collapse { id, collapsed } => {
                 if self.live_sidebar_section(id) {
-                    self.observe_sidebar_row(SECTIONS, id);
+                    self.observe_row(SECTIONS, id);
                     self.write(
                         SECTIONS,
                         id,
@@ -194,7 +194,7 @@ impl RegistryDoc {
                 }
             }
             Delete { id } => {
-                self.observe_sidebar_row(SECTIONS, id);
+                self.observe_row(SECTIONS, id);
                 self.write(
                     SECTIONS,
                     id,
@@ -216,7 +216,7 @@ impl RegistryDoc {
                     return Err(DocError::Schema("Session no longer exists".into()));
                 }
                 // Keep legacy clients from displaying section members as pins.
-                self.observe_sidebar_row(KIND_SIDEBAR_PINS, session_id);
+                self.observe_row(KIND_SIDEBAR_PINS, session_id);
                 self.write(
                     KIND_SIDEBAR_PINS,
                     session_id,

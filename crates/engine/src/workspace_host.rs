@@ -1014,6 +1014,12 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_seen(chat_id, at))?)
     }
 
+    /// Synced explicit unread marker. Any registry replica may write it; the
+    /// chat's execution host does not need to be online.
+    pub fn mark_chat_unread(&self, chat_id: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_unread(chat_id))?)
+    }
+
     /// Owner-only git stamp (SpacesSync). Refuses rows owned by another device.
     pub fn set_space_git(
         &self,

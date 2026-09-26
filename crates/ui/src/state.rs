@@ -506,6 +506,14 @@ impl EngineHandle {
 
     #[cfg(test)]
     pub(crate) fn from_test_client(client: RpcClient) -> Self {
+        Self::from_test_client_with_capabilities(client, Vec::new())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_client_with_capabilities(
+        client: RpcClient,
+        capabilities: Vec<String>,
+    ) -> Self {
         Self {
             inner: Arc::new(RemoteEngine {
                 client: Arc::new(client),
@@ -516,7 +524,7 @@ impl EngineHandle {
                 device_id: "local".into(),
                 workspace_scope: WorkspaceScope::Local,
                 cursor_sdk_version: None,
-                capabilities: Vec::new(),
+                capabilities,
             },
             deferred_state: None,
         }
@@ -637,6 +645,21 @@ struct PendingSend {
     started: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingUnread {
+    generation: u64,
+    cancelled_by_selection: bool,
+    chats_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManualUnreadHold {
+    chat_id: String,
+    generation: u64,
+    unread_observed: bool,
+    acknowledged: bool,
+}
+
 /// How long an unadopted send reads as Working/Sending (or Queued when the
 /// path is degraded) before flipping to the EXPLICIT failed state with a
 /// retry affordance. The old 30s overlay silently expired back to Idle with
@@ -710,6 +733,17 @@ pub struct AppState {
     /// the local device.
     pub selected_device: Option<String>,
     pub selected_chat: Option<String>,
+    /// Prevent the selected-chat paint sweep from immediately undoing an
+    /// explicit Mark Unread mutation. A deliberate selection releases it.
+    manual_unread_hold: Option<ManualUnreadHold>,
+    /// In-flight Mark Unread intents. Generations make late completions from
+    /// superseded clicks harmless; cancellation records selection as the
+    /// newer local intent so the ACK can reassert Mark Seen afterward.
+    pending_unread: HashMap<String, PendingUnread>,
+    unread_generation: u64,
+    /// Incremented for every authoritative WatchChats frame. Mark Unread ACKs
+    /// may project over their starting frame, never over a later one.
+    chats_revision: u64,
     /// Boot auto-select happened (or a manual selection superseded it).
     pub auto_selected: bool,
     /// First chats / spaces watch frame has landed — device-local state that
@@ -795,6 +829,12 @@ fn is_text_append(frame: &TranscriptFrame) -> bool {
         if upsert.is_empty() && remove.is_empty() && !append.is_empty())
 }
 
+fn unread_action_available(chat: Option<&Chat>, supported: bool, pending: bool) -> bool {
+    supported
+        && !pending
+        && chat.is_some_and(|chat| chat.last_message_at.is_some() && !chat.unseen())
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
@@ -822,6 +862,10 @@ impl AppState {
             no_project: false,
             selected_device: None,
             selected_chat: None,
+            manual_unread_hold: None,
+            pending_unread: HashMap::new(),
+            unread_generation: 0,
+            chats_revision: 0,
             transcript: Vec::new(),
             queue: Vec::new(),
             context_usage: None,
@@ -1035,16 +1079,31 @@ impl AppState {
             }
         }
         sort_chats(&mut chats);
+        self.chats_revision = self.chats_revision.wrapping_add(1);
         self.chats = chats;
         self.chats_synced = true;
+        if let Some(hold) = self.manual_unread_hold.as_mut()
+            && let Some(chat) = self.chats.iter().find(|chat| chat.id == hold.chat_id)
+        {
+            match chat.last_seen_at.map(|seen| seen.timestamp_millis()) {
+                None => hold.unread_observed = true,
+                Some(_) if hold.acknowledged && hold.unread_observed => {
+                    // A read frame observed after this hold's unread frame is
+                    // causally newer. Stop
+                    // suppressing auto-seen for subsequent messages.
+                    self.manual_unread_hold = None;
+                }
+                Some(_) => {}
+            }
+        }
         self.transcript_cache
             .retain(|cached| self.chats.iter().any(|c| c.id == cached.chat_id));
-        if let Some(selected) = &self.selected_chat
-            && !self.chats.iter().any(|c| &c.id == selected)
+        if let Some(selected) = self.selected_chat.clone()
+            && !self.chats.iter().any(|c| c.id == selected)
         {
             // Selected chat vanished (deleted elsewhere): drop selection + transcript.
-            self.transcript_baselines.remove(selected);
-            self.prepared_transcripts.remove(selected);
+            self.transcript_baselines.remove(&selected);
+            self.prepared_transcripts.remove(&selected);
             self.selected_chat = None;
             self.transcript.clear();
             self.context_usage = None;
@@ -1053,6 +1112,8 @@ impl AppState {
             self.transcript_task = None;
             self.queue.clear();
             self.queue_task = None;
+            self.manual_unread_hold = None;
+            self.pending_unread.remove(&selected);
         }
     }
 
@@ -1917,6 +1978,9 @@ impl AppState {
         self.no_project = false;
         self.selected_device = None;
         self.selected_chat = None;
+        self.manual_unread_hold = None;
+        self.pending_unread.clear();
+        self.chats_revision = 0;
         self.auto_selected = false;
         self.chats_synced = false;
         self.spaces_synced = false;
@@ -2180,10 +2244,17 @@ impl AppState {
         if self.selected_chat == chat_id {
             // Re-selecting still clears a fresh "completed" badge.
             if let Some(id) = chat_id {
-                self.mark_chat_seen(&id, cx);
+                let force = self.cancel_pending_unread(&id);
+                self.mark_chat_seen_inner(&id, force, cx);
             }
             return;
         }
+        if let Some(previous) = self.selected_chat.clone() {
+            self.clear_manual_unread_hold(&previous);
+        }
+        let force_seen = chat_id
+            .as_deref()
+            .is_some_and(|id| self.cancel_pending_unread(id));
         // Take the destination before trimming: switching to the oldest warm
         // transcript must not evict the very entry we are about to display.
         let cached = self
@@ -2288,7 +2359,7 @@ impl AppState {
                     }
                 }
             }
-            self.mark_chat_seen(id, cx);
+            self.mark_chat_seen_inner(id, force_seen, cx);
         }
         if let (Some(chat_id), Some(handle)) = (chat_id, self.engine.clone()) {
             self.transcript_task =
@@ -2345,9 +2416,6 @@ impl AppState {
         cx.notify();
     }
 
-    /// Synced seen marker: only fires when the chat is currently unseen
-    /// (idempotence — no mutate spam), stamps the local row optimistically so
-    /// the LWW round-trip is invisible, and fire-and-forgets the mutate.
     /// Window-focus liveness sweep: ask the engine to probe every open room
     /// (workspace + chat docs). Fire-and-forget; each room ignores the hint
     /// unless it has been broadcast-quiet ≥30s, so spamming is harmless.
@@ -2364,21 +2432,179 @@ impl AppState {
         .detach();
     }
 
+    pub(crate) fn can_mark_chat_unread(&self, chat_id: &str) -> bool {
+        let supported = self.engine.as_ref().is_some_and(|engine| {
+            engine
+                .engine_info()
+                .supports(zeron_proto::capabilities::CHAT_UNREAD_V1)
+        });
+        unread_action_available(
+            self.chats.iter().find(|chat| chat.id == chat_id),
+            supported,
+            self.pending_unread.contains_key(chat_id),
+        )
+    }
+
+    /// Install the local hold before dispatching the registry mutation. The
+    /// row stays visually read until the engine ACKs, avoiding a false success
+    /// that would otherwise need rollback on failure.
+    pub(crate) fn begin_mark_chat_unread(&mut self, chat_id: &str) -> Option<u64> {
+        let chat = self.chats.iter().find(|chat| chat.id == chat_id)?;
+        if chat.last_message_at.is_none()
+            || chat.unseen()
+            || self.pending_unread.contains_key(chat_id)
+        {
+            return None;
+        }
+        self.unread_generation = self.unread_generation.wrapping_add(1);
+        let generation = self.unread_generation;
+        self.pending_unread.insert(
+            chat_id.to_string(),
+            PendingUnread {
+                generation,
+                cancelled_by_selection: false,
+                chats_revision: self.chats_revision,
+            },
+        );
+        if self.selected_chat.as_deref() == Some(chat_id) {
+            self.manual_unread_hold = Some(ManualUnreadHold {
+                chat_id: chat_id.to_string(),
+                generation,
+                unread_observed: false,
+                acknowledged: false,
+            });
+        }
+        Some(generation)
+    }
+
+    /// Returns `(projection_changed, reassert_seen)`. The latter closes the
+    /// race where selection happened while Mark Unread was already in flight:
+    /// its successful ACK is followed by a causally newer Mark Seen mutation.
+    pub(crate) fn finish_mark_chat_unread(
+        &mut self,
+        chat_id: &str,
+        generation: u64,
+        success: bool,
+    ) -> (bool, bool) {
+        let Some(pending) = self.pending_unread.get(chat_id).copied() else {
+            return (false, false);
+        };
+        if pending.generation != generation {
+            return (false, false);
+        }
+        self.pending_unread.remove(chat_id);
+
+        if pending.cancelled_by_selection {
+            return (false, success);
+        }
+
+        let held = self
+            .manual_unread_hold
+            .as_ref()
+            .is_some_and(|hold| hold.chat_id == chat_id && hold.generation == generation);
+        if !success {
+            if held {
+                self.manual_unread_hold = None;
+                return (true, false);
+            }
+            return (false, false);
+        }
+
+        if held && let Some(hold) = self.manual_unread_hold.as_mut() {
+            hold.acknowledged = true;
+        }
+
+        let current_is_seen = self
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .is_some_and(|chat| chat.last_seen_at.is_some());
+        let unread_then_seen = held
+            && current_is_seen
+            && self
+                .manual_unread_hold
+                .as_ref()
+                .is_some_and(|hold| hold.unread_observed);
+        if unread_then_seen {
+            if held {
+                self.manual_unread_hold = None;
+            }
+            return (false, false);
+        }
+
+        let mut changed = false;
+        if self.chats_revision == pending.chats_revision
+            && let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == chat_id)
+            && chat.last_seen_at.take().is_some()
+        {
+            changed = true;
+        }
+        if self.selected_chat.as_deref() != Some(chat_id) && held {
+            self.manual_unread_hold = None;
+        }
+        (changed, false)
+    }
+
+    fn clear_manual_unread_hold(&mut self, chat_id: &str) -> bool {
+        let matches = self
+            .manual_unread_hold
+            .as_ref()
+            .is_some_and(|hold| hold.chat_id == chat_id);
+        if matches {
+            self.manual_unread_hold = None;
+        }
+        matches
+    }
+
+    fn cancel_pending_unread(&mut self, chat_id: &str) -> bool {
+        let held = self.clear_manual_unread_hold(chat_id);
+        let has_pending = self.pending_unread.contains_key(chat_id);
+        if let Some(pending) = self.pending_unread.get_mut(chat_id) {
+            pending.cancelled_by_selection = true;
+        }
+        held || has_pending
+    }
+
+    /// Synced seen marker: only fires when the chat is currently unseen
+    /// (idempotence — no mutate spam), stamps the local row optimistically so
+    /// the LWW round-trip is invisible, and fire-and-forgets the mutate.
     pub fn mark_chat_seen(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        self.mark_chat_seen_inner(chat_id, false, cx);
+    }
+
+    pub(crate) fn force_mark_chat_seen(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        self.mark_chat_seen_inner(chat_id, true, cx);
+    }
+
+    fn mark_chat_seen_inner(&mut self, chat_id: &str, force: bool, cx: &mut Context<Self>) {
+        if self
+            .manual_unread_hold
+            .as_ref()
+            .is_some_and(|hold| hold.chat_id == chat_id)
+        {
+            return;
+        }
         let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) else {
             return;
         };
-        if !chat.unseen() {
+        if !force && !chat.unseen() {
             return;
         }
-        chat.last_seen_at = Some(Utc::now());
+        let seen_at = chat
+            .last_message_at
+            .map_or_else(Utc::now, |last_message| Utc::now().max(last_message));
+        chat.last_seen_at = Some(seen_at);
         cx.notify();
         let Some(handle) = self.engine.clone() else {
             return;
         };
         let chat_id = chat_id.to_string();
         cx.spawn(async move |_, _| {
-            let params = serde_json::json!({ "op": "markChatSeen", "chatId": chat_id });
+            let params = serde_json::json!({
+                "op": "markChatSeen",
+                "chatId": chat_id,
+                "at": seen_at.timestamp_millis(),
+            });
             if let Err(err) = handle.client().call(methods::MUTATE, params).await {
                 tracing::warn!(chat = %chat_id, error = %err, "markChatSeen failed");
             }
@@ -4064,6 +4290,184 @@ mod tests {
         // No messages at all: nothing to see — Idle.
         let fresh = chat("f", 0, None);
         assert_eq!(display_status(&fresh, None, now), ChatIndicator::Idle);
+    }
+
+    #[test]
+    fn unread_action_requires_attached_engine_capability_and_a_read_message() {
+        let mut row = chat("c", 0, Some(10));
+        row.last_seen_at = row.last_message_at;
+
+        assert!(unread_action_available(Some(&row), true, false));
+        assert!(!unread_action_available(Some(&row), false, false));
+        assert!(!unread_action_available(Some(&row), true, true));
+
+        row.last_seen_at = None;
+        assert!(!unread_action_available(Some(&row), true, false));
+        assert!(!unread_action_available(
+            Some(&chat("empty", 0, None)),
+            true,
+            false
+        ));
+    }
+
+    #[tokio::test]
+    async fn unread_action_uses_attached_engine_capability_not_remote_chat_host() {
+        let mut state = AppState::new();
+        let mut row = chat("remote-chat", 0, Some(10));
+        row.device_id = "remote-host".into();
+        row.last_seen_at = row.last_message_at;
+        state.chats.push(row);
+
+        let legacy = memory_client(Arc::new(LegacyIdentityRpc));
+        state.engine = Some(EngineHandle::from_test_client(legacy));
+        assert!(!state.can_mark_chat_unread("remote-chat"));
+
+        let capable = memory_client(Arc::new(LegacyIdentityRpc));
+        state.engine = Some(EngineHandle::from_test_client_with_capabilities(
+            capable,
+            vec![zeron_proto::capabilities::CHAT_UNREAD_V1.into()],
+        ));
+        assert!(state.can_mark_chat_unread("remote-chat"));
+    }
+
+    #[test]
+    fn selected_mark_unread_holds_auto_seen_until_deliberate_reselection() {
+        let mut state = AppState::new();
+        let mut row = chat("c", 0, Some(10));
+        row.last_seen_at = row.last_message_at;
+        state.chats.push(row);
+        state.selected_chat = Some("c".into());
+
+        let generation = state.begin_mark_chat_unread("c").unwrap();
+        assert_eq!(
+            state.manual_unread_hold,
+            Some(ManualUnreadHold {
+                chat_id: "c".into(),
+                generation,
+                unread_observed: false,
+                acknowledged: false,
+            })
+        );
+
+        assert_eq!(
+            state.finish_mark_chat_unread("c", generation, true),
+            (true, false)
+        );
+        assert!(state.chats[0].unseen());
+        assert!(state.clear_manual_unread_hold("c"));
+    }
+
+    #[test]
+    fn selection_during_mark_unread_reasserts_seen_after_successful_ack() {
+        let mut state = AppState::new();
+        let mut row = chat("c", 0, Some(10));
+        row.last_seen_at = row.last_message_at;
+        state.chats.push(row);
+        state.selected_chat = Some("c".into());
+
+        let generation = state.begin_mark_chat_unread("c").unwrap();
+        assert!(state.cancel_pending_unread("c"));
+        assert_eq!(
+            state.finish_mark_chat_unread("c", generation, true),
+            (false, true)
+        );
+        assert!(!state.chats[0].unseen());
+    }
+
+    #[test]
+    fn failed_or_stale_mark_unread_does_not_change_the_seen_projection() {
+        let mut state = AppState::new();
+        let mut row = chat("c", 0, Some(10));
+        row.last_seen_at = row.last_message_at;
+        state.chats.push(row);
+        state.selected_chat = Some("c".into());
+
+        let generation = state.begin_mark_chat_unread("c").unwrap();
+        assert_eq!(
+            state.finish_mark_chat_unread("c", generation.wrapping_add(1), true),
+            (false, false)
+        );
+        assert!(!state.chats[0].unseen());
+        assert_eq!(
+            state.finish_mark_chat_unread("c", generation, false),
+            (true, false)
+        );
+        assert!(!state.chats[0].unseen());
+        assert!(state.manual_unread_hold.is_none());
+    }
+
+    #[test]
+    fn remote_seen_before_unread_ack_is_not_overwritten_by_late_projection() {
+        let mut state = AppState::new();
+        let mut row = chat("c", 0, Some(10));
+        row.last_seen_at = row.last_message_at;
+        let original_seen = row.last_seen_at;
+        state.chats.push(row.clone());
+        state.selected_chat = Some("c".into());
+
+        let generation = state.begin_mark_chat_unread("c").unwrap();
+        row.last_seen_at = None;
+        state.apply_chats(vec![row.clone()]);
+        row.last_seen_at = original_seen;
+        state.apply_chats(vec![row]);
+
+        assert_eq!(
+            state.finish_mark_chat_unread("c", generation, true),
+            (false, false)
+        );
+        assert_eq!(state.chats[0].last_seen_at, original_seen);
+        assert!(state.manual_unread_hold.is_none());
+    }
+
+    #[test]
+    fn pre_unread_seen_frame_cannot_release_the_hold_by_timestamp_guessing() {
+        let mut state = AppState::new();
+        let mut row = chat("c", 0, Some(10));
+        row.last_seen_at = row.last_message_at;
+        state.chats.push(row.clone());
+        state.selected_chat = Some("c".into());
+
+        let generation = state.begin_mark_chat_unread("c").unwrap();
+        row.last_seen_at = row.last_seen_at.map(|seen| seen + TimeDelta::minutes(1));
+        state.apply_chats(vec![row.clone()]);
+        assert_eq!(
+            state.finish_mark_chat_unread("c", generation, true),
+            (false, false)
+        );
+        assert!(state.manual_unread_hold.is_some());
+
+        row.last_seen_at = None;
+        state.apply_chats(vec![row]);
+        assert!(state.manual_unread_hold.is_some());
+        assert!(state.chats[0].unseen());
+    }
+
+    #[test]
+    fn remote_seen_after_unread_ack_releases_the_manual_hold() {
+        let mut state = AppState::new();
+        let mut row = chat("c", 0, Some(10));
+        row.last_seen_at = row.last_message_at;
+        let original_seen = row.last_seen_at;
+        state.chats.push(row.clone());
+        state.selected_chat = Some("c".into());
+
+        let generation = state.begin_mark_chat_unread("c").unwrap();
+        assert_eq!(
+            state.finish_mark_chat_unread("c", generation, true),
+            (true, false)
+        );
+        assert!(state.manual_unread_hold.is_some());
+
+        row.last_seen_at = None;
+        state.apply_chats(vec![row.clone()]);
+        assert!(state.manual_unread_hold.is_some());
+
+        // Even the same timestamp is a later read intent after the watch has
+        // observed unread; the registry HLC, not the scalar timestamp, orders it.
+        row.last_seen_at = original_seen;
+        state.apply_chats(vec![row]);
+        assert!(state.manual_unread_hold.is_none());
+        assert!(!state.chats[0].unseen());
     }
 
     #[test]

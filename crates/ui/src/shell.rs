@@ -193,6 +193,10 @@ struct ChatMenuState {
     page: ChatMenuPage,
 }
 
+const CHAT_MENU_UNREAD_ID: &str = "chat-menu-unread";
+const CHAT_MENU_UNREAD_LABEL: &str = "Unread";
+const CHAT_MENU_UNREAD_ICON: &str = icons::EYE_CLOSED;
+
 /// Interruptible height tween for the sidebar's device/archive disclosures.
 /// The rendered element owns the frame clock; this state preserves the current
 /// interpolated height when a second click reverses an in-flight transition.
@@ -4702,6 +4706,56 @@ impl Shell {
         }));
     }
 
+    /// Mark Unread is deliberately not stored in `mutate_task`: replacing a
+    /// generic sidebar task must not cancel the completion that releases the
+    /// selected-chat hold (or reasserts Seen after a selection race).
+    fn mark_chat_unread(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.close_chat_menu(cx);
+        if !self.state.read(cx).can_mark_chat_unread(&chat_id) {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.sidebar_notice = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
+        let Some(generation) = self
+            .state
+            .update(cx, |state, _| state.begin_mark_chat_unread(&chat_id))
+        else {
+            return;
+        };
+
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(
+                    methods::MUTATE,
+                    serde_json::json!({ "op": "markChatUnread", "chatId": chat_id }),
+                )
+                .await;
+            this.update(cx, |shell, cx| {
+                let success = result.is_ok();
+                let (changed, reassert_seen) = shell.state.update(cx, |state, _| {
+                    state.finish_mark_chat_unread(&chat_id, generation, success)
+                });
+                if reassert_seen {
+                    shell
+                        .state
+                        .update(cx, |state, cx| state.force_mark_chat_seen(&chat_id, cx));
+                }
+                if let Err(err) = result {
+                    shell.sidebar_notice = Some(format!("{err}").into());
+                }
+                if changed || reassert_seen || shell.sidebar_notice.is_some() {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn open_rename_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.close_chat_menu(cx);
         let current = self
@@ -8776,8 +8830,10 @@ impl Shell {
                     .iter()
                     .any(|chat| chat.id == chat_id && chat.parent_chat_id.is_some());
             let is_pinned = self.active_sidebar_pins(cx).contains(&chat_id);
+            let unread_enabled = self.state.read(cx).can_mark_chat_unread(&chat_id);
             let rename_id = chat_id.clone();
             let pin_id = chat_id.clone();
+            let unread_id = chat_id.clone();
             let archive_id = chat_id.clone();
             let delete_id = chat_id.clone();
             let menu = popover::popover_card(&theme)
@@ -8809,6 +8865,27 @@ impl Shell {
                                 .child(icon(icons::PIN).size(px(16.0)).text_color(theme.text_muted))
                                 .child(SharedString::from(if is_pinned { "Unpin" } else { "Pin" })),
                         )
+                        .child({
+                            let row = popover::menu_row(
+                                &theme,
+                                false,
+                                format!("chat-menu-unread-{chat_id}"),
+                            )
+                            .id(CHAT_MENU_UNREAD_ID)
+                            .child(
+                                icon(CHAT_MENU_UNREAD_ICON)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from(CHAT_MENU_UNREAD_LABEL));
+                            if unread_enabled {
+                                row.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.mark_chat_unread(unread_id.clone(), cx)
+                                }))
+                            } else {
+                                row.opacity(0.45).cursor_default()
+                            }
+                        })
                         .child(
                             popover::menu_row(
                                 &theme,
@@ -13457,6 +13534,20 @@ mod tests {
         tween.started = std::time::Instant::now() - motion::COLLAPSE.total().mul_f32(2.0);
         assert_eq!(tween.current(), 0.0);
         assert!(!tween.animating());
+    }
+
+    #[test]
+    fn unread_row_has_the_committed_structure_and_order() {
+        assert_eq!(CHAT_MENU_UNREAD_LABEL, "Unread");
+        assert_eq!(CHAT_MENU_UNREAD_ICON, icons::EYE_CLOSED);
+        let source = include_str!("shell.rs");
+        let pin = source.find(".id(\"chat-menu-pin\")").unwrap();
+        let unread = source.find(".id(CHAT_MENU_UNREAD_ID)").unwrap();
+        let archive = source.find(".id(\"chat-menu-archive\")").unwrap();
+        assert!(pin < unread && unread < archive);
+        let unread_block = &source[unread..archive];
+        assert!(unread_block.contains("if unread_enabled"));
+        assert!(unread_block.contains("mark_chat_unread"));
     }
 }
 

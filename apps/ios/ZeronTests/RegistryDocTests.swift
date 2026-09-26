@@ -92,3 +92,36 @@ final class HlcMonotonicClockTests: XCTestCase {
         XCTAssertTrue(after > before)
     }
 }
+
+@MainActor
+final class UnreadSessionTests: XCTestCase {
+    private var config: AppConfig {
+        AppConfig(edgeURL: URL(string: "http://localhost:1")!, mode: .dev,
+                  userId: "unread-tests", orgId: "tests", deviceId: "ios-test",
+                  deviceName: "Test phone", devBearer: "unread-tests@tests")
+    }
+
+    func testDesktopUnreadProjectsAndIosSeenWinsWithClockSkew() throws {
+        let futureClock = encodeHlc(ms: 9_000_000_000_000, counter: 42, device: "desktop")
+        let messageAt: Int64 = 9_000_000_000_000
+        let doc = RegistryDoc(deviceId: config.deviceId)
+        doc.applyState(seq: 1, full: true, gcFloor: 0, rows: [
+            RegistryRow(kind: "chats", id: "chat-1", seq: 1, deleted: false, delHlc: nil,
+                        fields: ["id": .string("chat-1"), "deviceId": .string("desktop"),
+                                 "createdAt": .int(1), "lastMessageAt": .int(messageAt)],
+                        // Desktop's `lastSeenAt: null` removed the value but retained its clock.
+                        clocks: ["id": futureClock, "deviceId": futureClock,
+                                 "createdAt": futureClock, "lastMessageAt": futureClock,
+                                 "lastSeenAt": futureClock])
+        ])
+        let store = WorkspaceStore(config: config, doc: doc)
+        XCTAssertTrue(try XCTUnwrap(store.chats.first).unseen)
+
+        store.markSeen(chatId: "chat-1")
+
+        let op = try XCTUnwrap(doc.pending.last?.ops.first)
+        XCTAssertEqual(op.set?["lastSeenAt"], .int(messageAt))
+        XCTAssertTrue(op.hlc > futureClock)
+        XCTAssertFalse(try XCTUnwrap(store.chats.first).unseen)
+    }
+}

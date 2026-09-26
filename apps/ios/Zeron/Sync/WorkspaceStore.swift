@@ -778,8 +778,9 @@ final class WorkspaceStore {
     /// stored stamp is already current.
     func markSeen(chatId: String) {
         guard let row = doc.overlayRow(kind: "chats", id: chatId) else { return }
-        let at = nowMs()
+        let at = max(nowMs(), row.fields["lastMessageAt"]?.int64Value ?? 0)
         if let current = row.fields["lastSeenAt"]?.int64Value, current >= at { return }
+        doc.observeRow(kind: "chats", id: chatId)
         doc.write(kind: "chats", id: chatId, op: .update, set: ["lastSeenAt": .int(at)])
         afterLocalWrite()
     }

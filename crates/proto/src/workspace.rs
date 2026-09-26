@@ -14,6 +14,8 @@ pub mod capabilities {
     pub const MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1: &str =
         "message-queue-clean-attachment-text-v1";
     pub const MESSAGE_QUEUE_EDIT_LEASE_V1: &str = "message-queue-edit-lease-v1";
+    /// The attached engine accepts the registry-scoped `markChatUnread` mutate.
+    pub const CHAT_UNREAD_V1: &str = "chat-unread-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -22,6 +24,7 @@ pub mod capabilities {
         MESSAGE_QUEUE_ATTACHMENTS_V1,
         MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
         MESSAGE_QUEUE_EDIT_LEASE_V1,
+        CHAT_UNREAD_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -100,7 +103,8 @@ mod tests {
                     "message-queue-actions-v1",
                     "message-queue-attachments-v1",
                     "message-queue-clean-attachment-text-v1",
-                    "message-queue-edit-lease-v1"
+                    "message-queue-edit-lease-v1",
+                    "chat-unread-v1"
                 ],
             })
         );

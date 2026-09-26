@@ -947,21 +947,55 @@ impl RegistryDoc {
         self.write(KIND_CHATS, chat_id, OpKind::Upsert, set);
     }
 
-    /// Synced seen marker (LWW) with a monotonic guard: no write when the
-    /// stored stamp is already >= `at`.
-    pub fn set_chat_seen(&mut self, chat_id: &str, at: DateTime<Utc>) -> Result<bool, DocError> {
+    /// Synced seen marker (LWW) with a monotonic guard. Clamp the value to the
+    /// latest message timestamp so a viewer whose wall clock trails the host
+    /// can still clear the unread state it is causally observing.
+    pub fn set_chat_seen(
+        &mut self,
+        chat_id: &str,
+        mut at: DateTime<Utc>,
+    ) -> Result<bool, DocError> {
         let Some(row) = self.overlay_row(KIND_CHATS, chat_id) else {
             return Ok(false);
         };
+        if let Some(message_at) = row.fields.get("lastMessageAt").and_then(Value::as_i64)
+            && message_at > at.timestamp_millis()
+        {
+            at = DateTime::from_timestamp_millis(message_at).unwrap_or(at);
+        }
         let current = row.fields.get("lastSeenAt").and_then(Value::as_i64);
         if current.is_some_and(|ms| ms >= at.timestamp_millis()) {
             return Ok(true);
         }
+        // This intent follows the row we displayed. Advance the local HLC
+        // beyond its field clocks even when another device's wall clock is
+        // ahead, otherwise a later read could lose as an "older" write.
+        self.observe_row(KIND_CHATS, chat_id);
         self.write(
             KIND_CHATS,
             chat_id,
             OpKind::Update,
             fields([("lastSeenAt", json!(at.timestamp_millis()))]),
+        );
+        Ok(true)
+    }
+
+    /// Explicitly mark a chat unread. Registry `null` removes the value while
+    /// retaining the new field clock, so older seen writes cannot resurrect
+    /// it and legacy clients already project the missing value as unread.
+    pub fn set_chat_unread(&mut self, chat_id: &str) -> Result<bool, DocError> {
+        let Some(row) = self.overlay_row(KIND_CHATS, chat_id) else {
+            return Ok(false);
+        };
+        if !row.fields.contains_key("lastSeenAt") {
+            return Ok(true);
+        }
+        self.observe_row(KIND_CHATS, chat_id);
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("lastSeenAt", Value::Null)]),
         );
         Ok(true)
     }
