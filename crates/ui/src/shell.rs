@@ -12039,13 +12039,17 @@ mod tests {
 
     #[test]
     fn update_strip_labels_cover_every_install_kind() {
-        // Managed (curl|sh daemon layout): the CLI hint.
+        // Linux managed installations drive the desktop flow too.
         let managed = zeron_update::InstallKind::Managed {
             app_root: PathBuf::from("/home/u/.zeron/app"),
         };
         assert_eq!(
             Shell::update_strip_label(&managed, &UpdateFlow::Idle, "0.2.86").0,
-            SharedString::from("Update available — v0.2.86 · run `zeron update`")
+            SharedString::from(if cfg!(target_os = "linux") {
+                "Update available — v0.2.86"
+            } else {
+                "Update available — v0.2.86 · run `zeron update`"
+            })
         );
         // Unmanaged (source builds, hand-copied binaries — bare Windows
         // release exes): the GitHub releases page, clickable to open it.
@@ -12086,6 +12090,32 @@ mod tests {
             SharedString::from("Update available — v0.2.86")
         );
         assert!(Shell::update_strip_label(&portable, &UpdateFlow::Idle, "0.2.86").1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn update_linux_sidebar_covers_download_restart_and_retry() {
+        let install = zeron_update::InstallKind::Managed {
+            app_root: PathBuf::from("/home/u/.zeron/app"),
+        };
+        for (flow, expected, clickable) in [
+            (UpdateFlow::Idle, "Update available — v1.0.0", true),
+            (UpdateFlow::Downloading, "Downloading v1.0.0…", false),
+            (
+                UpdateFlow::Ready(PathBuf::from("/home/u/.zeron/app/1.0.0")),
+                "Update ready — restart to apply",
+                true,
+            ),
+            (
+                UpdateFlow::Failed("download failed".into()),
+                "Update failed: download failed",
+                true,
+            ),
+        ] {
+            let (label, enabled) = Shell::update_strip_label(&install, &flow, "1.0.0");
+            assert_eq!(label.as_ref(), expected);
+            assert_eq!(enabled, clickable);
+        }
     }
 
     #[test]

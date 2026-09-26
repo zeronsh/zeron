@@ -19,6 +19,18 @@ The installer starts the daemon immediately and keeps it running across reboots.
 
 The desktop sidebar browser also needs the [Linux browser runtime](docs/reference/linux-browser.md).
 
+For a desktop-only installation, extract the Linux release tarball and run its
+`./install.sh`. It installs under `~/.zeron/app` with a launcher in
+`~/.local/bin`, without starting a background service. Updates appear in the
+sidebar: click to download, then click **Update ready — restart to apply**.
+An active Zeron systemd user service is restarted too; manually launched
+headless processes must be restarted separately. Previous version directories
+remain available under `~/.zeron/app`.
+
+If you used an older desktop installer that copied a binary into
+`~/.local/bin`, run the new installer once to enable sidebar updates. Source
+builds and manually copied executables remain unmanaged.
+
 Day-to-day:
 
 ```bash

@@ -8,6 +8,10 @@ on:
       - 'rust-toolchain.toml'
       - 'crates/**'
       - 'scripts/test-linux-browser.sh'
+      - 'scripts/test-linux-installer.py'
+      - 'scripts/package-linux.sh'
+      - 'dist/linux/**'
+      - 'edge/src/install.sh'
       - 'scripts/run-macos-browser-fixture.sh'
       - 'dist/macos/Info.plist'
       - 'apps/ios/**'
@@ -20,6 +24,10 @@ on:
       - 'rust-toolchain.toml'
       - 'crates/**'
       - 'scripts/test-linux-browser.sh'
+      - 'scripts/test-linux-installer.py'
+      - 'scripts/package-linux.sh'
+      - 'dist/linux/**'
+      - 'edge/src/install.sh'
       - 'scripts/run-macos-browser-fixture.sh'
       - 'dist/macos/Info.plist'
       - 'apps/ios/**'
@@ -73,6 +81,7 @@ jobs:
           cargo test --locked -p zeron-harness --test opencode
       - name: Durable session publication and recovery
         run: |
+          python3 scripts/test-linux-installer.py
           cargo test --locked -p zeron-sync --lib
           cargo test --locked -p zeron-update --lib
           cargo test --locked -p zeron-engine --lib --test session_publication --test restart_resume --test codex_subagents --test local_profiles

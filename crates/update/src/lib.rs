@@ -1,6 +1,6 @@
 //! zeron-update — release checking and self-update, shared by the engine (the
 //! background checker + `ApplyUpdate`), the CLI (`zeron update`), and the UI
-//! (the sidebar update strip + macOS bundle swap).
+//! (the sidebar download, install, and restart flow).
 //!
 //! Release layout (see `.github/workflows/release.yml` and `edge/src/install.sh`):
 //! artifacts live in the `comet-native-releases` R2 bucket, served pre-auth at
@@ -9,10 +9,9 @@
 //! releases published before the manifest existed.
 //!
 //! Install kinds and their update paths:
-//! - **Managed** (`~/.zeron/app/<ver>` + `current` symlink — the curl|sh
-//!   installer): download the headless tarball into a new versioned dir, flip
-//!   the symlink, restart the service. Same flow the installer script performs,
-//!   natively.
+//! - **Managed** (`~/.zeron/app/<ver>` + `current` symlink — Linux desktop
+//!   and curl|sh installers): download into a new versioned dir, flip the
+//!   symlink, restart the desktop or service. Linux requires release checksums.
 //! - **MacApp** (running out of an app bundle): download the app tarball, swap the
 //!   bundle directory, relaunch. Driven by the UI.
 //! - **Unmanaged** (source builds, hand-copied binaries): report only — the
@@ -29,6 +28,8 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::watch;
 
+#[cfg(target_os = "linux")]
+pub mod linux;
 #[cfg(windows)]
 pub mod windows;
 
@@ -107,7 +108,7 @@ fn require_mac_app_update_platform() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `zeron-<ver>-<os>-<arch>.tar.gz` — the headless/CLI tarball (Linux CI builds).
+/// `zeron-<ver>-<os>-<arch>.tar.gz` — the Linux desktop/CLI/daemon tarball.
 pub fn headless_artifact(version: &str) -> String {
     let (os, arch) = platform_key();
     format!("zeron-{version}-{os}-{arch}.tar.gz")
@@ -315,7 +316,7 @@ fn release_base(edge_url: &str) -> anyhow::Result<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallKind {
     /// `~/.zeron/app/<ver>/zeron` behind the `current` symlink
-    /// (curl|sh installer / a previous `zeron update`).
+    /// (Linux desktop installer / curl|sh installer / `zeron update`).
     Managed { app_root: PathBuf },
     /// Running out of a macOS `.app` bundle.
     MacApp { bundle: PathBuf },
@@ -329,6 +330,8 @@ pub enum InstallKind {
 impl InstallKind {
     pub fn supports_desktop_update(&self) -> bool {
         match self {
+            #[cfg(target_os = "linux")]
+            Self::Managed { .. } => true,
             Self::MacApp { .. } => true,
             #[cfg(windows)]
             Self::WindowsPortable { .. } => true,
@@ -343,6 +346,8 @@ impl InstallKind {
         data_dir: &Path,
     ) -> anyhow::Result<PathBuf> {
         match self {
+            #[cfg(target_os = "linux")]
+            Self::Managed { app_root } => linux::stage(edge_url, manifest, app_root).await,
             Self::MacApp { .. } => stage_mac_app(edge_url, manifest, data_dir).await,
             #[cfg(windows)]
             Self::WindowsPortable { directory } => {
@@ -355,6 +360,8 @@ impl InstallKind {
     /// Install and arrange a relaunch. The UI must quit after this succeeds.
     pub fn apply_desktop(&self, staged: &Path) -> anyhow::Result<()> {
         match self {
+            #[cfg(target_os = "linux")]
+            Self::Managed { app_root } => linux::apply(staged, app_root, true),
             Self::MacApp { bundle } => {
                 apply_mac_app(staged, bundle)?;
                 relaunch_app_after_exit(bundle);
@@ -491,56 +498,64 @@ pub async fn stage_headless(
     manifest: &Manifest,
     app_root: &Path,
 ) -> anyhow::Result<PathBuf> {
-    // Reject unsupported targets before creating a stage or making a request.
-    require_managed_update_platform()?;
-    let version = &manifest.version;
-    let dest = app_root.join(version);
-    if dest.join("zeron").exists() {
-        return Ok(dest);
-    }
-    let file = headless_artifact(version);
-    let stage = app_root.join(format!(".stage-{version}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&stage);
-    std::fs::create_dir_all(&stage).with_context(|| format!("creating {}", stage.display()))?;
-    let result = async {
-        let tarball = stage.join(&file);
-        download_release_file(edge_url, manifest, &file, &tarball).await?;
-        let unpacked = stage.join("unpacked");
-        std::fs::create_dir_all(&unpacked)?;
-        // Tarball root is the versioned stage dir (see scripts/package-linux.sh);
-        // strip it exactly as install.sh does.
-        run(
-            "tar",
-            &[
-                "-xzf",
-                &tarball.to_string_lossy(),
-                "-C",
-                &unpacked.to_string_lossy(),
-                "--strip-components=1",
-            ],
-        )?;
-        if !unpacked.join("zeron").is_file() {
-            bail!("tarball {file} did not contain a zeron binary");
+    #[cfg(target_os = "linux")]
+    return linux::stage(edge_url, manifest, app_root).await;
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Reject unsupported targets before creating a stage or making a request.
+        require_managed_update_platform()?;
+        let version = &manifest.version;
+        let dest = app_root.join(version);
+        if dest.join("zeron").exists() {
+            return Ok(dest);
         }
-        match std::fs::rename(&unpacked, &dest) {
-            Ok(()) => {}
-            // Lost a race with another stager — the staged copy is equivalent.
-            Err(_) if dest.join("zeron").exists() => {}
-            Err(err) => {
-                return Err(err).with_context(|| format!("moving {} into place", dest.display()));
+        let file = headless_artifact(version);
+        let stage = app_root.join(format!(".stage-{version}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&stage);
+        std::fs::create_dir_all(&stage).with_context(|| format!("creating {}", stage.display()))?;
+        let result = async {
+            let tarball = stage.join(&file);
+            download_release_file(edge_url, manifest, &file, &tarball).await?;
+            let unpacked = stage.join("unpacked");
+            std::fs::create_dir_all(&unpacked)?;
+            // Tarball root is the versioned stage dir (see scripts/package-linux.sh);
+            // strip it exactly as install.sh does.
+            run(
+                "tar",
+                &[
+                    "-xzf",
+                    &tarball.to_string_lossy(),
+                    "-C",
+                    &unpacked.to_string_lossy(),
+                    "--strip-components=1",
+                ],
+            )?;
+            if !unpacked.join("zeron").is_file() {
+                bail!("tarball {file} did not contain a zeron binary");
             }
+            match std::fs::rename(&unpacked, &dest) {
+                Ok(()) => {}
+                // Lost a race with another stager — the staged copy is equivalent.
+                Err(_) if dest.join("zeron").exists() => {}
+                Err(err) => {
+                    return Err(err)
+                        .with_context(|| format!("moving {} into place", dest.display()));
+                }
+            }
+            Ok(dest.clone())
         }
-        Ok(dest.clone())
+        .await;
+        let _ = std::fs::remove_dir_all(&stage);
+        result
     }
-    .await;
-    let _ = std::fs::remove_dir_all(&stage);
-    result
 }
 
 /// Atomically repoint `app_root/current` at `app_root/<ver>` (symlink to a temp
 /// name, then rename over — never a window with no `current`).
 pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    return linux::apply(&app_root.join(version), app_root, false);
+    #[cfg(all(unix, not(target_os = "linux")))]
     {
         let target = app_root.join(version);
         if !target.join("zeron").exists() {
@@ -709,6 +724,15 @@ impl UpdateStatus {
 
 /// `ZERON_AUTO_UPDATE=1|true|yes` — headless daemons apply updates themselves.
 fn auto_update_enabled() -> bool {
+    // A Linux desktop launched from the managed installation must keep the
+    // sidebar's explicit restart boundary, even if it inherits this variable.
+    #[cfg(target_os = "linux")]
+    if !std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "headless")
+    {
+        return false;
+    }
     std::env::var("ZERON_AUTO_UPDATE")
         .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
@@ -1292,7 +1316,15 @@ mod tests {
         for ver in ["0.1.0", "0.1.1"] {
             std::fs::create_dir_all(app_root.join(ver)).unwrap();
             std::fs::write(app_root.join(ver).join("zeron"), ver).unwrap();
+            #[cfg(target_os = "linux")]
+            std::fs::write(
+                app_root.join(ver).join(".zeron-update-sha256"),
+                format!("{:x}", Sha256::digest(ver.as_bytes())),
+            )
+            .unwrap();
         }
+        #[cfg(target_os = "linux")]
+        std::os::unix::fs::symlink(app_root.join("0.1.0"), app_root.join("current")).unwrap();
         apply_headless(&app_root, "0.1.0").unwrap();
         assert_eq!(
             std::fs::read_link(app_root.join("current")).unwrap(),

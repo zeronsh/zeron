@@ -46,21 +46,31 @@ file="zeron-$ver-$plat-$arch.tar.gz"
 data_root="$HOME/.zeron"
 app_root="$data_root/app"
 dest="$app_root/$ver"
+mkdir -p "$app_root"
+# Share the native updater/desktop installer's lock and never publish a
+# partially extracted version or leave a gap while replacing `current`.
+exec 9>"$app_root/.update.lock"
+flock -n 9 || { echo "zeron install: another update is in progress" >&2; exit 1; }
+tmp="$(mktemp -d "$app_root/.install-XXXXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
 
 if [ -x "$dest/zeron" ]; then
   echo "zeron $ver already downloaded — relinking."
 else
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
+  [ ! -e "$dest" ] || { echo "zeron install: incomplete existing installation at $dest" >&2; exit 1; }
   echo "downloading zeron $ver ($plat-$arch)…"
   curl -fSL --progress-bar "$BASE/releases/$file" -o "$tmp/$file"
-  mkdir -p "$dest"
-  tar -xzf "$tmp/$file" -C "$dest" --strip-components=1
+  mkdir "$tmp/unpacked"
+  tar -xzf "$tmp/$file" -C "$tmp/unpacked" --strip-components=1
+  [ -x "$tmp/unpacked/zeron" ] || { echo "zeron install: missing executable" >&2; exit 1; }
+  mv "$tmp/unpacked" "$dest"
 fi
 
-ln -sfn "$dest" "$app_root/current"
+ln -s "$dest" "$tmp/current"
+mv -Tf "$tmp/current" "$app_root/current"
 mkdir -p "$HOME/.local/bin"
 ln -sf "$app_root/current/zeron" "$HOME/.local/bin/zeron"
+flock -u 9
 
 # --- service -----------------------------------------------------------------
 # The daemon is useful before auth: without a saved session it serves the local
