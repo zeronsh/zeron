@@ -17,6 +17,8 @@ final class SessionViewController: UIViewController {
     private let jump = Glass.circleButton(symbol: "arrow.down", size: 40, pointSize: 15)
     private let titleView = SessionTitleView()
     private var shown = SessionChrome()
+    private let openedAt = CACurrentMediaTime()
+    private var reportedOpen = false
 
     init(app: AppModel, chatId: String) {
         self.app = app
@@ -185,7 +187,19 @@ final class SessionViewController: UIViewController {
     }
 
     private func applyFrame() {
-        list.apply(engine.frame())
+        let frame = engine.frame()
+        list.apply(frame)
+        if !reportedOpen, frame.rowCount() > 0 {
+            reportedOpen = true
+            // Open latency: push → first measured frame on screen.
+            let ms = (CACurrentMediaTime() - openedAt) * 1000
+            let json = String(format: "{\"openMs\":%.1f,\"rows\":%d,\"layoutPassMs\":%.2f}", ms, frame.rowCount(), Double(frame.buildMicros()) / 1000)
+            NSLog("OPEN %@", json)
+            if ProcessInfo.processInfo.arguments.contains("-measureopen") {
+                let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                try? json.write(to: docs.appendingPathComponent("open.json"), atomically: true, encoding: .utf8)
+            }
+        }
     }
 
     private func setJumpVisible(_ visible: Bool) {

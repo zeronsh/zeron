@@ -225,7 +225,7 @@ final class ComposerBar: UIView, UITextViewDelegate {
         NSLayoutConstraint.activate([
             suggestions.leadingAnchor.constraint(equalTo: leadingAnchor),
             suggestions.trailingAnchor.constraint(equalTo: trailingAnchor),
-            suggestions.bottomAnchor.constraint(equalTo: glass.topAnchor, constant: -8),
+            suggestions.bottomAnchor.constraint(equalTo: chipScroll.topAnchor, constant: -6),
         ])
     }
 
