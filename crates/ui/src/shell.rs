@@ -4968,12 +4968,13 @@ impl Shell {
     /// branch…). Session-nav shortcuts (cycle/jump/archive) go quiet
     /// underneath one: gpui runs a matched binding before any `on_key_down`,
     /// so an unguarded jump would switch sessions UNDER the open popover,
-    /// stranding it over a session the user never picked.
+    /// stranding it over a session the user never picked. The Settings page
+    /// is not one: navigating leaves it, and its shortcut recorder intercepts
+    /// the keys it records before they can dispatch.
     pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
         self.command_palette.is_some()
             || self.section_dialog.is_some()
             || self.section_menu.is_some()
-            || matches!(self.route, Route::Settings(_))
             || self.add_space.is_some()
             || self.composer.read(cx).pickers().read(cx).is_open()
             || self.open_side_chat_pickers(cx).is_some()
@@ -11793,11 +11794,7 @@ impl Render for Shell {
             }))
             // New session works from anywhere — `open_new_session` routes back
             // to chat itself, so Settings is not a dead spot.
-            .on_action(cx.listener(|this, _: &NewSession, _, cx| {
-                if !matches!(this.route, Route::Settings(_)) {
-                    this.open_new_session(cx)
-                }
-            }))
+            .on_action(cx.listener(|this, _: &NewSession, _, cx| this.open_new_session(cx)))
             // Native Settings menu item and the platform convention (Cmd+, on
             // macOS, Ctrl+, elsewhere) toggle the modal from any section.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
@@ -15340,6 +15337,64 @@ mod settings_modal_regressions {
         }
         assert_eq!(settings_open_route("settings/billing", remembered), None);
         assert_eq!(settings_open_route("new", remembered), None);
+    }
+
+    /// Session navigation shortcuts are not swallowed by Settings: each one
+    /// leaves the page and lands on its target, as it would from chat.
+    #[gpui::test]
+    fn navigation_shortcuts_work_from_settings(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let keymap = KeymapConfig::default();
+        cx.update(|cx| apply_keymap(cx, &keymap, ComposerSendBehavior::default()));
+        let window = cx.add_window(|_, cx| {
+            let mut shell = test_shell(dir.path(), cx);
+            shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.chats = ["older", "newer"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, id)| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": id, "title": id, "deviceId": "local", "archived": false,
+                            "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
+                        }))
+                        .unwrap()
+                    })
+                    .collect();
+                state.selected_chat = Some("older".into());
+            });
+            shell
+        });
+        let mut press = |combo: &str| {
+            window
+                .update(cx, |shell, _, cx| {
+                    shell.open_settings(SettingsSection::Shortcuts, cx)
+                })
+                .unwrap();
+            cx.run_until_parked();
+            cx.simulate_keystrokes(window.into(), &platform_combo(combo));
+            window
+                .read_with(cx, |shell, cx| {
+                    (shell.route, shell.state.read(cx).selected_chat.clone())
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            press(keymap.get(ShortcutId::JumpSession(0))),
+            (Route::Chat, Some("newer".into()))
+        );
+        assert_eq!(
+            press(&keymap.next_session),
+            (Route::Chat, Some("older".into()))
+        );
+        assert_eq!(
+            press(&keymap.prev_session),
+            (Route::Chat, Some("newer".into()))
+        );
+        assert_eq!(press(&keymap.new_session), (Route::Chat, None));
     }
 
     #[gpui::test]

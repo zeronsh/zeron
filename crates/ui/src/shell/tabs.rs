@@ -84,14 +84,13 @@ impl Shell {
     /// the order it is drawn. Selection is immediate (no MRU overlay held open
     /// on the modifier) — one press, one session.
     ///
-    /// Chat-scoped chrome, like the panel toggles: gpui dispatches a matched
-    /// binding before any `on_key_down`, so an unscoped cycle would fire
-    /// underneath Settings (yanking the user off the page mid-record, since
-    /// these are the very keys the shortcuts table invites them to press) or
-    /// underneath the add-space palette, stranding the overlay over a session
-    /// they never picked.
+    /// Works from Settings too, landing back in chat like a jump; the
+    /// shortcut recorder intercepts these keys while it records. Quiet under
+    /// a keyboard-owning overlay: gpui dispatches a matched binding before any
+    /// `on_key_down`, so a cycle under the add-space palette would strand the
+    /// overlay over a session the user never picked.
     pub(super) fn cycle_session(&mut self, forward: bool, cx: &mut Context<Self>) {
-        if !matches!(self.route, Route::Chat) || self.overlay_owns_keyboard(cx) {
+        if self.overlay_owns_keyboard(cx) {
             return;
         }
         // The same list `render_active_rows` draws and the jump shortcuts
