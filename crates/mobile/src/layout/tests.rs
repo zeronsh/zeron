@@ -217,3 +217,15 @@ fn user_mentions_render_as_accent_chips() {
     assert!(!d.text.contains("zeron-file:"));
     assert!(d.runs.iter().any(|r| r.color == display::ColorRole::Link));
 }
+
+#[test]
+fn user_attachments_render_as_images_not_trailer_text() {
+    let mut w = worker(390.0);
+    let text = "Fix the header spacing\n\nAttached images (local files — open them to view):\n- /tmp/uploads/a/shot.png".to_owned();
+    w.input = debug_input(vec![DebugEntry { id: "u".into(), user: true, text, streaming: false }], false);
+    let frame = w.pass();
+    let d = frame.display(0).unwrap();
+    assert!(!d.text.contains("Attached images"), "{}", d.text);
+    assert!(d.text.contains("Fix the header spacing"));
+    assert!(d.widgets.iter().any(|w| matches!(&w.kind, display::WidgetKind::Image { reference } if reference.ends_with("shot.png"))));
+}

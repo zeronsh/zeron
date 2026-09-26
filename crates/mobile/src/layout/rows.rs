@@ -168,31 +168,6 @@ impl Gap {
     }
 }
 
-/// Split the `Attached images (local files …):` trailer off a user prompt.
-fn split_attachments(content: &str) -> (&str, Vec<String>) {
-    let lower = content.to_ascii_lowercase();
-    let needle = "\n\nattached images (local files";
-    let Some(gap) = lower.find(needle) else {
-        return (content, Vec::new());
-    };
-    let line_start = gap + 2;
-    let line_end = content[line_start..].find('\n').map_or(content.len(), |p| line_start + p);
-    if !content[line_start..line_end].trim_end().ends_with("):") {
-        return (content, Vec::new());
-    }
-    let refs: Vec<String> = content[(line_end + 1).min(content.len())..]
-        .lines()
-        .filter_map(|l| l.trim_start().strip_prefix("- ").map(|p| p.trim().to_owned()))
-        .filter(|p| !p.is_empty())
-        .collect();
-    if refs.is_empty() {
-        return (content, refs);
-    }
-    let body = content[..gap].trim_end();
-    let body = if body == "(see attached image)" || body == "See attached image." { "" } else { body };
-    (body, refs)
-}
-
 struct PartState {
     parser: IncrementalParser,
     /// Last source fed to the parser (ptr-cheap equality short-circuit).
@@ -485,7 +460,10 @@ impl RowBuilder {
 
     fn user_row(&mut self, ctx: &mut Ctx, id: &str, content: &str, pending: bool) -> RowCore {
         let key = row_key(&format!("{id}#u"));
-        let (body, images) = split_attachments(content);
+        // Shared parser: strips the image trailer *and* hidden Appshot context.
+        let parsed = zeron_client::attachments::parse_user_message(content);
+        let body = parsed.text.as_str();
+        let images: Vec<String> = parsed.images.into_iter().map(|i| i.path).collect();
         let (size, lh) = TYPE.body;
         let style = ctx.typo.style(Family::Sans, Weight::Regular, false, size);
         let lh = ctx.typo.px(lh);
