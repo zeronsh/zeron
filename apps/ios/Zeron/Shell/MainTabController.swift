@@ -3,7 +3,7 @@ import UIKit
 /// Root: native tab bar (Liquid Glass comes from the system, so tab switches,
 /// minimize-on-scroll and the search morph are render-server animations), with
 /// the "Ask anything" composer as the tab bar's bottom accessory.
-final class MainTabController: UITabBarController {
+final class MainTabController: UITabBarController, UITabBarControllerDelegate {
     private let app: AppModel
 
     init(app: AppModel) {
@@ -39,13 +39,19 @@ final class MainTabController: UITabBarController {
         selectedTab = sessions
 
         bottomAccessory = accessory
+        delegate = self
+    }
+
+    /// Search has its own bottom field; the composer accessory steps aside.
+    func tabBarController(_ tabBarController: UITabBarController, didSelectTab selectedTab: UITab, previousTab: UITab?) {
+        setAccessoryVisible(!(selectedTab is UISearchTab), animated: true)
     }
 
     private lazy var accessory = UITabAccessory(contentView: AskAnythingAccessory { [weak self] in self?.presentNewSession() })
 
     /// Pushed sessions carry their own composer; the accessory steps aside.
     func setAccessoryVisible(_ visible: Bool, animated: Bool) {
-        let target = visible ? accessory : nil
+        let target = visible && !(selectedTab is UISearchTab) ? accessory : nil
         guard bottomAccessory !== target else { return }
         setBottomAccessory(target, animated: animated)
     }
