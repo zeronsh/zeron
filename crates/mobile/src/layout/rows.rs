@@ -76,6 +76,8 @@ pub(crate) struct UserBubble {
 pub(crate) struct ToolLine {
     pub label: PText,
     pub detail: PText,
+    pub title: String,
+    pub full: String,
     pub running: bool,
     pub failed: bool,
 }
@@ -546,6 +548,8 @@ impl RowBuilder {
                     MessagePart::Tool { call, is_error, resolved, .. } => {
                         let (label, detail) = zeron_proto::view::tool_chip_content(call);
                         Some(ToolLine {
+                            title: label.to_owned(),
+                            full: detail.clone(),
                             label: prepare_plain(ctx, label, label_style, lh, ColorRole::TextSecondary, WhiteSpace::Pre),
                             detail: prepare_plain(ctx, &detail, detail_style, lh, ColorRole::TextTertiary, WhiteSpace::Normal),
                             running: !resolved,
@@ -793,6 +797,9 @@ fn place_tools(t: &ToolGroup, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
         place_text(&l.label, sx, ly + (line - l.label.lh) / 2.0, lw + 1.0, Some(out));
         let dx = sx + lw + px.v(8.0);
         place_text_lines(&l.detail, dx, ly + (line - l.detail.lh) / 2.0, (x + cw - dx).max(1.0), 1, out);
+        if !l.full.is_empty() {
+            out.widget(WidgetKind::Detail { title: l.title.clone() }, (x, ly, cw, line), Some(l.full.clone()));
+        }
     }
     h
 }

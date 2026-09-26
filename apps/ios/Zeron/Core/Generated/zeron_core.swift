@@ -10601,6 +10601,11 @@ public enum WidgetKind: Equatable, Hashable {
      */
     case spinner
     /**
+     * Tap target revealing the full text in `payload` (truncated tool lines).
+     */
+    case detail(title: String
+    )
+    /**
      * A small SF-symbol-like icon by name.
      */
     case icon(name: String, color: ColorRole
@@ -10642,7 +10647,10 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
         
         case 6: return .spinner
         
-        case 7: return .icon(name: try FfiConverterString.read(from: &buf), color: try FfiConverterTypeColorRole.read(from: &buf)
+        case 7: return .detail(title: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 8: return .icon(name: try FfiConverterString.read(from: &buf), color: try FfiConverterTypeColorRole.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -10683,8 +10691,13 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
             writeInt(&buf, Int32(6))
         
         
-        case let .icon(name,color):
+        case let .detail(title):
             writeInt(&buf, Int32(7))
+            FfiConverterString.write(title, into: &buf)
+            
+        
+        case let .icon(name,color):
+            writeInt(&buf, Int32(8))
             FfiConverterString.write(name, into: &buf)
             FfiConverterTypeColorRole.write(color, into: &buf)
             

@@ -130,6 +130,8 @@ pub enum WidgetKind {
     Working { since_ms: Option<i64>, streaming: bool },
     /// A small activity spinner (running tools).
     Spinner,
+    /// Tap target revealing the full text in `payload` (truncated tool lines).
+    Detail { title: String },
     /// A small SF-symbol-like icon by name.
     Icon { name: String, color: ColorRole },
 }

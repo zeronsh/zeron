@@ -185,6 +185,18 @@ final class RowView: UIView {
                 view = DotGridView(style: .working)
             case let .working(sinceMs, streaming):
                 view = WorkingIndicatorView(since: sinceMs.map { Date(timeIntervalSince1970: Double($0) / 1000) }, streaming: streaming)
+            case let .detail(title):
+                let b = UIControl()
+                b.accessibilityLabel = "\(title) details"
+                b.accessibilityTraits = .button
+                let payload = w.payload ?? ""
+                b.addAction(UIAction { [weak self] _ in
+                    guard let vc = self?.findViewController() else { return }
+                    let sheet = UINavigationController(rootViewController: SelectTextViewController(text: payload, title: title, mono: true))
+                    if let s = sheet.sheetPresentationController { s.detents = [.medium(), .large()]; s.prefersGrabberVisible = true }
+                    vc.present(sheet, animated: true)
+                }, for: .touchUpInside)
+                view = b
             case let .icon(name, color):
                 let iv = UIImageView(image: UIImage(systemName: name, withConfiguration: UIImage.SymbolConfiguration(pointSize: rect.height * 0.8, weight: .medium)))
                 iv.tintColor = Palette.color(color)

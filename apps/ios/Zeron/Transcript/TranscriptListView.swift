@@ -412,22 +412,24 @@ extension UIView {
 /// Full-text selection for a message (the transcript itself is paint-only).
 final class SelectTextViewController: UIViewController {
     private let text: String
+    private let mono: Bool
 
-    init(text: String) {
+    init(text: String, title: String = "Select Text", mono: Bool = false) {
         self.text = text
+        self.mono = mono
         super.init(nibName: nil, bundle: nil)
+        self.title = title
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "Select Text"
         view.backgroundColor = Palette.background
         let tv = UITextView()
         tv.text = text
         tv.isEditable = false
-        tv.font = Fonts.ui(.sans, UIFontMetrics(forTextStyle: .body).scaledValue(for: 16.5))
+        tv.font = mono ? Fonts.ui(.mono, 14) : Fonts.ui(.sans, UIFontMetrics(forTextStyle: .body).scaledValue(for: 16.5))
         tv.textColor = Palette.text
         tv.backgroundColor = .clear
         tv.textContainerInset = UIEdgeInsets(top: 16, left: 14, bottom: 32, right: 14)
@@ -437,6 +439,6 @@ final class SelectTextViewController: UIViewController {
         navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak self] _ in
             self?.dismiss(animated: true)
         })
-        DispatchQueue.main.async { tv.selectAll(nil) }
+        if !mono { DispatchQueue.main.async { tv.selectAll(nil) } }
     }
 }
