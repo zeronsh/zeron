@@ -95,13 +95,12 @@ impl Shell {
     }
 
     /// A fresh, empty side chat under `parent_id` (the active chat when
-    /// None), opened in the right pane ready for its first message. Same
-    /// shape the Zeron MCP server's `create_chat` mints, so agent-spawned
-    /// and hand-started side chats list together.
+    /// None), opened in the right pane ready for its first message. Nothing
+    /// is written until that message: the first send mints it with the same
+    /// shape the Zeron MCP server's `create_chat` does, so agent-spawned and
+    /// hand-started side chats list together, and an abandoned one leaves
+    /// no row behind.
     pub(super) fn create_child_chat(&mut self, parent_id: Option<String>, cx: &mut Context<Self>) {
-        if self.side_chat_creating {
-            return;
-        }
         let state = self.state.read(cx);
         let parent = match parent_id {
             Some(id) => state.chats.iter().find(|c| c.id == id).cloned(),
@@ -109,9 +108,6 @@ impl Shell {
         };
         let Some(parent) = parent else {
             self.show_side_chat_error("Start a conversation before creating a side chat.", cx);
-            return;
-        };
-        let Some(engine) = state.engine().cloned() else {
             return;
         };
         let key = self.panel_key(cx);
@@ -127,30 +123,7 @@ impl Shell {
         chat.harness_session_id = None;
         chat.harness_session_cwd = None;
         chat.room_gen = Some(2);
-        let params = serde_json::json!({
-            "op": "createChat",
-            "chatId": chat.id,
-            "deviceId": chat.device_id,
-            "spaceId": chat.space_id,
-            "config": chat.config,
-            "branch": chat.branch,
-            "cwd": chat.cwd,
-            "parentChatId": parent.id,
-        });
-        self.side_chat_creating = true;
-        cx.spawn(async move |this, cx| {
-            let result = engine.client().call(methods::MUTATE, params).await;
-            let _ = this.update(cx, |this, cx| {
-                this.side_chat_creating = false;
-                match result {
-                    Ok(_) => this.open_side_chat(chat, key, cx),
-                    Err(error) => this.show_side_chat_error(error.to_string(), cx),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
+        self.open_side_chat_tab(chat, key, true, cx);
     }
 
     /// Open an existing side chat (a footer row) in the right pane.
@@ -188,6 +161,17 @@ impl Shell {
         key: String,
         cx: &mut Context<Self>,
     ) {
+        self.open_side_chat_tab(chat, key, false, cx);
+    }
+
+    /// `unsaved`: `chat` is only minted here, and its first send creates it.
+    fn open_side_chat_tab(
+        &mut self,
+        chat: zeron_proto::Chat,
+        key: String,
+        unsaved: bool,
+        cx: &mut Context<Self>,
+    ) {
         // A footer row or header button may land while the surface host is
         // closed (explorer-only pane, or hidden with its tabs kept): open it
         // beside the explorer first, for an existing tab too.
@@ -213,7 +197,7 @@ impl Shell {
         }
         let chat_id = chat.id.clone();
         let parent = self.state.clone();
-        let state = cx.new(|cx| AppState::side_chat_state(&parent, chat, cx));
+        let state = cx.new(|cx| AppState::side_chat_state(&parent, chat, unsaved, cx));
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         // Workspace file links open the editor and web links honor the
         // in-app preference, resolved in this side chat's context.
@@ -236,9 +220,9 @@ impl Shell {
                             this.pending_workspace_command = Some(*command);
                             cx.notify();
                         }
-                        // A side chat is already minted before its composer mounts,
-                        // and it inherits its parent's checkout, so it never runs
-                        // worktree setup of its own.
+                        // A side chat is already selected before its composer
+                        // mounts, and it inherits its parent's checkout, so it
+                        // never runs worktree setup of its own.
                         ComposerEvent::NewThreadTransitionStarted
                         | ComposerEvent::WorktreeSetup { .. } => {}
                         ComposerEvent::Sent {
@@ -460,6 +444,58 @@ mod tests {
                 cx,
             )
         })
+    }
+
+    /// "New side chat" writes nothing: the tab opens on a chat only its
+    /// first send mints, and closing it before then leaves nothing behind.
+    #[gpui::test]
+    fn new_side_chat_is_unsaved_until_its_first_send(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = shell_window(dir.path(), cx);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "main".into();
+                let main: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+                    "id": "main", "deviceId": "local", "cwd": "/tmp/main",
+                    "archived": false, "createdAt": Utc::now(),
+                }))
+                .unwrap();
+                shell.state.update(cx, |state, _| {
+                    state.chats = vec![main];
+                    state.selected_chat = Some("main".into());
+                });
+                shell.toggle_right_pane(cx);
+                shell.create_child_chat(None, cx);
+                let id = shell.side_chat_seq;
+                assert_eq!(shell.resolved_right_active(cx), RightSurface::SideChat(id));
+                let side = shell.side_chats[&id].state.clone();
+                let chat_id = side.read(cx).selected_chat.clone().unwrap();
+                assert!(side.read(cx).side_chat_unsaved());
+                // A model picked before the first send is what gets minted.
+                let config: zeron_proto::ChatConfig = serde_json::from_value(serde_json::json!({
+                    "harness": "codex", "sandbox": "workspace-write",
+                }))
+                .unwrap();
+                side.update(cx, |state, _| {
+                    state.apply_chat_config(&chat_id, config);
+                    state.apply_chats(Vec::new());
+                });
+                let create = side.read(cx).unsaved_side_chat_create(&chat_id).unwrap();
+                assert_eq!(create["parentChatId"], "main");
+                assert_eq!(create["cwd"], "/tmp/main");
+                assert_eq!(create["config"]["harness"], "codex");
+                let row = side.read(cx).selected_chat_row().cloned().unwrap();
+                assert_eq!(row.config.unwrap().harness, zeron_proto::HarnessId::Codex);
+                assert_eq!(shell.state.read(cx).chats.len(), 1, "no row yet");
+                // A draft cannot keep it: no row could reopen it.
+                let composer = shell.side_chats[&id].composer.clone();
+                composer.update(cx, |composer, cx| {
+                    composer.stage_appshot(crate::appshots::tests::shot(), cx)
+                });
+                shell.close_right_surface(RightSurface::SideChat(id), window, cx);
+                assert!(!shell.side_chats.contains_key(&id));
+            })
+            .unwrap();
     }
 
     /// Review feedback on the side-chat pane: its links resolve, a closed

@@ -3817,12 +3817,11 @@ impl Shell {
             }
             RightSurface::SideChat(id) => {
                 // An unsent draft outlives the tab: the side chat stays
-                // loaded, detached, and reopening it restores the draft.
-                if self
-                    .side_chats
-                    .get(&id)
-                    .is_none_or(|side| !side.composer.read(cx).has_draft(cx))
-                {
+                // loaded, detached, and reopening it restores the draft. An
+                // unsaved side chat has no row to reopen it from.
+                if self.side_chats.get(&id).is_none_or(|side| {
+                    side.state.read(cx).side_chat_unsaved() || !side.composer.read(cx).has_draft(cx)
+                }) {
                     self.side_chats.remove(&id);
                 }
                 if was_active {
