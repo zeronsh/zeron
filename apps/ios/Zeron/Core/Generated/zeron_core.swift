@@ -5267,7 +5267,14 @@ public func FfiConverterTypeLinkHit_lower(_ value: LinkHit) -> RustBuffer {
 
 
 public struct LiveStatus: Equatable, Hashable {
+    /**
+     * Display status (an in-flight send reads Working).
+     */
     public var indicator: ChatIndicator
+    /**
+     * A turn is actually running on the host (sends queue/steer).
+     */
+    public var turnRunning: Bool
     public var workingSinceMs: Int64?
     /**
      * The newest transcript entry is streaming.
@@ -5280,7 +5287,13 @@ public struct LiveStatus: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(indicator: ChatIndicator, workingSinceMs: Int64?, 
+    public init(
+        /**
+         * Display status (an in-flight send reads Working).
+         */indicator: ChatIndicator, 
+        /**
+         * A turn is actually running on the host (sends queue/steer).
+         */turnRunning: Bool, workingSinceMs: Int64?, 
         /**
          * The newest transcript entry is streaming.
          */streaming: Bool, 
@@ -5288,6 +5301,7 @@ public struct LiveStatus: Equatable, Hashable {
          * Stop is meaningful.
          */canInterrupt: Bool) {
         self.indicator = indicator
+        self.turnRunning = turnRunning
         self.workingSinceMs = workingSinceMs
         self.streaming = streaming
         self.canInterrupt = canInterrupt
@@ -5310,6 +5324,7 @@ public struct FfiConverterTypeLiveStatus: FfiConverterRustBuffer {
         return
             try LiveStatus(
                 indicator: FfiConverterTypeChatIndicator.read(from: &buf), 
+                turnRunning: FfiConverterBool.read(from: &buf), 
                 workingSinceMs: FfiConverterOptionInt64.read(from: &buf), 
                 streaming: FfiConverterBool.read(from: &buf), 
                 canInterrupt: FfiConverterBool.read(from: &buf)
@@ -5318,6 +5333,7 @@ public struct FfiConverterTypeLiveStatus: FfiConverterRustBuffer {
 
     public static func write(_ value: LiveStatus, into buf: inout [UInt8]) {
         FfiConverterTypeChatIndicator.write(value.indicator, into: &buf)
+        FfiConverterBool.write(value.turnRunning, into: &buf)
         FfiConverterOptionInt64.write(value.workingSinceMs, into: &buf)
         FfiConverterBool.write(value.streaming, into: &buf)
         FfiConverterBool.write(value.canInterrupt, into: &buf)
@@ -6925,6 +6941,10 @@ public struct SessionRow: Equatable, Hashable {
      */
     public var indicator: ChatIndicator
     /**
+     * Host-reported status only (no local-send override).
+     */
+    public var hostIndicator: ChatIndicator
+    /**
      * Run start of the live turn while Working/AwaitingInput.
      */
     public var workingSinceMs: Int64?
@@ -6971,6 +6991,9 @@ public struct SessionRow: Equatable, Hashable {
          * Staleness-gated (45s) live status; an in-flight send reads Working.
          */indicator: ChatIndicator, 
         /**
+         * Host-reported status only (no local-send override).
+         */hostIndicator: ChatIndicator, 
+        /**
          * Run start of the live turn while Working/AwaitingInput.
          */workingSinceMs: Int64?, lastActivityMs: Int64, 
         /**
@@ -6999,6 +7022,7 @@ public struct SessionRow: Equatable, Hashable {
         self.branch = branch
         self.cwd = cwd
         self.indicator = indicator
+        self.hostIndicator = hostIndicator
         self.workingSinceMs = workingSinceMs
         self.lastActivityMs = lastActivityMs
         self.timeLabel = timeLabel
@@ -7046,6 +7070,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 branch: FfiConverterOptionString.read(from: &buf), 
                 cwd: FfiConverterOptionString.read(from: &buf), 
                 indicator: FfiConverterTypeChatIndicator.read(from: &buf), 
+                hostIndicator: FfiConverterTypeChatIndicator.read(from: &buf), 
                 workingSinceMs: FfiConverterOptionInt64.read(from: &buf), 
                 lastActivityMs: FfiConverterInt64.read(from: &buf), 
                 timeLabel: FfiConverterString.read(from: &buf), 
@@ -7079,6 +7104,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.branch, into: &buf)
         FfiConverterOptionString.write(value.cwd, into: &buf)
         FfiConverterTypeChatIndicator.write(value.indicator, into: &buf)
+        FfiConverterTypeChatIndicator.write(value.hostIndicator, into: &buf)
         FfiConverterOptionInt64.write(value.workingSinceMs, into: &buf)
         FfiConverterInt64.write(value.lastActivityMs, into: &buf)
         FfiConverterString.write(value.timeLabel, into: &buf)
@@ -8666,6 +8692,11 @@ enum CoreError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     )
     case Unsupported(message: String
     )
+    /**
+     * The host answered with an error (bad request, git failure, …).
+     */
+    case HostError(message: String
+    )
     case Network(message: String
     )
     /**
@@ -8721,20 +8752,23 @@ public struct FfiConverterTypeCoreError: FfiConverterRustBuffer {
         case 4: return .Unsupported(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 5: return .Network(
+        case 5: return .HostError(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 6: return .Auth(
+        case 6: return .Network(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 7: return .Storage(
+        case 7: return .Auth(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 8: return .NotImplemented(
+        case 8: return .Storage(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 9: return .Closed
-        case 10: return .Internal(
+        case 9: return .NotImplemented(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 10: return .Closed
+        case 11: return .Internal(
             message: try FfiConverterString.read(from: &buf)
             )
 
@@ -8769,32 +8803,37 @@ public struct FfiConverterTypeCoreError: FfiConverterRustBuffer {
             FfiConverterString.write(message, into: &buf)
             
         
-        case let .Network(message):
+        case let .HostError(message):
             writeInt(&buf, Int32(5))
             FfiConverterString.write(message, into: &buf)
             
         
-        case let .Auth(message):
+        case let .Network(message):
             writeInt(&buf, Int32(6))
             FfiConverterString.write(message, into: &buf)
             
         
-        case let .Storage(message):
+        case let .Auth(message):
             writeInt(&buf, Int32(7))
             FfiConverterString.write(message, into: &buf)
             
         
-        case let .NotImplemented(message):
+        case let .Storage(message):
             writeInt(&buf, Int32(8))
             FfiConverterString.write(message, into: &buf)
             
         
-        case .Closed:
+        case let .NotImplemented(message):
             writeInt(&buf, Int32(9))
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case .Closed:
+            writeInt(&buf, Int32(10))
         
         
         case let .Internal(message):
-            writeInt(&buf, Int32(10))
+            writeInt(&buf, Int32(11))
             FfiConverterString.write(message, into: &buf)
             
         }

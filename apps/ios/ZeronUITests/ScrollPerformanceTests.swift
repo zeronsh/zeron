@@ -46,6 +46,27 @@ final class ScrollPerformanceTests: XCTestCase {
         }
     }
 
+    /// In-app frame pacing (works on simulators too): display-link flings
+    /// through ~3,300 rows, idle and while streaming. Asserts Apple's "good"
+    /// hitch ratio (< 5 ms of lateness per second of scrolling).
+    func testHitchRatioInApp() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-lab", "-turns", "300", "-bench"]
+        app.launch()
+        let result = app.staticTexts["bench-result"]
+        XCTAssertTrue(result.waitForExistence(timeout: 120))
+        let json = result.label
+        let attachment = XCTAttachment(string: json)
+        attachment.name = "bench.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        print("BENCH \(json)")
+        let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: [String: Double]])
+        for (phase, metrics) in parsed {
+            XCTAssertLessThan(metrics["hitchRatioMsPerS"] ?? 99, 5, "\(phase) hitch ratio")
+        }
+    }
+
     /// Cold launch into a long transcript.
     func testLaunchIntoLongTranscript() {
         measure(metrics: [XCTApplicationLaunchMetric(waitUntilResponsive: true)]) {

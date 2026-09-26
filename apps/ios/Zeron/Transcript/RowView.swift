@@ -20,6 +20,8 @@ final class RowCanvas: UIView {
 
     override func draw(_ rect: CGRect) {
         guard let model, let ctx = UIGraphicsGetCurrentContext() else { return }
+        let state = Signposts.transcript.beginInterval("draw-row")
+        defer { Signposts.transcript.endInterval("draw-row", state) }
         model.draw(layer: layerIndex, in: ctx, traits: traitCollection, hairline: 1 / max(1, traitCollection.displayScale), pass: pass)
     }
 
@@ -174,6 +176,9 @@ final class RowView: UIView {
                 iv.clipsToBounds = true
                 iv.layer.cornerRadius = min(rect.width, rect.height) > 120 ? 14 : 12
                 iv.layer.cornerCurve = .continuous
+                iv.isUserInteractionEnabled = true
+                iv.accessibilityTraits = .image
+                iv.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(openImage(_:))))
                 delegate?.rowView(self, imageFor: reference, into: iv)
                 view = iv
             case .spinner:
@@ -190,6 +195,11 @@ final class RowView: UIView {
             host.addSubview(view)
             widgetViews.append(view)
         }
+    }
+
+    @objc private func openImage(_ tap: UITapGestureRecognizer) {
+        guard let iv = tap.view as? UIImageView, let image = iv.image, let vc = findViewController() else { return }
+        vc.present(ImageViewer(image: image, source: iv), animated: true)
     }
 
     /// Link at a point in row coordinates.

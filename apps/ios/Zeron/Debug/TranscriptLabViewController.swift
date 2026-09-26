@@ -66,6 +66,9 @@ final class TranscriptLabViewController: UIViewController {
                 self.list.setContentOffset(CGPoint(x: 0, y: -self.list.adjustedContentInset.top), animated: false)
             }
         }
+        if args.contains("-bench") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.runBench() }
+        }
         if args.contains("-autoscroll") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.autoscroll() }
         }
@@ -139,6 +142,35 @@ final class TranscriptLabViewController: UIViewController {
         }
     }
 
+    // MARK: Benchmark
+
+    private let benchLabel = UILabel()
+    private var bench: ScrollBench?
+
+    /// Display-link driven flings (like a real scroll: every frame runs
+    /// layoutSubviews and realizes rows), idle and while streaming.
+    private func runBench() {
+        benchLabel.accessibilityIdentifier = "bench-result"
+        benchLabel.numberOfLines = 0
+        benchLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        benchLabel.frame = CGRect(x: 12, y: 120, width: view.bounds.width - 24, height: 80)
+        view.addSubview(benchLabel)
+        let idle = ScrollBench(list: list)
+        bench = idle
+        idle.run(passes: 3) { [weak self] idleResult in
+            guard let self else { return }
+            self.send("Stream the plan again while I scroll.")
+            let streaming = ScrollBench(list: self.list)
+            self.bench = streaming
+            streaming.run(passes: 2) { streamResult in
+                let json = "{\"idle\":\(idleResult.json),\"streaming\":\(streamResult.json)}"
+                NSLog("BENCH %@", json)
+                self.benchLabel.text = json
+                self.benchLabel.accessibilityLabel = json
+            }
+        }
+    }
+
     static let prompts = [
         "How does the layout engine avoid measuring text on the main thread?",
         "Show me the plan again with the code sample and the table.",
@@ -179,5 +211,79 @@ final class HitchMeter: UILabel {
         if frames % 30 == 0 {
             text = String(format: " %d hitches · layout %.1fms ", hitches, Double(layoutMicros) / 1000)
         }
+    }
+}
+
+/// Hitch accounting in Apple's terms: time a frame was late beyond its
+/// deadline, summed, per second of scrolling (ms/s; < 5 good, > 10 critical).
+final class ScrollBench {
+    struct Result {
+        var frames = 0
+        var hitches = 0
+        var hitchMs = 0.0
+        var seconds = 0.0
+        var worstMs = 0.0
+        var json: String {
+            String(format: "{\"frames\":%d,\"hitches\":%d,\"hitchRatioMsPerS\":%.2f,\"worstFrameMs\":%.1f,\"seconds\":%.2f}", frames, hitches, seconds > 0 ? hitchMs / seconds : 0, worstMs, seconds)
+        }
+    }
+
+    private weak var list: TranscriptListView?
+    private var link: CADisplayLink?
+    private var last: CFTimeInterval = 0
+    private var velocity: CGFloat = 0
+    private var direction: CGFloat = -1
+    private var passes = 0
+    private var result = Result()
+    private var done: ((Result) -> Void)?
+
+    init(list: TranscriptListView) { self.list = list }
+
+    func run(passes: Int, done: @escaping (Result) -> Void) {
+        list?.releaseFollow()
+        self.passes = passes * 2
+        self.done = done
+        startFling()
+        let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    private func startFling() {
+        velocity = 5200 // pt/s, a hard flick
+        direction = -direction
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        guard let list else { return link.invalidate() }
+        if last > 0 {
+            let dt = link.timestamp - last
+            let budget = link.targetTimestamp - link.timestamp
+            result.frames += 1
+            result.seconds += dt
+            let late = dt - budget
+            if late > budget * 0.5 {
+                result.hitches += 1
+                result.hitchMs += late * 1000
+            }
+            result.worstMs = max(result.worstMs, dt * 1000)
+            // UIScrollView-like deceleration.
+            velocity *= CGFloat(pow(0.998, dt * 1000))
+            let top = -list.adjustedContentInset.top
+            var y = list.contentOffset.y + direction * velocity * CGFloat(dt)
+            y = min(max(y, top), list.maxOffsetY)
+            list.contentOffset.y = y
+            if velocity < 60 || y <= top || y >= list.maxOffsetY {
+                passes -= 1
+                if passes <= 0 {
+                    link.invalidate()
+                    done?(result)
+                    return
+                }
+                startFling()
+            }
+        }
+        last = link.timestamp
     }
 }

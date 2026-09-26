@@ -94,6 +94,9 @@ final class TranscriptListView: UIScrollView, RowViewDelegate {
         if pan.state == .began { setFollowing(false) }
     }
 
+    /// Stop following the tail (programmatic scrolling, benchmarks).
+    func releaseFollow() { setFollowing(false) }
+
     /// Jump (or glide) to the newest content and resume following.
     func scrollToBottom(animated: Bool) {
         setFollowing(true)
@@ -117,6 +120,8 @@ final class TranscriptListView: UIScrollView, RowViewDelegate {
     // MARK: Frames
 
     func apply(_ frame: LayoutFrame) {
+        let state = Signposts.transcript.beginInterval("apply-frame")
+        defer { Signposts.transcript.endInterval("apply-frame", state) }
         if frame.styleCount() != fonts.count { fonts.update(frame.styles()) }
         let first = current == nil || current?.rowCount() == 0
         var anchor: (key: UInt64, delta: CGFloat)?
@@ -148,6 +153,8 @@ final class TranscriptListView: UIScrollView, RowViewDelegate {
 
     private func layoutRows() {
         guard let frame = current else { return }
+        let state = Signposts.transcript.beginInterval("layout-rows")
+        defer { Signposts.transcript.endInterval("layout-rows", state) }
         let y0 = contentOffset.y - overscan
         let y1 = contentOffset.y + bounds.height + overscan
         let placements = frame.rowsIn(y0: Float(y0), y1: Float(y1))
@@ -189,6 +196,8 @@ final class TranscriptListView: UIScrollView, RowViewDelegate {
     private func model(for p: RowPlacement, frame: LayoutFrame) -> RowModel {
         let k = ModelKey(key: p.key, version: p.version, width: frame.width())
         if let m = cache[k] { return m }
+        let state = Signposts.transcript.beginInterval("build-model-sync")
+        defer { Signposts.transcript.endInterval("build-model-sync", state) }
         let display = frame.display(index: p.index)!
         let m = RowModel(display: display, fonts: fonts)
         store(m, for: k)
