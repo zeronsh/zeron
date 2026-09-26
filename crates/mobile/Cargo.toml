@@ -23,4 +23,8 @@ bindgen = ["uniffi/cli"]
 [dependencies]
 uniffi = "0.32"
 zeron-markdown.workspace = true
+zeron-text.workspace = true
+zeron-doc.workspace = true
+zeron-proto.workspace = true
+zeron-syntax.workspace = true
 thiserror.workspace = true

@@ -460,7 +460,101 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 
 
 // Public interface members begin here.
+// Magic number for the Rust proxy to call using the same mechanism as every other method,
+// to free the callback once it's dropped by Rust.
+private let IDX_CALLBACK_FREE: Int32 = 0
+// Callback return codes
+private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
+private let UNIFFI_CALLBACK_ERROR: Int32 = 1
+private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
+    typealias FfiType = UInt16
+    typealias SwiftType = UInt16
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
+    typealias FfiType = UInt64
+    typealias SwiftType = UInt64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterFloat: FfiConverterPrimitive {
+    typealias FfiType = Float
+    typealias SwiftType = Float
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Float {
+        return try lift(readFloat(&buf))
+    }
+
+    public static func write(_ value: Float, into buf: inout [UInt8]) {
+        writeFloat(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterBool : FfiConverter {
+    typealias FfiType = Int8
+    typealias SwiftType = Bool
+
+    public static func lift(_ value: Int8) throws -> Bool {
+        return value != 0
+    }
+
+    public static func lower(_ value: Bool) -> Int8 {
+        return value ? 1 : 0
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -507,6 +601,2982 @@ fileprivate struct FfiConverterString: FfiConverter {
         writeBytes(&buf, value.utf8)
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterData: FfiConverterRustBuffer {
+    typealias SwiftType = Data
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+        let len: Int32 = try readInt(&buf)
+        return Data(try readBytes(&buf, count: Int(len)))
+    }
+
+    public static func write(_ value: Data, into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        writeBytes(&buf, value)
+    }
+}
+
+
+
+
+/**
+ * An immutable, fully measured transcript at one width.
+ */
+public protocol LayoutFrameProtocol: AnyObject, Sendable {
+    
+    func buildMicros()  -> UInt64
+    
+    func display(index: UInt32)  -> RowDisplay?
+    
+    /**
+     * Index of the row containing `y` (clamped).
+     */
+    func indexAt(y: Float)  -> UInt32?
+    
+    func indexOf(key: UInt64)  -> UInt32?
+    
+    /**
+     * Copyable text of the whole message owning `index` (context menus).
+     */
+    func messageText(index: UInt32)  -> String?
+    
+    func placement(index: UInt32)  -> RowPlacement?
+    
+    func revision()  -> UInt64
+    
+    func rowCount()  -> UInt32
+    
+    /**
+     * Rows intersecting `[y0, y1)`.
+     */
+    func rowsIn(y0: Float, y1: Float)  -> [RowPlacement]
+    
+    func styleCount()  -> UInt32
+    
+    func styles()  -> [StyleDesc]
+    
+    func totalHeight()  -> Float
+    
+    func width()  -> Float
+    
+}
+/**
+ * An immutable, fully measured transcript at one width.
+ */
+open class LayoutFrame: LayoutFrameProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_layoutframe(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_layoutframe(handle, $0) }
+    }
+
+    
+
+    
+open func buildMicros() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_layoutframe_build_micros(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func display(index: UInt32) -> RowDisplay?  {
+    return try!  FfiConverterOptionTypeRowDisplay.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_layoutframe_display(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(index),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Index of the row containing `y` (clamped).
+     */
+open func indexAt(y: Float) -> UInt32?  {
+    return try!  FfiConverterOptionUInt32.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_layoutframe_index_at(
+            self.uniffiCloneHandle(),
+        FfiConverterFloat.lower(y),uniffiCallStatus
+    )
+})
+}
+    
+open func indexOf(key: UInt64) -> UInt32?  {
+    return try!  FfiConverterOptionUInt32.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_layoutframe_index_of(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(key),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Copyable text of the whole message owning `index` (context menus).
+     */
+open func messageText(index: UInt32) -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_layoutframe_message_text(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(index),uniffiCallStatus
+    )
+})
+}
+    
+open func placement(index: UInt32) -> RowPlacement?  {
+    return try!  FfiConverterOptionTypeRowPlacement.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_layoutframe_placement(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(index),uniffiCallStatus
+    )
+})
+}
+    
+open func revision() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_layoutframe_revision(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func rowCount() -> UInt32  {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_layoutframe_row_count(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Rows intersecting `[y0, y1)`.
+     */
+open func rowsIn(y0: Float, y1: Float) -> [RowPlacement]  {
+    return try!  FfiConverterSequenceTypeRowPlacement.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_layoutframe_rows_in(
+            self.uniffiCloneHandle(),
+        FfiConverterFloat.lower(y0),
+        FfiConverterFloat.lower(y1),uniffiCallStatus
+    )
+})
+}
+    
+open func styleCount() -> UInt32  {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_layoutframe_style_count(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func styles() -> [StyleDesc]  {
+    return try!  FfiConverterSequenceTypeStyleDesc.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_layoutframe_styles(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func totalHeight() -> Float  {
+    return try!  FfiConverterFloat.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_layoutframe_total_height(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func width() -> Float  {
+    return try!  FfiConverterFloat.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_layoutframe_width(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLayoutFrame: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = LayoutFrame
+
+    public static func lift(_ handle: UInt64) throws -> LayoutFrame {
+        return LayoutFrame(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: LayoutFrame) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LayoutFrame {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: LayoutFrame, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLayoutFrame_lift(_ handle: UInt64) throws -> LayoutFrame {
+    return try FfiConverterTypeLayoutFrame.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLayoutFrame_lower(_ value: LayoutFrame) -> UInt64 {
+    return FfiConverterTypeLayoutFrame.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Frame-ready notifications (called on the layout thread).
+ */
+public protocol LayoutListener: AnyObject, Sendable {
+    
+    func frameReady(revision: UInt64) 
+    
+}
+/**
+ * Frame-ready notifications (called on the layout thread).
+ */
+open class LayoutListenerImpl: LayoutListener, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_layoutlistener(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_layoutlistener(handle, $0) }
+    }
+
+    
+
+    
+open func frameReady(revision: UInt64)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_layoutlistener_frame_ready(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(revision),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceLayoutListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceLayoutListener = UniffiVTableCallbackInterfaceLayoutListener(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeLayoutListener.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface LayoutListener: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeLayoutListener.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface LayoutListener: handle missing in uniffiClone")
+            }
+        },
+        frameReady: { (
+            uniffiHandle: UInt64,
+            revision: UInt64,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeLayoutListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.frameReady(
+                     revision: try FfiConverterUInt64.lift(revision)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceLayoutListener> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceLayoutListener>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitLayoutListener() {
+    uniffi_zeron_mobile_fn_init_callback_vtable_layoutlistener(UniffiCallbackInterfaceLayoutListener.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLayoutListener: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<LayoutListener>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = LayoutListener
+
+    public static func lift(_ handle: UInt64) throws -> LayoutListener {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return LayoutListenerImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: LayoutListener) -> UInt64 {
+         if let rustImpl = value as? LayoutListenerImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LayoutListener {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: LayoutListener, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLayoutListener_lift(_ handle: UInt64) throws -> LayoutListener {
+    return try FfiConverterTypeLayoutListener.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLayoutListener_lower(_ value: LayoutListener) -> UInt64 {
+    return FfiConverterTypeLayoutListener.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Measures text the bundled faces can't render (emoji, CJK…) with the
+ * platform's own text engine — pretext's "browser as ground truth".
+ * Self-describing (face, size, ligatures) because style ids are per-view.
+ */
+public protocol PlatformMeasurer: AnyObject, Sendable {
+    
+    func measure(face: FaceRole, size: Float, ligatures: Bool, text: String)  -> Float
+    
+}
+/**
+ * Measures text the bundled faces can't render (emoji, CJK…) with the
+ * platform's own text engine — pretext's "browser as ground truth".
+ * Self-describing (face, size, ligatures) because style ids are per-view.
+ */
+open class PlatformMeasurerImpl: PlatformMeasurer, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_platformmeasurer(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_platformmeasurer(handle, $0) }
+    }
+
+    
+
+    
+open func measure(face: FaceRole, size: Float, ligatures: Bool, text: String) -> Float  {
+    return try!  FfiConverterFloat.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_platformmeasurer_measure(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFaceRole_lower(face),
+        FfiConverterFloat.lower(size),
+        FfiConverterBool.lower(ligatures),
+        FfiConverterString.lower(text),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfacePlatformMeasurer {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfacePlatformMeasurer = UniffiVTableCallbackInterfacePlatformMeasurer(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypePlatformMeasurer.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface PlatformMeasurer: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypePlatformMeasurer.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface PlatformMeasurer: handle missing in uniffiClone")
+            }
+        },
+        measure: { (
+            uniffiHandle: UInt64,
+            face: RustBuffer,
+            size: Float,
+            ligatures: Int8,
+            text: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<Float>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Float in
+                guard let uniffiObj = try? FfiConverterTypePlatformMeasurer.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.measure(
+                     face: try FfiConverterTypeFaceRole_lift(face),
+                     size: try FfiConverterFloat.lift(size),
+                     ligatures: try FfiConverterBool.lift(ligatures),
+                     text: try FfiConverterString.lift(text)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterFloat.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfacePlatformMeasurer> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfacePlatformMeasurer>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitPlatformMeasurer() {
+    uniffi_zeron_mobile_fn_init_callback_vtable_platformmeasurer(UniffiCallbackInterfacePlatformMeasurer.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePlatformMeasurer: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<PlatformMeasurer>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = PlatformMeasurer
+
+    public static func lift(_ handle: UInt64) throws -> PlatformMeasurer {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return PlatformMeasurerImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: PlatformMeasurer) -> UInt64 {
+         if let rustImpl = value as? PlatformMeasurerImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PlatformMeasurer {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: PlatformMeasurer, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformMeasurer_lift(_ handle: UInt64) throws -> PlatformMeasurer {
+    return try FfiConverterTypePlatformMeasurer.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformMeasurer_lower(_ value: PlatformMeasurer) -> UInt64 {
+    return FfiConverterTypePlatformMeasurer.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Registered faces + fallback measurer, shared by every transcript.
+ */
+public protocol TextSystemProtocol: AnyObject, Sendable {
+    
+}
+/**
+ * Registered faces + fallback measurer, shared by every transcript.
+ */
+open class TextSystem: TextSystemProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_textsystem(self.handle, $0) }
+    }
+public convenience init(faces: [FaceData], measurer: PlatformMeasurer?) {
+    let handle =
+        try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_constructor_textsystem_new(
+        FfiConverterSequenceTypeFaceData.lower(faces),
+        FfiConverterOptionTypePlatformMeasurer.lower(measurer),uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_textsystem(handle, $0) }
+    }
+
+    
+
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTextSystem: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = TextSystem
+
+    public static func lift(_ handle: UInt64) throws -> TextSystem {
+        return TextSystem(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: TextSystem) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TextSystem {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: TextSystem, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextSystem_lift(_ handle: UInt64) throws -> TextSystem {
+    return try FfiConverterTypeTextSystem.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextSystem_lower(_ value: TextSystem) -> UInt64 {
+    return FfiConverterTypeTextSystem.lower(value)
+}
+
+
+
+
+
+
+/**
+ * One transcript's layout engine.
+ */
+public protocol TranscriptViewProtocol: AnyObject, Sendable {
+    
+    func close() 
+    
+    /**
+     * The latest published frame.
+     */
+    func frame()  -> LayoutFrame
+    
+    /**
+     * Feed markdown fixtures directly (demo screens, benchmarks, tests).
+     */
+    func setDebugEntries(entries: [DebugEntry], working: Bool) 
+    
+    func setViewport(width: Float, textScale: Float) 
+    
+    /**
+     * Expand/collapse a disclosure (tool group, long user message).
+     */
+    func toggle(key: UInt64) 
+    
+}
+/**
+ * One transcript's layout engine.
+ */
+open class TranscriptView: TranscriptViewProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_transcriptview(self.handle, $0) }
+    }
+public convenience init(text: TextSystem, listener: LayoutListener) {
+    let handle =
+        try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_constructor_transcriptview_new(
+        FfiConverterTypeTextSystem_lower(text),
+        FfiConverterTypeLayoutListener_lower(listener),uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_transcriptview(handle, $0) }
+    }
+
+    
+
+    
+open func close()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_transcriptview_close(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The latest published frame.
+     */
+open func frame() -> LayoutFrame  {
+    return try!  FfiConverterTypeLayoutFrame_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_transcriptview_frame(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Feed markdown fixtures directly (demo screens, benchmarks, tests).
+     */
+open func setDebugEntries(entries: [DebugEntry], working: Bool)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_transcriptview_set_debug_entries(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceTypeDebugEntry.lower(entries),
+        FfiConverterBool.lower(working),uniffiCallStatus
+    )
+}
+}
+    
+open func setViewport(width: Float, textScale: Float)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_transcriptview_set_viewport(
+            self.uniffiCloneHandle(),
+        FfiConverterFloat.lower(width),
+        FfiConverterFloat.lower(textScale),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Expand/collapse a disclosure (tool group, long user message).
+     */
+open func toggle(key: UInt64)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_transcriptview_toggle(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(key),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTranscriptView: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = TranscriptView
+
+    public static func lift(_ handle: UInt64) throws -> TranscriptView {
+        return TranscriptView(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: TranscriptView) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TranscriptView {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: TranscriptView, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTranscriptView_lift(_ handle: UInt64) throws -> TranscriptView {
+    return try FfiConverterTypeTranscriptView.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTranscriptView_lower(_ value: TranscriptView) -> UInt64 {
+    return FfiConverterTypeTranscriptView.lower(value)
+}
+
+
+
+
+public struct BoxPrim: Equatable, Hashable {
+    public var x: Float
+    public var y: Float
+    public var w: Float
+    public var h: Float
+    public var radius: Float
+    public var style: BoxStyle
+    public var color: ColorRole
+    public var scroller: UInt32?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(x: Float, y: Float, w: Float, h: Float, radius: Float, style: BoxStyle, color: ColorRole, scroller: UInt32?) {
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.radius = radius
+        self.style = style
+        self.color = color
+        self.scroller = scroller
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension BoxPrim: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBoxPrim: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BoxPrim {
+        return
+            try BoxPrim(
+                x: FfiConverterFloat.read(from: &buf), 
+                y: FfiConverterFloat.read(from: &buf), 
+                w: FfiConverterFloat.read(from: &buf), 
+                h: FfiConverterFloat.read(from: &buf), 
+                radius: FfiConverterFloat.read(from: &buf), 
+                style: FfiConverterTypeBoxStyle.read(from: &buf), 
+                color: FfiConverterTypeColorRole.read(from: &buf), 
+                scroller: FfiConverterOptionUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: BoxPrim, into buf: inout [UInt8]) {
+        FfiConverterFloat.write(value.x, into: &buf)
+        FfiConverterFloat.write(value.y, into: &buf)
+        FfiConverterFloat.write(value.w, into: &buf)
+        FfiConverterFloat.write(value.h, into: &buf)
+        FfiConverterFloat.write(value.radius, into: &buf)
+        FfiConverterTypeBoxStyle.write(value.style, into: &buf)
+        FfiConverterTypeColorRole.write(value.color, into: &buf)
+        FfiConverterOptionUInt32.write(value.scroller, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBoxPrim_lift(_ buf: RustBuffer) throws -> BoxPrim {
+    return try FfiConverterTypeBoxPrim.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBoxPrim_lower(_ value: BoxPrim) -> RustBuffer {
+    return FfiConverterTypeBoxPrim.lower(value)
+}
+
+
+/**
+ * A debug/demo transcript entry (markdown text), for fixtures and benches.
+ */
+public struct DebugEntry: Equatable, Hashable {
+    public var id: String
+    public var user: Bool
+    public var text: String
+    public var streaming: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, user: Bool, text: String, streaming: Bool) {
+        self.id = id
+        self.user = user
+        self.text = text
+        self.streaming = streaming
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DebugEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDebugEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DebugEntry {
+        return
+            try DebugEntry(
+                id: FfiConverterString.read(from: &buf), 
+                user: FfiConverterBool.read(from: &buf), 
+                text: FfiConverterString.read(from: &buf), 
+                streaming: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DebugEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterBool.write(value.user, into: &buf)
+        FfiConverterString.write(value.text, into: &buf)
+        FfiConverterBool.write(value.streaming, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDebugEntry_lift(_ buf: RustBuffer) throws -> DebugEntry {
+    return try FfiConverterTypeDebugEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDebugEntry_lower(_ value: DebugEntry) -> RustBuffer {
+    return FfiConverterTypeDebugEntry.lower(value)
+}
+
+
+public struct FaceData: Equatable, Hashable {
+    public var role: FaceRole
+    public var bytes: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(role: FaceRole, bytes: Data) {
+        self.role = role
+        self.bytes = bytes
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FaceData: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFaceData: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FaceData {
+        return
+            try FaceData(
+                role: FfiConverterTypeFaceRole.read(from: &buf), 
+                bytes: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FaceData, into buf: inout [UInt8]) {
+        FfiConverterTypeFaceRole.write(value.role, into: &buf)
+        FfiConverterData.write(value.bytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFaceData_lift(_ buf: RustBuffer) throws -> FaceData {
+    return try FfiConverterTypeFaceData.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFaceData_lower(_ value: FaceData) -> RustBuffer {
+    return FfiConverterTypeFaceData.lower(value)
+}
+
+
+/**
+ * A tappable link region (one per fragment; multi-line links repeat).
+ */
+public struct LinkHit: Equatable, Hashable {
+    public var x: Float
+    public var y: Float
+    public var w: Float
+    public var h: Float
+    public var url: String
+    public var scroller: UInt32?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(x: Float, y: Float, w: Float, h: Float, url: String, scroller: UInt32?) {
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.url = url
+        self.scroller = scroller
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LinkHit: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLinkHit: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LinkHit {
+        return
+            try LinkHit(
+                x: FfiConverterFloat.read(from: &buf), 
+                y: FfiConverterFloat.read(from: &buf), 
+                w: FfiConverterFloat.read(from: &buf), 
+                h: FfiConverterFloat.read(from: &buf), 
+                url: FfiConverterString.read(from: &buf), 
+                scroller: FfiConverterOptionUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LinkHit, into buf: inout [UInt8]) {
+        FfiConverterFloat.write(value.x, into: &buf)
+        FfiConverterFloat.write(value.y, into: &buf)
+        FfiConverterFloat.write(value.w, into: &buf)
+        FfiConverterFloat.write(value.h, into: &buf)
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterOptionUInt32.write(value.scroller, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLinkHit_lift(_ buf: RustBuffer) throws -> LinkHit {
+    return try FfiConverterTypeLinkHit.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLinkHit_lower(_ value: LinkHit) -> RustBuffer {
+    return FfiConverterTypeLinkHit.lower(value)
+}
+
+
+/**
+ * Everything needed to paint a row at its current width.
+ */
+public struct RowDisplay: Equatable, Hashable {
+    public var key: UInt64
+    public var version: UInt64
+    public var width: Float
+    public var height: Float
+    public var text: String
+    public var runs: [TextRun]
+    public var boxes: [BoxPrim]
+    public var links: [LinkHit]
+    public var scrollers: [Scroller]
+    public var widgets: [Widget]
+    /**
+     * Plain text for copy / accessibility.
+     */
+    public var copyText: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(key: UInt64, version: UInt64, width: Float, height: Float, text: String, runs: [TextRun], boxes: [BoxPrim], links: [LinkHit], scrollers: [Scroller], widgets: [Widget], 
+        /**
+         * Plain text for copy / accessibility.
+         */copyText: String) {
+        self.key = key
+        self.version = version
+        self.width = width
+        self.height = height
+        self.text = text
+        self.runs = runs
+        self.boxes = boxes
+        self.links = links
+        self.scrollers = scrollers
+        self.widgets = widgets
+        self.copyText = copyText
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RowDisplay: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRowDisplay: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RowDisplay {
+        return
+            try RowDisplay(
+                key: FfiConverterUInt64.read(from: &buf), 
+                version: FfiConverterUInt64.read(from: &buf), 
+                width: FfiConverterFloat.read(from: &buf), 
+                height: FfiConverterFloat.read(from: &buf), 
+                text: FfiConverterString.read(from: &buf), 
+                runs: FfiConverterSequenceTypeTextRun.read(from: &buf), 
+                boxes: FfiConverterSequenceTypeBoxPrim.read(from: &buf), 
+                links: FfiConverterSequenceTypeLinkHit.read(from: &buf), 
+                scrollers: FfiConverterSequenceTypeScroller.read(from: &buf), 
+                widgets: FfiConverterSequenceTypeWidget.read(from: &buf), 
+                copyText: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RowDisplay, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.key, into: &buf)
+        FfiConverterUInt64.write(value.version, into: &buf)
+        FfiConverterFloat.write(value.width, into: &buf)
+        FfiConverterFloat.write(value.height, into: &buf)
+        FfiConverterString.write(value.text, into: &buf)
+        FfiConverterSequenceTypeTextRun.write(value.runs, into: &buf)
+        FfiConverterSequenceTypeBoxPrim.write(value.boxes, into: &buf)
+        FfiConverterSequenceTypeLinkHit.write(value.links, into: &buf)
+        FfiConverterSequenceTypeScroller.write(value.scrollers, into: &buf)
+        FfiConverterSequenceTypeWidget.write(value.widgets, into: &buf)
+        FfiConverterString.write(value.copyText, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRowDisplay_lift(_ buf: RustBuffer) throws -> RowDisplay {
+    return try FfiConverterTypeRowDisplay.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRowDisplay_lower(_ value: RowDisplay) -> RustBuffer {
+    return FfiConverterTypeRowDisplay.lower(value)
+}
+
+
+/**
+ * A row's position in a frame.
+ */
+public struct RowPlacement: Equatable, Hashable {
+    public var index: UInt32
+    public var key: UInt64
+    /**
+     * Changes whenever the row's painted content may change (not its width).
+     */
+    public var version: UInt64
+    public var y: Float
+    public var height: Float
+    public var kind: RowKind
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(index: UInt32, key: UInt64, 
+        /**
+         * Changes whenever the row's painted content may change (not its width).
+         */version: UInt64, y: Float, height: Float, kind: RowKind) {
+        self.index = index
+        self.key = key
+        self.version = version
+        self.y = y
+        self.height = height
+        self.kind = kind
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RowPlacement: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRowPlacement: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RowPlacement {
+        return
+            try RowPlacement(
+                index: FfiConverterUInt32.read(from: &buf), 
+                key: FfiConverterUInt64.read(from: &buf), 
+                version: FfiConverterUInt64.read(from: &buf), 
+                y: FfiConverterFloat.read(from: &buf), 
+                height: FfiConverterFloat.read(from: &buf), 
+                kind: FfiConverterTypeRowKind.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RowPlacement, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.index, into: &buf)
+        FfiConverterUInt64.write(value.key, into: &buf)
+        FfiConverterUInt64.write(value.version, into: &buf)
+        FfiConverterFloat.write(value.y, into: &buf)
+        FfiConverterFloat.write(value.height, into: &buf)
+        FfiConverterTypeRowKind.write(value.kind, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRowPlacement_lift(_ buf: RustBuffer) throws -> RowPlacement {
+    return try FfiConverterTypeRowPlacement.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRowPlacement_lower(_ value: RowPlacement) -> RustBuffer {
+    return FfiConverterTypeRowPlacement.lower(value)
+}
+
+
+/**
+ * A horizontally scrolling viewport (code blocks, wide tables). Primitives
+ * that reference it are positioned in its content coordinates, whose origin
+ * is the viewport's top-left.
+ */
+public struct Scroller: Equatable, Hashable {
+    public var x: Float
+    public var y: Float
+    public var w: Float
+    public var h: Float
+    public var contentWidth: Float
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(x: Float, y: Float, w: Float, h: Float, contentWidth: Float) {
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.contentWidth = contentWidth
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Scroller: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeScroller: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Scroller {
+        return
+            try Scroller(
+                x: FfiConverterFloat.read(from: &buf), 
+                y: FfiConverterFloat.read(from: &buf), 
+                w: FfiConverterFloat.read(from: &buf), 
+                h: FfiConverterFloat.read(from: &buf), 
+                contentWidth: FfiConverterFloat.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Scroller, into buf: inout [UInt8]) {
+        FfiConverterFloat.write(value.x, into: &buf)
+        FfiConverterFloat.write(value.y, into: &buf)
+        FfiConverterFloat.write(value.w, into: &buf)
+        FfiConverterFloat.write(value.h, into: &buf)
+        FfiConverterFloat.write(value.contentWidth, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScroller_lift(_ buf: RustBuffer) throws -> Scroller {
+    return try FfiConverterTypeScroller.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScroller_lower(_ value: Scroller) -> RustBuffer {
+    return FfiConverterTypeScroller.lower(value)
+}
+
+
+/**
+ * A style the platform must be able to draw: `id` → (face, size).
+ */
+public struct StyleDesc: Equatable, Hashable {
+    public var id: UInt16
+    public var face: FaceRole
+    public var size: Float
+    public var ligatures: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: UInt16, face: FaceRole, size: Float, ligatures: Bool) {
+        self.id = id
+        self.face = face
+        self.size = size
+        self.ligatures = ligatures
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension StyleDesc: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStyleDesc: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StyleDesc {
+        return
+            try StyleDesc(
+                id: FfiConverterUInt16.read(from: &buf), 
+                face: FfiConverterTypeFaceRole.read(from: &buf), 
+                size: FfiConverterFloat.read(from: &buf), 
+                ligatures: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StyleDesc, into buf: inout [UInt8]) {
+        FfiConverterUInt16.write(value.id, into: &buf)
+        FfiConverterTypeFaceRole.write(value.face, into: &buf)
+        FfiConverterFloat.write(value.size, into: &buf)
+        FfiConverterBool.write(value.ligatures, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStyleDesc_lift(_ buf: RustBuffer) throws -> StyleDesc {
+    return try FfiConverterTypeStyleDesc.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStyleDesc_lower(_ value: StyleDesc) -> RustBuffer {
+    return FfiConverterTypeStyleDesc.lower(value)
+}
+
+
+/**
+ * One positioned piece of text: `text[start..start+len]` (UTF-16) drawn with
+ * `style` so its origin sits at (`x`, `baseline`).
+ */
+public struct TextRun: Equatable, Hashable {
+    public var start: UInt32
+    public var len: UInt32
+    public var x: Float
+    public var baseline: Float
+    /**
+     * Rust-measured advance — painters may use it for selection/hit rects.
+     */
+    public var width: Float
+    public var style: UInt16
+    public var color: ColorRole
+    public var decoration: Decoration
+    /**
+     * Index into [`RowDisplay::scrollers`] when the run scrolls horizontally.
+     */
+    public var scroller: UInt32?
+    /**
+     * Fade-in start in ms since the row's layout epoch (streaming veil);
+     * `None` = fully visible.
+     */
+    public var revealMs: UInt32?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(start: UInt32, len: UInt32, x: Float, baseline: Float, 
+        /**
+         * Rust-measured advance — painters may use it for selection/hit rects.
+         */width: Float, style: UInt16, color: ColorRole, decoration: Decoration, 
+        /**
+         * Index into [`RowDisplay::scrollers`] when the run scrolls horizontally.
+         */scroller: UInt32?, 
+        /**
+         * Fade-in start in ms since the row's layout epoch (streaming veil);
+         * `None` = fully visible.
+         */revealMs: UInt32?) {
+        self.start = start
+        self.len = len
+        self.x = x
+        self.baseline = baseline
+        self.width = width
+        self.style = style
+        self.color = color
+        self.decoration = decoration
+        self.scroller = scroller
+        self.revealMs = revealMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TextRun: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTextRun: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TextRun {
+        return
+            try TextRun(
+                start: FfiConverterUInt32.read(from: &buf), 
+                len: FfiConverterUInt32.read(from: &buf), 
+                x: FfiConverterFloat.read(from: &buf), 
+                baseline: FfiConverterFloat.read(from: &buf), 
+                width: FfiConverterFloat.read(from: &buf), 
+                style: FfiConverterUInt16.read(from: &buf), 
+                color: FfiConverterTypeColorRole.read(from: &buf), 
+                decoration: FfiConverterTypeDecoration.read(from: &buf), 
+                scroller: FfiConverterOptionUInt32.read(from: &buf), 
+                revealMs: FfiConverterOptionUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TextRun, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.start, into: &buf)
+        FfiConverterUInt32.write(value.len, into: &buf)
+        FfiConverterFloat.write(value.x, into: &buf)
+        FfiConverterFloat.write(value.baseline, into: &buf)
+        FfiConverterFloat.write(value.width, into: &buf)
+        FfiConverterUInt16.write(value.style, into: &buf)
+        FfiConverterTypeColorRole.write(value.color, into: &buf)
+        FfiConverterTypeDecoration.write(value.decoration, into: &buf)
+        FfiConverterOptionUInt32.write(value.scroller, into: &buf)
+        FfiConverterOptionUInt32.write(value.revealMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextRun_lift(_ buf: RustBuffer) throws -> TextRun {
+    return try FfiConverterTypeTextRun.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextRun_lower(_ value: TextRun) -> RustBuffer {
+    return FfiConverterTypeTextRun.lower(value)
+}
+
+
+public struct Widget: Equatable, Hashable {
+    public var id: UInt32
+    public var kind: WidgetKind
+    public var x: Float
+    public var y: Float
+    public var w: Float
+    public var h: Float
+    public var payload: String?
+    public var scroller: UInt32?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: UInt32, kind: WidgetKind, x: Float, y: Float, w: Float, h: Float, payload: String?, scroller: UInt32?) {
+        self.id = id
+        self.kind = kind
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.payload = payload
+        self.scroller = scroller
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Widget: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWidget: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Widget {
+        return
+            try Widget(
+                id: FfiConverterUInt32.read(from: &buf), 
+                kind: FfiConverterTypeWidgetKind.read(from: &buf), 
+                x: FfiConverterFloat.read(from: &buf), 
+                y: FfiConverterFloat.read(from: &buf), 
+                w: FfiConverterFloat.read(from: &buf), 
+                h: FfiConverterFloat.read(from: &buf), 
+                payload: FfiConverterOptionString.read(from: &buf), 
+                scroller: FfiConverterOptionUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Widget, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.id, into: &buf)
+        FfiConverterTypeWidgetKind.write(value.kind, into: &buf)
+        FfiConverterFloat.write(value.x, into: &buf)
+        FfiConverterFloat.write(value.y, into: &buf)
+        FfiConverterFloat.write(value.w, into: &buf)
+        FfiConverterFloat.write(value.h, into: &buf)
+        FfiConverterOptionString.write(value.payload, into: &buf)
+        FfiConverterOptionUInt32.write(value.scroller, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWidget_lift(_ buf: RustBuffer) throws -> Widget {
+    return try FfiConverterTypeWidget.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWidget_lower(_ value: Widget) -> RustBuffer {
+    return FfiConverterTypeWidget.lower(value)
+}
+
+
+
+public enum BoxStyle: Equatable, Hashable {
+    
+    case fill
+    /**
+     * A hairline (1 device pixel) stroke on the rect's inside edge.
+     */
+    case hairline
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension BoxStyle: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBoxStyle: FfiConverterRustBuffer {
+    typealias SwiftType = BoxStyle
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BoxStyle {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .fill
+        
+        case 2: return .hairline
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: BoxStyle, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .fill:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .hairline:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBoxStyle_lift(_ buf: RustBuffer) throws -> BoxStyle {
+    return try FfiConverterTypeBoxStyle.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBoxStyle_lower(_ value: BoxStyle) -> RustBuffer {
+    return FfiConverterTypeBoxStyle.lower(value)
+}
+
+
+
+/**
+ * Paint roles. The painter maps these to its palette (light/dark).
+ */
+
+public enum ColorRole: Equatable, Hashable {
+    
+    case text
+    case textSecondary
+    case textTertiary
+    case link
+    case accent
+    case danger
+    case success
+    case warning
+    case inlineCodeText
+    case inlineCodeBackground
+    case codeText
+    case codeBackground
+    case codeBorder
+    case quoteBar
+    case rule
+    case tableBorder
+    case tableHeaderBackground
+    case userBubble
+    case chipBackground
+    case syntaxKeyword
+    case syntaxString
+    case syntaxComment
+    case syntaxNumber
+    case syntaxFunction
+    case syntaxType
+    case syntaxConstant
+    case syntaxVariable
+    case syntaxProperty
+    case syntaxOperator
+    case syntaxPunctuation
+    case syntaxTag
+    case syntaxAttribute
+    case syntaxEscape
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ColorRole: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeColorRole: FfiConverterRustBuffer {
+    typealias SwiftType = ColorRole
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ColorRole {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .text
+        
+        case 2: return .textSecondary
+        
+        case 3: return .textTertiary
+        
+        case 4: return .link
+        
+        case 5: return .accent
+        
+        case 6: return .danger
+        
+        case 7: return .success
+        
+        case 8: return .warning
+        
+        case 9: return .inlineCodeText
+        
+        case 10: return .inlineCodeBackground
+        
+        case 11: return .codeText
+        
+        case 12: return .codeBackground
+        
+        case 13: return .codeBorder
+        
+        case 14: return .quoteBar
+        
+        case 15: return .rule
+        
+        case 16: return .tableBorder
+        
+        case 17: return .tableHeaderBackground
+        
+        case 18: return .userBubble
+        
+        case 19: return .chipBackground
+        
+        case 20: return .syntaxKeyword
+        
+        case 21: return .syntaxString
+        
+        case 22: return .syntaxComment
+        
+        case 23: return .syntaxNumber
+        
+        case 24: return .syntaxFunction
+        
+        case 25: return .syntaxType
+        
+        case 26: return .syntaxConstant
+        
+        case 27: return .syntaxVariable
+        
+        case 28: return .syntaxProperty
+        
+        case 29: return .syntaxOperator
+        
+        case 30: return .syntaxPunctuation
+        
+        case 31: return .syntaxTag
+        
+        case 32: return .syntaxAttribute
+        
+        case 33: return .syntaxEscape
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ColorRole, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .text:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .textSecondary:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .textTertiary:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .link:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .accent:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .danger:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .success:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .warning:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .inlineCodeText:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .inlineCodeBackground:
+            writeInt(&buf, Int32(10))
+        
+        
+        case .codeText:
+            writeInt(&buf, Int32(11))
+        
+        
+        case .codeBackground:
+            writeInt(&buf, Int32(12))
+        
+        
+        case .codeBorder:
+            writeInt(&buf, Int32(13))
+        
+        
+        case .quoteBar:
+            writeInt(&buf, Int32(14))
+        
+        
+        case .rule:
+            writeInt(&buf, Int32(15))
+        
+        
+        case .tableBorder:
+            writeInt(&buf, Int32(16))
+        
+        
+        case .tableHeaderBackground:
+            writeInt(&buf, Int32(17))
+        
+        
+        case .userBubble:
+            writeInt(&buf, Int32(18))
+        
+        
+        case .chipBackground:
+            writeInt(&buf, Int32(19))
+        
+        
+        case .syntaxKeyword:
+            writeInt(&buf, Int32(20))
+        
+        
+        case .syntaxString:
+            writeInt(&buf, Int32(21))
+        
+        
+        case .syntaxComment:
+            writeInt(&buf, Int32(22))
+        
+        
+        case .syntaxNumber:
+            writeInt(&buf, Int32(23))
+        
+        
+        case .syntaxFunction:
+            writeInt(&buf, Int32(24))
+        
+        
+        case .syntaxType:
+            writeInt(&buf, Int32(25))
+        
+        
+        case .syntaxConstant:
+            writeInt(&buf, Int32(26))
+        
+        
+        case .syntaxVariable:
+            writeInt(&buf, Int32(27))
+        
+        
+        case .syntaxProperty:
+            writeInt(&buf, Int32(28))
+        
+        
+        case .syntaxOperator:
+            writeInt(&buf, Int32(29))
+        
+        
+        case .syntaxPunctuation:
+            writeInt(&buf, Int32(30))
+        
+        
+        case .syntaxTag:
+            writeInt(&buf, Int32(31))
+        
+        
+        case .syntaxAttribute:
+            writeInt(&buf, Int32(32))
+        
+        
+        case .syntaxEscape:
+            writeInt(&buf, Int32(33))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeColorRole_lift(_ buf: RustBuffer) throws -> ColorRole {
+    return try FfiConverterTypeColorRole.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeColorRole_lower(_ value: ColorRole) -> RustBuffer {
+    return FfiConverterTypeColorRole.lower(value)
+}
+
+
+
+/**
+ * Text decorations, painted relative to the run's baseline.
+ */
+
+public enum Decoration: Equatable, Hashable {
+    
+    case none
+    case underline
+    case strikethrough
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension Decoration: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDecoration: FfiConverterRustBuffer {
+    typealias SwiftType = Decoration
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Decoration {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .none
+        
+        case 2: return .underline
+        
+        case 3: return .strikethrough
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: Decoration, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .none:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .underline:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .strikethrough:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDecoration_lift(_ buf: RustBuffer) throws -> Decoration {
+    return try FfiConverterTypeDecoration.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDecoration_lower(_ value: Decoration) -> RustBuffer {
+    return FfiConverterTypeDecoration.lower(value)
+}
+
+
+
+/**
+ * Faces the platform registers (same bytes it hands CoreText/Skia).
+ */
+
+public enum FaceRole: Equatable, Hashable {
+    
+    case sans
+    case sansMedium
+    case sansSemibold
+    case sansBold
+    case sansItalic
+    case sansMediumItalic
+    case sansSemiboldItalic
+    case sansBoldItalic
+    case mono
+    case monoMedium
+    case monoSemibold
+    case monoItalic
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FaceRole: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFaceRole: FfiConverterRustBuffer {
+    typealias SwiftType = FaceRole
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FaceRole {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .sans
+        
+        case 2: return .sansMedium
+        
+        case 3: return .sansSemibold
+        
+        case 4: return .sansBold
+        
+        case 5: return .sansItalic
+        
+        case 6: return .sansMediumItalic
+        
+        case 7: return .sansSemiboldItalic
+        
+        case 8: return .sansBoldItalic
+        
+        case 9: return .mono
+        
+        case 10: return .monoMedium
+        
+        case 11: return .monoSemibold
+        
+        case 12: return .monoItalic
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FaceRole, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .sans:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .sansMedium:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .sansSemibold:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .sansBold:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .sansItalic:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .sansMediumItalic:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .sansSemiboldItalic:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .sansBoldItalic:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .mono:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .monoMedium:
+            writeInt(&buf, Int32(10))
+        
+        
+        case .monoSemibold:
+            writeInt(&buf, Int32(11))
+        
+        
+        case .monoItalic:
+            writeInt(&buf, Int32(12))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFaceRole_lift(_ buf: RustBuffer) throws -> FaceRole {
+    return try FfiConverterTypeFaceRole.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFaceRole_lower(_ value: FaceRole) -> RustBuffer {
+    return FfiConverterTypeFaceRole.lower(value)
+}
+
+
+
+/**
+ * Row kinds the painter may style differently (e.g. context menus).
+ */
+
+public enum RowKind: Equatable, Hashable {
+    
+    case markdown
+    case user
+    case tools
+    case chip
+    case image
+    case working
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RowKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRowKind: FfiConverterRustBuffer {
+    typealias SwiftType = RowKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RowKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .markdown
+        
+        case 2: return .user
+        
+        case 3: return .tools
+        
+        case 4: return .chip
+        
+        case 5: return .image
+        
+        case 6: return .working
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RowKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .markdown:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .user:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .tools:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .chip:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .image:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .working:
+            writeInt(&buf, Int32(6))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRowKind_lift(_ buf: RustBuffer) throws -> RowKind {
+    return try FfiConverterTypeRowKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRowKind_lower(_ value: RowKind) -> RustBuffer {
+    return FfiConverterTypeRowKind.lower(value)
+}
+
+
+
+/**
+ * Native affordances the painter renders itself (icons, images, spinners).
+ */
+
+public enum WidgetKind: Equatable, Hashable {
+    
+    /**
+     * Copy button for a code block; `payload` holds the code.
+     */
+    case copyCode
+    /**
+     * Tool group / user message disclosure; toggles via `TranscriptView::toggle`.
+     */
+    case disclosure(expanded: Bool
+    )
+    /**
+     * Status glyph for a tool (running spinner / done check / failed cross).
+     */
+    case toolStatus(running: Bool, failed: Bool
+    )
+    /**
+     * A remote image to load into the rect (generated images, attachments).
+     */
+    case image(reference: String
+    )
+    /**
+     * Working indicator at the tail of a live turn.
+     */
+    case spinner
+    /**
+     * A small SF-symbol-like icon by name.
+     */
+    case icon(name: String, color: ColorRole
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WidgetKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
+    typealias SwiftType = WidgetKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WidgetKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .copyCode
+        
+        case 2: return .disclosure(expanded: try FfiConverterBool.read(from: &buf)
+        )
+        
+        case 3: return .toolStatus(running: try FfiConverterBool.read(from: &buf), failed: try FfiConverterBool.read(from: &buf)
+        )
+        
+        case 4: return .image(reference: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 5: return .spinner
+        
+        case 6: return .icon(name: try FfiConverterString.read(from: &buf), color: try FfiConverterTypeColorRole.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WidgetKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .copyCode:
+            writeInt(&buf, Int32(1))
+        
+        
+        case let .disclosure(expanded):
+            writeInt(&buf, Int32(2))
+            FfiConverterBool.write(expanded, into: &buf)
+            
+        
+        case let .toolStatus(running,failed):
+            writeInt(&buf, Int32(3))
+            FfiConverterBool.write(running, into: &buf)
+            FfiConverterBool.write(failed, into: &buf)
+            
+        
+        case let .image(reference):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(reference, into: &buf)
+            
+        
+        case .spinner:
+            writeInt(&buf, Int32(5))
+        
+        
+        case let .icon(name,color):
+            writeInt(&buf, Int32(6))
+            FfiConverterString.write(name, into: &buf)
+            FfiConverterTypeColorRole.write(color, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWidgetKind_lift(_ buf: RustBuffer) throws -> WidgetKind {
+    return try FfiConverterTypeWidgetKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWidgetKind_lower(_ value: WidgetKind) -> RustBuffer {
+    return FfiConverterTypeWidgetKind.lower(value)
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
+    typealias SwiftType = String?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterString.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypePlatformMeasurer: FfiConverterRustBuffer {
+    typealias SwiftType = PlatformMeasurer?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePlatformMeasurer.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePlatformMeasurer.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeRowDisplay: FfiConverterRustBuffer {
+    typealias SwiftType = RowDisplay?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeRowDisplay.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeRowDisplay.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeRowPlacement: FfiConverterRustBuffer {
+    typealias SwiftType = RowPlacement?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeRowPlacement.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeRowPlacement.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = [UInt32]
+
+    public static func write(_ value: [UInt32], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterUInt32.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UInt32] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UInt32]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterUInt32.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeBoxPrim: FfiConverterRustBuffer {
+    typealias SwiftType = [BoxPrim]
+
+    public static func write(_ value: [BoxPrim], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeBoxPrim.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [BoxPrim] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [BoxPrim]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeBoxPrim.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeDebugEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [DebugEntry]
+
+    public static func write(_ value: [DebugEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeDebugEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [DebugEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [DebugEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeDebugEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFaceData: FfiConverterRustBuffer {
+    typealias SwiftType = [FaceData]
+
+    public static func write(_ value: [FaceData], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFaceData.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FaceData] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FaceData]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFaceData.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeLinkHit: FfiConverterRustBuffer {
+    typealias SwiftType = [LinkHit]
+
+    public static func write(_ value: [LinkHit], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeLinkHit.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [LinkHit] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [LinkHit]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeLinkHit.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeRowPlacement: FfiConverterRustBuffer {
+    typealias SwiftType = [RowPlacement]
+
+    public static func write(_ value: [RowPlacement], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeRowPlacement.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [RowPlacement] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [RowPlacement]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeRowPlacement.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeScroller: FfiConverterRustBuffer {
+    typealias SwiftType = [Scroller]
+
+    public static func write(_ value: [Scroller], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeScroller.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Scroller] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Scroller]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeScroller.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeStyleDesc: FfiConverterRustBuffer {
+    typealias SwiftType = [StyleDesc]
+
+    public static func write(_ value: [StyleDesc], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeStyleDesc.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [StyleDesc] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [StyleDesc]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeStyleDesc.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTextRun: FfiConverterRustBuffer {
+    typealias SwiftType = [TextRun]
+
+    public static func write(_ value: [TextRun], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTextRun.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TextRun] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TextRun]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTextRun.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWidget: FfiConverterRustBuffer {
+    typealias SwiftType = [Widget]
+
+    public static func write(_ value: [Widget], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWidget.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Widget] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Widget]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWidget.read(from: &buf))
+        }
+        return seq
+    }
+}
 /**
  * Version handshake: the Swift/Kotlin bindings must match the linked library.
  */
@@ -514,6 +3584,33 @@ public func coreVersion() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_func_core_version(uniffiCallStatus
+    )
+})
+}
+/**
+ * Rust's line breaks for `text` in one face/size at `width`, as UTF-16
+ * offsets of each line start — the accuracy harness compares these with
+ * CoreText's own framesetter (platform engine as ground truth).
+ */
+public func debugLineStarts(textSystem: TextSystem, face: FaceRole, size: Float, width: Float, text: String) -> [UInt32]  {
+    return try!  FfiConverterSequenceUInt32.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_debug_line_starts(
+        FfiConverterTypeTextSystem_lower(textSystem),
+        FfiConverterTypeFaceRole_lower(face),
+        FfiConverterFloat.lower(size),
+        FfiConverterFloat.lower(width),
+        FfiConverterString.lower(text),uniffiCallStatus
+    )
+})
+}
+/**
+ * Rich markdown exercising every block type (lab screen, benches, tests).
+ */
+public func layoutFixtureMarkdown() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_layout_fixture_markdown(uniffiCallStatus
     )
 })
 }
@@ -536,7 +3633,81 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_core_version() != 46096) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_func_debug_line_starts() != 43822) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_layout_fixture_markdown() != 37734) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_layoutframe_build_micros() != 17231) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_layoutframe_display() != 61509) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_layoutframe_index_at() != 7764) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_layoutframe_index_of() != 52386) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_layoutframe_message_text() != 60311) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_layoutframe_placement() != 14501) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_layoutframe_revision() != 35752) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_layoutframe_row_count() != 53856) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_layoutframe_rows_in() != 18475) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_layoutframe_style_count() != 46371) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_layoutframe_styles() != 21725) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_layoutframe_total_height() != 27147) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_layoutframe_width() != 16219) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_layoutlistener_frame_ready() != 31990) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_platformmeasurer_measure() != 59931) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_transcriptview_close() != 21021) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_transcriptview_frame() != 19133) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_transcriptview_set_debug_entries() != 54762) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_transcriptview_set_viewport() != 43528) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_transcriptview_toggle() != 51051) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_constructor_textsystem_new() != 55727) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_constructor_transcriptview_new() != 26914) {
+        return InitializationResult.apiChecksumMismatch
+    }
 
+    uniffiCallbackInitLayoutListener()
+    uniffiCallbackInitPlatformMeasurer()
     return InitializationResult.ok
 }()
 

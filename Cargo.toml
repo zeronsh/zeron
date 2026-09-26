@@ -14,7 +14,9 @@ members = [
     "crates/syntax",
     "crates/markdown",
     "crates/mobile",
+    "crates/client",
     "crates/mcp",
+    "crates/text",
     "apps/zeron",
 ]
 
@@ -37,8 +39,10 @@ zeron-ui = { path = "crates/ui" }
 zeron-syntax = { path = "crates/syntax" }
 zeron-markdown = { path = "crates/markdown" }
 zeron-mobile = { path = "crates/mobile" }
+zeron-client = { path = "crates/client" }
 zeron-theme = { path = "crates/theme" }
 zeron-mcp = { path = "crates/mcp" }
+zeron-text = { path = "crates/text" }
 
 # CRDT
 loro = "1.13"

@@ -10,16 +10,10 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     ) {
         guard let scene = scene as? UIWindowScene else { return }
         let window = UIWindow(windowScene: scene)
-        let root = UIViewController()
-        root.view.backgroundColor = .systemBackground
-        let label = UILabel()
-        label.text = "Zeron core \(coreVersion())"
-        label.translatesAutoresizingMaskIntoConstraints = false
-        root.view.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: root.view.centerXAnchor),
-            label.centerYAnchor.constraint(equalTo: root.view.centerYAnchor),
-        ])
+        let args = ProcessInfo.processInfo.arguments
+        let root: UIViewController = args.contains("-lab")
+            ? MainTabController.nav(TranscriptLabViewController())
+            : MainTabController(app: AppModel())
         window.rootViewController = root
         window.makeKeyAndVisible()
         self.window = window

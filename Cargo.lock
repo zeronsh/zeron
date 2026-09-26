@@ -12074,6 +12074,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-client"
+version = "0.2.93"
+dependencies = [
+ "chrono",
+ "futures",
+ "loro",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "zeron-doc",
+ "zeron-proto",
+ "zeron-rpc",
+ "zeron-sync",
+]
+
+[[package]]
 name = "zeron-doc"
 version = "0.2.93"
 dependencies = [
@@ -12185,7 +12207,11 @@ version = "0.2.93"
 dependencies = [
  "thiserror 2.0.20",
  "uniffi",
+ "zeron-doc",
  "zeron-markdown",
+ "zeron-proto",
+ "zeron-syntax",
+ "zeron-text",
 ]
 
 [[package]]
@@ -12301,6 +12327,19 @@ dependencies = [
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "tree-sitter-yaml",
+]
+
+[[package]]
+name = "zeron-text"
+version = "0.2.93"
+dependencies = [
+ "criterion",
+ "hashbrown 0.15.5",
+ "rustc-hash 2.1.3",
+ "rustybuzz",
+ "unicode-bidi",
+ "unicode-linebreak",
+ "unicode-segmentation",
 ]
 
 [[package]]

@@ -7,6 +7,7 @@
 uniffi::setup_scaffolding!("zeron_core");
 
 mod client_ffi;
+pub mod layout;
 
 /// Version handshake: the Swift/Kotlin bindings must match the linked library.
 #[uniffi::export]

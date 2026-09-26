@@ -395,6 +395,8 @@
 		A2000000000000000000BC03 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos/include";
+				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator/include";
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -431,6 +433,8 @@
 		A2000000000000000000BC04 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/../../target/ios-core/iphoneos/include";
+				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/../../target/ios-core/iphonesimulator/include";
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
