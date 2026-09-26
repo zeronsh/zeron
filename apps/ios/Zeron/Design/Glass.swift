@@ -22,6 +22,19 @@ enum Glass {
         return v
     }
 
+    /// Materialize / dematerialize a glass surface the way the system does:
+    /// animating `effect` (nil ↔ glass) lets the render server grow the
+    /// refraction in, instead of cross-fading a finished blur (no flashes).
+    static func setVisible(_ view: UIVisualEffectView, _ visible: Bool, content: UIView? = nil, animated: Bool = true) {
+        let target: UIVisualEffect? = visible ? effect() : nil
+        let apply = {
+            view.effect = target
+            (content ?? view.contentView).alpha = visible ? 1 : 0
+        }
+        guard animated, !UIAccessibility.isReduceMotionEnabled else { return apply() }
+        UIView.animate(withDuration: visible ? 0.35 : 0.25, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction], animations: apply)
+    }
+
     /// A round glass icon button (toolbar "…", search, attach).
     static func circleButton(symbol: String, size: CGFloat = 44, pointSize: CGFloat = 17, action: UIAction? = nil) -> UIButton {
         var config = UIButton.Configuration.glass()

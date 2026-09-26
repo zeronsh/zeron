@@ -93,6 +93,8 @@ pub(crate) struct Chip {
     pub text: PText,
 }
 
+// Cores are built once and shared behind Arc; boxing variants only adds a hop.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Content {
     Block(PBlock),
     User(UserBubble),

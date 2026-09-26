@@ -80,6 +80,11 @@ final class QuestionPanel: UIView, UITextFieldDelegate {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// Glass materializes in/out with the panel.
+    func setGlassVisible(_ visible: Bool, animated: Bool) {
+        Glass.setVisible(card, visible, animated: animated)
+    }
+
     func configure(_ questions: [SessionChrome.Question]) {
         guard questions != items else { return }
         items = questions
@@ -207,6 +212,10 @@ final class QueuePanel: UIView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    func setGlassVisible(_ visible: Bool, animated: Bool) {
+        Glass.setVisible(card, visible, animated: animated)
+    }
 
     func configure(_ items: [SessionChrome.QueuedItem]) {
         guard items != self.items else { return }

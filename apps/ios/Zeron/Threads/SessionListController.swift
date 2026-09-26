@@ -74,6 +74,13 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         }
         token = app.observe { [weak self] in self?.reload(animated: true) }
         reload(animated: false)
+        // Pull to re-probe sync (health + room redial) when a network looks stale.
+        collectionView.refreshControl = UIRefreshControl(frame: .zero, primaryAction: UIAction { [weak self] action in
+            self?.app.willEnterForeground()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                (action.sender as? UIRefreshControl)?.endRefreshing()
+            }
+        })
     }
 
     /// Subclasses build their sections from the app model.

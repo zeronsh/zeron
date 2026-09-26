@@ -86,6 +86,9 @@ final class SessionViewController: UIViewController {
         for v in [pillRow, queue, questions, composer] { bottom.addArrangedSubview(v) }
         questions.isHidden = true
         queue.isHidden = true
+        // Hidden panels start dematerialized so their first appearance grows in.
+        questions.setGlassVisible(false, animated: false)
+        queue.setGlassVisible(false, animated: false)
         pillRow.isHidden = true
         view.addSubview(bottom)
 
@@ -219,6 +222,12 @@ final class SessionViewController: UIViewController {
             self.view.layoutIfNeeded()
         }
         let structural = (old.questions == nil) != (c.questions == nil) || old.queue.count != c.queue.count || (old.banner == .none) != (c.banner == .none)
+        if animated, (old.questions == nil) != (c.questions == nil) {
+            questions.setGlassVisible(c.questions != nil, animated: true)
+        }
+        if animated, old.queue.isEmpty != c.queue.isEmpty {
+            queue.setGlassVisible(!c.queue.isEmpty, animated: true)
+        }
         if animated, structural {
             UIView.animate(withDuration: 0.38, delay: 0, usingSpringWithDamping: 0.86, initialSpringVelocity: 0, options: [.allowUserInteraction, .beginFromCurrentState], animations: changes)
         } else {
