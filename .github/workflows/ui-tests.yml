@@ -55,11 +55,11 @@ jobs:
             // Run conservatively if the API did not return the full diff.
             if (files.length < context.payload.pull_request.changed_files) return true;
             // The app links the Rust mobile core and everything it depends on.
-            const core = ['crates/mobile/', 'crates/client/', 'crates/text/', 'crates/markdown/',
+            const mobileCore = ['crates/mobile/', 'crates/client/', 'crates/text/', 'crates/markdown/',
               'crates/doc/', 'crates/sync/', 'crates/proto/', 'crates/rpc/', 'crates/syntax/',
               'scripts/ios/'];
             const affectsIOS = path => path?.startsWith('apps/ios/')
-              || core.some(prefix => path?.startsWith(prefix))
+              || mobileCore.some(prefix => path?.startsWith(prefix))
               || path === 'Cargo.lock'
               || path === '.github/workflows/ui-tests.yml';
             return files.some(file => affectsIOS(file.filename)

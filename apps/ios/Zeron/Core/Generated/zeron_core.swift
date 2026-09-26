@@ -2409,6 +2409,14 @@ public protocol PlatformMeasurer: AnyObject, Sendable {
     
     func measure(face: FaceRole, size: Float, ligatures: Bool, text: String)  -> Float
     
+    /**
+     * Lay `text` out as one run and return one advance per Unicode scalar
+     * (a cluster's width on its first scalar, zero on the rest), so fallback
+     * fonts and kerning chosen *in context* match what the engine draws.
+     * Empty = unsupported.
+     */
+    func measureRun(face: FaceRole, size: Float, ligatures: Bool, text: String)  -> [Float]
+    
 }
 /**
  * Measures text the bundled faces can't render (emoji, CJK…) with the
@@ -2481,6 +2489,25 @@ open func measure(face: FaceRole, size: Float, ligatures: Bool, text: String) ->
 })
 }
     
+    /**
+     * Lay `text` out as one run and return one advance per Unicode scalar
+     * (a cluster's width on its first scalar, zero on the rest), so fallback
+     * fonts and kerning chosen *in context* match what the engine draws.
+     * Empty = unsupported.
+     */
+open func measureRun(face: FaceRole, size: Float, ligatures: Bool, text: String) -> [Float]  {
+    return try!  FfiConverterSequenceFloat.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_platformmeasurer_measure_run(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFaceRole_lower(face),
+        FfiConverterFloat.lower(size),
+        FfiConverterBool.lower(ligatures),
+        FfiConverterString.lower(text),uniffiCallStatus
+    )
+})
+}
+    
 
     
 }
@@ -2533,6 +2560,36 @@ fileprivate struct UniffiCallbackInterfacePlatformMeasurer {
 
             
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterFloat.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        measureRun: { (
+            uniffiHandle: UInt64,
+            face: RustBuffer,
+            size: Float,
+            ligatures: Int8,
+            text: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> [Float] in
+                guard let uniffiObj = try? FfiConverterTypePlatformMeasurer.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.measureRun(
+                     face: try FfiConverterTypeFaceRole_lift(face),
+                     size: try FfiConverterFloat.lift(size),
+                     ligatures: try FfiConverterBool.lift(ligatures),
+                     text: try FfiConverterString.lift(text)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceFloat.lower($0) }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -11214,6 +11271,31 @@ fileprivate struct FfiConverterSequenceUInt32: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceFloat: FfiConverterRustBuffer {
+    typealias SwiftType = [Float]
+
+    public static func write(_ value: [Float], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterFloat.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Float] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Float]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterFloat.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -12621,6 +12703,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_platformmeasurer_measure() != 59931) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_platformmeasurer_measure_run() != 60773) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_transcriptview_attach() != 3138) {

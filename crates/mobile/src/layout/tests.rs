@@ -14,6 +14,9 @@ impl PlatformMeasurer for FixedFallback {
     fn measure(&self, _face: FaceRole, size: f32, _ligatures: bool, text: String) -> f32 {
         text.chars().count() as f32 * size * 1.1
     }
+    fn measure_run(&self, _face: FaceRole, size: f32, _ligatures: bool, text: String) -> Vec<f32> {
+        text.chars().map(|_| size * 1.1).collect()
+    }
 }
 
 fn font(name: &str) -> Vec<u8> {

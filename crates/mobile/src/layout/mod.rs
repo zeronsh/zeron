@@ -37,6 +37,11 @@ use style::Typography;
 #[uniffi::export(with_foreign)]
 pub trait PlatformMeasurer: Send + Sync {
     fn measure(&self, face: FaceRole, size: f32, ligatures: bool, text: String) -> f32;
+    /// Lay `text` out as one run and return one advance per Unicode scalar
+    /// (a cluster's width on its first scalar, zero on the rest), so fallback
+    /// fonts and kerning chosen *in context* match what the engine draws.
+    /// Empty = unsupported.
+    fn measure_run(&self, face: FaceRole, size: f32, ligatures: bool, text: String) -> Vec<f32>;
 }
 
 /// Maps a view's style ids back to font descriptions for the platform.
@@ -51,6 +56,18 @@ impl zeron_text::FallbackMeasurer for MeasurerBridge {
             return 0.0;
         };
         self.platform.measure(desc.face, desc.size, desc.ligatures, text.to_owned())
+    }
+
+    fn measure_run(&self, style: zeron_text::StyleId, text: &str, advances: &mut Vec<f32>) -> bool {
+        let Some(desc) = self.styles.lock().unwrap().get(&style.0).cloned() else {
+            return false;
+        };
+        let run = self.platform.measure_run(desc.face, desc.size, desc.ligatures, text.to_owned());
+        if run.len() != text.chars().count() {
+            return false;
+        }
+        advances.extend(run);
+        true
     }
 }
 

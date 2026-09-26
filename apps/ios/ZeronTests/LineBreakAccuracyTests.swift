@@ -61,7 +61,8 @@ final class LineBreakAccuracyTests: XCTestCase {
         let rate = Double(exact) / Double(cases)
         print("LINEBREAK ACCURACY exact=\(exact)/\(cases) (\(String(format: "%.2f", rate * 100))%) lineCountDiffs=\(lineDiff)")
         report.forEach { print("  MISMATCH \($0)") }
-        // Height is what virtualization needs: line counts must agree.
-        XCTAssertGreaterThanOrEqual(1 - Double(lineDiff) / Double(cases), 0.99)
+        // Heights (line counts) must agree exactly; line starts nearly always.
+        XCTAssertEqual(lineDiff, 0)
+        XCTAssertGreaterThanOrEqual(rate, 0.999)
     }
 }

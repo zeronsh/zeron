@@ -76,6 +76,38 @@ final class CoreTextMeasurer: PlatformMeasurer {
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))
         return Float(CTLineGetTypographicBounds(line, nil, nil, nil))
     }
+
+    /// Per-scalar advances of `text` laid out as one CoreText line (fallback
+    /// font + kerning chosen in context), folded from UTF-16 glyph indices.
+    func measureRun(face: FaceRole, size: Float, ligatures: Bool, text: String) -> [Float] {
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: Fonts.ctFont(face, size: size),
+            .ligature: ligatures ? 1 : 0,
+        ]
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))
+        let units = text.utf16.count
+        var perUnit = [Float](repeating: 0, count: units)
+        for case let run as CTRun in CTLineGetGlyphRuns(line) as NSArray {
+            let n = CTRunGetGlyphCount(run)
+            guard n > 0 else { continue }
+            var advances = [CGSize](repeating: .zero, count: n)
+            var indices = [CFIndex](repeating: 0, count: n)
+            CTRunGetAdvances(run, CFRange(location: 0, length: n), &advances)
+            CTRunGetStringIndices(run, CFRange(location: 0, length: n), &indices)
+            for i in 0..<n where indices[i] >= 0 && indices[i] < units {
+                perUnit[indices[i]] += Float(advances[i].width)
+            }
+        }
+        var out: [Float] = []
+        out.reserveCapacity(text.unicodeScalars.count)
+        var unit = 0
+        for scalar in text.unicodeScalars {
+            let width = scalar.utf16.count
+            out.append(perUnit[unit..<min(units, unit + width)].reduce(0, +))
+            unit += width
+        }
+        return out
+    }
 }
 
 /// One process-wide text system shared by every transcript.
