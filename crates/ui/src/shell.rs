@@ -4219,6 +4219,7 @@ impl Shell {
         self.settings.transcript_width = current.transcript_width;
         self.settings.skill_completion_by_harness = current.skill_completion_by_harness;
         self.settings.skills_in_slash_menu = current.skills_in_slash_menu;
+        self.settings.drafts = current.drafts;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
