@@ -6,6 +6,8 @@
 
 use super::*;
 
+const RIGHT_PANE_HEADER_CONTROLS_MIN_WIDTH: f32 = 8.0 + 4.0 + 4.0 + 28.0;
+
 /// The chat one step from `selected` in the sidebar `order`, wrapping at both
 /// ends. Pure.
 ///
@@ -263,8 +265,12 @@ impl Shell {
         // the pane itself would sit under the drag region and never see a
         // click. Closed, it is just the stable open/close toggle. Hidden on
         // the new-session canvas (user request) — nothing to diff yet.
-        let right_pane_open = !on_canvas && self.right_pane_open(cx);
-        let takeover = right_pane_open && self.right_pane_expanded;
+        let fit = self.horizontal_fit();
+        let right_pane_visible = !on_canvas
+            && fit.right
+            && (self.right_pane_open(cx) || self.tween_active(self.right_tween));
+        let takeover = right_pane_visible
+            && (self.right_pane_expanded || self.tween_active(self.main_takeover_tween));
         // In takeover the title hides and the strip owns the whole band, so
         // the row's left inset pulls back to the sidebar seam — the title
         // inset would push the scope dropdown off the pane's own left gutter
@@ -295,6 +301,8 @@ impl Shell {
         let right_pad = self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET);
         // The title row's gaps are outside the fixed-width panel controls.
         let gap_budget = if takeover { row_gap } else { row_gap * 3.0 };
+        // Match the surface's visible width, including its resize bounce,
+        // so the header follows the pane seam as the sidebar moves.
         let right_visible = self.right_visible_width(cx);
         let widths = panel_titlebar_widths(
             right_visible,
@@ -308,7 +316,7 @@ impl Shell {
         let trailing_width = if on_canvas {
             0.0
         } else {
-            let surface = if right_pane_open {
+            let surface = if right_pane_visible {
                 widths.surface_reveal
             } else {
                 0.0
@@ -323,6 +331,7 @@ impl Shell {
         } else {
             let mut controls = div()
                 .id("right-titlebar-controls")
+                .debug_selector(|| "right-titlebar-controls".into())
                 .flex_none()
                 .h_full()
                 .flex()
@@ -332,11 +341,12 @@ impl Shell {
                 // the tab strip); a wheel over the tabs must scroll the
                 // strip, never the surface behind it.
                 .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
-            if right_pane_open {
+            if right_pane_visible {
                 // The right pane's SURFACE TABS (t3 RightPanelTabs) — the diff
                 // options that used to live here moved into the pane's own
                 // second row; expand stays in this band (user request).
-                let tabs = self.render_right_tab_strip(cx);
+                let show_pane_controls =
+                    widths.surface_reveal >= RIGHT_PANE_HEADER_CONTROLS_MIN_WIDTH;
                 // The toggle is the fixed right-edge anchor, like the left
                 // sidebar control. Only the tabs + expand section reveals to
                 // its left; including the toggle in this animated width
@@ -354,22 +364,24 @@ impl Shell {
                         // 8 + the trigger's own 8px pad = the pane's 16px
                         // text gutter. The 4px right padding is the stable
                         // gap before the fixed toggle.
-                        .pl(px(8.0))
-                        .pr(px(4.0))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .overflow_hidden()
-                                .child(tabs),
-                        )
-                        .child(header_icon_button(
-                            "expand-changes",
-                            right_pane_expand_icon(self.right_pane_expanded),
-                            &theme,
-                            cx.listener(|this, _, _, cx| this.toggle_right_pane_expand(cx)),
-                        )),
+                        .when(show_pane_controls, |el| {
+                            el.pl(px(8.0))
+                                .pr(px(4.0))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .h_full()
+                                        .overflow_hidden()
+                                        .child(self.render_right_tab_strip(cx)),
+                                )
+                                .child(header_icon_button(
+                                    "expand-changes",
+                                    right_pane_expand_icon(self.right_pane_expanded),
+                                    &theme,
+                                    cx.listener(|this, _, _, cx| this.toggle_right_pane_expand(cx)),
+                                ))
+                        }),
                 );
             }
             // The explorer slot sits over the explorer column and carries the
@@ -404,12 +416,12 @@ impl Shell {
                                     }),
                                 )
                                 .role(gpui::Role::Button)
-                                .aria_label(if self.files_panel_open(cx) {
+                                .aria_label(if self.files_panel_open(cx) && fit.files {
                                     "Hide files panel"
                                 } else {
                                     "Show files panel"
                                 })
-                                .when(self.files_panel_open(cx), |button| {
+                                .when(self.files_panel_open(cx) && fit.files, |button| {
                                     button.bg(crate::theme::wash(0.09))
                                 }),
                             )
@@ -428,7 +440,19 @@ impl Shell {
         // under this session, fork copies its history into one. Same pair
         // the side-chat header carries, so a family reads the same from
         // either end.
-        let session_controls = (!takeover && !on_canvas).then(|| {
+        let show_actions = !takeover
+            && !on_canvas
+            && available_titlebar_width >= actions_ui::PROJECT_ACTION_CONTROL_MIN_WIDTH;
+        let show_session_controls = !takeover
+            && !on_canvas
+            && available_titlebar_width
+                >= SESSION_CONTROLS_WIDTH
+                    + if show_actions {
+                        actions_ui::PROJECT_ACTION_CONTROL_MIN_WIDTH
+                    } else {
+                        0.0
+                    };
+        let session_controls = show_session_controls.then(|| {
             let busy = self.side_chat_creating;
             div()
                 .flex_none()
@@ -464,7 +488,7 @@ impl Shell {
         } else {
             available_titlebar_width
         };
-        let actions = (!takeover && !on_canvas)
+        let actions = show_actions
             .then(|| {
                 self.render_project_actions_control(available_titlebar_width, viewport_height, cx)
             })
@@ -669,4 +693,275 @@ mod cycle_tests {
     // `AppState::sidebar_chats` the sidebar and the jump shortcuts read, and
     // `jump_slots_count_the_rows_the_sidebar_draws` (state.rs) covers the
     // space-filter behaviour for all of them.
+}
+
+#[cfg(test)]
+mod titlebar_geometry_tests {
+    use super::*;
+    use gpui::{AppContext, TestAppContext};
+
+    struct TitlebarHost {
+        shell: Entity<Shell>,
+        _data_dir: tempfile::TempDir,
+    }
+
+    impl Render for TitlebarHost {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.shell.update(cx, |shell, cx| {
+                shell.viewport_width = f32::from(window.viewport_size().width);
+                div()
+                    .w(px(shell.viewport_width))
+                    .h(px(80.0))
+                    .relative()
+                    .child(shell.render_session_title_bar(window.viewport_size().height, cx))
+                    .child(shell.render_titlebar_cluster(cx))
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn panel_titlebar_controls_keep_their_edges_during_sidebar_motion(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            let shell = cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.active_chat = "session".into();
+                shell.state.update(cx, |state, _| {
+                    state.chats.push(serde_json::from_value(serde_json::json!({
+                        "id": "session", "title": "A deliberately long session title for geometry testing",
+                        "deviceId": "local", "archived": false, "createdAt": Utc::now(),
+                        "spaceId": "project",
+                    })).unwrap());
+                    state.spaces.push(serde_json::from_value(serde_json::json!({
+                        "id": "project", "deviceId": "local", "path": "/project",
+                        "createdAt": Utc::now(),
+                    })).unwrap());
+                    state.selected_chat = Some("session".into());
+                });
+                let key = crate::project_actions::ProjectActionsKey {
+                    device_id: "local".into(),
+                    space_id: "project".into(),
+                };
+                shell.project_actions.active = Some(key.clone());
+                shell.project_actions.cache.insert(
+                    key,
+                    crate::project_actions::ProjectActionsStatus::Ready(
+                        zeron_proto::ProjectActionsSnapshot {
+                            space_id: "project".into(),
+                            actions: vec![zeron_proto::ProjectAction {
+                                id: "dev".into(),
+                                name: "Development web server".into(),
+                                command: "dev".into(),
+                                icon: zeron_proto::ProjectActionIcon::Play,
+                                run_on_worktree_create: false,
+                            }],
+                            importable_actions: Vec::new(),
+                            project_file_issue: None,
+                        },
+                    ),
+                );
+                let key = shell.panel_key(cx);
+                shell.panels.toggle_changes(&key);
+                shell
+            });
+            TitlebarHost { shell, _data_dir: dir }
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        let duration = RESIZE.total().mul_f32(motion::speed_scale());
+        let started = std::time::Instant::now();
+        let mut sidebar_button_left = None;
+        for width in [1400.0, 1024.0, 800.0, 634.0, 633.0, 630.0, 629.0, 600.0] {
+            cx.simulate_resize(gpui::size(px(width), px(600.0)));
+            for (collapsed, from, to) in [(false, 0.0, 256.0), (true, 256.0, 0.0)] {
+                shell.update(cx, |shell, _| {
+                    shell.settings.sidebar_collapsed = collapsed;
+                    shell.sidebar_tween = Some(WidthTween { from, to, started });
+                });
+                for progress in [0.0, 0.5, 1.0] {
+                    shell.update(cx, |shell, _| {
+                        shell.render_time = Some(started + duration.mul_f32(progress));
+                    });
+                    host.update(cx, |_, cx| cx.notify());
+                    cx.update(|window, cx| window.draw(cx).clear());
+                    let left = cx.debug_bounds("toggle-sidebar").unwrap();
+                    let right = cx.debug_bounds("toggle-changes").unwrap();
+                    let expand = cx.debug_bounds("expand-changes");
+                    let row = cx.debug_bounds("right-titlebar-controls").unwrap();
+                    let action = cx.debug_bounds("project-actions-control");
+                    let (pane_width, right_pad, left_clearance) =
+                        shell.read_with(cx, |shell, cx| {
+                            let content_left = (shell.sidebar_now() + Theme::SPACE_LG).max(
+                                shell.title_bar_content_start()
+                                    + TITLEBAR_ACTION_SLOT_WIDTH * shell.titlebar_plus_alpha(cx),
+                            );
+                            (
+                                shell.right_visible_width(cx),
+                                shell.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET),
+                                content_left + 8.0 * 3.0,
+                            )
+                        });
+                    let left_x = f32::from(left.left());
+                    if let Some(initial) = sidebar_button_left {
+                        assert_eq!(left_x, initial, "sidebar trigger shifted");
+                    } else {
+                        sidebar_button_left = Some(left_x);
+                    }
+                    assert!(
+                        (f32::from(right.left()) - (width - right_pad - 28.0)).abs() < 0.5,
+                        "right trigger at {}, expected {} for {width}px, {collapsed:?}, {progress}; row {}, action right {:?}, pane width {}",
+                        f32::from(right.left()),
+                        width - right_pad - 28.0,
+                        f32::from(row.left()),
+                        action.as_ref().map(|action| f32::from(action.right())),
+                        pane_width,
+                    );
+                    // At tight widths, the fixed toggles can be wider than
+                    // the pane, or the window-control cluster can constrain
+                    // the reveal. Otherwise the strip follows the seam.
+                    let expected_left = (width - pane_width)
+                        .min(width - right_pad - PANEL_TOGGLE_SLOTS)
+                        .max(left_clearance);
+                    assert!(
+                        (f32::from(row.left()) - expected_left).abs() < 0.5,
+                        "pane header at {}, expected {} at {width}px, {collapsed:?}, {progress}",
+                        f32::from(row.left()),
+                        expected_left,
+                    );
+                    if let Some(action) = action {
+                        assert!(action.right() + px(8.0) <= row.left());
+                    }
+                    assert_eq!(
+                        expand.is_some(),
+                        f32::from(row.size.width)
+                            >= RIGHT_PANE_HEADER_CONTROLS_MIN_WIDTH + PANEL_TOGGLE_SLOTS
+                    );
+                    if let Some(expand) = expand {
+                        assert!(expand.right() + px(4.0) <= right.left());
+                    }
+                }
+            }
+        }
+
+        // The expanded pane intentionally leaves room for the fixed left
+        // cluster while the sidebar is collapsed; its buttons still cannot
+        // collide with one another or change their right-edge position.
+        cx.simulate_resize(gpui::size(px(1024.0), px(600.0)));
+        shell.update(cx, |shell, _| {
+            shell.right_pane_expanded = true;
+            shell.settings.sidebar_collapsed = true;
+            shell.sidebar_tween = None;
+            shell.render_time = None;
+        });
+        host.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let right = cx.debug_bounds("toggle-changes").unwrap();
+        let expand = cx.debug_bounds("expand-changes").unwrap();
+        let row = cx.debug_bounds("right-titlebar-controls").unwrap();
+        assert!(expand.right() + px(4.0) <= right.left());
+        assert!(row.left() > px(0.0));
+
+        // A recently resized right pane can still be bouncing when the
+        // sidebar changes. The titlebar follows the painted width, including
+        // the responsive cap that preserves the conversation minimum.
+        let bounce_started = std::time::Instant::now();
+        cx.simulate_resize(gpui::size(px(800.0), px(600.0)));
+        shell.update(cx, |shell, _| {
+            shell.right_pane_expanded = false;
+            shell.settings.sidebar_collapsed = false;
+            shell.sidebar_tween = Some(WidthTween {
+                from: 0.0,
+                to: 256.0,
+                started: bounce_started,
+            });
+            shell.right_tween = None;
+            shell.right_edge_bounce = Some(motion::ResizeEdgeBounce {
+                edge: motion::ResizeEdge::Max,
+                started: bounce_started,
+            });
+            shell.render_time = Some(bounce_started + std::time::Duration::from_millis(80));
+        });
+        host.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let row = cx.debug_bounds("right-titlebar-controls").unwrap();
+        let pane_width = shell.read_with(cx, |shell, cx| {
+            let bounce = shell.right_now(cx) - shell.right_target(cx);
+            assert!(bounce.abs() > 0.5);
+            shell.right_visible_width(cx)
+        });
+        assert!((f32::from(row.left()) - (800.0 - pane_width)).abs() < 0.5);
+
+        // Closing the surface must keep its header mounted behind the same
+        // shrinking mask as the pane; Files and the fixed toggles remain in
+        // their own slots while both widths move.
+        cx.simulate_resize(gpui::size(px(1400.0), px(600.0)));
+        for files_open in [false, true] {
+            for progress in [0.0, 0.1, 0.25, 0.5, 0.75] {
+                shell.update(cx, |shell, _| {
+                    shell.settings.sidebar_collapsed = true;
+                    shell.sidebar_tween = None;
+                    shell.right_edge_bounce = None;
+                    shell.panels.update("session", |panels| {
+                        panels.changes_open = false;
+                        panels.files_open = files_open;
+                    });
+                    shell.files_tween = None;
+                    shell.right_tween = Some(WidthTween {
+                        from: 520.0,
+                        to: 0.0,
+                        started,
+                    });
+                    shell.render_time = Some(started + duration.mul_f32(progress));
+                });
+                host.update(cx, |_, cx| cx.notify());
+                cx.update(|window, cx| window.draw(cx).clear());
+                let toggle = cx.debug_bounds("toggle-changes").unwrap();
+                let files_toggle = cx.debug_bounds("toggle-files-panel").unwrap();
+                let expand = cx.debug_bounds("expand-changes");
+                let strip = cx.debug_bounds("right-titlebar-controls").unwrap();
+                let (right, files, pad) = shell.read_with(cx, |shell, cx| {
+                    (
+                        shell.right_visible_width(cx),
+                        shell.files_visible_width(cx),
+                        shell.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET),
+                    )
+                });
+                assert!((f32::from(toggle.left()) - (1400.0 - pad - 28.0)).abs() < 0.5);
+                assert!(files_toggle.right() + px(PANEL_TOGGLE_GAP) <= toggle.left());
+                if right + files >= pad + PANEL_TOGGLE_SLOTS {
+                    assert!(
+                        (f32::from(strip.left()) - (1400.0 - right - files)).abs() < 0.5,
+                        "header drift with Right {right}px and Files {files}px"
+                    );
+                }
+                if right > 160.0 {
+                    assert!(
+                        expand.is_some(),
+                        "surface controls vanished early at {right}px"
+                    );
+                }
+                if let Some(expand) = expand {
+                    assert!(expand.right() + px(4.0) <= files_toggle.left());
+                }
+            }
+        }
+    }
 }

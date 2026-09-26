@@ -334,7 +334,7 @@ impl DockState {
             if progress >= panel_handoff::GEOMETRY_SWITCH {
                 *width = Glide::new(target);
             }
-        } else if reduced || (!self.frame.active && !self.moving) {
+        } else if reduced {
             *width = Glide::new(target);
         } else {
             width.advance(target, dt, duration(self.frame.docked));
@@ -752,6 +752,32 @@ mod tests {
                 assert_eq!(state.layout_width(target, false, hidden), target);
             }
         }
+    }
+
+    #[test]
+    fn idle_composer_width_glides_in_both_directions_and_can_reverse() {
+        let mut state = DockState::default();
+        let mut now = Instant::now();
+        state.tick(true, false, now);
+        assert_eq!(state.layout_width(720.0, false, now), 720.0);
+        now += std::time::Duration::from_millis(16);
+        state.tick(true, false, now);
+        let shrinking = state.layout_width(440.0, false, now);
+        assert!(shrinking > 440.0 && shrinking < 720.0);
+        now += std::time::Duration::from_millis(16);
+        state.tick(true, false, now);
+        let shrinking = state.layout_width(440.0, false, now);
+        assert!(shrinking < 720.0);
+        now += std::time::Duration::from_millis(16);
+        state.tick(true, false, now);
+        let reversing = state.layout_width(720.0, false, now);
+        assert!(reversing < 720.0 && reversing > 440.0);
+        for _ in 0..90 {
+            now += std::time::Duration::from_millis(16);
+            state.tick(true, false, now);
+            state.layout_width(720.0, false, now);
+        }
+        assert_eq!(state.layout_width(720.0, false, now), 720.0);
     }
 
     #[test]

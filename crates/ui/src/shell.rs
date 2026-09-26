@@ -44,9 +44,9 @@ use crate::settings::harnesses::HarnessesPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
-    self, CHAT_PANEL_MIN, ComposerSendBehavior, JUMP_SLOTS, KeymapConfig, RIGHT_PANE_DEFAULT,
-    RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SavePolicy, ShortcutId,
-    SidebarOrganization, SidebarSort, TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH,
+    self, CHAT_PANEL_MIN, ComposerSendBehavior, FILES_PANEL_MIN, JUMP_SLOTS, KeymapConfig,
+    RIGHT_PANE_DEFAULT, RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SavePolicy,
+    ShortcutId, SidebarOrganization, SidebarSort, TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH,
     TERMINAL_MIN_HEIGHT, UiSettings, badge_combo, jump_hints_visible, modifier_send_hint_visible,
     platform_combo, sidebar_pin_profile_key,
 };
@@ -652,9 +652,8 @@ pub enum Route {
 }
 
 /// Maximum width the right pane may occupy while retaining the conversation
-/// floor. On unusually small windows this deliberately falls below the right
-/// pane's preferred minimum: the chat remains usable and the side surface
-/// yields the scarce space.
+/// floor. The horizontal fit policy hides a lower-priority column before this
+/// budget can fall below the right pane's minimum at rest.
 fn right_pane_max_width(viewport: f32, sidebar: f32, chat_floor: f32) -> f32 {
     (viewport - sidebar - chat_floor).max(0.0)
 }
@@ -707,13 +706,122 @@ fn workspace_file_title(path: &str) -> SharedString {
 pub struct ChatPanels {
     /// The explorer portion of the right pane is docked.
     pub files_open: bool,
+    files_opened_at: u64,
     pub terminal_open: bool,
     /// The surface host portion of the right pane is visible (historically
     /// the Changes pane). The pane itself shows when either portion does.
     pub changes_open: bool,
+    /// Opening order for the smart panel limit. Zero predates an explicit open.
+    terminal_opened_at: u64,
+    changes_opened_at: u64,
     /// Which surface tab renders; validated against the live tab list each
     /// frame (a closed tab falls back gracefully).
     pub right_active: RightSurface,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuxiliaryPanel {
+    Sidebar,
+    Right,
+    Files,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SmartPanelRestore {
+    opener: AuxiliaryPanel,
+    hidden: AuxiliaryPanel,
+}
+
+/// Choose the oldest visible auxiliary panel, keeping the panel being opened.
+fn smart_panel_victim<const N: usize>(
+    max_panels: usize,
+    visible: [(AuxiliaryPanel, bool, u64); N],
+    keep: Option<AuxiliaryPanel>,
+) -> Option<AuxiliaryPanel> {
+    if 1 + visible.iter().filter(|(_, open, _)| *open).count() <= max_panels {
+        return None;
+    }
+    visible
+        .into_iter()
+        .filter(|(panel, open, _)| *open && Some(*panel) != keep)
+        .min_by_key(|(_, _, opened_at)| *opened_at)
+        .map(|(panel, _, _)| panel)
+}
+
+/// Responsive visibility is separate from each panel's open flag. A hidden
+/// panel keeps its tabs and width preference and returns when space permits.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HorizontalPanelFit {
+    sidebar: bool,
+    right: bool,
+    files: bool,
+    sidebar_limit: f32,
+}
+
+fn horizontal_panel_fit(
+    viewport: f32,
+    sidebar_width: f32,
+    sidebar: (bool, u64),
+    right: (bool, u64),
+    files: (bool, u64),
+    expanded: bool,
+) -> HorizontalPanelFit {
+    let mut visible = [
+        (AuxiliaryPanel::Sidebar, sidebar.0, sidebar.1),
+        (AuxiliaryPanel::Right, right.0, right.1),
+        (AuxiliaryPanel::Files, files.0, files.1),
+    ];
+    let viewport = viewport.max(0.0);
+    loop {
+        let sidebar_open = visible[0].1;
+        let right_open = visible[1].1;
+        let files_open = visible[2].1;
+        let chat_floor = if right_open && expanded {
+            0.0
+        } else {
+            CHAT_PANEL_MIN
+        };
+        let minimum = chat_floor
+            + if sidebar_open { SIDEBAR_MIN } else { 0.0 }
+            + if right_open { RIGHT_PANE_MIN } else { 0.0 }
+            + if files_open { FILES_PANEL_MIN } else { 0.0 };
+        if minimum <= viewport {
+            return HorizontalPanelFit {
+                sidebar: sidebar_open,
+                right: right_open,
+                files: files_open,
+                sidebar_limit: if sidebar_open {
+                    (viewport
+                        - chat_floor
+                        - if right_open { RIGHT_PANE_MIN } else { 0.0 }
+                        - if files_open { FILES_PANEL_MIN } else { 0.0 })
+                    .min(sidebar_width)
+                } else {
+                    0.0
+                },
+            };
+        }
+        // Takeover is the user's explicit choice to give the surface the
+        // conversation's space. Evict the other columns before that surface.
+        let victim = visible
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, open, _))| *open)
+            .min_by_key(|(_, (panel, _, opened_at))| {
+                (expanded && *panel == AuxiliaryPanel::Right, *opened_at)
+            })
+            .map(|(index, _)| index);
+        let Some(victim) = victim else {
+            return HorizontalPanelFit {
+                sidebar: false,
+                right: false,
+                files: false,
+                sidebar_limit: 0.0,
+            };
+        };
+        visible[victim].1 = false;
+    }
 }
 
 /// The session-scoped panel map. Keys are chat ids; the new-chat canvas uses
@@ -1721,6 +1829,9 @@ pub struct Shell {
     pub(super) jump_hints: bool,
     /// Lazy panes: no entity (and no RPC) until first opened.
     terminal: Option<Entity<TerminalPanel>>,
+    /// A hidden terminal may still hold window focus until the next frame.
+    /// Transfer it only if no newly opened surface claimed focus first.
+    smart_focus_handoff: Vec<FocusHandle>,
     /// Embedded terminal host for right-pane Terminal surfaces — a SEPARATE
     /// entity from the bottom drawer's (own PTYs, own grid geometry; one
     /// panel can only size one visible grid at a time).
@@ -1833,6 +1944,8 @@ pub struct Shell {
         std::cell::RefCell<std::collections::HashMap<String, Entity<project_icon::ProjectIcon>>>,
     /// Hovered row whose status is replaced by the archive control.
     chat_status_hover: Option<String>,
+    /// A keyboard-opened action corner stays mounted while its buttons have focus.
+    chat_status_keyboard: Option<String>,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
     /// In-flight reorder for the pinned section only.
@@ -1882,9 +1995,16 @@ pub struct Shell {
     boot: EngineBootConfig,
     data_dir: PathBuf,
     settings: UiSettings,
+    /// The user's saved choice; smart-panel eviction only changes visibility.
+    sidebar_user_collapsed: bool,
     /// Session-scoped panel open flags (terminal / changes per chat; §1.10-1.11
     /// parity — heights stay in [`UiSettings`]).
     panels: SessionPanels,
+    panel_open_sequence: u64,
+    sidebar_opened_at: u64,
+    /// Session-local automatic closures; explicit closes never enter this history.
+    smart_panel_restores: std::collections::HashMap<String, Vec<SmartPanelRestore>>,
+    smart_panel_eviction_in_progress: bool,
     /// The panel key of the chat currently shown ("" = new-chat canvas).
     active_chat: String,
     /// Last selected session survives opening the blank Appshot destination.
@@ -1908,6 +2028,7 @@ pub struct Shell {
     debug_upload: Option<String>,
     sidebar_tween: Option<WidthTween>,
     files_tween: Option<WidthTween>,
+    last_horizontal_fit: Option<(String, HorizontalPanelFit)>,
     sidebar_edge_bounce: Option<motion::ResizeEdgeBounce>,
     /// Boundary currently held during a sidebar drag. Cleared on re-entry or
     /// release so the next genuine edge crossing can acknowledge the limit.
@@ -2090,6 +2211,21 @@ impl Shell {
         });
         let data_dir = boot.data_dir.clone();
         let mut settings = settings::current(cx);
+        let icon_data_dir = data_dir.clone();
+        let icon_references = settings.project_icon_overrides.clone();
+        let icon_cleanup_cutoff = std::time::SystemTime::now()
+            .checked_sub(Duration::from_secs(5))
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        cx.background_executor()
+            .spawn(async move {
+                project_icon::cleanup_orphaned_project_icons(
+                    &icon_data_dir,
+                    &icon_references,
+                    icon_cleanup_cutoff,
+                );
+            })
+            .detach();
+        let sidebar_user_collapsed = settings.sidebar_collapsed;
         state.update(cx, |state, cx| {
             state.set_change_requests_visible(settings.sidebar_show_pull_request, cx)
         });
@@ -2176,6 +2312,7 @@ impl Shell {
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
             terminal: None,
+            smart_focus_handoff: Vec::new(),
             right_terminal: None,
             right_plus: popover::Popup::default(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
@@ -2252,6 +2389,7 @@ impl Shell {
             sidebar_pinned_heights: Vec::new(),
             project_icons: Default::default(),
             chat_status_hover: None,
+            chat_status_keyboard: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
             pinned_session_drag: None,
             pinned_session_drag_generation: 0,
@@ -2281,7 +2419,12 @@ impl Shell {
             boot,
             data_dir,
             settings,
+            sidebar_user_collapsed,
             panels: SessionPanels::default(),
+            panel_open_sequence: 0,
+            sidebar_opened_at: 0,
+            smart_panel_restores: Default::default(),
+            smart_panel_eviction_in_progress: false,
             active_chat: String::new(),
             last_appshot_chat: None,
             sidebar_prev_order: Vec::new(),
@@ -2294,6 +2437,7 @@ impl Shell {
             debug_upload,
             sidebar_tween: None,
             files_tween: None,
+            last_horizontal_fit: None,
             sidebar_edge_bounce: None,
             sidebar_resize_edge: None,
             pane_resize_active: None,
@@ -2693,7 +2837,8 @@ impl Shell {
             if let Some(panel) = self.terminal.clone() {
                 panel.update(cx, |panel, cx| panel.set_open(panels.terminal_open, cx));
             }
-            if panels.changes_open
+            self.reconcile_smart_panels(None, cx);
+            if self.panels.get(&self.panel_key(cx)).changes_open
                 && let RightSurface::Diff(id) = self.resolved_right_active(cx)
                 && let Some(changes) = self.diffs.get(&id).cloned()
             {
@@ -2724,11 +2869,85 @@ impl Shell {
 
     // ---- layout state ----
 
+    fn horizontal_fit(&self) -> HorizontalPanelFit {
+        if !matches!(self.route, Route::Chat) {
+            return HorizontalPanelFit {
+                sidebar: !self.settings.sidebar_collapsed,
+                right: false,
+                files: false,
+                sidebar_limit: self.settings.sidebar_width,
+            };
+        }
+        let panels = self.panels.get(&self.active_chat);
+        horizontal_panel_fit(
+            self.viewport_width,
+            self.settings.sidebar_width,
+            (
+                !self.settings.sidebar_collapsed || self.tween_active(self.sidebar_tween),
+                self.sidebar_opened_at,
+            ),
+            (
+                !self.active_chat.is_empty()
+                    && (panels.changes_open || self.tween_active(self.right_tween)),
+                panels.changes_opened_at,
+            ),
+            (
+                !self.active_chat.is_empty()
+                    && (panels.files_open || self.tween_active(self.files_tween)),
+                panels.files_opened_at,
+            ),
+            self.right_pane_expanded,
+        )
+    }
+
+    /// Let a column that was hidden by the viewport return from zero width.
+    /// Closing columns keep their own tween and fit slot until their mask is
+    /// gone, so a restored neighbor never jumps into their space mid-close.
+    fn track_horizontal_fit(&mut self, cx: &App) {
+        if !matches!(self.route, Route::Chat) {
+            self.last_horizontal_fit = None;
+            return;
+        }
+        let fit = self.horizontal_fit();
+        let previous = self
+            .last_horizontal_fit
+            .as_ref()
+            .filter(|(key, _)| *key == self.active_chat)
+            .map(|(_, fit)| *fit);
+        if let Some(previous) = previous {
+            let files_target = if fit.files && self.panels.get(&self.active_chat).files_open {
+                self.files_target_for_sidebar(fit.sidebar_limit, cx)
+            } else {
+                0.0
+            };
+            if fit.sidebar && !previous.sidebar && !self.settings.sidebar_collapsed {
+                self.sidebar_tween = Some(WidthTween::new(0.0, fit.sidebar_limit));
+            }
+            if fit.right && !previous.right && self.panels.get(&self.active_chat).changes_open {
+                self.right_tween = Some(WidthTween::new(
+                    0.0,
+                    self.right_target_for_columns(cx, fit.sidebar_limit, files_target),
+                ));
+            }
+            if fit.files && !previous.files && self.panels.get(&self.active_chat).files_open {
+                self.files_tween = Some(WidthTween::new(0.0, files_target));
+            }
+        }
+        if let Some((key, previous)) = &mut self.last_horizontal_fit
+            && *key == self.active_chat
+        {
+            *previous = fit;
+        } else {
+            self.last_horizontal_fit = Some((self.active_chat.clone(), fit));
+        }
+    }
+
     fn sidebar_target(&self) -> f32 {
-        if self.settings.sidebar_collapsed {
+        let fit = self.horizontal_fit();
+        if self.settings.sidebar_collapsed || !fit.sidebar {
             0.0
         } else {
-            self.settings.sidebar_width
+            fit.sidebar_limit
         }
     }
 
@@ -2766,36 +2985,244 @@ impl Shell {
         self.panels.get(&self.panel_key(cx)).terminal_open
     }
 
+    fn record_panel_open(&mut self, panel: AuxiliaryPanel, key: &str) {
+        // A deliberate reopen supersedes any older promise to restore this
+        // panel when a different opener closes.
+        let history_key = if panel == AuxiliaryPanel::Sidebar {
+            &self.active_chat
+        } else {
+            key
+        };
+        if let Some(history) = self.smart_panel_restores.get_mut(history_key) {
+            history.retain(|entry| entry.hidden != panel);
+        }
+        self.panel_open_sequence += 1;
+        let opened_at = self.panel_open_sequence;
+        match panel {
+            AuxiliaryPanel::Sidebar => self.sidebar_opened_at = opened_at,
+            AuxiliaryPanel::Right => self
+                .panels
+                .update(key, |panels| panels.changes_opened_at = opened_at),
+            AuxiliaryPanel::Files => self
+                .panels
+                .update(key, |panels| panels.files_opened_at = opened_at),
+            AuxiliaryPanel::Terminal => self
+                .panels
+                .update(key, |panels| panels.terminal_opened_at = opened_at),
+        }
+    }
+
+    fn visible_auxiliary_panels(&self, cx: &App) -> usize {
+        let panels = self.panels.get(&self.panel_key(cx));
+        usize::from(!self.settings.sidebar_collapsed)
+            + usize::from(self.right_pane_open(cx))
+            + usize::from(self.files_panel_open(cx))
+            + usize::from(panels.terminal_open)
+    }
+
+    /// Restore only the panels this opener actually displaced. A later manual
+    /// reopen cancels the old entry, and a nested smart eviction retains the
+    /// earlier chain until that restored opener is itself closed.
+    fn restore_smart_panels(&mut self, opener: AuxiliaryPanel, cx: &mut Context<Self>) {
+        if !self.settings.restore_evicted_panels || self.smart_panel_eviction_in_progress {
+            return;
+        }
+        let Some(limit) = self.settings.panel_behavior.max_panels() else {
+            return;
+        };
+        let key = self.panel_key(cx);
+        let mut history = self.smart_panel_restores.remove(&key).unwrap_or_default();
+        let mut hidden = Vec::new();
+        history.retain(|entry| {
+            if entry.opener == opener {
+                hidden.push(entry.hidden);
+                false
+            } else {
+                true
+            }
+        });
+        if !history.is_empty() {
+            self.smart_panel_restores.insert(key.clone(), history);
+        }
+        for panel in hidden.into_iter().rev() {
+            if 1 + self.visible_auxiliary_panels(cx) >= limit {
+                break;
+            }
+            match panel {
+                AuxiliaryPanel::Sidebar if self.settings.sidebar_collapsed => {
+                    self.toggle_sidebar_visibility(false, cx);
+                }
+                AuxiliaryPanel::Right if !self.right_pane_open(cx) => {
+                    self.set_surfaces_open(true, cx);
+                }
+                AuxiliaryPanel::Files
+                    if !self.files_panel_open(cx) && self.files.contains_key(&key) =>
+                {
+                    // The explorer entity survives smart eviction. Restore its
+                    // column without stealing focus from the panel just closed.
+                    let from = self.files_visible_width(cx);
+                    self.panels.update(&key, |p| p.files_open = true);
+                    self.record_panel_open(AuxiliaryPanel::Files, &key);
+                    self.files_tween = Some(WidthTween::new(
+                        from,
+                        self.files_target_for_sidebar(self.sidebar_target(), cx),
+                    ));
+                }
+                AuxiliaryPanel::Terminal if !self.terminal_open(cx) => {
+                    self.set_terminal_open(true, &key, cx);
+                }
+                _ => {}
+            }
+        }
+        cx.notify();
+    }
+
+    /// Closing a panel only changes visibility. Its size, surface tabs, and
+    /// terminal sessions remain available when the user reopens it.
+    fn reconcile_smart_panels(&mut self, keep: Option<AuxiliaryPanel>, cx: &mut Context<Self>) {
+        if !matches!(self.route, Route::Chat) {
+            return;
+        }
+        let Some(max_panels) = self.settings.panel_behavior.max_panels() else {
+            return;
+        };
+        let key = self.panel_key(cx);
+        loop {
+            let panels = self.panels.get(&key);
+            let victim = smart_panel_victim(
+                max_panels,
+                [
+                    (
+                        AuxiliaryPanel::Sidebar,
+                        !self.settings.sidebar_collapsed,
+                        self.sidebar_opened_at,
+                    ),
+                    (
+                        AuxiliaryPanel::Right,
+                        self.right_pane_open(cx),
+                        panels.changes_opened_at,
+                    ),
+                    (
+                        AuxiliaryPanel::Files,
+                        self.files_panel_open(cx),
+                        panels.files_opened_at,
+                    ),
+                    (
+                        AuxiliaryPanel::Terminal,
+                        panels.terminal_open,
+                        panels.terminal_opened_at,
+                    ),
+                ],
+                keep,
+            );
+            self.smart_panel_eviction_in_progress = victim.is_some();
+            match victim {
+                Some(AuxiliaryPanel::Sidebar) => self.toggle_sidebar_visibility(false, cx),
+                Some(AuxiliaryPanel::Right) => {
+                    self.toggle_right_pane(cx);
+                    if let Some(panel) = &self.right_terminal {
+                        self.smart_focus_handoff.push(panel.read(cx).focus_handle());
+                    }
+                    if keep.is_none() || keep == Some(AuxiliaryPanel::Sidebar) {
+                        self.composer
+                            .update(cx, |composer, _| composer.focus_pending = true);
+                    }
+                }
+                Some(AuxiliaryPanel::Files) => {
+                    self.close_files_panel(cx);
+                    if keep.is_none() || keep == Some(AuxiliaryPanel::Sidebar) {
+                        self.composer
+                            .update(cx, |composer, _| composer.focus_pending = true);
+                    }
+                }
+                Some(AuxiliaryPanel::Terminal) => {
+                    self.set_terminal_open(false, &key, cx);
+                    if let Some(panel) = &self.terminal {
+                        self.smart_focus_handoff.push(panel.read(cx).focus_handle());
+                    }
+                    if keep.is_none() || keep == Some(AuxiliaryPanel::Sidebar) {
+                        self.composer
+                            .update(cx, |composer, _| composer.focus_pending = true);
+                    }
+                }
+                None => break,
+            }
+            self.smart_panel_eviction_in_progress = false;
+            if self.settings.restore_evicted_panels
+                && let (Some(opener), Some(hidden)) = (keep, victim)
+            {
+                self.smart_panel_restores
+                    .entry(key.clone())
+                    .or_default()
+                    .push(SmartPanelRestore { opener, hidden });
+            }
+        }
+        self.smart_panel_eviction_in_progress = false;
+    }
+
     fn right_target(&self, cx: &App) -> f32 {
-        if !self.right_pane_open(cx) {
+        self.right_target_for_sidebar(cx, self.sidebar_now())
+    }
+
+    fn right_target_for_sidebar(&self, cx: &App, sidebar: f32) -> f32 {
+        self.right_target_for_columns(
+            cx,
+            sidebar,
+            self.files_reserved_width_for_sidebar(sidebar, cx),
+        )
+    }
+
+    fn right_target_for_columns(&self, cx: &App, sidebar: f32, files: f32) -> f32 {
+        if !self.right_pane_open(cx) || !self.horizontal_fit().right {
             0.0
         } else {
             // Manual sizing preserves a usable conversation column. Takeover
             // intentionally consumes it completely. Both ride the sidebar
             // tween so toggling it remains seamless.
-            let sidebar_now = self.sidebar_now();
             if self.right_pane_expanded {
-                right_pane_takeover_width(
-                    self.viewport_width - self.files_reserved_width(cx),
-                    sidebar_now,
-                )
+                right_pane_takeover_width(self.viewport_width - files, sidebar)
             } else {
-                self.settings
-                    .right_pane_width
-                    .min(self.surface_max_width(cx))
+                self.settings.right_pane_width.min(right_pane_max_width(
+                    self.viewport_width - files,
+                    sidebar,
+                    CHAT_PANEL_MIN,
+                ))
             }
         }
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.toggle_sidebar_visibility(true, cx);
+    }
+
+    fn toggle_sidebar_visibility(&mut self, remember_choice: bool, cx: &mut Context<Self>) {
+        if remember_choice && !self.settings.sidebar_collapsed && !self.horizontal_fit().sidebar {
+            self.record_panel_open(AuxiliaryPanel::Sidebar, "");
+            if self.horizontal_fit().sidebar {
+                self.sidebar_tween = Some(WidthTween::new(0.0, self.sidebar_target()));
+                cx.notify();
+                return;
+            }
+        }
         let from = self.sidebar_now();
         self.sidebar_edge_bounce = None;
         self.sidebar_resize_edge = None;
         self.pane_resize_active = None;
         self.pane_resize_dragging = None;
         self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed;
+        if remember_choice {
+            self.sidebar_user_collapsed = self.settings.sidebar_collapsed;
+        }
         self.sidebar_tween = Some(WidthTween::new(from, self.sidebar_target()));
-        self.schedule_save(cx);
+        if remember_choice {
+            self.schedule_save(cx);
+        }
+        if !self.settings.sidebar_collapsed {
+            self.record_panel_open(AuxiliaryPanel::Sidebar, "");
+            self.reconcile_smart_panels(Some(AuxiliaryPanel::Sidebar), cx);
+        } else {
+            self.restore_smart_panels(AuxiliaryPanel::Sidebar, cx);
+        }
         cx.notify();
     }
 
@@ -2804,6 +3231,15 @@ impl Shell {
     /// it opens the surface host beside it, and it never hides the explorer —
     /// only the explorer's own toggle undocks that portion.
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
+        if self.right_pane_open(cx) && !self.horizontal_fit().right {
+            let key = self.panel_key(cx);
+            self.record_panel_open(AuxiliaryPanel::Right, &key);
+            if self.horizontal_fit().right {
+                self.right_tween = Some(WidthTween::new(0.0, self.right_target(cx)));
+                cx.notify();
+                return;
+            }
+        }
         self.set_surfaces_open(!self.right_pane_open(cx), cx);
     }
 
@@ -2838,13 +3274,22 @@ impl Shell {
         let was_expanded = self.right_pane_expanded;
         let key = self.panel_key(cx);
         self.panels.update(&key, |p| p.changes_open = open);
+        if open {
+            self.record_panel_open(AuxiliaryPanel::Right, &key);
+        }
         if !open {
-            self.suspend_file_images(cx);
             // Closing always leaves takeover mode — reopening at full bleed
             // with the conversation gone read as a broken chat.
             self.right_pane_expanded = false;
         }
-        let to = self.right_target(cx);
+        if open {
+            self.reconcile_smart_panels(Some(AuxiliaryPanel::Right), cx);
+        } else {
+            self.restore_smart_panels(AuxiliaryPanel::Right, cx);
+        }
+        // Smart behavior may have just started closing the sidebar. Target
+        // its final width so the two matching tweens land without a snap.
+        let to = self.right_target_for_sidebar(cx, self.sidebar_target());
         self.right_tween = Some(WidthTween::new(from, to));
         self.right_takeover_content_tween = None;
         self.main_takeover_tween = was_expanded.then(|| {
@@ -3468,12 +3913,8 @@ impl Shell {
             return false;
         };
 
-        let key = self.panel_key(cx);
-        let was_open = self.panels.get(&key).changes_open;
-        let from = self.right_target(cx);
-        self.panels.update(&key, |panel| panel.changes_open = true);
-        if !was_open {
-            self.right_tween = Some(WidthTween::new(from, self.right_target(cx)));
+        if !self.right_pane_open(cx) {
+            self.toggle_right_pane(cx);
         }
         self.add_file_surface_at(
             owner,
@@ -3957,6 +4398,9 @@ impl Shell {
                 panel.changes_open = true;
                 panel.right_active = surface;
             });
+            // The save guard is explicitly revealing this file. Treat the
+            // right pane as the requested opening when the smart cap applies.
+            self.record_panel_open(AuxiliaryPanel::Right, &key);
             self.apply_nav(NavEntry::Chat(key), cx);
         }
     }
@@ -4023,15 +4467,13 @@ impl Shell {
     /// animates 200 ms; closing detaches (PTYs stay alive), opening restores.
     /// The flag is per chat (zeron `sessionPanels`).
     fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let from = self.terminal_target(cx);
         let key = self.panel_key(cx);
-        let open = self.panels.toggle_terminal(&key);
-        self.terminal_tween = Some(WidthTween::new(from, self.terminal_target(cx)));
-        let panel = self.terminal_panel(cx);
-        panel.update(cx, |panel, cx| panel.set_open(open, cx));
+        let open = !self.panels.get(&key).terminal_open;
+        self.set_terminal_open(open, &key, cx);
         if open {
             self.composer
                 .update(cx, |composer, _| composer.focus_pending = false);
+            let panel = self.terminal_panel(cx);
             panel.update(cx, |panel, cx| panel.request_focus(cx));
             // Opening lands keyboard focus IN the shell — typing goes straight
             // to the prompt, no click needed (zeron terminal-panel.tsx: the
@@ -4047,6 +4489,18 @@ impl Shell {
             // `useHotkey(toggleShortcut, ... setOpenScoped(!open))`.)
             window.focus(&self.composer.focus_handle(cx), cx);
         }
+    }
+
+    fn set_terminal_open(&mut self, open: bool, key: &str, cx: &mut Context<Self>) {
+        let from = self.eval_tween(self.terminal_tween, self.terminal_target(cx));
+        self.panels
+            .update(key, |panels| panels.terminal_open = open);
+        if open {
+            self.record_panel_open(AuxiliaryPanel::Terminal, key);
+        }
+        self.terminal_tween = Some(WidthTween::new(from, self.terminal_target(cx)));
+        let panel = self.terminal_panel(cx);
+        panel.update(cx, |panel, cx| panel.set_open(open, cx));
         self.terminal_tween_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(RESIZE.total().mul_f32(motion::speed_scale()) + Duration::from_millis(30))
@@ -4057,6 +4511,11 @@ impl Shell {
             })
             .ok();
         }));
+        if open {
+            self.reconcile_smart_panels(Some(AuxiliaryPanel::Terminal), cx);
+        } else if key == self.panel_key(cx) {
+            self.restore_smart_panels(AuxiliaryPanel::Terminal, cx);
+        }
         cx.notify();
     }
 
@@ -4090,8 +4549,10 @@ impl Shell {
     ) {
         let x = f32::from(event.event.position.x);
         let sample = sidebar_drag_sample(x, self.sidebar_resize_edge, self.reduced_motion);
+        let was_collapsed = self.settings.sidebar_collapsed;
         self.settings.sidebar_width = sample.width;
         self.settings.sidebar_collapsed = false;
+        self.sidebar_user_collapsed = false;
         self.pane_resize_dragging = Some(PaneResizeKind::Sidebar);
         self.sidebar_tween = None; // live drag tracks the pointer directly
         if sample.starts_bounce {
@@ -4102,6 +4563,10 @@ impl Shell {
         self.pane_resize_active = sample.edge.is_none().then_some(PaneResizeKind::Sidebar);
         self.sidebar_resize_edge = sample.edge;
         self.schedule_save(cx);
+        if was_collapsed {
+            self.record_panel_open(AuxiliaryPanel::Sidebar, "");
+            self.reconcile_smart_panels(Some(AuxiliaryPanel::Sidebar), cx);
+        }
         cx.notify();
     }
 
@@ -4196,7 +4661,9 @@ impl Shell {
         self.settings.accent = crate::appearance::accent(cx);
         self.settings.surface = crate::appearance::surface(cx);
         self.sync_independent_settings(cx);
-        settings::replace(self.settings.clone(), SavePolicy::Debounced, cx);
+        let mut to_save = self.settings.clone();
+        to_save.sidebar_collapsed = self.sidebar_user_collapsed;
+        settings::replace(to_save, SavePolicy::Debounced, cx);
     }
 
     /// Controls outside the Shell mutate these choices directly. A geometry
@@ -4219,6 +4686,13 @@ impl Shell {
         self.settings.transcript_width = current.transcript_width;
         self.settings.skill_completion_by_harness = current.skill_completion_by_harness;
         self.settings.skills_in_slash_menu = current.skills_in_slash_menu;
+        if self.settings.panel_behavior != current.panel_behavior
+            || (self.settings.restore_evicted_panels && !current.restore_evicted_panels)
+        {
+            self.smart_panel_restores.clear();
+        }
+        self.settings.panel_behavior = current.panel_behavior;
+        self.settings.restore_evicted_panels = current.restore_evicted_panels;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
@@ -4395,6 +4869,7 @@ impl Shell {
         self.settings_focus_pending = false;
         self.route = Route::Chat;
         self.settings_restore_pending = true;
+        self.reconcile_smart_panels(None, cx);
         cx.notify();
     }
 
@@ -4432,6 +4907,8 @@ impl Shell {
                 let target = (!chat_id.is_empty()).then_some(chat_id);
                 if self.state.read(cx).selected_chat != target {
                     self.state.update(cx, |s, cx| s.select_chat(target, cx));
+                } else {
+                    self.reconcile_smart_panels(None, cx);
                 }
             }
             NavEntry::Settings(section) => {
@@ -4490,6 +4967,19 @@ impl Shell {
                         |this: &mut Shell, _, event: &AppearanceSettingsEvent, cx| match *event {
                             AppearanceSettingsEvent::CodeFontSizeChanged(size) => {
                                 this.set_code_font_size(size, cx);
+                            }
+                            AppearanceSettingsEvent::PanelBehaviorChanged(behavior) => {
+                                this.settings.panel_behavior = behavior;
+                                this.smart_panel_restores.clear();
+                                // Settings replaces the conversation while it is open.
+                                // Apply the new cap when returning to a chat.
+                                cx.notify();
+                            }
+                            AppearanceSettingsEvent::RestoreEvictedPanelsChanged(restore) => {
+                                this.settings.restore_evicted_panels = restore;
+                                if !restore {
+                                    this.smart_panel_restores.clear();
+                                }
                             }
                         },
                     ));
@@ -5713,9 +6203,16 @@ impl Shell {
     }
 
     pub(super) fn sidebar_now(&self) -> f32 {
-        self.eval_tween(self.sidebar_tween, self.sidebar_target())
-            + self
-                .eval_resize_edge_bounce(self.sidebar_edge_bounce, !self.settings.sidebar_collapsed)
+        let fit = self.horizontal_fit();
+        if !fit.sidebar {
+            return 0.0;
+        }
+        (self.eval_tween(self.sidebar_tween, self.sidebar_target())
+            + self.eval_resize_edge_bounce(
+                self.sidebar_edge_bounce,
+                !self.settings.sidebar_collapsed,
+            ))
+        .clamp(0.0, fit.sidebar_limit)
     }
 
     fn right_now(&self, cx: &App) -> f32 {
@@ -5724,6 +6221,17 @@ impl Shell {
                 self.right_edge_bounce,
                 self.right_pane_open(cx) && !self.right_pane_expanded,
             )
+    }
+
+    fn main_target_width(&self, right_width: f32, cx: &App) -> f32 {
+        // The flex column follows the visible sidebar, not its destination.
+        // Sizing the composer from sidebar_target() made it overflow that
+        // column while the sidebar closed beside an open right pane.
+        conversation_width(
+            self.viewport_width - self.files_reserved_width(cx),
+            self.sidebar_now(),
+            right_width,
+        )
     }
 
     fn tween_active(&self, tween: Option<WidthTween>) -> bool {
@@ -6341,7 +6849,7 @@ impl Shell {
         // activity/glyph personality independently of the selected variant.
         let inner = self.sidebar_pane.clone().cached(
             gpui::StyleRefinement::default()
-                .w(px(self.settings.sidebar_width))
+                .w(px(self.horizontal_fit().sidebar_limit))
                 .h_full()
                 .flex_none(),
         );
@@ -6658,9 +7166,8 @@ impl Shell {
         // Activity, not position (t3code Sidebar): status is a small colored
         // word + glyph in the row's top-right corner — Working animates the
         // composer-strip spinner, Done wears a check; Idle rows show the
-        // relative time instead. Hovering the ROW swaps the corner for the
-        // ARCHIVE button. Compact rows keep status first and elapsed time last;
-        // their archive control occupies the remote-icon slot on hover.
+        // relative time instead. Row hover replaces trailing metadata with
+        // separate pin and archive actions. Activity and time share this slot.
         // A chat can appear on both surfaces at once. Namespace every hover
         // key and child id so the palette never animates the sidebar copy.
         let row_id = if search_query.is_some() {
@@ -6679,10 +7186,17 @@ impl Shell {
             .is_some_and(|chat| {
                 self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str())
             });
-        let project_icon = (search_query.is_none() && self.settings.sidebar_show_project_icon)
-            .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
-        let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
+        // A filtered project's identity lives in the sidebar header; repeating
+        // it on every session adds no information. Keep harness icons intact.
+        let project_icon = (search_query.is_none()
+            && self.settings.sidebar_show_project_icon
+            && self.settings.space_filter.is_none())
+        .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
+        let corner_hovered = !preview
+            && (self.chat_status_hover.as_deref() == Some(row_id.as_str())
+                || self.chat_status_keyboard.as_deref() == Some(row_id.as_str()));
         let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
+        let show_actions = corner_hovered && jump_label.is_none();
         let project_icon = project_icon.map(|icon| {
             div()
                 .flex_none()
@@ -6726,45 +7240,7 @@ impl Shell {
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
         let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
-        let compact_status = compact.then(|| {
-            let glyph = if working {
-                loaders::mini_glyph_spinner(
-                    format!("{row_id}-working"),
-                    2.0,
-                    theme.glyph,
-                    self.sidebar_pane.entity_id(),
-                    cx,
-                )
-                .into_any_element()
-            } else if status == zeron_proto::ChatIndicator::Completed && !queued && !undelivered {
-                icon(icons::CHECK)
-                    .size(px(11.0))
-                    .text_color(status_color)
-                    .into_any_element()
-            } else {
-                div()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(status_color)
-                    .into_any_element()
-            };
-            div()
-                .id(SharedString::from(format!("{row_id}-status")))
-                .debug_selector({
-                    let id = id.clone();
-                    move || format!("chat-status-{id}")
-                })
-                .size(px(13.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .aria_label(status_label.unwrap_or("Idle"))
-                .child(glyph)
-                .into_any_element()
-        });
-        let compact_jump_label = compact.then(|| jump_label.clone()).flatten();
-        let corner_body: AnyElement = if let Some(label) = jump_label.filter(|_| !compact) {
+        let corner_body: AnyElement = if let Some(label) = jump_label {
             // The jump hint replaces the status/time corner while the modifier
             // is held, cut to the sidebar PR badge's exact cloth
             // (`pull_request_badge`, Sidebar surface): pinned 16px, px 4,
@@ -6789,63 +7265,114 @@ impl Shell {
                     .child(label)
                     .into_any_element()
             }
-        } else if corner_hovered {
+        } else if show_actions {
+            let pinned = self.active_sidebar_pins(cx).contains(&id);
+            let pin_id = id.clone();
+            let pin_key_id = id.clone();
+            let archive_id = id.clone();
+            let archive_key_id = id.clone();
+            let action = |name: &str, label: &'static str, glyph, tone| {
+                let group = SharedString::from(format!("{row_id}-{name}-hover"));
+                div()
+                    .id(SharedString::from(format!("{row_id}-{name}")))
+                    .group(group.clone())
+                    .debug_selector({
+                        let selector = format!("{row_id}-{name}");
+                        move || selector.clone()
+                    })
+                    .role(gpui::Role::Button)
+                    .aria_label(label)
+                    .tab_index(0)
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .size(px(24.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    // Paint within the hit target so a compact row retains
+                    // breathing room around the button on every side.
+                    .child(
+                        div()
+                            .debug_selector({
+                                let selector = format!("{row_id}-{name}-surface");
+                                move || selector.clone()
+                            })
+                            .size(px(20.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.0))
+                            .group_hover(group.clone(), |s| s.bg(theme.glass_hover()))
+                            .child(
+                                icon(glyph)
+                                    .size(px(14.0))
+                                    .text_color(tone)
+                                    .group_hover(group, |s| s.text_color(theme.text)),
+                            ),
+                    )
+            };
             div()
                 .flex()
-                .flex_row()
                 .items_center()
-                .gap(px(4.0))
-                .h(px(18.0))
-                .when(!compact, |el| {
-                    el.px(px(4.0))
-                        .mr(px(-4.0))
-                        .rounded(px(5.0))
-                        .bg(crate::theme::wash(0.10))
-                        .hover(|s| s.bg(crate::theme::wash(0.18)))
-                })
+                .gap(px(2.0))
                 .child(
-                    icon(if archived {
-                        icons::ARCHIVE_UP_MINIMALISTIC
-                    } else {
-                        icons::ARCHIVE_MINIMALISTIC
-                    })
-                    .size(px(if compact {
-                        SIDEBAR_ACTIVE_HARNESS_ICON_SIZE
-                    } else {
-                        11.0
-                    }))
-                    .flex_none()
-                    .text_color(theme.text_muted),
-                )
-                .when(!compact, |el| {
-                    el.child(
-                        div()
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(if archived {
-                                "Unarchive"
-                            } else {
-                                "Archive"
-                            })),
+                    action(
+                        "pin",
+                        if pinned { "Unpin" } else { "Pin" },
+                        icons::PIN,
+                        if pinned { theme.text } else { theme.text_muted },
                     )
-                })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.set_chat_pinned(pin_id.clone(), !pinned, cx);
+                    }))
+                    .on_key_down(cx.listener(
+                        move |this, event: &gpui::KeyDownEvent, _, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                cx.stop_propagation();
+                                this.set_chat_pinned(pin_key_id.clone(), !pinned, cx);
+                            }
+                        },
+                    )),
+                )
+                .child(
+                    action(
+                        "archive",
+                        if archived { "Unarchive" } else { "Archive" },
+                        if archived {
+                            icons::ARCHIVE_UP_MINIMALISTIC
+                        } else {
+                            icons::ARCHIVE_MINIMALISTIC
+                        },
+                        theme.text_muted,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.set_chat_archived(archive_id.clone(), !archived, cx);
+                    }))
+                    .on_key_down(cx.listener(
+                        move |this, event: &gpui::KeyDownEvent, _, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                cx.stop_propagation();
+                                this.set_chat_archived(archive_key_id.clone(), !archived, cx);
+                            }
+                        },
+                    )),
+                )
                 .into_any_element()
-        } else if compact {
-            if remote {
-                icon(icons::REMOTE_SERVER)
-                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                    .text_color(theme.text_muted.opacity(0.5))
-                    .into_any_element()
-            } else {
-                div().into_any_element()
-            }
         } else {
             match status_label {
                 Some(label) => {
                     // Glyph slot: Working wears the preset's animated pixel
                     // glyph beside its label, Done wears the check, and the
                     // remaining statuses use a compact dot.
-                    let glyph: AnyElement = if status == zeron_proto::ChatIndicator::Completed {
+                    let glyph: AnyElement = if status == zeron_proto::ChatIndicator::Completed
+                        && !queued
+                        && !undelivered
+                    {
                         icon(icons::CHECK)
                             .size(px(11.0))
                             .flex_none()
@@ -6869,73 +7396,51 @@ impl Shell {
                             .into_any_element()
                     };
                     div()
+                        .id(SharedString::from(format!("{row_id}-status")))
+                        .aria_label(label)
+                        .debug_selector({
+                            let id = id.clone();
+                            move || format!("chat-status-{id}")
+                        })
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap(px(4.0))
                         .child(glyph)
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(10.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(status_color)
-                                .child(SharedString::from(label)),
-                        )
+                        .when(!compact || !working, |el| {
+                            el.child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(10.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(status_color)
+                                    .child(SharedString::from(label)),
+                            )
+                        })
                         .into_any_element()
                 }
                 None => div()
+                    .debug_selector({
+                        let id = id.clone();
+                        move || format!("chat-time-{id}")
+                    })
                     .text_size(crate::typography::ui_rems(10.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .child(time_ago.clone())
                     .into_any_element(),
             }
         };
-        // One stable wrapper across both states (identity keeps the hover
-        // from flickering as the content swaps); the swap is driven by the
-        // ROW's hover (user request — corner-only felt undiscoverable), but
-        // archiving only clicks on the corner itself, so the row's own click
-        // stays the selector.
-        let corner: AnyElement = {
-            let archive_id = id.clone();
-            div()
-                .id(SharedString::from(format!("{row_id}-corner")))
-                .aria_label(if corner_hovered {
-                    if archived { "Unarchive" } else { "Archive" }
-                } else {
-                    if compact {
-                        if remote {
-                            "Remote session"
-                        } else {
-                            "Session actions"
-                        }
-                    } else {
-                        status_label.unwrap_or("Idle")
-                    }
-                })
-                .when(compact, |el| el.w(px(18.0)).justify_center())
-                .flex_none()
-                // Pin the corner to line 1's text height so the archive pill
-                // (taller, padded) overflows vertically instead of growing the
-                // row — the swap must not shift the card's content.
-                // NO occlude: the ROW's hover drives the swap, and an
-                // occluding corner un-hovered the row underneath it —
-                // pill mounts, steals the pointer, row un-hovers, pill
-                // unmounts, repeat (user-reported flicker). The pill's
-                // stop_propagation click is separation enough.
-                .h(px(14.0))
-                .flex()
-                .items_center()
-                .when(!preview, |el| el.cursor_pointer())
-                .when(corner_hovered, |el| {
-                    el.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.set_chat_archived(archive_id.clone(), !archived, cx);
-                        }))
-                })
-                .child(corner_body)
-                .into_any_element()
-        };
+        // Keep one non-occluding wrapper: actions must not steal row hover
+        // and repeatedly mount/unmount as the pointer crosses into them.
+        let corner = div()
+            .id(SharedString::from(format!("{row_id}-corner")))
+            .flex_none()
+            .min_w(px(24.0))
+            .h(px(14.0))
+            .flex()
+            .items_center()
+            .justify_end()
+            .child(corner_body)
+            .into_any_element();
         let mut corner = Some(corner);
         let (hover, text) = (theme.glass_hover(), theme.text);
         let selected_wash = crate::theme::glass_selected_bg();
@@ -6945,6 +7450,10 @@ impl Shell {
             theme.text_muted.opacity(0.5)
         };
         let select_id = id.clone();
+        let keyboard_select_id = id.clone();
+        let keyboard_row_id = row_id.clone();
+        let keyboard_hint =
+            format!("Session {title}. Enter to open. Space for Pin and Archive actions.");
         let menu_id = id.clone();
         // Hover fades over transition-colors (zeron session-row.tsx) — both
         // the wash and the title brighten ride the same 150ms blend.
@@ -6994,41 +7503,67 @@ impl Shell {
             // No selection ring (user request) — the wash alone marks the
             // active row.
             // Row hover drives BOTH the wash blend and the corner's
-            // status→Archive swap (one listener — gpui allows a single
+            // metadata→actions swap (one listener — gpui allows a single
             // hover listener per element).
             .when(!preview, |el| {
-                el.on_hover({
-                    let fade_hover = motion::hover_listener(fade_key.clone());
-                    let hover_id = row_id.clone();
-                    cx.listener(move |this, hovered: &bool, window, cx| {
-                        fade_hover(hovered, window, cx);
-                        if *hovered {
-                            if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
-                                this.chat_status_hover = Some(hover_id.clone());
+                el.role(gpui::Role::ListItem)
+                    .aria_label(keyboard_hint)
+                    .tab_index(0)
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                        match event.keystroke.key.as_str() {
+                            "enter" => {
+                                cx.stop_propagation();
+                                this.open_chat(keyboard_select_id.clone(), cx);
+                            }
+                            "space" => {
+                                cx.stop_propagation();
+                                this.chat_status_keyboard = Some(keyboard_row_id.clone());
                                 cx.notify();
                             }
-                        } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
-                            this.chat_status_hover = None;
-                            cx.notify();
+                            "escape"
+                                if this.chat_status_keyboard.as_deref()
+                                    == Some(keyboard_row_id.as_str()) =>
+                            {
+                                cx.stop_propagation();
+                                this.chat_status_keyboard = None;
+                                cx.notify();
+                            }
+                            _ => {}
                         }
+                    }))
+                    .on_hover({
+                        let fade_hover = motion::hover_listener(fade_key.clone());
+                        let hover_id = row_id.clone();
+                        cx.listener(move |this, hovered: &bool, window, cx| {
+                            fade_hover(hovered, window, cx);
+                            if *hovered {
+                                if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
+                                    this.chat_status_hover = Some(hover_id.clone());
+                                    cx.notify();
+                                }
+                            } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
+                                this.chat_status_hover = None;
+                                cx.notify();
+                            }
+                        })
                     })
-                })
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.open_chat(select_id.clone(), cx);
-                }))
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                        this.chat_menu.open(ChatMenuState {
-                            tab: None,
-                            chat_id: menu_id.clone(),
-                            position: event.position,
-                            page: ChatMenuPage::Root,
-                        });
-                        cx.notify();
-                    }),
-                )
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_chat(select_id.clone(), cx);
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            this.chat_menu.open(ChatMenuState {
+                                tab: None,
+                                chat_id: menu_id.clone(),
+                                position: event.position,
+                                page: ChatMenuPage::Root,
+                            });
+                            cx.notify();
+                        }),
+                    )
             })
             .when_some(drag, |el, payload| {
                 let shell = cx.entity();
@@ -7069,30 +7604,37 @@ impl Shell {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(if compact {
-                        4.0
-                    } else {
-                        SIDEBAR_ACTIVE_HARNESS_TITLE_GAP
-                    }))
-                    .children(compact_status)
-                    .when_some(
-                        harness.map(crate::pickers::harness_brand_icon),
-                        |el, (path, tint)| {
-                            el.child(
-                                icon(path)
-                                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                                    .flex_none()
-                                    .text_color(
-                                        tint.unwrap_or(subline).opacity(if archived_muted {
-                                            0.4
-                                        } else {
-                                            0.8
-                                        }),
-                                    ),
-                            )
-                        },
-                    )
-                    .children(project_icon)
+                    // Trailing metadata must not set this line's height: its
+                    // font metrics differ from the hover action controls.
+                    .when(compact, |el| el.h(px(17.0)))
+                    .gap(px(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP))
+                    .when(project_icon.is_some() || harness.is_some(), |el| {
+                        el.child(
+                            div()
+                                .debug_selector({
+                                    let id = id.clone();
+                                    move || format!("chat-identity-{id}")
+                                })
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .children(project_icon)
+                                .when_some(
+                                    harness.map(crate::pickers::harness_brand_icon),
+                                    |el, (path, tint)| {
+                                        el.child(
+                                            icon(path)
+                                                .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                                .flex_none()
+                                                .text_color(tint.unwrap_or(subline).opacity(
+                                                    if archived_muted { 0.4 } else { 0.8 },
+                                                )),
+                                        )
+                                    },
+                                ),
+                        )
+                    })
                     .child(sidebar_faded_label(
                         format!("chat-title-{content_id}").into(),
                         true,
@@ -7101,61 +7643,50 @@ impl Shell {
                             .line_height(px(17.0))
                             .child(popover::search_highlight(title, search_query, theme)),
                     ))
-                    .when(!compact && !show_label && remote, |el| {
-                        el.child(
-                            icon(icons::REMOTE_SERVER)
-                                .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                                .flex_none()
-                                .text_color(subline),
-                        )
-                    })
-                    .when(
-                        if compact {
-                            remote || corner_hovered
-                        } else {
-                            !show_label
-                        },
-                        |el| {
-                            el.child(
-                                div()
-                                    .flex_none()
-                                    .text_color(subline)
-                                    .children(corner.take()),
-                            )
-                        },
-                    )
-                    .when(compact, |el| {
-                        el.children(change_request.clone().map(|summary| {
-                            if preview {
-                                crate::change_requests::pull_request_badge_preview(
-                                    format!("{row_id}-compact-pr").into(),
-                                    summary,
-                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                    theme,
-                                )
-                            } else {
-                                crate::change_requests::pull_request_badge(
-                                    format!("{row_id}-compact-pr").into(),
-                                    summary,
-                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                    theme,
-                                )
-                            }
-                        }))
-                    })
-                    .when(compact, |el| {
+                    .when(compact || !show_label, |el| {
                         el.child(
                             div()
                                 .debug_selector({
                                     let id = id.clone();
-                                    move || format!("chat-time-{id}")
+                                    move || format!("chat-trailing-{id}")
                                 })
-                                .w(px(30.0))
                                 .flex_none()
-                                .text_right()
-                                .text_size(crate::typography::ui_rems(11.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                // Separate session content from metadata while
+                                // keeping metadata internally grouped.
+                                .ml(px(4.0))
+                                .when(show_actions, |el| el.mr(px(-4.0)))
                                 .text_color(subline)
-                                .child(compact_jump_label.unwrap_or(time_ago)),
+                                .when((compact || !show_label) && remote && !show_actions, |el| {
+                                    el.child(
+                                        icon(icons::REMOTE_SERVER)
+                                            .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                            .flex_none()
+                                            .text_color(subline),
+                                    )
+                                })
+                                .when(compact && !show_actions, |el| {
+                                    el.children(change_request.clone().map(|summary| {
+                                        if preview {
+                                            crate::change_requests::pull_request_badge_preview(
+                                    format!("{row_id}-compact-pr").into(),
+                                    summary,
+                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    theme,
+                                )
+                                        } else {
+                                            crate::change_requests::pull_request_badge(
+                                    format!("{row_id}-compact-pr").into(),
+                                    summary,
+                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    theme,
+                                )
+                                        }
+                                    }))
+                                })
+                                .children(corner.take()),
                         )
                     }),
             )
@@ -7445,7 +7976,7 @@ impl Shell {
                 "sidebar-pinned-header".to_string(),
                 spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT
                     + if self.pinned_open {
-                        spaces::SIDEBAR_DISCLOSURE_BODY_INSET - SIDEBAR_LIST_GAP
+                        spaces::SIDEBAR_DISCLOSURE_BODY_INSET
                     } else {
                         0.0
                     },
@@ -7457,12 +7988,12 @@ impl Shell {
                     "sidebar-sessions-header".into(),
                     spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT
                         + if show_pinned_section || custom_count > 0 {
-                            12.0
+                            spaces::SIDEBAR_SECTION_GAP
                         } else {
                             0.0
                         }
                         + if self.sessions_open {
-                            spaces::SIDEBAR_DISCLOSURE_BODY_INSET - SIDEBAR_LIST_GAP
+                            spaces::SIDEBAR_DISCLOSURE_BODY_INSET
                         } else {
                             0.0
                         },
@@ -7474,7 +8005,15 @@ impl Shell {
             if ix < pinned_count && !self.pinned_open {
                 continue;
             }
-            order.push((key.clone(), *height));
+            let next_in_list = if ix < pinned_count {
+                ix + 1 < pinned_count
+            } else {
+                ungrouped && ix + 1 < keyed.len()
+            };
+            order.push((
+                key.clone(),
+                *height + if next_in_list { SIDEBAR_LIST_GAP } else { 0.0 },
+            ));
         }
         if self.pinned_session_drag.is_none()
             && self.sidebar_session_transfer.is_none()
@@ -7487,7 +8026,7 @@ impl Shell {
                 // that movement, leaving gaps and momentary overlaps between
                 // the first group, following groups, and Archived.
                 let offsets = if key_order_changed {
-                    resort_offsets(&self.sidebar_prev_order, &order, SIDEBAR_LIST_GAP)
+                    resort_offsets(&self.sidebar_prev_order, &order, 0.0)
                 } else {
                     std::collections::HashMap::new()
                 };
@@ -7601,8 +8140,7 @@ impl Shell {
                 .id("sidebar-active-sessions")
                 .flex()
                 .flex_col()
-                .gap(px(SIDEBAR_LIST_GAP))
-                .pb(px(Theme::SPACE_SM))
+                .pb(px(spaces::SIDEBAR_SECTION_GAP))
                 .when_some(pinned_group, |el, group| el.child(group))
                 .children(custom_items)
                 .when(
@@ -7661,7 +8199,7 @@ impl Shell {
                                     ))
                                     .flex()
                                     .flex_col()
-                                    .gap(px(SIDEBAR_LIST_GAP))
+                                    .gap(px(if ungrouped { SIDEBAR_LIST_GAP } else { 0.0 }))
                                     .when(regular_items.is_empty(), |el| {
                                         el.h(px(48.0 + self.sidebar_transfer_extra_gap("regular")))
                                             .justify_center()
@@ -7742,8 +8280,8 @@ impl Shell {
                     .px(px(Theme::SPACE_SM))
                     .flex()
                     .flex_col()
-                    // No "Sessions" header (user request) — the list
-                    // is the whole column; a little air stands in.
+                    // One inset below the fixed project filter, independent
+                    // of grouping and disclosure state.
                     .pt(px(SIDEBAR_LIST_PAD_TOP))
                     .child(active_list)
                     .children(archived_section)
@@ -9920,18 +10458,25 @@ impl Shell {
     /// page (its options row + the lazy [`Changes`] viewer), workspace Files,
     /// an embedded terminal, or the surface picker when no tabs exist.
     fn render_right_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        if !self.right_pane_open(cx) && !self.tween_active(self.right_tween) {
+            // Let image previews paint through the close mask before releasing
+            // their resources. A quick reversal never unloads the frame.
+            self.suspend_file_images(cx);
+        }
+        if !self.horizontal_fit().right {
+            return Empty.into_any_element();
+        }
         let theme = Theme::of(cx).clone();
         let content: AnyElement = if self.right_pane_open(cx) || self.tween_active(self.right_tween)
         {
             match self.resolved_right_active(cx) {
-                // Rendering a Files surface activates its image. Keep it unmounted
-                // throughout the closing animation after suspending its resources.
-                RightSurface::File(_) if !self.right_pane_open(cx) => {
-                    gpui::Empty.into_any_element()
-                }
                 RightSurface::File(id) => {
                     if let Some(file) = self.file_surfaces.get(&id).cloned() {
-                        file.update(cx, |file, cx| file.ensure_loaded(cx));
+                        // Keep the last file frame behind the closing mask. Loading
+                        // while closing would reactivate suspended image resources.
+                        if self.right_pane_open(cx) {
+                            file.update(cx, |file, cx| file.ensure_loaded(cx));
+                        }
                         file.into_any_element()
                     } else {
                         self.render_surface_picker(cx)
@@ -10807,7 +11352,9 @@ impl Shell {
     /// hiding the conversation column; toggling back restores the saved
     /// width. Rides the same width tween as open/close so the jump glides.
     fn toggle_right_pane_expand(&mut self, cx: &mut Context<Self>) {
-        let from = self.right_target(cx);
+        // A second click during the first expansion starts at the painted
+        // seam, not the previous destination.
+        let from = self.right_visible_width(cx);
         self.right_edge_bounce = None;
         self.right_resize_edge = None;
         self.finish_pane_resize(PaneResizeKind::Right);
@@ -11280,6 +11827,7 @@ fn window_control_button(
     let fade_key = format!("window-control-{id}");
     div()
         .id(id)
+        .debug_selector(|| id.into())
         .size(px(24.0))
         .flex_none()
         .flex()
@@ -11463,6 +12011,7 @@ fn header_icon_button(
     let fade_key = format!("header-icon-{id}");
     div()
         .id(id)
+        .debug_selector(|| id.into())
         .size(px(28.0))
         .flex_none()
         .flex()
@@ -11520,6 +12069,18 @@ impl Render for Shell {
         }
 
         self.render_time = Some(std::time::Instant::now());
+        if self
+            .smart_focus_handoff
+            .drain(..)
+            .any(|hidden_focus| hidden_focus.is_focused(window))
+        {
+            let fallback = if matches!(self.route, Route::Chat) {
+                self.composer.focus_handle(cx)
+            } else {
+                self.shortcut_focus.clone()
+            };
+            window.focus(&fallback, cx);
+        }
         if self.all_file_edits_flushed(cx)
             && let Some(action) = self.pending_exit.take()
         {
@@ -11598,6 +12159,7 @@ impl Render for Shell {
         let browser_active = matches!(gate, GatePhase::Ready)
             && !restart_required
             && matches!(self.route, Route::Chat)
+            && self.horizontal_fit().right
             && (self.right_pane_open(cx) || self.tween_active(self.right_tween));
         // Native clipping follows the animated GPUI mask. Drags only transfer
         // pointer ownership; the browser continues rendering and reflowing.
@@ -11659,6 +12221,7 @@ impl Render for Shell {
         // Manual tween drive bookkeeping for this pass (see [`WidthTween`]).
         self.reduced_motion = motion::reduced_motion(cx);
         self.motion_active.set(false);
+        self.track_horizontal_fit(cx);
 
         if self.activation_sub.is_none() {
             self.activation_sub = Some(cx.observe_window_activation(
@@ -11964,11 +12527,7 @@ impl Render for Shell {
                 if panel_handoff {
                     self.motion_active.set(true);
                 }
-                let main_target_width = conversation_width(
-                    viewport - self.files_reserved_width(cx),
-                    self.sidebar_target(),
-                    right_target_width,
-                );
+                let main_target_width = self.main_target_width(right_target_width, cx);
                 let main_transition = self.active_tween_endpoints(self.main_takeover_tween);
                 let main_content_width =
                     stable_panel_content_width(main_target_width, main_transition);
@@ -12014,7 +12573,7 @@ impl Render for Shell {
                 // never renders it (zeron __root.tsx `!isSettings && activeChat`
                 // around the diff column) — the per-session open flags stay
                 // intact for the return trip.
-                let right_open = on_chat && self.right_pane_open(cx);
+                let right_open = on_chat && self.right_pane_open(cx) && self.horizontal_fit().right;
                 // Takeover mode derives its width from the viewport, so a
                 // manual drag handle would fight the expanded target.
                 let right_handle = (right_open
@@ -13670,18 +14229,47 @@ mod exit_regressions {
                 assert!(!shell.right_pane_open(cx));
                 assert!(shell.tween_active(shell.right_tween));
                 assert!(
-                    !files.read(cx).test_images_visible(),
-                    "closing suspends image resources immediately"
+                    files.read(cx).test_images_visible(),
+                    "file content stays painted through the closing mask"
                 );
+                let frame_time = shell.render_time;
+                shell.render_time = Some(shell.right_tween.unwrap().started + duration);
                 let _ = shell.render_right_pane(window, cx);
                 assert!(
                     !files.read(cx).test_images_visible(),
-                    "closing animation must not reactivate images"
+                    "image resources suspend once the close animation ends"
                 );
+                shell.render_time = frame_time;
                 shell.settings.sidebar_collapsed = true;
                 shell.sidebar_tween = tween;
                 shell.toggle_sidebar(cx);
                 assert_eq!(shell.sidebar_tween.unwrap().from, width);
+
+                // With the right pane open, the composer must use the live
+                // center column as the sidebar opens and closes, including
+                // frames where the right pane hits its chat-width clamp.
+                let key = shell.panel_key(cx);
+                assert!(shell.panels.toggle_changes(&key));
+                shell.right_tween = None;
+                shell.settings.sidebar_width = 256.0;
+                shell.settings.right_pane_width = 520.0;
+                shell.viewport_width = 1024.0;
+                let started = std::time::Instant::now();
+                for (collapsed, from, to) in [(false, 0.0, 256.0), (true, 256.0, 0.0)] {
+                    shell.settings.sidebar_collapsed = collapsed;
+                    shell.sidebar_tween = Some(WidthTween { from, to, started });
+                    for progress in [0.0, 0.5, 1.0] {
+                        shell.render_time = Some(started + duration.mul_f32(progress));
+                        let sidebar = shell.sidebar_now();
+                        let right = shell.right_now(cx);
+                        let live_column = conversation_width(
+                            shell.viewport_width - shell.files_reserved_width(cx),
+                            sidebar,
+                            right,
+                        );
+                        assert_eq!(shell.main_target_width(right, cx), live_column);
+                    }
+                }
                 shell.render_time = None;
                 assert!(!shell.tween_active(tween));
                 assert_eq!(shell.active_tween_endpoints(tween), None);
@@ -13740,6 +14328,11 @@ mod exit_regressions {
             let terminal_size = 15.0 + index as f32;
             let code_size = 11.0 + index as f32;
             let transcript_width = 736.0 + 16.0 * index as f32;
+            let panel_behavior = if index % 2 == 0 {
+                settings::PanelBehavior::Smart2
+            } else {
+                settings::PanelBehavior::Smart4
+            };
             let geometry = Some(settings::WindowGeometry {
                 display_uuid: Some(uuid::Uuid::from_u128(7)),
                 x: 80.0 + index as f32,
@@ -13769,6 +14362,7 @@ mod exit_regressions {
                                 separate_from_slash: true,
                             },
                         );
+                        settings.panel_behavior = panel_behavior;
                     });
                     for step in 0..3 {
                         shell.settings.sidebar_width = 290.0 + step as f32;
@@ -13795,6 +14389,7 @@ mod exit_regressions {
                                 .skill_completion(zeron_proto::HarnessId::ClaudeCode)
                                 .separate_from_slash
                         );
+                        assert_eq!(current.panel_behavior, panel_behavior);
                     }
                     settings::flush(cx);
                     let loaded = settings::UiSettings::load(dir.path());
@@ -13806,6 +14401,7 @@ mod exit_regressions {
                     assert_eq!(loaded.code_font_family, code_family);
                     assert_eq!(loaded.code_font_size, code_size);
                     assert_eq!(loaded.transcript_width, transcript_width);
+                    assert_eq!(loaded.panel_behavior, panel_behavior);
                     assert_eq!(loaded.sidebar_width, 292.0);
                     assert_eq!(loaded.right_pane_width, 542.0);
                     assert_eq!(loaded.terminal_height, 302.0);
@@ -15475,5 +16071,543 @@ mod settings_modal_regressions {
             assert_eq!(shell.route, Route::Chat);
             assert_eq!(shell.settings.settings_section, SettingsSection::Devices);
         });
+    }
+}
+
+#[cfg(feature = "project-palette-fixture")]
+impl Shell {
+    pub fn fixture_project_icon_menu(&mut self, cx: &mut Context<Self>) {
+        self.space_menu
+            .open(("project".into(), gpui::point(px(28.0), px(100.0))));
+        cx.notify();
+    }
+
+    /// Deterministic disclosure and hover states for sidebar review captures.
+    pub fn fixture_sidebar_state(
+        &mut self,
+        organization: crate::settings::SidebarOrganization,
+        collapsed: bool,
+        hover: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.sidebar_organization = organization;
+        self.pinned_open = !collapsed;
+        self.sessions_open = !collapsed;
+        self.archived_open = !collapsed;
+        self.chat_status_hover = hover.then(|| "chat-chat-0".into());
+        self.sidebar_disclosure_motion.clear();
+        self.sidebar_prev_order.clear();
+        self.sidebar_resort.clear();
+        self.sidebar_new_keys.clear();
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod smart_panel_rebase_tests {
+    use super::*;
+    use gpui::{AppContext, TestAppContext};
+
+    #[gpui::test]
+    fn session_row_keyboard_reveals_and_activates_pin(cx: &mut TestAppContext) {
+        struct RowHost(Entity<Shell>);
+        impl Render for RowHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    shell.render_chat_row(
+                        "keyboard".into(),
+                        "Keyboard session".into(),
+                        "now".into(),
+                        "Project".into(),
+                        None,
+                        None,
+                        None,
+                        zeron_proto::ChatIndicator::Idle,
+                        false,
+                        false,
+                        false,
+                        None,
+                        None,
+                        None,
+                        &Theme::default(),
+                        cx,
+                    )
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            RowHost(cx.new(|cx| {
+                let state = cx.new(|_| {
+                    let mut state = AppState::new();
+                    state.workspace_scope = Some(zeron_proto::WorkspaceScope::Local);
+                    state.local_device_id = Some("local".into());
+                    state.chats = vec![
+                        serde_json::from_value(serde_json::json!({
+                        "id": "keyboard", "title": "Keyboard session", "deviceId": "local", "archived": false,
+                            "createdAt": Utc::now(),
+                        }))
+                        .unwrap(),
+                    ];
+                    state
+                });
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: String::new(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.settings.sidebar_show_project_icon = false;
+                shell
+            }))
+        });
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        assert!(cx.debug_bounds("chat-keyboard-pin").is_none());
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.simulate_keystrokes("space");
+        assert!(cx.debug_bounds("chat-keyboard-pin").is_some());
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.simulate_keystrokes("enter");
+        shell.read_with(cx, |shell, cx| {
+            assert!(
+                shell
+                    .active_sidebar_pins(cx)
+                    .contains(&"keyboard".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn smart_panel_victim_respects_count_opening_order_and_requested_panel() {
+        use AuxiliaryPanel::{Files, Right, Sidebar, Terminal};
+        let visible = [(Sidebar, true, 1), (Right, true, 3), (Terminal, true, 2)];
+        assert_eq!(smart_panel_victim(4, visible, None), None);
+        assert_eq!(smart_panel_victim(3, visible, None), Some(Sidebar));
+        assert_eq!(
+            smart_panel_victim(2, visible, Some(Sidebar)),
+            Some(Terminal)
+        );
+        assert_eq!(
+            smart_panel_victim(2, visible, Some(Terminal)),
+            Some(Sidebar)
+        );
+        assert_eq!(
+            smart_panel_victim(
+                2,
+                [(Sidebar, false, 1), (Right, true, 3), (Terminal, false, 2)],
+                None
+            ),
+            None
+        );
+        let with_files = [
+            (Sidebar, true, 1),
+            (Right, true, 3),
+            (Files, true, 4),
+            (Terminal, true, 2),
+        ];
+        assert_eq!(
+            smart_panel_victim(4, with_files, Some(Files)),
+            Some(Sidebar)
+        );
+        assert_eq!(
+            smart_panel_victim(3, with_files, Some(Sidebar)),
+            Some(Terminal)
+        );
+    }
+
+    #[test]
+    fn horizontal_fit_rebalances_without_shrinking_open_panels_below_their_minima() {
+        for viewport in [
+            0.0, 120.0, 300.0, 500.0, 660.0, 880.0, 1000.0, 1104.0, 1600.0,
+        ] {
+            for sidebar_width in [SIDEBAR_MIN, SIDEBAR_MAX] {
+                for mask in 0..8 {
+                    for expanded in [false, true] {
+                        for order in [[1, 2, 3], [3, 2, 1]] {
+                            let fit = horizontal_panel_fit(
+                                viewport,
+                                sidebar_width,
+                                (mask & 1 != 0, order[0]),
+                                (mask & 2 != 0, order[1]),
+                                (mask & 4 != 0, order[2]),
+                                expanded,
+                            );
+                            let chat = if fit.right && expanded {
+                                0.0
+                            } else {
+                                CHAT_PANEL_MIN.min(viewport)
+                            };
+                            let required = chat
+                                + fit.sidebar_limit
+                                + if fit.right { RIGHT_PANE_MIN } else { 0.0 }
+                                + if fit.files { FILES_PANEL_MIN } else { 0.0 };
+                            assert!(required <= viewport + 0.001, "{viewport}: {fit:?}");
+                            if fit.sidebar {
+                                assert!(fit.sidebar_limit >= SIDEBAR_MIN);
+                            }
+                            if viewport >= CHAT_PANEL_MIN && !expanded {
+                                assert!(viewport - required >= -0.001);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn horizontal_fit_keeps_recent_panel_and_restores_older_panels_with_space() {
+        let narrow = horizontal_panel_fit(
+            1000.0,
+            SIDEBAR_DEFAULT,
+            (true, 1),
+            (true, 2),
+            (true, 3),
+            false,
+        );
+        assert!(!narrow.sidebar && narrow.right && narrow.files);
+        let sidebar_reopened = horizontal_panel_fit(
+            1000.0,
+            SIDEBAR_DEFAULT,
+            (true, 4),
+            (true, 2),
+            (true, 3),
+            false,
+        );
+        assert!(sidebar_reopened.sidebar && !sidebar_reopened.right && sidebar_reopened.files);
+        let wide = horizontal_panel_fit(
+            1600.0,
+            SIDEBAR_DEFAULT,
+            (true, 4),
+            (true, 2),
+            (true, 3),
+            false,
+        );
+        assert!(wide.sidebar && wide.right && wide.files);
+        assert_eq!(wide.sidebar_limit, SIDEBAR_DEFAULT);
+    }
+
+    #[gpui::test]
+    fn shell_panel_widths_follow_fit_and_restore_without_changing_open_flags(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                shell.active_chat = "chat".into();
+                shell.panels.update("chat", |panels| {
+                    panels.changes_open = true;
+                    panels.changes_opened_at = 2;
+                    panels.files_open = true;
+                    panels.files_opened_at = 3;
+                });
+                shell.sidebar_opened_at = 1;
+                shell.viewport_width = 1000.0;
+                assert_eq!(shell.sidebar_now(), 0.0);
+                assert_eq!(shell.files_visible_width(cx), settings::FILES_PANEL_DEFAULT);
+                assert_eq!(shell.right_visible_width(cx), 414.0);
+                assert!(shell.right_pane_open(cx) && shell.files_panel_open(cx));
+
+                shell.settings.sidebar_width = SIDEBAR_MAX;
+                shell.viewport_width = 1150.0;
+                assert_eq!(shell.horizontal_fit().sidebar_limit, 270.0);
+                assert_eq!(shell.sidebar_now(), 270.0);
+
+                shell.settings.sidebar_width = SIDEBAR_DEFAULT;
+                shell.viewport_width = 1600.0;
+                assert_eq!(shell.sidebar_now(), SIDEBAR_DEFAULT);
+                assert_eq!(shell.files_visible_width(cx), settings::FILES_PANEL_DEFAULT);
+                assert_eq!(shell.right_visible_width(cx), RIGHT_PANE_DEFAULT);
+
+                shell.viewport_width = 1000.0;
+                shell.last_horizontal_fit = Some(("chat".into(), shell.horizontal_fit()));
+                shell.close_files_panel(cx);
+                let closing = shell.files_tween.unwrap();
+                let duration = RESIZE.total().mul_f32(motion::speed_scale());
+                shell.render_time = Some(closing.started + duration / 2);
+                assert!(shell.files_visible_width(cx) > 0.0);
+                assert_eq!(shell.sidebar_now(), 0.0);
+
+                shell.files_tween = Some(WidthTween {
+                    started: std::time::Instant::now() - duration,
+                    ..closing
+                });
+                shell.render_time = None;
+                shell.track_horizontal_fit(cx);
+                let returning = shell.sidebar_tween.unwrap();
+                assert_eq!(returning.from, 0.0);
+                shell.render_time = Some(returning.started);
+                assert_eq!(shell.sidebar_now(), 0.0);
+                shell.render_time = Some(returning.started + duration / 2);
+                assert!(shell.sidebar_now() > 0.0);
+                assert!(shell.sidebar_now() < SIDEBAR_DEFAULT);
+
+                shell
+                    .panels
+                    .update("chat", |panels| panels.files_open = true);
+                shell.files_tween = None;
+                shell.sidebar_tween = None;
+                shell.right_tween = None;
+                shell.render_time = None;
+                shell.settings.sidebar_width = SIDEBAR_MAX;
+                shell.viewport_width = 500.0;
+                shell.last_horizontal_fit = Some(("chat".into(), shell.horizontal_fit()));
+                shell.viewport_width = 1150.0;
+                shell.track_horizontal_fit(cx);
+                assert_eq!(shell.sidebar_tween.unwrap().to, 270.0);
+                assert_eq!(shell.files_tween.unwrap().to, FILES_PANEL_MIN);
+                assert_eq!(shell.right_tween.unwrap().to, RIGHT_PANE_MIN);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn smart_panels_reconcile_toggles_limits_and_chat_flags(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            let mut settings = settings::UiSettings::default();
+            settings.panel_behavior = settings::PanelBehavior::Smart2;
+            settings::init(settings, dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "a".into();
+                shell.viewport_width = 1000.0;
+                shell.settings.right_pane_width = 520.0;
+                shell.toggle_right_pane(cx);
+                assert!(shell.right_pane_open(cx));
+                assert!(shell.settings.sidebar_collapsed);
+                assert!(!shell.sidebar_user_collapsed);
+                // Automatic eviction must not survive a restart when the
+                // evicting right pane itself is session-only state.
+                shell.schedule_save(cx);
+                settings::flush(cx);
+                assert!(!settings::UiSettings::load(dir.path()).sidebar_collapsed);
+                assert_eq!(shell.right_tween.unwrap().to, 520.0);
+                let end =
+                    shell.right_tween.unwrap().started + RESIZE.total() + Duration::from_millis(1);
+                shell.render_time = Some(end);
+                assert_eq!(shell.right_now(cx), shell.right_target(cx));
+                shell.render_time = None;
+
+                shell.toggle_terminal(window, cx);
+                assert!(shell.terminal_open(cx));
+                assert!(!shell.right_pane_open(cx));
+                let terminal = shell.terminal.clone().unwrap();
+                shell.toggle_right_pane(cx);
+                assert!(shell.right_pane_open(cx));
+                assert!(!shell.terminal_open(cx));
+                assert!(shell.terminal.is_some());
+                assert_eq!(shell.terminal.as_ref().unwrap(), &terminal);
+                assert_eq!(
+                    shell.settings.terminal_height,
+                    settings::TERMINAL_DEFAULT_HEIGHT
+                );
+                assert!(!shell.smart_focus_handoff.is_empty());
+                let _ = shell.render(window, cx);
+                assert!(shell.composer.focus_handle(cx).is_focused(window));
+                let newly_focused_surface = cx.focus_handle();
+                window.focus(&newly_focused_surface, cx);
+                shell
+                    .smart_focus_handoff
+                    .push(terminal.read(cx).focus_handle());
+                let _ = shell.render(window, cx);
+                assert!(newly_focused_surface.is_focused(window));
+
+                shell.panels.update("b", |panels| {
+                    panels.changes_open = true;
+                    panels.terminal_open = true;
+                });
+                shell.record_panel_open(AuxiliaryPanel::Right, "b");
+                shell.record_panel_open(AuxiliaryPanel::Terminal, "b");
+                shell.active_chat = "b".into();
+                shell.reconcile_smart_panels(None, cx);
+                assert!(!shell.panels.get("b").changes_open);
+                assert!(shell.panels.get("b").terminal_open);
+                assert!(shell.panels.get("a").changes_open);
+
+                settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                    settings.panel_behavior = settings::PanelBehavior::Smart3;
+                });
+                shell.sync_independent_settings(cx);
+                shell
+                    .panels
+                    .update("b", |panels| panels.changes_open = true);
+                shell.record_panel_open(AuxiliaryPanel::Right, "b");
+                shell.open_settings(SettingsSection::Appearance, cx);
+                settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                    settings.panel_behavior = settings::PanelBehavior::Smart2;
+                });
+                shell.sync_independent_settings(cx);
+                shell.reconcile_smart_panels(None, cx);
+                assert!(shell.panels.get("b").changes_open);
+                shell.close_settings(cx);
+                assert!(shell.panels.get("b").changes_open);
+                assert!(!shell.panels.get("b").terminal_open);
+
+                shell.panels.update("b", |panels| panels.files_open = true);
+                shell.record_panel_open(AuxiliaryPanel::Files, "b");
+                shell.reconcile_smart_panels(Some(AuxiliaryPanel::Files), cx);
+                assert!(shell.files_panel_open(cx));
+                assert!(!shell.right_pane_open(cx));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn smart_panels_restore_only_automatic_closures_in_opening_order(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            let mut settings = settings::UiSettings::default();
+            settings.panel_behavior = settings::PanelBehavior::Smart2;
+            settings.restore_evicted_panels = true;
+            settings::init(settings, dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _window, cx| {
+                shell.active_chat = "a".into();
+                shell.viewport_width = 1200.0;
+                shell.toggle_right_pane(cx);
+                assert!(shell.settings.sidebar_collapsed);
+                assert!(shell.right_pane_open(cx));
+
+                // The terminal displaces Right, then closing it restores
+                // Right; closing Right subsequently restores the sidebar.
+                shell.set_terminal_open(true, "a", cx);
+                assert!(!shell.right_pane_open(cx));
+                assert!(shell.terminal_open(cx));
+                shell.set_terminal_open(false, "a", cx);
+                assert!(shell.right_pane_open(cx));
+                assert!(shell.settings.sidebar_collapsed);
+                shell.toggle_right_pane(cx);
+                assert!(!shell.settings.sidebar_collapsed);
+                assert!(!shell.right_pane_open(cx));
+
+                // A deliberate sidebar reopen cancels Right's older promise
+                // to restore it. Its own eviction of Right is reversible.
+                shell.toggle_right_pane(cx);
+                shell.toggle_sidebar(cx);
+                assert!(!shell.settings.sidebar_collapsed);
+                assert!(!shell.right_pane_open(cx));
+                shell.toggle_sidebar(cx);
+                assert!(shell.right_pane_open(cx));
+                shell.toggle_right_pane(cx);
+                assert!(shell.settings.sidebar_collapsed);
+
+                // Files follows the same policy without recreating its entity.
+                shell.toggle_right_pane(cx);
+                assert!(shell.right_pane_open(cx));
+                shell.panels.update("a", |panels| panels.files_open = true);
+                shell.record_panel_open(AuxiliaryPanel::Files, "a");
+                shell.reconcile_smart_panels(Some(AuxiliaryPanel::Files), cx);
+                assert!(!shell.right_pane_open(cx));
+                shell.close_files_panel(cx);
+                assert!(shell.right_pane_open(cx));
+
+                // Expansion reversal starts at the painted seam mid-flight.
+                shell.right_tween = None;
+                shell.files_tween = None;
+                shell.toggle_right_pane_expand(cx);
+                let expansion = shell.right_tween.unwrap();
+                shell.render_time = Some(expansion.started + RESIZE.total() / 2);
+                let painted = shell.right_visible_width(cx);
+                shell.toggle_right_pane_expand(cx);
+                assert!((shell.right_tween.unwrap().from - painted).abs() < 0.001);
+            })
+            .unwrap();
     }
 }

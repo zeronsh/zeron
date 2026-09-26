@@ -5,9 +5,9 @@ use crate::settings::{FILES_PANEL_DEFAULT, FILES_PANEL_MAX, FILES_PANEL_MIN};
 
 pub(super) struct FilesPanelResize;
 
-/// Allocate a real column to Files. Reduce its preferred width before taking
-/// space from the chat/editor minima; below those minima, share the shortage
-/// proportionally so no open panel covers another.
+/// Allocate a real column to Files, reducing its preferred width before the
+/// chat or surface minima. The shell fit policy hides a whole column when its
+/// minimum cannot fit, so no settled column is rendered as a sliver.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct FilesPanelLayout {
     width: f32,
@@ -29,24 +29,15 @@ fn files_panel_layout(
         CHAT_PANEL_MIN
     };
     let surface_min = if surfaces_open { RIGHT_PANE_MIN } else { 0.0 };
-    let scale = if preferred > 0.0 {
-        (available / (chat_min + surface_min + preferred.min(FILES_PANEL_MIN))).min(1.0)
+    let max_width = if preferred > 0.0 {
+        (available - chat_min - surface_min).max(0.0)
     } else {
-        // Preserve the existing chat floor when Files is closed.
-        1.0
+        0.0
     };
-    let max_width = (available - (chat_min + surface_min) * scale).max(0.0);
     let width = visible.max(0.0).min(max_width);
-    // As Files animates closed, return its space to the remaining columns
-    // smoothly instead of changing their minima when the tween finishes.
-    let content_scale = if preferred > 0.0 {
-        ((available - width) / (chat_min + surface_min)).min(1.0)
-    } else {
-        1.0
-    };
     FilesPanelLayout {
         width,
-        surface_max: right_pane_max_width(viewport - width, sidebar, chat_min * content_scale),
+        surface_max: right_pane_max_width(viewport - width, sidebar, chat_min),
     }
 }
 
@@ -58,27 +49,37 @@ impl Shell {
     }
 
     fn files_layout(&self, visible: f32, cx: &App) -> FilesPanelLayout {
+        self.files_layout_for_sidebar(visible, self.sidebar_now(), cx)
+    }
+
+    fn files_layout_for_sidebar(&self, visible: f32, sidebar: f32, cx: &App) -> FilesPanelLayout {
+        let fit = self.horizontal_fit();
         files_panel_layout(
             self.viewport_width,
-            self.sidebar_now(),
-            if self.files_panel_open(cx) || self.tween_active(self.files_tween) {
+            sidebar,
+            if fit.files && (self.files_panel_open(cx) || self.tween_active(self.files_tween)) {
                 self.settings.files_panel_width
             } else {
                 0.0
             },
-            visible,
-            self.right_pane_open(cx),
-            self.right_pane_expanded,
+            if fit.files { visible } else { 0.0 },
+            fit.right,
+            self.right_pane_expanded && fit.right,
         )
     }
 
     pub(super) fn files_target(&self, cx: &App) -> f32 {
-        self.files_layout(
+        self.files_target_for_sidebar(self.sidebar_now(), cx)
+    }
+
+    pub(super) fn files_target_for_sidebar(&self, sidebar: f32, cx: &App) -> f32 {
+        self.files_layout_for_sidebar(
             if self.files_panel_open(cx) {
                 self.settings.files_panel_width
             } else {
                 0.0
             },
+            sidebar,
             cx,
         )
         .width
@@ -96,15 +97,25 @@ impl Shell {
         self.files_visible_width(cx)
     }
 
+    pub(super) fn files_reserved_width_for_sidebar(&self, sidebar: f32, cx: &App) -> f32 {
+        self.files_layout_for_sidebar(self.files_visible_width(cx), sidebar, cx)
+            .width
+    }
+
     pub(super) fn surface_max_width(&self, cx: &App) -> f32 {
         self.files_layout(self.files_visible_width(cx), cx)
             .surface_max
     }
 
     pub(super) fn right_visible_width(&self, cx: &App) -> f32 {
+        if !self.horizontal_fit().right {
+            return 0.0;
+        }
         let available =
             (self.viewport_width - self.sidebar_now() - self.files_visible_width(cx)).max(0.0);
-        self.right_now(cx).min(available)
+        self.right_now(cx)
+            .min(available)
+            .min(self.surface_max_width(cx))
     }
 
     fn clear_surface_transitions(&mut self) {
@@ -220,10 +231,20 @@ impl Shell {
         }
         let from = self.files_visible_width(cx);
         let was_open = self.files_panel_open(cx);
-        self.panels.update(&key, |p| p.files_open = true);
         if !was_open {
             self.clear_surface_transitions();
-            self.files_tween = Some(WidthTween::new(from, self.files_target(cx)));
+            // Keep the explorer at its current width while smart behavior
+            // closes an older panel, then calculate the final destination.
+            self.files_tween = Some(WidthTween::new(from, from));
+        }
+        self.panels.update(&key, |p| p.files_open = true);
+        if !was_open {
+            self.record_panel_open(AuxiliaryPanel::Files, &key);
+            self.reconcile_smart_panels(Some(AuxiliaryPanel::Files), cx);
+            self.files_tween = Some(WidthTween::new(
+                from,
+                self.files_target_for_sidebar(self.sidebar_target(), cx),
+            ));
         }
         if let Some(files) = self.files.get(&key).cloned() {
             files.update(cx, |files, cx| {
@@ -247,6 +268,7 @@ impl Shell {
             .update(&self.panel_key(cx), |p| p.files_open = false);
         self.clear_surface_transitions();
         self.files_tween = Some(WidthTween::new(from, 0.0));
+        self.restore_smart_panels(AuxiliaryPanel::Files, cx);
         cx.notify();
     }
 
@@ -256,6 +278,15 @@ impl Shell {
         if !self.files_panel_open(cx) {
             self.add_files_surface(window, cx);
             return;
+        }
+        if !self.horizontal_fit().files {
+            let key = self.panel_key(cx);
+            self.record_panel_open(AuxiliaryPanel::Files, &key);
+            if self.horizontal_fit().files {
+                self.files_tween = Some(WidthTween::new(0.0, self.files_target(cx)));
+                self.add_files_surface(window, cx);
+                return;
+            }
         }
         self.close_files_panel(cx);
         window.focus(&self.composer.focus_handle(cx), cx);
@@ -288,7 +319,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let active = self.panel_key(cx);
-        let visible = matches!(self.route, Route::Chat) && self.files_panel_open(cx);
+        let visible = matches!(self.route, Route::Chat)
+            && self.horizontal_fit().files
+            && self.files_panel_open(cx);
         for (key, files) in &self.files {
             if !visible || *key != active {
                 files.update(cx, |files, _| files.release_git_status());
@@ -296,6 +329,7 @@ impl Shell {
         }
         if !matches!(self.route, Route::Chat)
             || self.active_chat.is_empty()
+            || !self.horizontal_fit().files
             || (!self.files_panel_open(cx) && !self.tween_active(self.files_tween))
         {
             return Empty.into_any_element();
@@ -340,9 +374,10 @@ impl Shell {
             .child(
                 div()
                     .h_full()
+                    .relative()
                     .w(px(self.files_visible_width(cx)))
                     .overflow_hidden()
-                    .child(inner),
+                    .child(inner.absolute().top_0().right_0()),
             )
             .when(
                 self.files_panel_open(cx) && !self.tween_active(self.files_tween),
@@ -409,23 +444,19 @@ mod tests {
     fn files_layout_returns_space_smoothly_during_close() {
         let mut previous_chat = 0.0;
         for visible in [186.0, 140.0, 84.0, 40.0, 0.0] {
-            let layout = files_panel_layout(1000.0, 256.0, 286.0, visible, true, false);
-            let chat = 744.0 - layout.width - layout.surface_max;
-            assert!(chat >= previous_chat && chat <= CHAT_PANEL_MIN);
+            let layout = files_panel_layout(1200.0, 256.0, 286.0, visible, true, false);
+            let chat = 944.0 - layout.width - layout.surface_max;
+            assert!(chat >= previous_chat && chat >= CHAT_PANEL_MIN);
             previous_chat = chat;
         }
         assert_eq!(
-            files_panel_layout(1000.0, 256.0, 286.0, 0.0, true, false),
-            files_panel_layout(1000.0, 256.0, 0.0, 0.0, true, false),
+            files_panel_layout(1200.0, 256.0, 286.0, 0.0, true, false),
+            files_panel_layout(1200.0, 256.0, 0.0, 0.0, true, false),
         );
     }
 
     #[test]
-    fn files_layout_shares_tight_windows_without_covering_any_column() {
-        let compact = files_panel_layout(1000.0, 256.0, 440.0, 440.0, true, false);
-        let chat = 1000.0 - 256.0 - compact.width - compact.surface_max;
-        assert!((compact.width / FILES_PANEL_MIN - chat / CHAT_PANEL_MIN).abs() < 0.001);
-        assert!((compact.surface_max / RIGHT_PANE_MIN - chat / CHAT_PANEL_MIN).abs() < 0.001);
+    fn files_layout_never_takes_space_reserved_for_the_chat_or_surface() {
         for viewport in [0.0, 120.0, 280.0, 600.0, 1000.0, 1200.0, 1600.0] {
             for sidebar in [0.0, 256.0, 400.0] {
                 for surfaces in [false, true] {
@@ -438,17 +469,71 @@ mod tests {
                             assert!(layout.width >= 0.0 && layout.width <= visible);
                             assert!(layout.surface_max >= 0.0);
                             assert!(layout.width + layout.surface_max <= available + 0.001);
-                            if available > 0.0 && surfaces {
-                                assert!(layout.surface_max > 0.0, "the editor must remain visible");
-                                if visible > 0.0 {
-                                    assert!(layout.width > 0.0, "the tree must remain visible");
-                                }
+                            if available
+                                >= CHAT_PANEL_MIN + if surfaces { RIGHT_PANE_MIN } else { 0.0 }
+                            {
+                                assert!(
+                                    available - layout.width - layout.surface_max >= CHAT_PANEL_MIN
+                                        || surfaces && expanded
+                                );
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    #[gpui::test]
+    fn smart_limit_counts_the_explorer_as_a_panel(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            let mut settings = settings::UiSettings::default();
+            settings.panel_behavior = settings::PanelBehavior::Smart2;
+            settings::init(settings, dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "chat".into();
+                shell.viewport_width = 1000.0;
+                shell.add_files_surface(window, cx);
+                assert!(shell.files_panel_open(cx));
+                assert!(shell.settings.sidebar_collapsed);
+                assert!(!shell.sidebar_user_collapsed);
+                assert_eq!(
+                    shell.files_tween.unwrap().to,
+                    shell.settings.files_panel_width
+                );
+
+                shell.toggle_right_pane(cx);
+                assert!(shell.right_pane_open(cx));
+                assert!(!shell.files_panel_open(cx));
+                assert!(shell.files.contains_key("chat"));
+
+                shell.toggle_files_panel(window, cx);
+                assert!(shell.files_panel_open(cx));
+                assert!(!shell.right_pane_open(cx));
+            })
+            .unwrap();
     }
 
     #[gpui::test]

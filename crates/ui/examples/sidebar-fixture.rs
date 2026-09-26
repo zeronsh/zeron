@@ -1,4 +1,8 @@
 //! Isolated native sidebar review fixture. ZERON_SIDEBAR_COMPACT / ZERON_SIDEBAR_HIDE_LABEL select layout.
+//! With `appshots-fixture`, ZERON_SIDEBAR_CAPTURE_DIR exports disclosure,
+//! grouping, and hover states, then exits. ZERON_PALETTE_LIGHT selects light mode.
+//! ZERON_SIDEBAR_PROJECT_ICON seeds a device-local custom project icon.
+//! ZERON_SIDEBAR_SELECTED_PROJECT shows that project in the sidebar header.
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use zeron_ui::*;
 
@@ -16,11 +20,23 @@ fn main() -> anyhow::Result<()> {
         settings.sidebar_show_project_label = std::env::var_os("ZERON_SIDEBAR_HIDE_LABEL").is_none();
         settings.sidebar_organization = settings::SidebarOrganization::InOneList;
         settings.sidebar_width = 310.0;
+        if std::env::var_os("ZERON_SIDEBAR_SELECTED_PROJECT").is_some() {
+            settings.space_filter = Some("project".into());
+        }
         settings.sidebar_pins_mut("local".into()).extend(["chat-0".into(), "chat-1".into()]);
         let project_path = data.join("fieldnotes");
         std::fs::create_dir_all(project_path.join("public")).unwrap();
         std::fs::write(project_path.join("public/favicon.svg"), r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="1" y="1" width="22" height="22" rx="6" fill="#668cf5"/><path d="M7 6h11v3h-8v3h6v3h-6v4H7Z" fill="white"/></svg>"##).unwrap();
         settings.surface = zeron_theme::SurfacePreference::Frosted;
+        if let Some(icon) = std::env::var_os("ZERON_SIDEBAR_PROJECT_ICON") {
+            let directory = data.join("project-icons");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::copy(icon, directory.join("fixture.png")).unwrap();
+            settings.project_icon_overrides.insert(
+                format!("{:?}:local:project", Some("local")),
+                "fixture.png".into(),
+            );
+        }
         settings.save(&data).unwrap();
         settings::init(settings.clone(), data.clone(), cx);
         let fonts = typography::register_fonts(cx);
@@ -48,7 +64,7 @@ fn main() -> anyhow::Result<()> {
             s.spaces = vec![serde_json::from_value(serde_json::json!({"id":"project","deviceId":"local","path":project_path,"createdAt":"2026-09-08T00:00:00Z"})).unwrap()];
             s.chats = vec![serde_json::from_value(serde_json::json!({"id":"browser-fixture","deviceId":"local","spaceId":"project","title":"Build the Fieldnotes workspace","archived":false,"createdAt":"2026-09-08T00:00:00Z","config":{"harness":"claude-code","model":"claude-sonnet-4-6","reasoning":null,"sandbox":"workspace-write"}})).unwrap()];
 
-            for (ix, title) in ["Polish the command palette", "Fix authentication redirects", "Add deployment status", "Review pull request comments", "Improve keyboard navigation", "Update project documentation", "Refine composer spacing", "Audit chat sync", "Build settings search"].iter().enumerate() {
+            for (ix, title) in ["Polish the command palette", "Fix authentication redirects", "Add deployment status", "Review pull request comments", "Improve keyboard navigation", "Update project documentation", "Refine composer spacing", "Audit chat sync", "Build settings search", "Align project and device groups", "Keep long session titles readable at narrow sidebar widths", "Check archive and restore actions", "Pin frequently used sessions", "Verify deployment previews", "Review accessibility labels", "Refactor workspace navigation", "Update release notes", "Investigate background sync", "Polish empty states", "Review archived conversations"].iter().enumerate() {
                 let mut chat = s.chats[0].clone();
                 chat.id = format!("chat-{ix}");
                 chat.title = Some((*title).into());
@@ -76,18 +92,59 @@ fn main() -> anyhow::Result<()> {
                 });
             }
             s.chats[4].last_message_at = Some(chrono::Utc::now());
-            s.chats[8].archived = true;
+            s.sessions.push(zeron_proto::Session {
+                chat_id: "chat-2".into(), device_id: "remote".into(),
+                status: zeron_proto::SessionStatus::Working, started_at: None,
+                updated_at: chrono::Utc::now(), last_completed_turn: None,
+            });
+            for ix in [8, 16, 17, 18, 19, 20] { s.chats[ix].archived = true; }
             s
         });
         let boot = EngineBootConfig { data_dir: data, ipc_port: 0, edge_url: String::new(), edge_token: None, org_id: None, workos_client_id: None, default_harness: HarnessId::ClaudeCode };
-        let _window = cx.open_window(WindowOptions {
+        let window = cx.open_window(WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::new(gpui::point(px(12.),px(30.)), size(px(1100.),px(800.))))),
-            titlebar: Some(gpui::TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: Some(gpui::point(px(14.),px(14.))) }),
+            titlebar: Some(gpui::TitlebarOptions { title: Some("Zeron — Sidebar spacing fixture".into()), appears_transparent: true, traffic_light_position: Some(gpui::point(px(14.),px(14.))) }),
             app_owns_titlebar_drag: true,
             ..Default::default()
         }, |_, cx| cx.new(|cx| shell::Shell::new(state.clone(), boot, cx))).unwrap();
         state.update(cx, |_, cx| cx.notify());
         cx.activate(true);
+        #[cfg(feature = "appshots-fixture")]
+        if let Some(output) = std::env::var_os("ZERON_SIDEBAR_CAPTURE_DIR") {
+            let output = std::path::PathBuf::from(output);
+            std::fs::create_dir_all(&output).unwrap();
+            cx.spawn(async move |cx| {
+                use settings::SidebarOrganization::*;
+                let result: anyhow::Result<()> = async {
+                    for (name, organization, collapsed, hover) in [
+                        ("collapsed", InOneList, true, false),
+                        ("one-list", InOneList, false, false),
+                        ("by-project", ByProject, false, false),
+                        ("by-device", ByDevice, false, false),
+                        ("hover-actions", InOneList, false, true),
+                        ("project-icon-menu", InOneList, false, false),
+                    ] {
+                        window.update(cx, |shell, window, cx| {
+                            window.resize(size(px(1100.), px(1000.)));
+                            shell.fixture_sidebar_state(organization, collapsed, hover, cx);
+                            if name == "project-icon-menu" { shell.fixture_project_icon_menu(cx); }
+                        })?;
+                        cx.background_executor().timer(std::time::Duration::from_millis(600)).await;
+                        let handle: gpui::AnyWindowHandle = window.into();
+                        handle.update(cx, |_, window, cx| -> anyhow::Result<()> {
+                            window.draw(cx).clear();
+                            window.render_to_image()?.save(output.join(format!("{name}.png")))?;
+                            Ok(())
+                        })??;
+                    }
+                    Ok(())
+                }.await;
+                if let Err(error) = result { eprintln!("Sidebar capture failed: {error:#}"); }
+                cx.update(|cx| cx.quit());
+            }).detach();
+        }
+        #[cfg(not(feature = "appshots-fixture"))]
+        let _ = window;
     });
     Ok(())
 }

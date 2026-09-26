@@ -62,13 +62,18 @@ impl Shell {
         }
 
         let selected = self.active_chat == chat_id;
-        self.panels
-            .update(&chat_id, |panels| panels.terminal_open = true);
+        let was_open = self.panels.get(&chat_id).terminal_open;
         if selected {
-            self.terminal_tween = None;
-            self.terminal_tween_task = None;
-            panel.update(cx, |panel, cx| panel.set_open(true, cx));
+            if !was_open {
+                self.set_terminal_open(true, &chat_id, cx);
+            }
             panel.update(cx, |panel, cx| panel.select_tab_by_key(tab, cx));
+        } else {
+            self.panels
+                .update(&chat_id, |panels| panels.terminal_open = true);
+            if !was_open {
+                self.record_panel_open(AuxiliaryPanel::Terminal, &chat_id);
+            }
         }
         cx.notify();
     }
@@ -441,12 +446,11 @@ impl Shell {
         let tab = panel.update(cx, |panel, cx| {
             panel.reserve_tab_for_chat(context.chat_id.clone(), action.name.clone(), cx)
         });
-        self.panels
-            .update(&context.chat_id, |panels| panels.terminal_open = true);
-        self.terminal_tween = None;
-        self.terminal_tween_task = None;
+        let was_open = self.panels.get(&context.chat_id).terminal_open;
+        if !was_open {
+            self.set_terminal_open(true, &context.chat_id, cx);
+        }
         panel.update(cx, |panel, cx| {
-            panel.set_open(true, cx);
             panel.select_tab_by_key(tab, cx);
         });
 
@@ -554,6 +558,7 @@ impl Shell {
         // with the frost on its own back layer so the dropdown menu (a
         // deferred child) never lands inside the blur.
         let mut control = div()
+            .debug_selector(|| "project-actions-control".into())
             .relative()
             .flex_none()
             .flex()
@@ -1072,6 +1077,8 @@ fn project_action_params(
 
 const ACTION_CONTROL_HEIGHT: f32 = 24.0;
 const ACTION_CONTROL_RADIUS: f32 = 7.0;
+// The empty-state "Add action" label is wider than the compact split button.
+pub(super) const PROJECT_ACTION_CONTROL_MIN_WIDTH: f32 = 96.0;
 
 /// The pill's fill (or its hover): the composer's own material and edge, so
 /// the two read as one family. Hover is a faint wash over that dark fill —

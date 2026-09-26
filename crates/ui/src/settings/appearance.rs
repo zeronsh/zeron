@@ -22,6 +22,7 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons;
 use crate::popover::{self, Popup};
 use crate::settings::widgets;
+use crate::settings::{PanelBehavior, SavePolicy};
 use crate::theme::{Appearance, Theme};
 use crate::theme_library;
 use crate::typography::{self, FontAvailability, UiFontFamily, UiFontSize};
@@ -51,6 +52,8 @@ pub enum FontKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AppearanceSettingsEvent {
     CodeFontSizeChanged(f32),
+    PanelBehaviorChanged(PanelBehavior),
+    RestoreEvictedPanelsChanged(bool),
 }
 
 impl FontKind {
@@ -1115,6 +1118,57 @@ fn surface_helper(surface: SurfacePreference, resolved: SurfaceTreatment) -> Str
         SurfacePreference::Frosted => "Translucent surfaces".into(),
         SurfacePreference::Opaque => "Solid surfaces".into(),
     }
+}
+
+fn panel_behavior_choice(
+    theme: &Theme,
+    behavior: PanelBehavior,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
+    panel_choice(
+        theme,
+        format!("panel-behavior-{}", behavior.label()),
+        behavior.label(),
+        selected,
+    )
+}
+
+fn panel_choice(
+    theme: &Theme,
+    id: String,
+    label: &'static str,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(id))
+        .h(px(30.0))
+        .px(px(10.0))
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(if selected { theme.accent } else { theme.border })
+        .bg(if selected {
+            theme.accent_wash
+        } else {
+            theme.surface_raised.opacity(0.28)
+        })
+        .text_size(crate::typography::ui_rems(11.5))
+        .font_weight(if selected {
+            gpui::FontWeight::MEDIUM
+        } else {
+            gpui::FontWeight::NORMAL
+        })
+        .text_color(if selected {
+            theme.accent
+        } else {
+            theme.text_muted
+        })
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .when(!selected, |control| {
+            control.hover(|style| style.bg(theme.surface_raised_hover))
+        })
+        .child(label)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2573,6 +2627,40 @@ impl Render for AppearancePage {
         let current_background = ui_settings.new_thread_composer_background;
         let current_background_effect = ui_settings.new_thread_background_effect;
         let reduced_motion = crate::motion::reduced_motion(cx);
+        let current_panel_behavior = ui_settings.panel_behavior;
+        let panel_behavior_controls = PanelBehavior::ALL
+            .into_iter()
+            .map(|behavior| {
+                panel_behavior_choice(&theme, behavior, behavior == current_panel_behavior)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        crate::settings::update(SavePolicy::Immediate, cx, |settings| {
+                            settings.panel_behavior = behavior;
+                        });
+                        cx.emit(AppearanceSettingsEvent::PanelBehaviorChanged(behavior));
+                        cx.notify();
+                    }))
+            })
+            .collect::<Vec<_>>();
+        let restore_controls = [(false, "Stay closed"), (true, "Reopen")]
+            .into_iter()
+            .map(|(restore, label)| {
+                panel_choice(
+                    &theme,
+                    format!("restore-evicted-panels-{restore}"),
+                    label,
+                    restore == ui_settings.restore_evicted_panels,
+                )
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    crate::settings::update(SavePolicy::Immediate, cx, |settings| {
+                        settings.restore_evicted_panels = restore;
+                    });
+                    cx.emit(AppearanceSettingsEvent::RestoreEvictedPanelsChanged(
+                        restore,
+                    ));
+                    cx.notify();
+                }))
+            })
+            .collect::<Vec<_>>();
         let cards = AppearanceMode::ALL
             .into_iter()
             .map(|mode| {
@@ -3036,6 +3124,67 @@ impl Render for AppearancePage {
                                     &theme,
                                     "Material and background",
                                     widgets::section_card(&theme).mt_0().children(settings_rows),
+                                ))
+                                .child(widgets::section(
+                                    &theme,
+                                    "Layout",
+                                    widgets::section_card(&theme).mt_0().child(
+                                        widgets::card_row(&theme, false)
+                                            .child(widgets::row_tile(&theme, icons::WIDGET))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .child(widgets::row_title(
+                                                        &theme,
+                                                        "Smart panel behavior",
+                                                    ))
+                                                    .child(widgets::meta_line(
+                                                        &theme,
+                                                        vec![div()
+                                                            .child("Conversation counts as one panel. Opening another hides the least recently opened panel when the limit is reached.")
+                                                            .into_any_element()],
+                                                    )),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .ml(px(10.0))
+                                                    .max_w(px(340.0))
+                                                    .flex()
+                                                    .flex_wrap()
+                                                    .justify_end()
+                                                    .gap(px(6.0))
+                                                    .children(panel_behavior_controls),
+                                            ),
+                                    )
+                                    .child(
+                                        widgets::card_row(&theme, true)
+                                            .child(widgets::row_tile(&theme, icons::WIDGET))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .child(widgets::row_title(
+                                                        &theme,
+                                                        "Reopen hidden panels",
+                                                    ))
+                                                    .child(widgets::meta_line(
+                                                        &theme,
+                                                        vec![div()
+                                                            .child("When you close a panel, reopen panels it hid to make room.")
+                                                            .into_any_element()],
+                                                    )),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .ml(px(10.0))
+                                                    .flex()
+                                                    .gap(px(6.0))
+                                                    .children(restore_controls),
+                                            ),
+                                    ),
                                 ))
                                 .child(
                                     widgets::section_card(&theme)

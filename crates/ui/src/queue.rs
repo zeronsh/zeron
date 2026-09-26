@@ -75,12 +75,15 @@ impl Render for QueueActionTooltip {
 /// Compact, borderless rows inside the queue's single glass surface.
 const ROW_HEIGHT: f32 = 36.0;
 const QUEUE_TEXT_SIZE: f32 = 12.5;
-const ROW_GAP: f32 = 0.0;
+const ROW_GAP: f32 = 4.0;
 const ROW_SLOT: f32 = ROW_HEIGHT + ROW_GAP;
 const ROW_PAD_X: f32 = 8.0;
 const ROW_RADIUS: f32 = 8.0;
 const PANEL_RADIUS: f32 = 16.0;
-const PANEL_PAD_TOP: f32 = 0.0;
+// Keep the wash inside the tray's curve, including while rows are scrolled or
+// dragged. The inset and row radius add up to the outer radius.
+const PANEL_ROW_INSET: f32 = PANEL_RADIUS - ROW_RADIUS;
+const PANEL_PAD_TOP: f32 = PANEL_ROW_INSET;
 /// The custom 24px queue glyphs have quieter geometry than the legacy set, so
 /// render them slightly larger to preserve the previous optical weight.
 const QUEUE_ICON_SIZE: f32 = 13.0;
@@ -247,9 +250,10 @@ fn queue_panel_surface(theme: &Theme) -> gpui::Div {
         .border_1()
         .border_color(theme.border)
         .when(!theme.is_frost(), |el| el.shadow_lg())
-        // Keep visible rows flush with the tray; only the portion tucked behind
-        // the composer needs padding.
-        .pb(px(QUEUE_COMPOSER_OVERLAP))
+        .px(px(PANEL_ROW_INSET))
+        .pt(px(PANEL_PAD_TOP))
+        // The lower gutter remains visible above the overlapping composer.
+        .pb(px(QUEUE_COMPOSER_OVERLAP + PANEL_ROW_INSET))
         .flex()
         .flex_col()
 }

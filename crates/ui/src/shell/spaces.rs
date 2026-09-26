@@ -1181,17 +1181,210 @@ mod pinned_session_tests {
         let active = cx.debug_bounds("chat-older").unwrap();
         let archived = cx.debug_bounds("chat-archived").unwrap();
         assert_eq!(active.size, archived.size);
+        if compact || !show_label {
+            let title = cx.debug_bounds("chat-title-older").unwrap();
+            let metadata = cx.debug_bounds("chat-trailing-older").unwrap();
+            assert!(metadata.left() - title.right() >= px(12.0));
+            assert!(metadata.right() <= active.right() - px(Theme::SPACE_SM));
+        }
         assert_eq!(cx.debug_bounds("chat-branch-archived").is_some(), !compact);
         assert_eq!(
             cx.debug_bounds("chat-device-archived").is_some(),
             !compact && show_label
         );
         if compact {
-            assert!(cx.debug_bounds("chat-status-archived").is_some());
+            assert!(cx.debug_bounds("chat-status-archived").is_none());
             let time = cx.debug_bounds("chat-time-archived").unwrap();
             cx.simulate_mouse_move(archived.center(), None, gpui::Modifiers::default());
+            assert!(cx.debug_bounds("chat-time-archived").is_none());
+            let pin = cx.debug_bounds("chat-archived-pin").unwrap();
+            let archive = cx.debug_bounds("chat-archived-archive").unwrap();
+            assert_eq!(archive.left() - pin.right(), px(2.0));
+            assert_eq!(archive.right(), time.right() + px(4.0));
+            for (selector, target) in [
+                ("chat-archived-pin-surface", pin),
+                ("chat-archived-archive-surface", archive),
+            ] {
+                let surface = cx.debug_bounds(selector).unwrap();
+                assert_eq!(surface.center(), target.center());
+                assert_eq!(target.size, gpui::size(px(24.0), px(24.0)));
+                assert_eq!(surface.size, gpui::size(px(20.0), px(20.0)));
+                assert!(surface.top() >= archived.top() + px(4.0));
+                assert!(surface.bottom() <= archived.bottom() - px(4.0));
+            }
+            assert_eq!(cx.debug_bounds("chat-archived").unwrap(), archived);
+            cx.simulate_mouse_move(active.center(), None, gpui::Modifiers::default());
             assert_eq!(cx.debug_bounds("chat-time-archived").unwrap(), time);
         }
+
+        // Activity and elapsed time occupy one trailing slot, never both.
+        cx.simulate_mouse_move(
+            gpui::point(px(0.0), px(0.0)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        for status in [
+            zeron_proto::SessionStatus::Working,
+            zeron_proto::SessionStatus::AwaitingInput,
+            zeron_proto::SessionStatus::Errored,
+        ] {
+            shell.update(cx, |shell, cx| {
+                shell.chat_status_hover = None;
+                shell.state.update(cx, |state, _| {
+                    let chat = state
+                        .chats
+                        .iter_mut()
+                        .find(|chat| chat.id == "older")
+                        .unwrap();
+                    chat.last_message_at = Some(chat.created_at);
+                    state.sessions = vec![zeron_proto::Session {
+                        chat_id: "older".into(),
+                        device_id: "local".into(),
+                        status,
+                        started_at: None,
+                        updated_at: Utc::now(),
+                        last_completed_turn: None,
+                    }];
+                });
+                cx.notify();
+            });
+            assert!(cx.debug_bounds("chat-time-older").is_none());
+            let status = cx.debug_bounds("chat-status-older").unwrap();
+            assert!(status.right() > active.center().x);
+            assert_eq!(cx.debug_bounds("chat-older").unwrap(), active);
+        }
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| state.sessions.clear());
+            cx.notify();
+        });
+        assert!(cx.debug_bounds("chat-status-older").is_some());
+        assert!(cx.debug_bounds("chat-time-older").is_none());
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state
+                    .chats
+                    .iter_mut()
+                    .find(|chat| chat.id == "older")
+                    .unwrap()
+                    .last_message_at = None;
+            });
+            cx.notify();
+        });
+        assert!(cx.debug_bounds("chat-status-older").is_none());
+        assert!(cx.debug_bounds("chat-time-older").is_some());
+
+        // Switching grouping must not lower the first row or Archived.
+        for organization in [
+            SidebarOrganization::ByProject,
+            SidebarOrganization::ByDevice,
+            SidebarOrganization::InOneList,
+        ] {
+            shell.update(cx, |shell, cx| {
+                shell.settings.sidebar_organization = organization;
+                shell.sidebar_prev_order.clear();
+                shell.sidebar_resort.clear();
+                shell.sidebar_new_keys.clear();
+                cx.notify();
+            });
+            assert_eq!(cx.debug_bounds("chat-older").unwrap(), active);
+            assert_eq!(cx.debug_bounds("chat-archived").unwrap(), archived);
+        }
+
+        // All disclosure boundaries share one gap, including all-collapsed
+        // and mixed open/closed states (the original spacing regression).
+        for pins_open in [false, true] {
+            for sessions_open in [false, true] {
+                shell.update(cx, |shell, cx| {
+                    shell
+                        .settings
+                        .sidebar_pins_mut("local".into())
+                        .push("newer".into());
+                    shell.pinned_open = pins_open;
+                    shell.sessions_open = sessions_open;
+                    shell.archived_open = false;
+                    shell.sidebar_prev_order.clear();
+                    shell.sidebar_resort.clear();
+                    shell.sidebar_new_keys.clear();
+                    cx.notify();
+                });
+                let pinned = cx.debug_bounds("sidebar-pinned-section").unwrap();
+                let sessions = cx.debug_bounds("sessions-toggle").unwrap();
+                let shelf = cx.debug_bounds("archived-toggle").unwrap();
+                let last = if sessions_open {
+                    cx.debug_bounds("chat-older").unwrap()
+                } else {
+                    sessions
+                };
+                assert_eq!(sessions.top() - pinned.bottom(), px(SIDEBAR_SECTION_GAP));
+                assert_eq!(shelf.top() - last.bottom(), px(SIDEBAR_SECTION_GAP));
+                shell.update(cx, |shell, _| {
+                    shell.settings.sidebar_pins_mut("local".into()).clear();
+                });
+            }
+        }
+        for groups_open in [false, true] {
+            shell.update(cx, |shell, cx| {
+                shell.settings.sidebar_organization = SidebarOrganization::ByDevice;
+                shell
+                    .settings
+                    .sidebar_pins_mut("local".into())
+                    .push("newer".into());
+                shell.state.update(cx, |state, _| {
+                    let mut remote = state
+                        .chats
+                        .iter()
+                        .find(|chat| chat.id == "older")
+                        .unwrap()
+                        .clone();
+                    remote.id = "remote-row".into();
+                    remote.device_id = "remote".into();
+                    state.chats.push(remote);
+                });
+                shell.sidebar_collapsed_groups = if groups_open {
+                    Default::default()
+                } else {
+                    ["device:local".into(), "device:remote".into()]
+                        .into_iter()
+                        .collect()
+                };
+                shell.sidebar_prev_order.clear();
+                shell.sidebar_resort.clear();
+                shell.sidebar_new_keys.clear();
+                cx.notify();
+            });
+            let pinned = cx.debug_bounds("sidebar-pinned-section").unwrap();
+            let local = cx.debug_bounds("sidebar-group-device:local").unwrap();
+            let remote = cx.debug_bounds("sidebar-group-device:remote").unwrap();
+            let shelf = cx.debug_bounds("archived-toggle").unwrap();
+            let local_end = if groups_open {
+                cx.debug_bounds("chat-older").unwrap()
+            } else {
+                local
+            };
+            let remote_end = if groups_open {
+                cx.debug_bounds("chat-remote-row").unwrap()
+            } else {
+                remote
+            };
+            assert_eq!(local.top() - pinned.bottom(), px(SIDEBAR_SECTION_GAP));
+            assert_eq!(remote.top() - local_end.bottom(), px(SIDEBAR_SECTION_GAP));
+            assert_eq!(shelf.top() - remote_end.bottom(), px(SIDEBAR_SECTION_GAP));
+            shell.update(cx, |shell, cx| {
+                shell.settings.sidebar_pins_mut("local".into()).clear();
+                shell.state.update(cx, |state, _| {
+                    state.chats.retain(|chat| chat.id != "remote-row")
+                });
+            });
+        }
+        shell.update(cx, |shell, cx| {
+            shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+            shell.sidebar_collapsed_groups.clear();
+            shell.pinned_open = true;
+            shell.sessions_open = true;
+            shell.archived_open = true;
+            shell.sidebar_prev_order.clear();
+            cx.notify();
+        });
 
         // Sessions owns all unpinned rows, including their keyboard traversal.
         for open in [false, true] {
@@ -1213,15 +1406,23 @@ mod pinned_session_tests {
             });
         }
         if compact {
-            let status = cx.debug_bounds("chat-status-older").unwrap();
+            assert!(cx.debug_bounds("chat-status-older").is_none());
             let time = cx.debug_bounds("chat-time-older").unwrap();
-            assert!(status.right() < time.left());
             let row = cx.debug_bounds("chat-older").unwrap();
             let title = cx.debug_bounds("chat-title-older").unwrap();
             cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
             assert!(cx.debug_bounds("chat-title-older").unwrap().size.width < title.size.width);
-            assert_eq!(cx.debug_bounds("chat-status-older").unwrap(), status);
-            assert_eq!(cx.debug_bounds("chat-time-older").unwrap(), time);
+            assert!(cx.debug_bounds("chat-status-older").is_none());
+            assert!(cx.debug_bounds("chat-time-older").is_none());
+            let pin = cx.debug_bounds("chat-older-pin").unwrap();
+            let archive = cx.debug_bounds("chat-older-archive").unwrap();
+            assert!(pin.right() <= archive.left());
+            assert_eq!(archive.right(), time.right() + px(4.0));
+            for target in [pin.center(), archive.center()] {
+                cx.simulate_mouse_move(target, None, gpui::Modifiers::default());
+                assert_eq!(cx.debug_bounds("chat-older-pin").unwrap(), pin);
+                assert_eq!(cx.debug_bounds("chat-older-archive").unwrap(), archive);
+            }
         }
 
         // Dragging a regular session over another regular session is a no-op.
@@ -1922,11 +2123,9 @@ const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 10] = [
 // list items stay tightly related at 2px, while section boundaries use 12px
 // (well over 2x the intra-list gap). Disclosure content gets a small 4px
 // handoff from its header without leaving dead space while collapsed.
-const SIDEBAR_SECTION_GAP: f32 = 12.0;
+pub(super) const SIDEBAR_SECTION_GAP: f32 = 12.0;
 pub(super) const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 28.0;
 pub(super) const SIDEBAR_DISCLOSURE_BODY_INSET: f32 = 4.0;
-const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
-    SIDEBAR_SECTION_GAP + SIDEBAR_DISCLOSURE_HEADER_HEIGHT;
 pub(super) const SIDEBAR_DISCLOSURE_TWEEN_GRACE: std::time::Duration =
     std::time::Duration::from_millis(120);
 
@@ -1977,7 +2176,15 @@ fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyEle
                 .child(label),
         ))
         .child(div().flex_1())
-        .child(chevron)
+        .child(
+            div()
+                .size(px(24.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(chevron),
+        )
 }
 
 /// One activatable row of the open dropdown, in nav order. `AddSpace` names
@@ -3673,8 +3880,48 @@ impl Shell {
         };
         let open = self.spaces_menu.is_open();
 
+        let selected_project = filter.filter(|id| self.state.read(cx).space_row(id).is_some());
+        let project_icon = if let Some(space_id) = selected_project.clone() {
+            let keyboard_space_id = space_id.clone();
+            div()
+                .id("selected-project-icon")
+                .debug_selector(|| "selected-project-icon".into())
+                .role(gpui::Role::Button)
+                .aria_label("Change project icon")
+                .tab_index(0)
+                .size(px(24.0))
+                .mx(px(-4.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.0))
+                .focus_visible(|style| style.bg(theme.glass_hover()))
+                .hover(|style| style.bg(theme.glass_hover()))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(self.render_space_icon(&space_id, 16.0, cx))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.choose_project_icon(space_id.clone(), cx);
+                }))
+                .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                    if !event.is_held && matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        this.choose_project_icon(keyboard_space_id.clone(), cx);
+                    }
+                }))
+                .into_any_element()
+        } else {
+            icon(icons::FOLDER)
+                .size(px(16.0))
+                .flex_none()
+                .text_color(theme.text_muted)
+                .into_any_element()
+        };
+
         let trigger = div()
             .id("spaces-filter")
+            .debug_selector(|| "spaces-filter".into())
             .flex_1()
             .min_w_0()
             .h(px(29.0))
@@ -3715,12 +3962,18 @@ impl Shell {
                     this.open_spaces_menu(window, cx);
                 }
             }))
-            .child(
-                icon(icons::FOLDER)
-                    .size(px(16.0))
-                    .flex_none()
-                    .text_color(theme.text_muted),
-            )
+            .when_some(selected_project, |el, space_id| {
+                el.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.close_spaces_menu(cx);
+                        this.space_menu.open((space_id.clone(), event.position));
+                        cx.notify();
+                    }),
+                )
+            })
+            .child(project_icon)
             // flex_1 pushes the caret to the trigger's right edge and gives
             // long space names a bound to fade against; the "@ device"
             // tag hugs the name inside it rather than sitting by the caret.
@@ -4669,6 +4922,10 @@ impl Shell {
             let toggle_motion_key = motion_key.clone();
             let header = sidebar_disclosure_header(theme, visible_label, chevron)
                 .id(SharedString::from(format!("sidebar-group-{collapse_key}")))
+                .debug_selector({
+                    let key = collapse_key.clone();
+                    move || format!("sidebar-group-{key}")
+                })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
                     this.begin_sidebar_disclosure_motion(
@@ -4689,13 +4946,21 @@ impl Shell {
                 body_height,
                 body.into_any_element(),
             );
-            let height =
-                SIDEBAR_DISCLOSURE_SECTION_HEIGHT + if collapsed { 0.0 } else { body_height };
+            // The first group shares the Sessions header's top edge. Only
+            // sections following pins or another group need the section gap.
+            let section_gap = if rendered.is_empty() && self.sidebar_session_transfer.is_none() {
+                0.0
+            } else {
+                SIDEBAR_SECTION_GAP
+            };
+            let height = section_gap
+                + SIDEBAR_DISCLOSURE_HEADER_HEIGHT
+                + if collapsed { 0.0 } else { body_height };
             let element = div()
                 .w_full()
                 .flex()
                 .flex_col()
-                .pt(px(SIDEBAR_SECTION_GAP))
+                .pt(px(section_gap))
                 .child(header)
                 .child(body)
                 .into_any_element();
@@ -4944,6 +5209,7 @@ impl Shell {
         let chevron = self.sidebar_disclosure_chevron("archived", open, theme);
         let header = sidebar_disclosure_header(theme, label, chevron)
             .id("archived-toggle")
+            .debug_selector(|| "archived-toggle".into())
             .on_click(cx.listener(move |this, _, _, cx| {
                 let was_open = this.archived_open;
                 this.begin_sidebar_disclosure_motion(
@@ -6296,7 +6562,7 @@ impl Shell {
 
     // ---- space context menu / rename / delete overlays ----
 
-    fn close_space_menu(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn close_space_menu(&mut self, cx: &mut Context<Self>) {
         if self.space_menu.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.space_menu);
             cx.notify();
@@ -6365,6 +6631,11 @@ impl Shell {
             let closing = self.space_menu.closing_since();
             let rename_id = space_id.clone();
             let delete_id = space_id.clone();
+            let icon_id = space_id.clone();
+            let reset_icon_id = space_id.clone();
+            let has_icon = self
+                .project_icon_key(&space_id, cx)
+                .is_some_and(|key| self.settings.project_icon_overrides.contains_key(&key));
             let menu = popover::popover_card(&theme)
                 .w(px(170.0))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -6381,6 +6652,42 @@ impl Shell {
                         .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
                         .child(SharedString::from("Rename…")),
                 )
+                .child(
+                    popover::menu_row(&theme, false, format!("space-menu-icon-{space_id}"))
+                        .id("space-menu-icon")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.choose_project_icon(icon_id.clone(), cx)
+                        }))
+                        .child(
+                            icon(icons::FILE_IMAGE)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(if has_icon {
+                            "Change icon…"
+                        } else {
+                            "Choose icon…"
+                        }),
+                )
+                .when(has_icon, |el| {
+                    el.child(
+                        popover::menu_row(
+                            &theme,
+                            false,
+                            format!("space-menu-reset-icon-{space_id}"),
+                        )
+                        .id("space-menu-reset-icon")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.reset_project_icon(&reset_icon_id, cx)
+                        }))
+                        .child(
+                            icon(icons::CLOSE)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child("Reset icon"),
+                    )
+                })
                 .child(popover::menu_separator())
                 .child(
                     popover::menu_row(&theme, false, format!("space-menu-delete-{space_id}"))
