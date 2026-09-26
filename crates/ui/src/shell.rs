@@ -1755,7 +1755,6 @@ pub struct Shell {
     side_chats: std::collections::HashMap<u64, SideChatTab>,
     side_chat_seq: u64,
     side_chat_creating: bool,
-    side_chat_error: Option<SharedString>,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
@@ -2195,7 +2194,6 @@ impl Shell {
             side_chats: std::collections::HashMap::new(),
             side_chat_seq: 0,
             side_chat_creating: false,
-            side_chat_error: None,
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
@@ -2392,7 +2390,6 @@ impl Shell {
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
             self.side_chat_creating = false;
-            self.side_chat_error = None;
         }
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.sidebar_notice = Some(notice.into());
@@ -3177,6 +3174,21 @@ impl Shell {
         }
     }
 
+    /// Whether `chat_id` is a side chat open among the current conversation's
+    /// right-pane tabs.
+    fn side_chat_open_here(&self, chat_id: &str, cx: &App) -> bool {
+        self.right_tabs
+            .get(&self.panel_key(cx))
+            .is_some_and(|tabs| {
+                tabs.iter().any(|tab| match tab {
+                    RightSurface::SideChat(id) => self.side_chats.get(id).is_some_and(|side| {
+                        side.state.read(cx).selected_chat.as_deref() == Some(chat_id)
+                    }),
+                    _ => false,
+                })
+            })
+    }
+
     fn activate_session_link(
         &mut self,
         activation: &crate::markdown::render::LinkActivation,
@@ -3184,18 +3196,25 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> crate::markdown::render::LinkOutcome {
         use crate::markdown::render::{LinkAction, LinkOutcome};
-        if self.active_chat.is_empty()
-            || activation.source_session.as_deref() != Some(self.active_chat.as_str())
-            || self.state.read(cx).selected_chat.as_deref() != Some(self.active_chat.as_str())
-        {
+        let Some(source) = activation.source_session.clone() else {
+            return LinkOutcome::Rejected;
+        };
+        let from_main = !self.active_chat.is_empty()
+            && source == self.active_chat
+            && self.state.read(cx).selected_chat.as_deref() == Some(self.active_chat.as_str());
+        if !from_main && !self.side_chat_open_here(&source, cx) {
             return LinkOutcome::Rejected;
         }
         if activation.target.navigation.is_err() {
             return if matches!(
                 activation.action,
                 LinkAction::Primary | LinkAction::Internal
-            ) && self.open_workspace_file_link(&activation.target.original, window, cx)
-            {
+            ) && self.open_workspace_file_link(
+                &source,
+                &activation.target.original,
+                window,
+                cx,
+            ) {
                 LinkOutcome::Internal
             } else {
                 LinkOutcome::Rejected
@@ -3400,25 +3419,30 @@ impl Shell {
         }
     }
 
+    /// Open a transcript's file link, resolved against the linking chat's
+    /// checkout (a side chat's own, which it inherits from its parent).
     fn open_workspace_file_link(
         &mut self,
+        chat_id: &str,
         target: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(chat) = self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .find(|chat| chat.id == self.active_chat)
-        else {
+        let cwd = |state: &Entity<AppState>| {
+            state
+                .read(cx)
+                .chats
+                .iter()
+                .find(|chat| chat.id == chat_id)
+                .and_then(|chat| chat.cwd.clone())
+        };
+        // A just-created fork may reach the main list after its own state.
+        let root =
+            cwd(&self.state).or_else(|| self.side_chats.values().find_map(|side| cwd(&side.state)));
+        let Some(root) = root else {
             return false;
         };
-        let Some(root) = chat.cwd.as_deref() else {
-            return false;
-        };
-        let Some(link) = resolve_workspace_file_link(target, root) else {
+        let Some(link) = resolve_workspace_file_link(target, &root) else {
             return false;
         };
 
@@ -3759,7 +3783,15 @@ impl Shell {
                 panel.update(cx, |panel, cx| panel.close_tab_by_key(tab, window, cx));
             }
             RightSurface::SideChat(id) => {
-                self.side_chats.remove(&id);
+                // An unsent draft outlives the tab: the side chat stays
+                // loaded, detached, and reopening it restores the draft.
+                if self
+                    .side_chats
+                    .get(&id)
+                    .is_none_or(|side| !side.composer.read(cx).has_draft(cx))
+                {
+                    self.side_chats.remove(&id);
+                }
                 if was_active {
                     window.focus(&self.composer.focus_handle(cx), cx);
                 }
@@ -4909,6 +4941,15 @@ impl Shell {
             || matches!(self.route, Route::Settings(_))
             || self.add_space.is_some()
             || self.composer.read(cx).pickers().read(cx).is_open()
+            || self.open_side_chat_pickers(cx).is_some()
+    }
+
+    /// The pickers of a side chat whose picker popover is open.
+    fn open_side_chat_pickers(&self, cx: &App) -> Option<Entity<crate::pickers::Pickers>> {
+        self.side_chats
+            .values()
+            .map(|side| side.composer.read(cx).pickers().clone())
+            .find(|pickers| pickers.read(cx).is_open())
     }
 
     /// Track held modifiers for sidebar jump hints and the queue's submit hint.
@@ -11761,7 +11802,11 @@ impl Render for Shell {
             // this matched binding beats its key handler to the dispatch —
             // forward the slot instead of eating it.
             .on_action(cx.listener(|this, jump: &JumpSession, _, cx| {
-                let pickers = this.composer.read(cx).pickers().clone();
+                // An open model menu — the main composer's or a side
+                // chat's — takes the digit as its model shortcut.
+                let pickers = this
+                    .open_side_chat_pickers(cx)
+                    .unwrap_or_else(|| this.composer.read(cx).pickers().clone());
                 let handled = pickers.update(cx, |pickers, cx| pickers.jump_model_slot(jump.0, cx));
                 if !handled && !this.overlay_owns_keyboard(cx) {
                     this.jump_to_session(jump.0, cx)

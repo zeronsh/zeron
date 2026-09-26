@@ -23,12 +23,19 @@ impl Shell {
         }
     }
 
+    /// Side-chat creation failed (nothing to fork yet, an engine or remote
+    /// device error): say why in the conversation's composer.
+    fn show_side_chat_error(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let message = message.into();
+        self.composer
+            .update(cx, |composer, cx| composer.show_error(message, cx));
+    }
+
     /// The surface picker's "Side chat": fork the current conversation
     /// through its latest completed response, as a child of it.
     pub(super) fn create_side_chat(&mut self, cx: &mut Context<Self>) {
         let Some(source) = self.state.read(cx).selected_chat_row().cloned() else {
-            self.side_chat_error = Some("Start a conversation before creating a side chat.".into());
-            cx.notify();
+            self.show_side_chat_error("Start a conversation before creating a side chat.", cx);
             return;
         };
         let parent = source.id.clone();
@@ -53,7 +60,6 @@ impl Shell {
         };
         let key = self.panel_key(cx);
         self.side_chat_creating = true;
-        self.side_chat_error = None;
         let params = serde_json::json!({
             "chatId": uuid::Uuid::new_v4().to_string(),
             "sourceChatId": source.id,
@@ -79,7 +85,7 @@ impl Shell {
                             this.open_side_chat(chat, key, cx);
                         }
                     }
-                    Err(error) => this.side_chat_error = Some(error.to_string().into()),
+                    Err(error) => this.show_side_chat_error(error.to_string(), cx),
                 }
                 cx.notify();
             });
@@ -102,8 +108,7 @@ impl Shell {
             None => state.selected_chat_row().cloned(),
         };
         let Some(parent) = parent else {
-            self.side_chat_error = Some("Start a conversation before creating a side chat.".into());
-            cx.notify();
+            self.show_side_chat_error("Start a conversation before creating a side chat.", cx);
             return;
         };
         let Some(engine) = state.engine().cloned() else {
@@ -133,14 +138,13 @@ impl Shell {
             "parentChatId": parent.id,
         });
         self.side_chat_creating = true;
-        self.side_chat_error = None;
         cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::MUTATE, params).await;
             let _ = this.update(cx, |this, cx| {
                 this.side_chat_creating = false;
                 match result {
                     Ok(_) => this.open_side_chat(chat, key, cx),
-                    Err(error) => this.side_chat_error = Some(error.to_string().into()),
+                    Err(error) => this.show_side_chat_error(error.to_string(), cx),
                 }
                 cx.notify();
             });
@@ -193,6 +197,11 @@ impl Shell {
             .iter()
             .find(|(_, tab)| tab.state.read(cx).selected_chat.as_deref() == Some(&chat.id))
         {
+            // A closed tab kept for its draft is detached: re-attach it.
+            let tabs = self.right_tabs.entry(key.clone()).or_default();
+            if !tabs.contains(&RightSurface::SideChat(id)) {
+                tabs.push(RightSurface::SideChat(id));
+            }
             if key == self.panel_key(cx) {
                 self.set_right_active(RightSurface::SideChat(id), cx);
             } else {
@@ -212,7 +221,11 @@ impl Shell {
         transcript.update(cx, |transcript, _| {
             transcript.set_workspace_link_handler(links)
         });
-        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        let composer = cx.new(|cx| {
+            let mut composer = Composer::new(state.clone(), cx);
+            composer.set_side_chat(cx);
+            composer
+        });
         let events = vec![
             cx.subscribe(&transcript, Self::on_transcript_event),
             cx.subscribe(&composer, {
@@ -420,6 +433,121 @@ mod tests {
                 assert!(shell.right_surface_rows(cx).is_empty());
                 assert!(!shell.right_pane_open(cx));
                 assert_eq!(shell.resolved_right_active(cx), RightSurface::Picker);
+            })
+            .unwrap();
+    }
+
+    fn shell_window(dir: &std::path::Path, cx: &mut TestAppContext) -> gpui::WindowHandle<Shell> {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir, cx);
+        });
+        cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        })
+    }
+
+    /// Review feedback on the side-chat pane: its links resolve, a closed
+    /// tab keeps its draft, its model menu owns the digit shortcuts, and
+    /// creation failures are shown.
+    #[gpui::test]
+    fn side_chat_links_drafts_shortcuts_and_errors(cx: &mut TestAppContext) {
+        use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
+        let dir = tempfile::tempdir().unwrap();
+        let window = shell_window(dir.path(), cx);
+        // Nothing to fork yet: the reason shows in the composer.
+        window
+            .update(cx, |shell, _, cx| {
+                shell.create_side_chat(cx);
+                assert!(
+                    shell
+                        .composer
+                        .read(cx)
+                        .failure()
+                        .is_some_and(|message| message.contains("Start a conversation"))
+                );
+            })
+            .unwrap();
+        let chat: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+            "id": "side", "parentChatId": "main", "deviceId": "local", "cwd": "/tmp",
+            "archived": false, "createdAt": Utc::now(),
+        }))
+        .unwrap();
+        window
+            .update(cx, |shell, _, cx| {
+                shell.active_chat = "main".into();
+                shell
+                    .state
+                    .update(cx, |state, _| state.selected_chat = Some("main".into()));
+                shell.toggle_right_pane(cx);
+                shell.open_side_chat(chat.clone(), shell.panel_key(cx), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, window, cx| {
+                let id = shell.side_chat_seq;
+                // Links from the open side chat are its own, not rejected.
+                let mut activation = LinkActivation {
+                    target: LinkTarget::new("Docs", "https://example.com/docs"),
+                    action: LinkAction::External,
+                    source_session: Some("side".into()),
+                };
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::External("https://example.com/docs".into())
+                );
+                activation.source_session = Some("elsewhere".into());
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Rejected
+                );
+                // The side chat's model menu owns Cmd/Ctrl+digit.
+                let composer = shell.side_chats[&id].composer.clone();
+                assert!(!shell.overlay_owns_keyboard(cx));
+                composer.update(cx, |composer, cx| composer.open_model_menu(window, cx));
+                assert!(shell.overlay_owns_keyboard(cx));
+                assert!(shell.open_side_chat_pickers(cx).is_some());
+                // Closing the tab with a draft keeps it for the reopen.
+                composer.update(cx, |composer, cx| {
+                    composer.stage_appshot(crate::appshots::tests::shot(), cx)
+                });
+                shell.close_right_surface(RightSurface::SideChat(id), window, cx);
+                let listed = |shell: &Shell, cx: &App| {
+                    shell
+                        .right_surface_rows(cx)
+                        .iter()
+                        .any(|(surface, ..)| *surface == RightSurface::SideChat(id))
+                };
+                assert!(!listed(shell, cx));
+                assert!(shell.side_chats.contains_key(&id));
+                shell.open_side_chat(chat.clone(), shell.panel_key(cx), cx);
+                assert_eq!(shell.side_chat_seq, id, "the kept tab is reused");
+                assert!(listed(shell, cx));
+                assert_eq!(shell.resolved_right_active(cx), RightSurface::SideChat(id));
+                assert!(shell.side_chats[&id].composer.read(cx).has_draft(cx));
+                // Without a draft, closing drops it.
+                let mut other = chat.clone();
+                other.id = "side-2".into();
+                shell.open_side_chat(other, shell.panel_key(cx), cx);
+                let other = shell.side_chat_seq;
+                shell.close_right_surface(RightSurface::SideChat(other), window, cx);
+                assert!(!shell.side_chats.contains_key(&other));
             })
             .unwrap();
     }
