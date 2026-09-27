@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <glib-unix.h>
 #include <json-glib/json-glib.h>
 #include <signal.h>
@@ -29,6 +30,8 @@ typedef struct {
 static GHashTable *pages;
 static WebKitWebContext *context;
 static GByteArray *input;
+static int profile_lock = -1;
+static gboolean shutting_down;
 
 static gboolean write_all(const void *data, size_t length) {
     const char *p = data;
@@ -473,9 +476,32 @@ static void evaluated(GObject *web, GAsyncResult *result, gpointer data) {
     g_clear_object(&v);
     g_clear_error(&error);
 }
+static void shutdown_ready(GObject *manager, GAsyncResult *result, gpointer unused) {
+    GError *error = NULL;
+    GList *cookies = webkit_cookie_manager_get_all_cookies_finish(WEBKIT_COOKIE_MANAGER(manager), result, &error);
+    g_list_free_full(cookies, (GDestroyNotify)soup_cookie_free);
+    g_clear_error(&error);
+    gtk_main_quit();
+}
+static void begin_shutdown(void) {
+    if (shutting_down)
+        return;
+    shutting_down = TRUE;
+    g_hash_table_remove_all(pages);
+    // Let WebKit process the pending cookie operations before leaving its loop.
+    webkit_cookie_manager_get_all_cookies(webkit_web_context_get_cookie_manager(context),
+                                         NULL, shutdown_ready, NULL);
+}
+
 static void command(JsonObject *o) {
     guint id = number(o, "id");
     const char *cmd = string(o, "cmd");
+    if (!strcmp(cmd, "shutdown")) {
+        begin_shutdown();
+        return;
+    }
+    if (shutting_down)
+        return;
     Page *p = g_hash_table_lookup(pages, GUINT_TO_POINTER(id));
     if (!strcmp(cmd, "create")) {
         if (!p)
@@ -582,7 +608,7 @@ static gboolean read_commands(gint fd, GIOCondition condition, gpointer unused) 
     guint8 bytes[65536];
     ssize_t n = read(fd, bytes, sizeof bytes);
     if (n <= 0) {
-        gtk_main_quit();
+        begin_shutdown();
         return G_SOURCE_REMOVE;
     }
     g_byte_array_append(input, bytes, n);
@@ -628,6 +654,19 @@ static gboolean configure_storage(int argc, char **argv) {
     }
     if (argc != 3 || strcmp(argv[1], "--profile") || !g_path_is_absolute(argv[2])) {
         const char *error = "Browser profile requires an absolute storage directory";
+        send_packet('E', 0, error, strlen(error));
+        return FALSE;
+    }
+    if (!storage_directory(argv[2])) {
+        const char *error = "Could not create or write the browser profile directory";
+        send_packet('E', 0, error, strlen(error));
+        return FALSE;
+    }
+    gchar *lock_path = g_build_filename(argv[2], "profile.lock", NULL);
+    profile_lock = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    g_free(lock_path);
+    if (profile_lock < 0 || flock(profile_lock, LOCK_EX | LOCK_NB) < 0) {
+        const char *error = "Browser profile is in use by another process or cannot be locked. Close the other Zeron instance and reopen this tab.";
         send_packet('E', 0, error, strlen(error));
         return FALSE;
     }
@@ -679,5 +718,7 @@ int main(int argc, char **argv) {
     g_hash_table_destroy(pages);
     g_byte_array_unref(input);
     g_object_unref(context);
+    if (profile_lock >= 0)
+        close(profile_lock);
     return 0;
 }

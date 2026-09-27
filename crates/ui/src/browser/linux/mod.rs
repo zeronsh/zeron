@@ -26,19 +26,35 @@ pub enum NativeEvent {
 
 #[derive(Clone, Default)]
 pub struct BrowserData {
-    current: Arc<Mutex<Weak<Worker>>>,
+    current: Arc<Mutex<Option<Arc<Worker>>>>,
     profile: Option<super::profile::BrowserProfile>,
 }
 
 struct Worker {
     child: Mutex<Child>,
-    stdin: Mutex<ChildStdin>,
+    stdin: Mutex<Option<ChildStdin>>,
     routes: Arc<Mutex<HashMap<u32, Weak<Route>>>>,
     next_id: AtomicU32,
 }
 impl Drop for Worker {
     fn drop(&mut self) {
+        // EOF asks the helper to drain pending work. Closing the pipe cannot
+        // block on a hung helper, unlike writing another command to a full pipe.
+        if let Ok(stdin) = self.stdin.get_mut() {
+            stdin.take();
+        }
         if let Ok(child) = self.child.get_mut() {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    _ => break,
+                }
+            }
+            tracing::warn!("browser helper did not shut down in time; terminating it");
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -103,11 +119,21 @@ fn read_startup(stdout: &mut impl Read) -> Result<(), String> {
 
 impl BrowserData {
     pub fn for_profile(profile: super::profile::BrowserProfile) -> Self {
-        Self { profile: Some(profile), ..Default::default() }
+        // One live helper per profile, shared across all windows in this process.
+        type SharedWorker = Mutex<Option<Arc<Worker>>>;
+        static PROFILES: std::sync::OnceLock<Mutex<HashMap<std::path::PathBuf, Weak<SharedWorker>>>> = std::sync::OnceLock::new();
+        let mut profiles = PROFILES.get_or_init(Default::default).lock().unwrap();
+        profiles.retain(|_, worker| worker.strong_count() > 0);
+        let current = profiles.get(&profile.root).and_then(Weak::upgrade).unwrap_or_else(|| {
+            let current = Arc::new(Mutex::new(None));
+            profiles.insert(profile.root.clone(), Arc::downgrade(&current));
+            current
+        });
+        Self { profile: Some(profile), current }
     }
     fn worker(&self) -> Result<Arc<Worker>, String> {
         let mut current = self.current.lock().unwrap();
-        if let Some(worker) = current.upgrade() {
+        if let Some(worker) = current.as_ref() {
             if worker
                 .child
                 .lock()
@@ -116,7 +142,7 @@ impl BrowserData {
                 .map_err(|e| e.to_string())?
                 .is_none()
             {
-                return Ok(worker);
+                return Ok(worker.clone());
             }
         }
         let mut command = Command::new(helper_path()?);
@@ -209,11 +235,11 @@ impl BrowserData {
         }).map_err(|e| e.to_string())?;
         let worker = Arc::new(Worker {
             child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
+            stdin: Mutex::new(Some(stdin)),
             routes,
             next_id: AtomicU32::new(1),
         });
-        *current = Arc::downgrade(&worker);
+        *current = Some(worker.clone());
         Ok(worker)
     }
 }
@@ -221,7 +247,8 @@ impl Worker {
     fn send(&self, id: u32, mut command: Value) -> Result<(), String> {
         command["id"] = id.into();
         let data = serde_json::to_vec(&command).map_err(|e| e.to_string())?;
-        let mut pipe = self.stdin.lock().unwrap();
+        let mut stdin = self.stdin.lock().unwrap();
+        let pipe = stdin.as_mut().ok_or("Browser helper is shutting down")?;
         pipe.write_all(&(data.len() as u32).to_le_bytes())
             .and_then(|_| pipe.write_all(&data))
             .map_err(|e| e.to_string())

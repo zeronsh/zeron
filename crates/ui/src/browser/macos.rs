@@ -35,7 +35,20 @@ struct BrowserStore {
 pub(super) struct BrowserData(Rc<RefCell<BrowserStore>>);
 impl BrowserData {
     pub fn for_profile(profile: super::profile::BrowserProfile) -> Self {
-        Self(Rc::new(RefCell::new(BrowserStore { profile: Some(profile), ..Default::default() })))
+        thread_local! {
+            static PROFILES: RefCell<std::collections::HashMap<std::path::PathBuf, std::rc::Weak<RefCell<BrowserStore>>>> = RefCell::new(std::collections::HashMap::new());
+        }
+        PROFILES.with(|profiles| {
+            let mut profiles = profiles.borrow_mut();
+            profiles.retain(|_, store| store.strong_count() > 0);
+            if let Some(store) = profiles.get(&profile.root).and_then(std::rc::Weak::upgrade) {
+                return Self(store);
+            }
+            let root = profile.root.clone();
+            let store = Rc::new(RefCell::new(BrowserStore { profile: Some(profile), ..Default::default() }));
+            profiles.insert(root, Rc::downgrade(&store));
+            Self(store)
+        })
     }
     fn configuration(
         &self,
