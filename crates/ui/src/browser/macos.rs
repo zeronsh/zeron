@@ -27,12 +27,16 @@ use wry::{WebView, WebViewBuilderExtMacos, WebViewExtMacOS};
 
 #[derive(Default)]
 struct BrowserStore {
+    profile: Option<super::profile::BrowserProfile>,
     store: Option<Retained<objc2_web_kit::WKWebsiteDataStore>>,
     preview_hosts: std::collections::BTreeSet<String>,
 }
 #[derive(Clone, Default)]
 pub(super) struct BrowserData(Rc<RefCell<BrowserStore>>);
 impl BrowserData {
+    pub fn for_profile(profile: super::profile::BrowserProfile) -> Self {
+        Self(Rc::new(RefCell::new(BrowserStore { profile: Some(profile), ..Default::default() })))
+    }
     fn configuration(
         &self,
         mtm: MainThreadMarker,

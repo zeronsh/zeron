@@ -25,7 +25,10 @@ pub enum NativeEvent {
 }
 
 #[derive(Clone, Default)]
-pub struct BrowserData(Arc<Mutex<Weak<Worker>>>);
+pub struct BrowserData {
+    current: Arc<Mutex<Weak<Worker>>>,
+    profile: Option<super::profile::BrowserProfile>,
+}
 
 struct Worker {
     child: Mutex<Child>,
@@ -83,8 +86,11 @@ fn helper_path() -> Result<std::path::PathBuf, String> {
     Ok(path)
 }
 impl BrowserData {
+    pub fn for_profile(profile: super::profile::BrowserProfile) -> Self {
+        Self { profile: Some(profile), ..Default::default() }
+    }
     fn worker(&self) -> Result<Arc<Worker>, String> {
-        let mut current = self.0.lock().unwrap();
+        let mut current = self.current.lock().unwrap();
         if let Some(worker) = current.upgrade() {
             if worker
                 .child

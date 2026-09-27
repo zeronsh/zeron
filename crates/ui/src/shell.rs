@@ -1957,7 +1957,7 @@ pub struct Shell {
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
     browser_context: crate::browser::BrowserContext,
-    browser_profile: Option<String>,
+    browser_profile: Option<crate::browser::profile::BrowserProfile>,
     /// Ordered surface tabs per panel key (drag-reorderable; stale entries —
     /// closed terminals/diffs — are skipped at read time).
     right_tabs: std::collections::HashMap<String, Vec<RightSurface>>,
@@ -12968,25 +12968,24 @@ impl Render for Shell {
 
         let browser_profile = {
             let state = self.state.read(cx);
-            crate::links::workspace_locator(
+            crate::browser::profile::BrowserProfile::for_workspace(
+                &self.data_dir,
                 state.workspace_scope,
                 state.auth.as_ref(),
                 state.local_device_id.as_deref(),
             )
         };
         if browser_profile.is_some() && browser_profile != self.browser_profile {
-            if self.browser_profile.is_some() {
-                for browser in self.browsers.values() {
-                    browser.update(cx, |browser, cx| browser.close(cx));
-                }
-                self.browsers.clear();
-                self.browser_subs.clear();
-                self.browser_context = crate::browser::BrowserContext::default();
-                self.pull_request_cache = Default::default();
-                self.pull_requests_page = None;
-                self.pull_request_detail = None;
-                self.pull_request_detail_subscription = None;
+            for browser in self.browsers.values() {
+                browser.update(cx, |browser, cx| browser.close(cx));
             }
+            self.browsers.clear();
+            self.browser_subs.clear();
+            self.browser_context = crate::browser::BrowserContext::for_profile(browser_profile.clone().unwrap());
+            self.pull_request_cache = Default::default();
+            self.pull_requests_page = None;
+            self.pull_request_detail = None;
+            self.pull_request_detail_subscription = None;
             self.browser_profile = browser_profile;
         }
         let browser_active = matches!(gate, GatePhase::Ready)

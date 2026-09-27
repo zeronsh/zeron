@@ -12,6 +12,7 @@ mod windows_webview;
 #[cfg(windows)]
 use windows_webview as native;
 pub mod model;
+pub(crate) mod profile;
 mod view;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
@@ -71,11 +72,21 @@ pub enum BrowserEvent {
     Close,
 }
 
-/// A window/profile's ephemeral website data, allocated on first navigation.
+/// A profile's website data, allocated on first navigation. Default contexts are
+/// ephemeral, for unresolved identities and isolated fixtures.
 #[derive(Clone, Default)]
 pub struct BrowserContext {
     #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     data: native::BrowserData,
+}
+
+impl BrowserContext {
+    pub(crate) fn for_profile(profile: profile::BrowserProfile) -> Self {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        { Self { data: native::BrowserData::for_profile(profile) } }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        { let _ = profile; Self::default() }
+    }
 }
 
 pub struct BrowserSurface {
