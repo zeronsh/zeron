@@ -38,14 +38,73 @@ concurrency:
   group: windows-tests-${{ github.ref }}
   cancel-in-progress: true
 
+# Test binaries never ship, so skip the release profile's cross-crate LTO: it
+# re-optimizes every dependency at each test binary's link.
+env:
+  CARGO_PROFILE_RELEASE_LTO: 'off'
+
 defaults:
   run:
     shell: pwsh
 
+# Independent jobs run in parallel; each compiles only its own crates.
 jobs:
-  tests:
+  ui:
+    name: UI tests
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Locate Windows SDK shader compiler
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/fxc.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Shares dependencies with the app job, which saves them.
+          shared-key: windows-gpui
+          save-if: false
+      - name: UI tests
+        env:
+          RUST_BACKTRACE: '1'
+        run: |
+          # Native platform initialization runs in its own process. Keep the
+          # real-font assertion and the complete headless suite mandatory.
+          cargo test --release --locked -p zeron-ui --lib native_diff_font_geometry -- --test-threads=1 --nocapture
+          $nativeResult = $LASTEXITCODE
+          cargo test --release --locked -p zeron-ui --lib -- --test-threads=1 --skip native_diff_font_geometry --nocapture
+          $headlessResult = $LASTEXITCODE
+          if ($nativeResult -ne 0 -or $headlessResult -ne 0) { exit 1 }
+
+  engine:
+    name: Harness and engine tests
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Pull requests restore main's cache instead of evicting it.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Native harness security and integration tests
+        run: cargo test --release --locked -p zeron-harness --features native-fixture --lib --test codex_availability --test windows_native
+      - name: Engine unit tests
+        run: cargo test --release --locked -p zeron-engine --lib
+      - name: Harness catalog and login tests
+        run: cargo test --release --locked -p zeron-engine --test codex_catalog --test codex_login_resolution
+      - name: Auth integration tests
+        run: cargo test --release --locked -p zeron-engine --test auth
+
+  app:
+    name: App and packaging
+    runs-on: windows-2022
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain
@@ -59,20 +118,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          cache-workspace-crates: true
-      - name: Native harness security and integration tests
-        run: cargo test --release --locked -p zeron-harness --features native-fixture --lib --test codex_availability --test windows_native
-      - name: UI tests
-        env:
-          RUST_BACKTRACE: '1'
-        run: |
-          # Native platform initialization runs in its own process. Keep the
-          # real-font assertion and the complete headless suite mandatory.
-          cargo test --release --locked -p zeron-ui --lib native_diff_font_geometry -- --test-threads=1 --nocapture
-          $nativeResult = $LASTEXITCODE
-          cargo test --release --locked -p zeron-ui --lib -- --test-threads=1 --skip native_diff_font_geometry --nocapture
-          $headlessResult = $LASTEXITCODE
-          if ($nativeResult -ne 0 -or $headlessResult -ne 0) { exit 1 }
+          shared-key: windows-gpui
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build application
         run: cargo build --release --locked -p zeron
       - name: Verify portable packaging
@@ -81,12 +128,6 @@ jobs:
         run: cargo test --release --locked -p gpui_windows --lib layout
       - name: Application and updater tests
         run: cargo test --release --locked -p zeron -p zeron-update
-      - name: Engine unit tests
-        run: cargo test --release --locked -p zeron-engine --lib
-      - name: Harness catalog and login tests
-        run: cargo test --release --locked -p zeron-engine --test codex_catalog --test codex_login_resolution
-      - name: Auth integration tests
-        run: cargo test --release --locked -p zeron-engine --test auth
       - name: GUI subsystem and redirected CLI output
         run: ./scripts/test-windows-startup.ps1
       - name: CLI startup without HOME
@@ -140,7 +181,7 @@ jobs:
 
   native-gui:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_gui }}
-    needs: tests
+    needs: app
     runs-on: windows-2022
     timeout-minutes: 10
     steps:

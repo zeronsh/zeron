@@ -23,6 +23,10 @@ jobs:
         with:
           node-version: '22'
       - uses: Swatinem/rust-cache@v2
+        with:
+          # This workflow never runs on main; restore UI tests' debug cache.
+          shared-key: linux-debug
+          save-if: false
       - name: Dependency updater validation
         run: python3 scripts/test-update-cursor-sdk.py
       - name: Harness compatibility, steering, and session recovery
