@@ -388,7 +388,7 @@ impl NativePage {
             if mods.contains(NSEventModifierFlags::Shift) {
                 combo.push_str("shift-");
             }
-            combo.push_str(&key);
+            combo.push_str(super::model::native_shortcut_key(&key));
             let Ok(keystroke) = gpui::Keystroke::parse(&combo) else {
                 return event.as_ptr();
             };
