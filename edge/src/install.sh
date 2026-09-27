@@ -25,8 +25,14 @@ case "$os" in
     echo "  $BASE/releases/latest.txt → $BASE/releases/zeron-<version>-macos-arm64.dmg" >&2
     exit 1
     ;;
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    echo "zeron install: on Windows, run this in PowerShell:" >&2
+    echo "  irm $BASE/install.ps1 | iex" >&2
+    exit 1
+    ;;
   *)
     echo "zeron install: unsupported OS '$os' — only Linux for now." >&2
+    echo "  Windows: irm $BASE/install.ps1 | iex" >&2
     exit 1
     ;;
 esac

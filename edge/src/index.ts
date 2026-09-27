@@ -46,6 +46,7 @@ import { DeviceRoom } from "./device-room";
 import { RegistryRoom } from "./registry-room";
 import { ChatRoom } from "./chat-room";
 import installSh from "./install.sh";
+import installPs1 from "./install.ps1";
 
 export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom };
 
@@ -120,11 +121,16 @@ export default {
     }
 
     // ── public install surface (also routed from zeron.sh): the
-    //    `curl | sh` installer and the release artifacts it downloads ───────
-    if (url.pathname === "/install.sh" && (request.method === "GET" || request.method === "HEAD")) {
-      return new Response(request.method === "HEAD" ? null : installSh, {
+    //    `curl | sh` / `irm | iex` installers and the release artifacts
+    //    they download. text/plain so PowerShell's `irm` returns a string. ─
+    if (
+      (url.pathname === "/install.sh" || url.pathname === "/install.ps1") &&
+      (request.method === "GET" || request.method === "HEAD")
+    ) {
+      const powershell = url.pathname.endsWith(".ps1");
+      return new Response(request.method === "HEAD" ? null : powershell ? installPs1 : installSh, {
         headers: {
-          "content-type": "application/x-sh",
+          "content-type": powershell ? "text/plain; charset=utf-8" : "application/x-sh",
           "cache-control": "public, max-age=0, must-revalidate"
         }
       });

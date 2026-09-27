@@ -70,7 +70,7 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
                 "this binary is not update-managed (source build or hand-copied).\n\
                  Linux: curl -fsSL https://zeron.sh/install.sh | sh\n\
                  macOS: download the new Zeron.app dmg, or rebuild from source.\n\
-                 Windows: use an update-enabled portable package, or rebuild from source."
+                 Windows: irm https://zeron.sh/install.ps1 | iex"
             )
         }
     }

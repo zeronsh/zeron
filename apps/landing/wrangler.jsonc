@@ -1,6 +1,6 @@
 {
   // Landing page: pure static assets, no worker script. The install surface
-  // (/install.sh, /releases/*) is served by the edge worker via path routes on
+  // (/install.sh, /install.ps1, /releases/*) is served by the edge worker via path routes on
   // the same hostname — path routes beat this custom domain, so this worker
   // only ever sees page traffic. Deploy with `npx wrangler deploy` from this
   // dir. (The worker keeps its historical "comet-landing" name; renaming a

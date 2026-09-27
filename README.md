@@ -27,6 +27,22 @@ zeron update      # update to the latest release
 zeron daemon start|stop|restart|status
 ```
 
+## Install and run locally (Windows)
+
+```powershell
+irm https://zeron.sh/install.ps1 | iex
+zeron status
+```
+
+The installer downloads the latest release into `%LOCALAPPDATA%\Programs\Zeron`, puts `zeron` on your user PATH, and writes `zeron-update.json` beside `zeron.exe` so `zeron update` can replace it. No administrator account is required. Open a new terminal if `zeron` is not found yet.
+
+```powershell
+zeron status      # local/synced mode and engine status
+zeron update      # update to the latest release
+```
+
+Windows has no background service yet. Run `zeron` to open the app, or `zeron headless` to run the engine in this terminal. See the [development notes](docs/reference/windows-development.md) for source builds.
+
 ## Optional multi-device sync
 
 Sign in only when you want to open your account's synced workspace. Authentication changes the profile selected by the next engine start, so stop the daemon before changing it:
@@ -52,8 +68,6 @@ zeron daemon start
 `zeron login` and `zeron logout` refuse to modify credentials while an engine owns the data directory. The desktop app follows the same next-restart profile boundary.
 
 On macOS: use the desktop release, or build `zeron` from source and run `zeron daemon install` to install the launchd service.
-
-On Windows: extract the portable release ZIP and run `zeron.exe`. Keep `zeron-update.json` beside it for in-app updates. See the [development notes](docs/reference/windows-development.md) for source builds.
 
 ## Sponsors
 

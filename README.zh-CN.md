@@ -25,6 +25,22 @@ zeron update      # 更新到最新版本
 zeron daemon start|stop|restart|status
 ```
 
+## 在本地安装运行（Windows）
+
+```powershell
+irm https://zeron.sh/install.ps1 | iex
+zeron status
+```
+
+安装脚本会把最新版本下载到 `%LOCALAPPDATA%\Programs\Zeron`，把 `zeron` 加进当前用户的 PATH，并在 `zeron.exe` 旁边写上 `zeron-update.json`，这样 `zeron update` 才能替换它。不需要管理员权限。如果当前终端还找不到 `zeron`，新开一个终端再试。
+
+```powershell
+zeron status      # 查看本地/同步模式和引擎状态
+zeron update      # 更新到最新版本
+```
+
+Windows 目前没有后台服务。直接运行 `zeron` 会打开应用，`zeron headless` 则在当前终端跑引擎。
+
 ## 可选：多设备同步
 
 只有想打开账号下的同步工作区时才需要登录。登录会换掉引擎下次启动时用的 profile，所以改之前先停掉守护进程：
