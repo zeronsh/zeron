@@ -531,6 +531,10 @@ impl BrowserSurface {
 impl Render for BrowserSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        #[cfg(target_os = "macos")]
+        let persistence_notice = self.context.data.persistence_notice();
+        #[cfg(not(target_os = "macos"))]
+        let persistence_notice: Option<&str> = None;
         let focused = self.address.focus_handle(cx).is_focused(window);
         let external = !cfg!(any(target_os = "macos", target_os = "linux", windows));
         let has_page = self.page.url.is_some();
@@ -785,6 +789,8 @@ impl Render for BrowserSurface {
             .on_action(cx.listener(|this, _: &super::Back, _, _| this.history(false)))
             .on_action(cx.listener(|this, _: &super::Forward, _, _| this.history(true)))
             .child(toolbar)
+            .when_some(persistence_notice, |el, message| el.child(div().px(px(12.0)).py(px(8.0))
+                .text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted).child(message.to_owned())))
             .when_some(self.validation.clone(), |el, message| el.child(div().px(px(12.0)).py(px(8.0)).text_size(crate::typography::ui_rems(11.0)).text_color(theme.danger).child(message)))
             .when(remote_loopback, |el| el.child(div().px(px(12.0)).py(px(8.0)).border_b_1().border_color(theme.border)
                 .text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted)

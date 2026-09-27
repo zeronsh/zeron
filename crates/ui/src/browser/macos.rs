@@ -43,8 +43,15 @@ impl BrowserData {
     ) -> Retained<objc2_web_kit::WKWebViewConfiguration> {
         let mut data = self.0.borrow_mut();
         if data.store.is_none() {
-            data.store =
-                Some(unsafe { objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm) });
+            data.store = Some(unsafe {
+                match &data.profile {
+                    Some(profile) if persistent_profiles_supported() => {
+                        let identifier = objc2_foundation::NSUUID::from_bytes(profile.data_store_identifier());
+                        objc2_web_kit::WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm)
+                    }
+                    _ => objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm),
+                }
+            });
             if let Err(error) =
                 configure_preview_proxy(data.store.as_ref().unwrap(), &data.preview_hosts)
             {
@@ -79,6 +86,19 @@ impl BrowserData {
                 tracing::warn!(%error, "preview hostname proxy unavailable");
             }
         }
+    }
+}
+
+/// macOS 12/13 have only a single default persistent store. Do not silently
+/// share it across accounts; retain isolated temporary stores on those systems.
+fn persistent_profiles_supported() -> bool {
+    unsafe { msg_send![class!(WKWebsiteDataStore), respondsToSelector: sel!(dataStoreForIdentifier:)] }
+}
+
+impl BrowserData {
+    pub(super) fn persistence_notice(&self) -> Option<&'static str> {
+        (self.0.borrow().profile.is_some() && !persistent_profiles_supported())
+            .then_some("Logins are temporary on this macOS version. Use macOS 14 or later, or open this page in your default browser, to keep them.")
     }
 }
 
@@ -302,7 +322,6 @@ impl NativePage {
             .with_webview_configuration(data.configuration(mtm))
             .with_visible(false)
             .with_focused(false)
-            .with_incognito(true)
             .with_new_window_req_handler(move |url, _| {
                 if allowed_navigation(&url) {
                     let _ = new_tab.try_send(NativeEvent::NewTab(url));
