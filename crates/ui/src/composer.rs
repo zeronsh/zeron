@@ -1515,7 +1515,7 @@ enum EditKind {
 }
 
 const GENERIC_COMPOSER_CONTEXT: &str = "Composer";
-const MESSAGE_COMPOSER_CONTEXT: &str = "MessageComposer";
+pub(crate) const MESSAGE_COMPOSER_CONTEXT: &str = "MessageComposer";
 const PALETTE_SEARCH_CONTEXT: &str = "PaletteSearch";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2135,6 +2135,14 @@ impl ComposerInput {
     }
 
     /// Keep compact fields on one row and reveal the caret horizontally.
+    /// Bound a standalone multiline composer while preserving caret scrolling.
+    pub(crate) fn with_viewport_height(mut self, height: f32) -> Self {
+        let height = height.max(self.configured_line_height);
+        self.viewport_height = Some(height);
+        self.settled_viewport_height = Some(height);
+        self
+    }
+
     pub fn with_single_line(mut self) -> Self {
         self.single_line = true;
         self
@@ -5359,9 +5367,9 @@ pub enum ComposerEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct MentionToken {
-    range: Range<usize>,
-    query: String,
+pub(crate) struct MentionToken {
+    pub(crate) range: Range<usize>,
+    pub(crate) query: String,
 }
 
 /// Refine a locally identified token using Markdown source ranges. This is
@@ -5481,7 +5489,7 @@ fn completion_markdown_end(
 
 /// The `@` must begin a token. This intentionally excludes `name@example.com`
 /// and ordinary words while allowing punctuation such as `(@src`.
-fn mention_token(text: &str, cursor: usize) -> Option<MentionToken> {
+pub(crate) fn mention_token(text: &str, cursor: usize) -> Option<MentionToken> {
     if cursor > text.len() || !text.is_char_boundary(cursor) {
         return None;
     }
