@@ -1,6 +1,8 @@
 //! Native PR inspection and explicit comment submission.
 #[path = "pull_request_interactions.rs"]
 mod interactions;
+#[path = "pull_request_code.rs"]
+mod code;
 use crate::{
     settings::{self, PullRequestDestination, widgets},
     state::AppState,
@@ -200,8 +202,7 @@ pub struct PullRequestDetailPage {
     file_search_subscription: Option<Subscription>,
     file_query: String,
     files_expanded: bool,
-    files_motion: Option<crate::motion::DisclosureMotion>,
-    files_height: Rc<std::cell::Cell<f32>>,
+    code_pane_width: Option<f32>,
     scroll: widgets::PageScroll,
     comment_input: Entity<crate::composer::ComposerInput>,
     comment_subscription: Option<Subscription>,
@@ -263,8 +264,7 @@ impl PullRequestDetailPage {
             file_search_subscription: None,
             file_query: String::new(),
             files_expanded: false,
-            files_motion: None,
-            files_height: Rc::new(std::cell::Cell::new(0.0)),
+            code_pane_width: None,
             scroll: widgets::PageScroll::default(),
             comment_input: cx.new(|cx| {
                 crate::composer::ComposerInput::with_context(
@@ -627,23 +627,7 @@ impl PullRequestDetailPage {
     }
 
     fn toggle_files(&mut self, cx: &mut Context<Self>) {
-        let height = self
-            .files_height
-            .get()
-            .max((self.code_files.len() as f32 * 28.0 + 40.0).min(208.0));
-        let previous = self.files_motion;
-        let from = previous
-            .filter(|motion| motion.animating())
-            .map(|motion| motion.current())
-            .unwrap_or(if self.files_expanded { height } else { 0.0 });
         self.files_expanded = !self.files_expanded;
-        self.files_motion = (!crate::motion::reduced_motion(cx)).then(|| {
-            crate::motion::DisclosureMotion::new(
-                previous.map_or(1, |motion| motion.epoch + 1),
-                from,
-                if self.files_expanded { height } else { 0.0 },
-            )
-        });
         cx.notify();
     }
 
@@ -742,7 +726,7 @@ impl Render for PrActionTooltip {
 fn action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let icon_only = matches!(
         id,
-        "pr-back" | "pr-external" | "pr-copy-url" | "pr-copy-patch" | "pr-detail-refresh" | "pr-previous-file" | "pr-next-file"
+        "pr-back" | "pr-external" | "pr-copy-url" | "pr-copy-patch" | "pr-files" | "pr-detail-refresh" | "pr-previous-file" | "pr-next-file"
     );
     let glyph = match id {
         "pr-previous-file" => Some(crate::icons::ALT_ARROW_LEFT),
@@ -1261,255 +1245,8 @@ impl Render for PullRequestDetailPage {
                                 .child(action("pr-retry-diff", "Retry diff", &theme).on_click(
                                     cx.listener(|page, _, _, cx| page.load_diff(true, cx)),
                                 ));
-                        } else if let Some(diff) = &self.diff {
-                            let files_reveal = self
-                                .files_motion
-                                .filter(|motion| motion.animating())
-                                .map_or(if self.files_expanded { 1.0 } else { 0.0 }, |motion| {
-                                    (motion.current() / motion.from.max(motion.to).max(1.0))
-                                        .clamp(0.0, 1.0)
-                                });
-                            let patch = diff.clone();
-                            let toolbar = div()
-                                .bg(theme.glass_hover())
-                                .rounded(px(8.0))
-                                .p(px(4.0))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .min_w_0()
-                                .child(
-                                    action("pr-files", "Changed files", &theme)
-                                        .aria_expanded(self.files_expanded)
-                                        .child(self.code_files.len().to_string())
-                                        .child(
-                                            crate::icons::icon(crate::icons::ALT_ARROW_RIGHT)
-                                                .size(px(12.0))
-                                                .text_color(theme.text_muted)
-                                                .with_transformation(gpui::Transformation::rotate(
-                                                    gpui::percentage(files_reveal * 0.25),
-                                                )),
-                                        )
-                                        .on_click(cx.listener(|page, _, window, cx| {
-                                            page.toggle_files(cx);
-                                            if page.files_expanded {
-                                                window.focus(
-                                                    &page.file_search.read(cx).focus_handle(cx),
-                                                    cx,
-                                                );
-                                            }
-                                        })),
-                                )
-                                .justify_between()
-                                .child(action("pr-copy-patch", "Copy diff", &theme).size(px(32.0)).on_click(
-                                    move |_, _, cx| {
-                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                            patch.as_ref().clone(),
-                                        ));
-                                    },
-                                ));
-                            column = column.child(toolbar);
-                            let files_motion =
-                                self.files_motion.filter(|motion| motion.animating());
-                            if self.files_expanded || files_motion.is_some() {
-                                let height = self.files_height.clone();
-                                let mut file_list = div()
-                                    .id("pr-file-list")
-                                    .max_h(px((f32::from(window.viewport_size().height) * 0.25)
-                                        .min(200.0)))
-                                    .overflow_y_scroll()
-                                    .mt(px(8.0))
-                                    .relative()
-                                    .child(div().py(px(8.0)).child(crate::surface_chrome::input().child(div().flex_1().min_w_0().child(self.file_search.clone()))))
-                                    .child(
-                                        gpui::canvas(
-                                            move |bounds, _, _| {
-                                                height.set(f32::from(bounds.size.height));
-                                            },
-                                            |_, _, _, _| {},
-                                        )
-                                        .absolute()
-                                        .inset_0(),
-                                    );
-                                let file_stats: std::collections::HashMap<_, _> = detail.files
-                                    .iter().map(|file| (file.path.as_str(), file)).collect();
-                                let mut matches = 0;
-                                for (index, (path, _)) in self.code_files.iter().enumerate() {
-                                    if !self.file_query.is_empty() && !path.to_lowercase().contains(&self.file_query) { continue; }
-                                    matches += 1;
-                                    let stats = file_stats.get(path.as_str());
-                                    file_list = file_list.child(
-                                        widgets::ghost_action(&theme)
-                                            .w_full()
-                                            .min_w_0()
-                                            .id(SharedString::from(format!("pr-file-{index}")))
-                                            .debug_selector(move || format!("pr-file-{index}"))
-                                            .role(gpui::Role::Button)
-                                            .aria_label(format!("Open diff for {path}"))
-                                            .when(index == self.selected_code_file, |el| el.bg(theme.glass_hover()))
-                                            .focus_visible(|style| style.bg(theme.glass_hover()))
-                                            .tab_index(0)
-                                            .on_click(cx.listener(move |page, _, _, cx| {
-                                                page.select_code_file(index, cx);
-                                                if page.files_expanded {
-                                                    page.toggle_files(cx);
-                                                }
-                                                cx.notify();
-                                            }))
-                                            .child(
-                                                crate::icons::icon(crate::icons::FILE_CODE)
-                                                    .size(px(14.0))
-                                                    .text_color(theme.text_muted),
-                                            )
-                                            .child(div().flex_1().min_w_0().truncate().child(path.clone()))
-                                            .when_some(stats, |el, file| el
-                                                .child(div().flex_none().text_color(theme.success).child(format!("+{}", file.additions)))
-                                                .child(div().flex_none().text_color(theme.danger).child(format!("−{}", file.deletions)))),
-                                    );
-                                }
-                                if matches == 0 {
-                                    file_list = file_list.child(div().p(px(12.0)).text_color(theme.text_muted).child("No matching files"));
-                                }
-                                column = column.child(
-                                    div()
-                                        .flex_none()
-                                        .overflow_hidden()
-                                        .when_some(files_motion, |el, motion| {
-                                            el.h(px(motion.current())).opacity(
-                                                0.35 + 0.65
-                                                    * (motion.current()
-                                                        / motion.from.max(motion.to).max(1.0))
-                                                    .clamp(0.0, 1.0),
-                                            )
-                                        })
-                                        .child(file_list),
-                                );
-                            }
-                            let current = self.selected_code_file;
-                            column = column.child(
-                                div()
-                                    .id("pr-file-navigation")
-                                    .debug_selector(|| "pr-file-navigation".into())
-                                    .flex_none()
-                                    .mt(px(12.0))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_size(px(12.0))
-                                            .child(
-                                                self.code_files
-                                                    .get(current)
-                                                    .map(|(path, _)| path.clone())
-                                                    .unwrap_or_else(|| "No changed files".into()),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_size(px(11.0))
-                                            .text_color(theme.text_muted)
-                                            .child(format!(
-                                                "{} / {}",
-                                                if self.code_files.is_empty() {
-                                                    0
-                                                } else {
-                                                    current + 1
-                                                },
-                                                self.code_files.len()
-                                            )),
-                                    )
-                                    .child(
-                                        action("pr-previous-file", "Previous file", &theme)
-                                            .when(current == 0, |el| el.opacity(0.4))
-                                            .on_click(cx.listener(move |page, _, _, cx| {
-                                                if current > 0 {
-                                                    page.select_code_file(current - 1, cx);
-                                                }
-                                            })),
-                                    )
-                                    .child(
-                                        action("pr-next-file", "Next file", &theme)
-                                            .when(current + 1 >= self.code_files.len(), |el| {
-                                                el.opacity(0.4)
-                                            })
-                                            .on_click(cx.listener(move |page, _, _, cx| {
-                                                page.select_code_file(current + 1, cx)
-                                            })),
-                                    ),
-                            );
-                            let mut visible_rows = self.code_range();
-                            if self.code_files.get(current).is_some() && !visible_rows.is_empty() {
-                                visible_rows.start += 1;
-                            }
-                            let rows = self.code_rows.clone();
-                            let files = self.code_files.clone();
-                            let code_width = (self.code_width - 128.0) / 7.0
-                                * crate::changes::diff_text_size(&theme)
-                                * 0.7
-                                + 144.0;
-                            let colors = theme.clone();
-                            let code_scroll = self.code_scroll.0.borrow().base_handle.clone();
-                            column =
-                                column.child(
-                                    div()
-                                        .id("pr-code-viewport")
-                                        .debug_selector(|| "pr-code-viewport".into())
-                                        .mt(px(12.0))
-                                        .flex_1()
-                                        .min_h_0()
-                                        .border_1().border_color(theme.border).rounded(px(8.0))
-                                        .overflow_x_scroll()
-                                        .track_scroll(&self.code_horizontal)
-                                        .child(
-                                            crate::edge_fade::edge_faded(
-                                                16.0,
-                                                true,
-                                                true,
-                                                gpui::uniform_list(
-                                                    "pr-code-lines",
-                                                    visible_rows.len(),
-                                                    move |range, _, _| {
-                                                        range
-                                                    .map(|index| {
-                                                        let index = index + visible_rows.start;
-                                                        let row = &rows[index];
-                                                        if row.kind == crate::changes::LineKind::Meta {
-                                                            let file_header = files.binary_search_by_key(&index, |(_, offset)| *offset).is_ok();
-                                                            div().w_full().h(px(crate::changes::diff_line_height(&colors)))
-                                                                .flex().items_center().gap(px(8.0))
-                                                                .px(px(12.0))
-                                                                .bg(crate::theme::wash(if file_header { 0.08 } else { 0.035 }))
-                                                                .text_size(px(11.0))
-                                                                .text_color(if file_header { colors.text } else { colors.text_muted })
-                                                                .when(file_header, |el| el
-                                                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                                                    .child(crate::icons::icon(crate::icons::FILE_CODE).size(px(13.0)).text_color(colors.text_muted)))
-                                                                .when(!file_header, |el| el.font_family(colors.font_mono.clone()))
-                                                                .child(row.text.clone()).into_any_element()
-                                                        } else {
-                                                            crate::changes::readonly_diff_line(&crate::changes::DiffLine {
-                                                                kind: row.kind, old_no: row.old.parse().ok(), new_no: row.new.parse().ok(),
-                                                                text: row.text.to_string(),
-                                                            }, &row.spans, &colors)
-                                                        }
-                                                    })
-                                                    .collect::<Vec<_>>()
-                                                    },
-                                                )
-                                                .w(px(code_width))
-                                                .min_w_full()
-                                                .h_full()
-                                                .track_scroll(&self.code_scroll),
-                                            )
-                                            .fade_overflow_y(&code_scroll),
-                                        ),
-                                );
+                        } else if self.diff.is_some() {
+                            column = column.child(self.code_workspace(detail, &theme, cx));
                         } else {
                             column = column.child(div().mt(px(20.0)).child("Loading diff…"));
                         }
@@ -1671,9 +1408,7 @@ impl Render for PullRequestDetailPage {
                 .into_any_element()
         };
         let navigation = self.navigation(&theme, cx);
-        if self.tab_fades.tick_at(Instant::now())
-            || self.files_motion.is_some_and(|motion| motion.animating())
-        {
+        if self.tab_fades.tick_at(Instant::now()) {
             window.request_animation_frame();
         }
         let composer = (self.tab == Tab::Activity).then(|| self.comment_composer(&theme, cx));
@@ -1931,11 +1666,28 @@ mod tests {
             let nav = cx.debug_bounds("pr-detail-nav").unwrap();
             assert!(viewport.size.height >= px(60.0), "expanded picker: {viewport:?}");
             assert!(viewport.bottom() <= nav.top());
+            let browser = cx.debug_bounds("pr-file-browser").unwrap();
+            if width >= 900.0 {
+                assert!(browser.right() < viewport.left(), "files stay beside the diff");
+            } else {
+                assert!(browser.bottom() < viewport.top(), "compact picker stays above the diff");
+            }
             for selector in ["pr-files", "pr-copy-patch", "pr-previous-file", "pr-next-file"] {
                 let control = cx.debug_bounds(selector).unwrap();
                 assert!(control.left() >= px(24.0) && control.right() <= px(width - 24.0), "{selector}: {control:?}");
             }
         }
+        page.update(cx, |page, cx| {
+            page.file_search.update(cx, |input, cx| input.set_text("", cx));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let file = cx.debug_bounds("pr-file-2").unwrap();
+        cx.simulate_mouse_down(file.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(file.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        page.read_with(cx, |page, _| assert_eq!(page.selected_code_file, 2));
+        assert!(cx.debug_bounds("pr-file-browser").is_some(), "wide file navigator remains available after selection");
     }
 
     struct NavigationHitHost {
@@ -2218,8 +1970,8 @@ mod tests {
             );
             assert_eq!(
                 viewport.size.width,
-                px(width - 48.0),
-                "Code uses available width"
+                px(width - 48.0 - if width - 48.0 >= 760.0 { 236.0 } else { 0.0 }),
+                "Code shares available width with the file navigator"
             );
             assert!(nav.size.width <= px(width));
             assert_eq!(nav.size.height, px(44.0));
@@ -2249,6 +2001,8 @@ mod tests {
         page.read_with(cx, |page, _| {
             assert!(page.code_horizontal.max_offset().x > px(0.0))
         });
+        cx.simulate_resize(gpui::size(px(600.0), px(800.0)));
+        cx.run_until_parked();
         let files = cx.debug_bounds("pr-files").unwrap();
         cx.simulate_mouse_down(
             files.center(),

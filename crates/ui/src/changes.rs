@@ -4431,8 +4431,9 @@ pub(crate) fn readonly_diff_line(
     line: &DiffLine,
     spans: &[zeron_syntax::HighlightSpan],
     theme: &Theme,
+    gutter_px: f32,
 ) -> AnyElement {
-    diff_line_row(line, spans, theme, GUTTER_WIDTH, DiffCodeWidth::Clipped, None)
+    diff_line_row(line, spans, theme, gutter_px, DiffCodeWidth::Clipped, None)
 }
 
 /// One +/−/context/meta diff line: coloured accent bar, dual line-number
