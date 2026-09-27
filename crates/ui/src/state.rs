@@ -691,6 +691,9 @@ pub struct AppState {
     pub chats: Vec<Chat>,
     /// Fork RPC may arrive ahead of its registry row on a remote device.
     pending_side_chat: Option<Chat>,
+    /// `pending_side_chat` was started by hand and nothing has minted it:
+    /// no registry row, no doc, until its first send.
+    unsaved_side_chat: bool,
     pub sessions: Vec<Session>,
     /// Synced user/org sidebar pin state. Local workspaces deliberately ignore
     /// this and continue reading their device-local settings entry.
@@ -815,6 +818,7 @@ impl AppState {
             spaces: Vec::new(),
             chats: Vec::new(),
             pending_side_chat: None,
+            unsaved_side_chat: false,
             sessions: Vec::new(),
             sidebar_preferences: SidebarPreferencesState::default(),
             session_presentation: None,
@@ -1114,6 +1118,15 @@ impl AppState {
     /// the chips update on click; the next chats watch frame carries the same
     /// value once the engine applies the LWW write.
     pub fn apply_chat_config(&mut self, chat_id: &str, config: zeron_proto::ChatConfig) {
+        // The pending side chat's copy is what `apply_chats` re-inserts and
+        // what an unsaved one is minted from.
+        if let Some(chat) = self
+            .pending_side_chat
+            .as_mut()
+            .filter(|chat| chat.id == chat_id)
+        {
+            chat.config = Some(config.clone());
+        }
         if let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) {
             chat.config = Some(config);
         }
@@ -1910,6 +1923,7 @@ impl AppState {
         self.spaces.clear();
         self.chats.clear();
         self.pending_side_chat = None;
+        self.unsaved_side_chat = false;
         self.sessions.clear();
         self.sidebar_preferences = SidebarPreferencesState::default();
         self.session_presentation = None;
@@ -1937,9 +1951,13 @@ impl AppState {
     }
 
     /// Independent selection and transcript subscriptions over the same engine.
+    /// An `unsaved` chat is a hand-started side chat nothing has written yet:
+    /// it opens no doc until its first send mints it (see
+    /// [`Self::unsaved_side_chat_create`]).
     pub(crate) fn side_chat_state(
         parent: &Entity<Self>,
         chat: Chat,
+        unsaved: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let source = parent.read(cx);
@@ -1954,11 +1972,69 @@ impl AppState {
         state.data_dir = source.data_dir.clone();
         state.auto_selected = true;
         state.pending_side_chat = Some(chat.clone());
+        state.unsaved_side_chat = unsaved;
         if let Some(engine) = engine {
             state.attach_engine(engine, cx);
         }
         state.select_chat(Some(chat.id), cx);
         state
+    }
+
+    /// This is a side chat's state whose chat its first send has yet to mint.
+    pub(crate) fn side_chat_unsaved(&self) -> bool {
+        self.unsaved_side_chat
+    }
+
+    fn is_unsaved_side_chat(&self, chat_id: &str) -> bool {
+        self.unsaved_side_chat
+            && self
+                .pending_side_chat
+                .as_ref()
+                .is_some_and(|chat| chat.id == chat_id)
+    }
+
+    /// The `Mutate createChat` params that mint the unsaved side chat
+    /// `chat_id` on its first send; `None` once it exists.
+    pub(crate) fn unsaved_side_chat_create(&self, chat_id: &str) -> Option<serde_json::Value> {
+        if !self.is_unsaved_side_chat(chat_id) {
+            return None;
+        }
+        let chat = self.pending_side_chat.as_ref()?;
+        Some(serde_json::json!({
+            "op": "createChat",
+            "chatId": chat.id,
+            "deviceId": chat.device_id,
+            "spaceId": chat.space_id,
+            "config": chat.config,
+            "branch": chat.branch,
+            "cwd": chat.cwd,
+            "parentChatId": chat.parent_chat_id,
+        }))
+    }
+
+    /// The unsaved side chat now exists: attach the doc watches it deferred.
+    pub(crate) fn side_chat_saved(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        if !self.is_unsaved_side_chat(chat_id) {
+            return;
+        }
+        self.unsaved_side_chat = false;
+        if self.selected_chat.as_deref() == Some(chat_id) {
+            self.focus_chat_sync(chat_id, cx);
+            self.start_chat_watches(chat_id.to_owned(), cx);
+        }
+    }
+
+    fn start_chat_watches(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        let Some(handle) = self.engine.clone() else {
+            return;
+        };
+        self.transcript_task = Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
+        if handle
+            .engine_info()
+            .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
+        {
+            self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
+        }
     }
 
     // ---- gpui glue ----
@@ -2174,7 +2250,9 @@ impl AppState {
     /// watch server-side. Selecting a chat also lands in its space and marks it
     /// seen (a global-list click must switch the tab strip too).
     pub fn select_chat(&mut self, chat_id: Option<String>, cx: &mut Context<Self>) {
-        if let Some(id) = &chat_id {
+        if let Some(id) = &chat_id
+            && !self.is_unsaved_side_chat(id)
+        {
             self.focus_chat_sync(id, cx);
         }
         if self.selected_chat == chat_id {
@@ -2290,14 +2368,12 @@ impl AppState {
             }
             self.mark_chat_seen(id, cx);
         }
-        if let (Some(chat_id), Some(handle)) = (chat_id, self.engine.clone()) {
-            self.transcript_task =
-                Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
-            if handle
-                .engine_info()
-                .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
-            {
-                self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
+        if let Some(chat_id) = chat_id {
+            if self.is_unsaved_side_chat(&chat_id) {
+                // Nothing to watch yet, and opening its doc would start one.
+                self.transcript_replayed = true;
+            } else {
+                self.start_chat_watches(chat_id, cx);
             }
         }
         cx.notify();

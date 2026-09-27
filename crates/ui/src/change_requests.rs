@@ -46,7 +46,7 @@ impl ChangeRequestBadgeModel {
             ChangeRequestState::Closed => ("Closed", ChangeRequestBadgeTone::Closed),
         };
         Self {
-            number: format!("#{}", summary.number).into(),
+            number: summary.number.to_string().into(),
             state_label,
             title: summary.title.replace(['\r', '\n'], " ").into(),
             tone,
@@ -87,7 +87,7 @@ impl Render for ChangeRequestTooltip {
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(self.model.tone.color(theme))
                     .child(SharedString::from(format!(
-                        "PR {} · {}",
+                        "PR #{} · {}",
                         self.model.number, self.model.state_label
                     ))),
             )
@@ -160,7 +160,7 @@ fn render_pull_request_badge(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(if composer { 5.0 } else { 0.0 }))
+        .gap(px(if composer { 5.0 } else { 3.0 }))
         .px(px(if composer { 7.0 } else { 4.0 }))
         .rounded(px(if composer { 6.0 } else { 4.0 }))
         .bg(color.opacity(0.08))
@@ -180,14 +180,12 @@ fn render_pull_request_badge(
                 })
                 .tooltip_show_delay(std::time::Duration::from_millis(350))
         })
-        .when(composer, |element| {
-            element.child(
-                crate::icons::icon(crate::icons::PULL_REQUEST)
-                    .size(px(11.0))
-                    .flex_none()
-                    .text_color(color.opacity(0.85)),
-            )
-        })
+        .child(
+            crate::icons::icon(crate::icons::PULL_REQUEST)
+                .size(px(if composer { 11.0 } else { 10.0 }))
+                .flex_none()
+                .text_color(color.opacity(0.85)),
+        )
         // Monospace digits give the badge a stable tabular width as PR numbers change.
         .child(
             div()
@@ -648,7 +646,7 @@ mod tests {
             summary.state = state;
             summary.title = "First line\nSecond line".into();
             let model = ChangeRequestBadgeModel::from_summary(&summary);
-            assert_eq!(model.number, "#90");
+            assert_eq!(model.number, "90");
             assert_eq!(model.state_label, label);
             assert_eq!(model.tone, tone);
             assert_eq!(model.title, "First line Second line");

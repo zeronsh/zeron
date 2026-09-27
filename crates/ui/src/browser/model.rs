@@ -1,6 +1,38 @@
 //! Browser state shared by the chrome and platform host. No native handles.
 use std::net::IpAddr;
 
+/// NSEvent supplies characters, while GPUI bindings name non-printing keys.
+/// Shift+Tab can arrive as NSBackTabCharacter rather than a literal tab.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn native_shortcut_key(characters: &str) -> &str {
+    match characters {
+        "\t" | "\u{19}" => "tab",
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod native_shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn native_tabs_match_the_configured_navigation_keystrokes() {
+        for (characters, modifiers, binding) in [
+            ("\t", "ctrl-", "ctrl-tab"),
+            ("\t", "ctrl-shift-", "ctrl-shift-tab"),
+            ("\u{19}", "ctrl-shift-", "ctrl-shift-tab"),
+            ("\t", "alt-", "alt-tab"),
+            ("l", "cmd-", "cmd-l"),
+        ] {
+            let native = format!("{modifiers}{}", native_shortcut_key(characters));
+            assert_eq!(
+                gpui::Keystroke::parse(&native).unwrap(),
+                gpui::Keystroke::parse(binding).unwrap(),
+            );
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 pub struct PageState {
     pub url: Option<String>,
