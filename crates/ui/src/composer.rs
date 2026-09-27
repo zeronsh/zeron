@@ -7619,7 +7619,19 @@ impl Composer {
         };
         let space_id = space.as_ref().map(|s| s.id.clone());
         let space_path = space.as_ref().map(|s| s.path.clone());
-        let create_side_chat = self.state.read(cx).unsaved_side_chat_create(&chat_id);
+        let create_side_chat = self.state.update(cx, |state, _| {
+            if state.side_chat_unsaved()
+                && let Some(mut config) = resolved.chat_config()
+            {
+                // Freeze the same resolved provider settings in createChat and
+                // Run, including defaults learned since the harness was picked.
+                if let Some(existing) = state.selected_chat_row().and_then(|c| c.config.as_ref()) {
+                    config.sandbox = existing.sandbox;
+                }
+                state.apply_chat_config(&chat_id, config);
+            }
+            state.unsaved_side_chat_create(&chat_id)
+        });
         if queue && !is_new {
             let capability = if self.staged().is_empty() && self.staged_appshots().is_empty() {
                 capabilities::MESSAGE_QUEUE_V1
@@ -11074,6 +11086,8 @@ mod tests {
         let chat: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
             "id": "side", "parentChatId": "main", "deviceId": "local", "cwd": "/tmp/main",
             "archived": false, "createdAt": chrono::Utc::now(),
+            "config": { "harness": "codex", "model": "child-model", "reasoning": "low",
+                "sandbox": "workspace-write" },
         }))
         .unwrap();
         let side = cx.new(|cx| AppState::side_chat_state(&parent, chat, true, cx));
@@ -11104,6 +11118,8 @@ mod tests {
         assert_eq!(create.params["op"], "createChat");
         assert_eq!(create.params["parentChatId"], "main");
         assert_eq!(create.params["cwd"], "/tmp/main");
+        assert_eq!(create.params["config"]["harness"], "codex");
+        assert_eq!(create.params["config"]["model"], "child-model");
         replies
             .try_send(
                 serde_json::to_string(&zeron_rpc::ServerFrame {
@@ -11120,6 +11136,16 @@ mod tests {
         let called = |method: &str| after.iter().any(|f| f.method.as_deref() == Some(method));
         assert!(called(methods::WATCH_DOC_MESSAGES), "{after:?}");
         assert!(called(methods::QUEUE_COMMAND), "{after:?}");
+        let run = after
+            .iter()
+            .find(|f| f.method.as_deref() == Some(methods::QUEUE_COMMAND))
+            .unwrap();
+        let request = &run.params["command"]["request"];
+        for field in ["harness", "model", "reasoning", "modelOptions"] {
+            assert_eq!(request[field], create.params["config"][field], "{field}");
+        }
+        assert_eq!(request["cwd"], "/tmp/main");
+        assert_eq!(request["resume"], serde_json::Value::Null);
         assert!(!after.iter().any(|f| f.params["op"] == "createChat"));
         assert!(!side.read_with(cx, |state, _| state.side_chat_unsaved()));
     }

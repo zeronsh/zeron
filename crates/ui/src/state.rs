@@ -1985,6 +1985,16 @@ impl AppState {
         self.unsaved_side_chat
     }
 
+    /// The harness can change until the first send snapshots it.
+    /// Keep the harness fixed while createChat is in flight, including uploads.
+    pub(crate) fn side_chat_harness_editable(&self) -> bool {
+        self.unsaved_side_chat
+            && self
+                .selected_chat
+                .as_ref()
+                .is_some_and(|id| !self.pending_sends.contains_key(id))
+    }
+
     fn is_unsaved_side_chat(&self, chat_id: &str) -> bool {
         self.unsaved_side_chat
             && self
