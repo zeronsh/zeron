@@ -478,7 +478,7 @@ static void evaluated(GObject *web, GAsyncResult *result, gpointer data) {
 }
 static void shutdown_ready(GObject *manager, GAsyncResult *result, gpointer unused) {
     GError *error = NULL;
-    GList *cookies = webkit_cookie_manager_get_all_cookies_finish(WEBKIT_COOKIE_MANAGER(manager), result, &error);
+    GList *cookies = webkit_cookie_manager_get_cookies_finish(WEBKIT_COOKIE_MANAGER(manager), result, &error);
     g_list_free_full(cookies, (GDestroyNotify)soup_cookie_free);
     g_clear_error(&error);
     gtk_main_quit();
@@ -489,8 +489,10 @@ static void begin_shutdown(void) {
     shutting_down = TRUE;
     g_hash_table_remove_all(pages);
     // Let WebKit process the pending cookie operations before leaving its loop.
-    webkit_cookie_manager_get_all_cookies(webkit_web_context_get_cookie_manager(context),
-                                         NULL, shutdown_ready, NULL);
+    // get_cookies is available on older WebKitGTK 4.1 runtimes too (the
+    // get_all_cookies API would require WebKitGTK 2.42).
+    webkit_cookie_manager_get_cookies(webkit_web_context_get_cookie_manager(context),
+                                     "http://localhost/", NULL, shutdown_ready, NULL);
 }
 
 static void command(JsonObject *o) {

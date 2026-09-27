@@ -83,9 +83,16 @@ pub struct BrowserContext {
 impl BrowserContext {
     pub(crate) fn for_profile(profile: profile::BrowserProfile) -> Self {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        { Self { data: native::BrowserData::for_profile(profile) } }
+        {
+            Self {
+                data: native::BrowserData::for_profile(profile),
+            }
+        }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        { let _ = profile; Self::default() }
+        {
+            let _ = profile;
+            Self::default()
+        }
     }
 }
 
@@ -581,6 +588,52 @@ impl BrowserSurface {
                     });
                 }));
             }
+        }
+    }
+}
+
+#[cfg(feature = "browser-fixture")]
+impl BrowserContext {
+    pub fn fixture_persistence_supported() -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            native::persistent_profiles_supported()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            cfg!(target_os = "linux")
+        }
+    }
+
+    /// Named WK stores live outside the fixture's temporary data directory.
+    /// Remove only the store derived from this fixture installation and identity.
+    pub fn fixture_remove_profile(
+        data_dir: &std::path::Path,
+        device: &str,
+        completion: impl FnOnce(Result<(), String>) + Send + 'static,
+    ) {
+        #[cfg(target_os = "macos")]
+        {
+            use wry::WebViewExtMacOS;
+            if native::persistent_profiles_supported() {
+                let profile = profile::BrowserProfile::for_workspace(
+                    data_dir,
+                    Some(zeron_proto::WorkspaceScope::Local),
+                    None,
+                    Some(device),
+                )
+                .unwrap();
+                wry::WebView::remove_data_store(&profile.data_store_identifier(), move |result| {
+                    completion(result.map_err(|error| error.to_string()));
+                });
+            } else {
+                completion(Ok(()));
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (data_dir, device);
+            completion(Ok(()));
         }
     }
 }

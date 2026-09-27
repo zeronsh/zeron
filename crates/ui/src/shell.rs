@@ -3619,8 +3619,10 @@ impl Shell {
             }
             self.browsers.clear();
             self.browser_subs.clear();
-            self.browser_context = browser_profile.clone()
-                .map(crate::browser::BrowserContext::for_profile).unwrap_or_default();
+            self.browser_context = browser_profile
+                .clone()
+                .map(crate::browser::BrowserContext::for_profile)
+                .unwrap_or_default();
             self.pull_request_cache = Default::default();
             self.pull_requests_page = None;
             self.pull_request_detail = None;
@@ -16936,6 +16938,69 @@ mod exit_regressions {
                 })
                 .unwrap();
         }
+    }
+
+    #[gpui::test]
+    fn browser_profile_changes_clear_tabs_and_reselect_the_stable_identity(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "session".into();
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(zeron_proto::WorkspaceScope::Local);
+                    state.local_device_id = Some("device-a".into());
+                });
+                // Selecting the identity happens before navigation, without requiring a render.
+                shell.add_browser_surface(None, window, cx);
+                let original = shell.browser_profile.clone().unwrap();
+                shell.active_chat = "another-chat".into();
+                shell.add_browser_surface(None, window, cx);
+                assert_eq!(shell.browsers.len(), 2);
+                assert_eq!(shell.browser_profile.as_ref(), Some(&original));
+                shell.state.update(cx, |state, _| {
+                    state.local_device_id = Some("device-b".into())
+                });
+                shell.sync_browser_profile(cx);
+                assert!(shell.browsers.is_empty());
+                assert!(shell.browser_subs.is_empty());
+                assert_ne!(shell.browser_profile.as_ref(), Some(&original));
+                shell.state.update(cx, |state, _| {
+                    state.local_device_id = Some("device-a".into())
+                });
+                shell.sync_browser_profile(cx);
+                assert_eq!(shell.browser_profile.as_ref(), Some(&original));
+                shell.add_browser_surface(None, window, cx);
+                shell
+                    .state
+                    .update(cx, |state, _| state.workspace_scope = None);
+                shell.sync_browser_profile(cx);
+                assert!(shell.browser_profile.is_none());
+                assert!(shell.browsers.is_empty());
+            })
+            .unwrap();
     }
 
     #[gpui::test]

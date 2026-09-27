@@ -98,6 +98,55 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_profiles_follow_user_and_organization_not_device() {
+        let root = tempfile::tempdir().unwrap();
+        let make = |user: &str, org: Option<&str>, device: &str, scope| {
+            let auth = AuthState::SignedIn {
+                user: zeron_proto::UserProfile {
+                    id: user.into(),
+                    email: "fixture@example.test".into(),
+                    name: None,
+                },
+                org_id: org.map(str::to_owned),
+            };
+            BrowserProfile::for_workspace(root.path(), Some(scope), Some(&auth), Some(device))
+                .unwrap()
+        };
+        let a = make("alice", Some("one"), "device-a", WorkspaceScope::Synced);
+        assert_eq!(
+            a,
+            make("alice", Some("one"), "device-b", WorkspaceScope::Synced)
+        );
+        assert_ne!(
+            a,
+            make("bob", Some("one"), "device-a", WorkspaceScope::Synced)
+        );
+        assert_ne!(
+            a,
+            make("alice", Some("two"), "device-a", WorkspaceScope::Synced)
+        );
+        assert_ne!(a, make("alice", None, "device-a", WorkspaceScope::Synced));
+        assert_ne!(
+            a,
+            make(
+                "alice",
+                Some("one"),
+                "device-a",
+                WorkspaceScope::Development
+            )
+        );
+        assert!(
+            BrowserProfile::for_workspace(
+                root.path(),
+                Some(WorkspaceScope::Synced),
+                Some(&AuthState::SignedOut),
+                Some("device-a")
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn unresolved_identity_does_not_select_a_shared_persistent_profile() {
         let root = Path::new("/unused");
         assert!(BrowserProfile::for_workspace(root, None, None, None).is_none());

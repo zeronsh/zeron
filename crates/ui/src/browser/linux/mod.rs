@@ -103,13 +103,19 @@ fn helper_path() -> Result<std::path::PathBuf, String> {
 }
 fn read_startup(stdout: &mut impl Read) -> Result<(), String> {
     let mut header = [0u8; 9];
-    stdout.read_exact(&mut header).map_err(|error| format!("Browser helper could not start: {error}. Check the WebKitGTK 4.1 runtime and display."))?;
+    stdout.read_exact(&mut header).map_err(|error| {
+        format!(
+            "Browser helper could not start: {error}. Check the WebKitGTK 4.1 runtime and display."
+        )
+    })?;
     let length = u32::from_le_bytes(header[5..9].try_into().unwrap()) as usize;
     if length > 16384 || header[1..5] != [0; 4] {
         return Err("Invalid browser startup response".into());
     }
     let mut message = vec![0; length];
-    stdout.read_exact(&mut message).map_err(|error| error.to_string())?;
+    stdout
+        .read_exact(&mut message)
+        .map_err(|error| error.to_string())?;
     match header[0] {
         b'R' if message.is_empty() => Ok(()),
         b'E' => Err(String::from_utf8_lossy(&message).into_owned()),
@@ -121,15 +127,23 @@ impl BrowserData {
     pub fn for_profile(profile: super::profile::BrowserProfile) -> Self {
         // One live helper per profile, shared across all windows in this process.
         type SharedWorker = Mutex<Option<Arc<Worker>>>;
-        static PROFILES: std::sync::OnceLock<Mutex<HashMap<std::path::PathBuf, Weak<SharedWorker>>>> = std::sync::OnceLock::new();
+        static PROFILES: std::sync::OnceLock<
+            Mutex<HashMap<std::path::PathBuf, Weak<SharedWorker>>>,
+        > = std::sync::OnceLock::new();
         let mut profiles = PROFILES.get_or_init(Default::default).lock().unwrap();
         profiles.retain(|_, worker| worker.strong_count() > 0);
-        let current = profiles.get(&profile.root).and_then(Weak::upgrade).unwrap_or_else(|| {
-            let current = Arc::new(Mutex::new(None));
-            profiles.insert(profile.root.clone(), Arc::downgrade(&current));
-            current
-        });
-        Self { profile: Some(profile), current }
+        let current = profiles
+            .get(&profile.root)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| {
+                let current = Arc::new(Mutex::new(None));
+                profiles.insert(profile.root.clone(), Arc::downgrade(&current));
+                current
+            });
+        Self {
+            profile: Some(profile),
+            current,
+        }
     }
     fn worker(&self) -> Result<Arc<Worker>, String> {
         let mut current = self.current.lock().unwrap();
@@ -745,5 +759,49 @@ impl super::BrowserSurface {
             content.into_any_element(),
             None,
         ))
+    }
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+
+    #[test]
+    fn startup_surfaces_storage_errors_and_rejects_invalid_packets() {
+        assert!(read_startup(&mut &b"R\0\0\0\0\0\0\0\0"[..]).is_ok());
+        let mut packet = b"E\0\0\0\0".to_vec();
+        packet.extend_from_slice(&6u32.to_le_bytes());
+        packet.extend_from_slice(b"locked");
+        assert_eq!(read_startup(&mut packet.as_slice()), Err("locked".into()));
+        assert!(read_startup(&mut &b"R\0"[..]).is_err());
+        assert!(read_startup(&mut &b"R\0\0\0\0\xff\xff\xff\xff"[..]).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires a real WebKitGTK runtime and display (xvfb-run)"]
+    fn profile_contexts_share_a_live_helper_and_release_its_lock_on_shutdown() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = super::super::profile::BrowserProfile::for_workspace(
+            root.path(),
+            Some(zeron_proto::WorkspaceScope::Local),
+            None,
+            Some("device"),
+        )
+        .unwrap();
+        let first = BrowserData::for_profile(profile.clone());
+        let second = BrowserData::for_profile(profile.clone());
+        let pid = first.worker().unwrap().child.lock().unwrap().id();
+        // No page owns the worker. The profile keeps it alive between tabs.
+        assert_eq!(pid, first.worker().unwrap().child.lock().unwrap().id());
+        assert_eq!(pid, second.worker().unwrap().child.lock().unwrap().id());
+        drop(first);
+        assert_eq!(pid, second.worker().unwrap().child.lock().unwrap().id());
+        drop(second);
+        // Immediate reopening must acquire the released process lock.
+        let reopened = BrowserData::for_profile(profile);
+        let worker = reopened.worker().unwrap();
+        assert_ne!(pid, worker.child.lock().unwrap().id());
+        drop(worker);
+        drop(reopened);
     }
 }

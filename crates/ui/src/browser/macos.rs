@@ -45,7 +45,10 @@ impl BrowserData {
                 return Self(store);
             }
             let root = profile.root.clone();
-            let store = Rc::new(RefCell::new(BrowserStore { profile: Some(profile), ..Default::default() }));
+            let store = Rc::new(RefCell::new(BrowserStore {
+                profile: Some(profile),
+                ..Default::default()
+            }));
             profiles.insert(root, Rc::downgrade(&store));
             Self(store)
         })
@@ -59,7 +62,8 @@ impl BrowserData {
             data.store = Some(unsafe {
                 match &data.profile {
                     Some(profile) if persistent_profiles_supported() => {
-                        let identifier = objc2_foundation::NSUUID::from_bytes(profile.data_store_identifier());
+                        let identifier =
+                            objc2_foundation::NSUUID::from_bytes(profile.data_store_identifier());
                         objc2_web_kit::WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm)
                     }
                     _ => objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm),
@@ -104,8 +108,10 @@ impl BrowserData {
 
 /// macOS 12/13 have only a single default persistent store. Do not silently
 /// share it across accounts; retain isolated temporary stores on those systems.
-fn persistent_profiles_supported() -> bool {
-    unsafe { msg_send![class!(WKWebsiteDataStore), respondsToSelector: sel!(dataStoreForIdentifier:)] }
+pub(super) fn persistent_profiles_supported() -> bool {
+    unsafe {
+        msg_send![class!(WKWebsiteDataStore), respondsToSelector: sel!(dataStoreForIdentifier:)]
+    }
 }
 
 impl BrowserData {
