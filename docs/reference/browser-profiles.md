@@ -47,8 +47,12 @@ normal teardown the parent closes its command pipe, and the helper destroys
 pages and waits for pending cookie operations before leaving its event loop.
 The parent allows three seconds before forced termination. Another process
 opening the same profile gets an explicit error instead of a concurrent writer.
-Startup/storage failures are shown on the browser page; they do not silently
-select temporary storage.
+Startup runs on a dedicated background thread, including executable extraction,
+profile coordination and the bounded ten-second handshake. Navigation keeps the
+UI responsive and shows a loading state until initialization finishes. If the
+address changes during startup, the latest address is loaded; closing the tab
+cancels delivery of its pending result. Startup/storage failures are shown on
+the browser page; they do not silently select temporary storage.
 
 On macOS 14+, WebKit manages storage in the app's website-data location. Zeron
 uses a named `WKWebsiteDataStore` with a stable UUID derived from the canonical
@@ -72,6 +76,11 @@ Run the browser unit and shell regression tests:
 ```sh
 cargo test --locked -p zeron-ui --lib browser --features browser-fixture -- --test-threads=1
 ```
+
+The Linux startup regressions use Python 3 to gate a synthetic helper. They
+check that two windows remain responsive, the latest address wins, startup
+errors are delivered asynchronously, and closing a pending tab cancels its
+attachment. These tests do not need a display.
 
 On Linux, exercise the real helper lifecycle and shared process registry:
 

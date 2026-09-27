@@ -286,8 +286,14 @@ impl BrowserSurface {
         }
         let external = !cfg!(any(target_os = "macos", target_os = "linux", windows));
         let has_error = self.page.error.is_some();
+        #[cfg(target_os = "linux")]
+        let starting = self.native_startup.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let starting = false;
         let title = if has_error {
             "Couldn’t load this page"
+        } else if starting {
+            "Starting browser…"
         } else if external && self.page.url.is_some() {
             "Opened in your browser"
         } else {
@@ -295,6 +301,8 @@ impl BrowserSurface {
         };
         let description = if let Some(error) = &self.page.error {
             error.clone()
+        } else if starting {
+            "You can keep working while your page opens.".into()
         } else if external {
             "Open a website or local app in your default browser. Embedded browsing is available on macOS and Linux.".into()
         } else {

@@ -28,6 +28,8 @@ pub enum NativeEvent {
 pub struct BrowserData {
     current: Arc<Mutex<Option<Arc<Worker>>>>,
     profile: Option<super::profile::BrowserProfile>,
+    #[cfg(test)]
+    helper_override: Option<std::path::PathBuf>,
 }
 
 struct Worker {
@@ -70,18 +72,28 @@ struct Route {
 }
 
 fn helper_path() -> Result<std::path::PathBuf, String> {
-    use sha2::{Digest, Sha256};
-    const HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/zeron-webkit"));
-    let hash = format!("{:x}", Sha256::digest(HELPER));
     let root = std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|p| std::path::PathBuf::from(p).join(".cache")))
         .ok_or("Could not locate the browser cache directory")?
         .join("zeron/browser");
-    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    extract_helper(&root)
+}
+
+fn extract_helper(root: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    use sha2::{Digest, Sha256};
+    const HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/zeron-webkit"));
+    let hash = format!("{:x}", Sha256::digest(HELPER));
+    std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
     let path = root.join(format!("webkit-{hash}"));
     if std::fs::read(&path).ok().as_deref() != Some(HELPER) {
-        let temp = root.join(format!(".webkit-{}", std::process::id()));
+        // Different profiles can now initialize concurrently. Each extraction
+        // needs its own staging file, even within the same application process.
+        let temp = root.join(format!(
+            ".webkit-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let result = (|| -> std::io::Result<()> {
             let mut f = std::fs::OpenOptions::new()
                 .write(true)
@@ -101,6 +113,7 @@ fn helper_path() -> Result<std::path::PathBuf, String> {
         .map_err(|e| e.to_string())?;
     Ok(path)
 }
+
 fn read_startup(stdout: &mut impl Read) -> Result<(), String> {
     let mut header = [0u8; 9];
     stdout.read_exact(&mut header).map_err(|error| {
@@ -143,8 +156,11 @@ impl BrowserData {
         Self {
             profile: Some(profile),
             current,
+            #[cfg(test)]
+            helper_override: None,
         }
     }
+    /// Blocking initialization, called only by the dedicated startup thread.
     fn worker(&self) -> Result<Arc<Worker>, String> {
         let mut current = self.current.lock().unwrap();
         if let Some(worker) = current.as_ref() {
@@ -159,7 +175,15 @@ impl BrowserData {
                 return Ok(worker.clone());
             }
         }
-        let mut command = Command::new(helper_path()?);
+        #[cfg(test)]
+        let executable = self
+            .helper_override
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(helper_path)?;
+        #[cfg(not(test))]
+        let executable = helper_path()?;
+        let mut command = Command::new(executable);
         if let Some(profile) = &self.profile {
             command.arg("--profile").arg(&profile.root);
         }
@@ -285,11 +309,26 @@ pub struct NativePage {
     pub pressed: std::cell::Cell<Option<gpui::MouseButton>>,
 }
 impl NativePage {
-    pub fn new(
-        _: &gpui::Window,
-        data: &BrowserData,
+    /// Extract, spawn and handshake entirely off the UI thread. Concurrent
+    /// tabs wait for their shared profile's worker here, never in navigation.
+    pub fn start(
+        data: BrowserData,
         tx: Sender<NativeEvent>,
-    ) -> Result<Self, String> {
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<Self, String>>, String> {
+        let (ready, result) = tokio::sync::oneshot::channel();
+        std::thread::Builder::new()
+            .name("browser-startup".into())
+            .spawn(move || {
+                let page = Self::new(&data, tx);
+                // If the tab was closed, send returns the page and drops it on
+                // this thread. The UI never waits for an abandoned startup.
+                let _ = ready.send(page);
+            })
+            .map_err(|error| format!("Could not start browser initialization: {error}"))?;
+        Ok(result)
+    }
+
+    fn new(data: &BrowserData, tx: Sender<NativeEvent>) -> Result<Self, String> {
         let worker = data.worker()?;
         let id = worker.next_id.fetch_add(1, Ordering::Relaxed);
         let route = Arc::new(Route {
@@ -393,6 +432,44 @@ impl Drop for NativePage {
 }
 
 impl super::BrowserSurface {
+    pub(super) fn start_linux_page(
+        &mut self,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> Result<(), String> {
+        if self.native_startup.is_some() {
+            // navigate() has already updated page.url. Use that latest address
+            // when startup completes instead of starting a second helper.
+            return Ok(());
+        }
+        let ready = NativePage::start(self.context.data.clone(), self.native_tx.clone())?;
+        self.native_startup = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = ready
+                .await
+                .unwrap_or_else(|_| Err("Browser initialization stopped unexpectedly".into()));
+            let _ = this.update_in(cx, |this, _, cx| {
+                this.native_startup = None;
+                let result = result.and_then(|mut native| {
+                    native.present(this.presentation);
+                    let result = this
+                        .page
+                        .url
+                        .as_deref()
+                        .map_or(Ok(()), |url| native.load(url));
+                    this.native = Some(native);
+                    result
+                });
+                this.page.loading = result.is_ok();
+                if let Err(error) = result {
+                    this.page.error = Some(format!("Could not open this page: {error}"));
+                }
+                cx.emit(super::BrowserEvent::Changed);
+                cx.notify();
+            });
+        }));
+        Ok(())
+    }
+
     pub(super) fn on_native_event(
         &mut self,
         event: NativeEvent,
@@ -805,3 +882,6 @@ mod storage_tests {
         drop(reopened);
     }
 }
+
+#[cfg(test)]
+mod startup_tests;
