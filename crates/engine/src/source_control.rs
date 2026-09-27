@@ -7,14 +7,17 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use zeron_proto::{ChangeRequestState, ChangeRequestSummary};
+use zeron_proto::{
+    ChangeRequestListItem, ChangeRequestMergeability, ChangeRequestReviewDecision,
+    ChangeRequestState, ChangeRequestSummary,
+};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_TIMEOUT: Duration = Duration::from_secs(20);
@@ -22,6 +25,31 @@ const GIT_OUTPUT_LIMIT: usize = 64 * 1024;
 const GITHUB_OUTPUT_LIMIT: usize = 1024 * 1024;
 const GITHUB_RESULT_LIMIT: &str = "20";
 const GITHUB_JSON_FIELDS: &str = "number,title,url,state,baseRefName,headRefName,updatedAt,isCrossRepository,headRepositoryOwner";
+const GITHUB_SEARCH_QUERY: &str = "query($search: String!, $owner: String!, $name: String!) { repository(owner: $owner, name: $name) { nameWithOwner } search(query: $search, type: ISSUE, first: 50) { nodes { ... on PullRequest { author { login } number title url state isDraft mergeable reviewDecision createdAt updatedAt additions deletions repository { nameWithOwner } } } } }";
+
+/// Strictly one repository; reject search qualifiers and unscoped requests.
+pub fn valid_pr_repository(repository: &str) -> bool {
+    let parts: Vec<_> = repository.split('/').collect();
+    parts.len() == 2
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && *part != "."
+                && *part != ".."
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        })
+}
+
+#[derive(Default)]
+struct PrRequestCache {
+    entries: Vec<(
+        String,
+        Instant,
+        Result<serde_json::Value, ChangeRequestError>,
+    )>,
+    rate_limited_at: Option<Instant>,
+}
 
 /// Repository identity extracted from a Git remote URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +120,42 @@ pub trait ChangeRequestProvider: Send + Sync {
     ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError>;
 }
 
+/// Host-side boundary for global change request listing and inspection surfaces.
+#[async_trait]
+pub trait OpenChangeRequestLookup: Send + Sync {
+    async fn list_authored_open(
+        &self,
+        repository: &str,
+        refresh: bool,
+    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError>;
+    async fn list_filtered_open(
+        &self,
+        repository: &str,
+        filter: zeron_proto::ChangeRequestFilter,
+        refresh: bool,
+    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError> {
+        if filter != zeron_proto::ChangeRequestFilter::Authored {
+            return Err(ChangeRequestError::UnsupportedRepository);
+        }
+        self.list_authored_open(repository, refresh).await
+    }
+    async fn post_comment(
+        &self,
+        _url: &str,
+        _body: &str,
+    ) -> Result<zeron_proto::ChangeRequestComment, ChangeRequestError> {
+        Err(ChangeRequestError::UnsupportedRepository)
+    }
+    async fn detail(
+        &self,
+        _url: &str,
+        _diff: bool,
+        _refresh: bool,
+    ) -> Result<serde_json::Value, ChangeRequestError> {
+        Err(ChangeRequestError::UnsupportedRepository)
+    }
+}
+
 /// Checkout inspection plus provider resolution, injectable for cache/service tests.
 #[async_trait]
 pub trait CheckoutChangeRequestLookup: Send + Sync {
@@ -120,6 +184,24 @@ impl ChangeRequestResolver {
             inspector: GitCheckoutInspector::new(runner.clone()),
             github: GitHubCli::with_runner(runner),
         }
+    }
+
+    /// Resolve just the selected checkout's identity. Local Git only: no
+    /// provider lookup, repository enumeration, or remote transport.
+    pub async fn repository_for_checkout(&self, cwd: &Path) -> Option<String> {
+        let remote = self
+            .inspector
+            .git_optional(cwd, &["remote", "get-url", "origin"])
+            .await;
+        let remote = match remote {
+            Some(remote) => parse_git_remote(&remote)?,
+            None => {
+                let source = self.inspect_checkout(cwd).await.ok()?;
+                parse_git_remote(source.branch.remote_url.as_deref()?)?
+            }
+        };
+        (remote.host.eq_ignore_ascii_case("github.com"))
+            .then(|| format!("{}/{}", remote.owner, remote.repository))
     }
 
     pub async fn resolve_github(
@@ -184,15 +266,339 @@ impl CheckoutChangeRequestLookup for ChangeRequestResolver {
 #[derive(Clone)]
 pub struct GitHubCli {
     runner: Arc<dyn ProcessRunner>,
+    pr_cache: Arc<tokio::sync::Mutex<PrRequestCache>>,
 }
 
 impl GitHubCli {
+    /// Shared across RPC clients on this engine. The lock also serializes distinct
+    /// provider reads and coalesces simultaneous identical reads. Never retry here.
+    async fn cached_pr_request<F>(
+        &self,
+        key: String,
+        refresh: bool,
+        fetch: F,
+    ) -> Result<serde_json::Value, ChangeRequestError>
+    where
+        F: std::future::Future<Output = Result<serde_json::Value, ChangeRequestError>> + Send,
+    {
+        let mut cache = self.pr_cache.lock().await;
+        if let Some(index) = cache.entries.iter().position(|entry| entry.0 == key) {
+            let entry = cache.entries.remove(index);
+            let ttl = match &entry.2 {
+                Err(ChangeRequestError::RateLimited) => Duration::from_secs(15 * 60),
+                Err(_) => Duration::from_secs(60),
+                Ok(_) if refresh => Duration::from_secs(15),
+                Ok(_) => Duration::from_secs(5 * 60),
+            };
+            let fresh = entry.1.elapsed() < ttl;
+            let result = entry.2.clone();
+            cache.entries.push(entry);
+            if fresh {
+                return result;
+            }
+        }
+        if cache
+            .rate_limited_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(15 * 60))
+        {
+            return Err(ChangeRequestError::RateLimited);
+        }
+        let result = fetch.await;
+        if matches!(result, Err(ChangeRequestError::RateLimited)) {
+            cache.rate_limited_at = Some(Instant::now());
+        }
+        cache.entries.retain(|entry| entry.0 != key);
+        cache.entries.push((key, Instant::now(), result.clone()));
+        if cache.entries.len() > 24 {
+            let _ = cache.entries.remove(0);
+        }
+        result
+    }
+
+    pub async fn detail(
+        &self,
+        url: &str,
+        diff: bool,
+        refresh: bool,
+    ) -> Result<serde_json::Value, ChangeRequestError> {
+        let url = validated_pull_request_url(url)?;
+        self.cached_pr_request(
+            format!("{diff}:{url}"),
+            refresh,
+            self.fetch_detail(&url, diff),
+        )
+        .await
+    }
+
+    /// Explicit user submission only. Never retry a write after an ambiguous failure.
+    pub async fn post_comment(
+        &self,
+        url: &str,
+        body: &str,
+    ) -> Result<zeron_proto::ChangeRequestComment, ChangeRequestError> {
+        let url = validated_pull_request_url(url)?;
+        if body.trim().is_empty() || body.len() > 60_000 {
+            return Err(ChangeRequestError::Decode);
+        }
+        let parsed = reqwest::Url::parse(&url).map_err(|_| ChangeRequestError::Decode)?;
+        let parts: Vec<_> = parsed.path().trim_matches('/').split('/').collect();
+        let endpoint = format!(
+            "repos/{}/{}/issues/{}/comments",
+            parts[0], parts[1], parts[3]
+        );
+        let output = self
+            .runner
+            .run(ProcessRequest {
+                program: "gh".into(),
+                args: vec![
+                    "api".into(),
+                    "--method".into(),
+                    "POST".into(),
+                    endpoint,
+                    "-f".into(),
+                    format!("body={body}"),
+                ],
+                cwd: None,
+                env: vec![
+                    ("GH_PROMPT_DISABLED".into(), "1".into()),
+                    ("GH_HOST".into(), "github.com".into()),
+                ],
+                timeout: GITHUB_TIMEOUT,
+                output_limit: GITHUB_OUTPUT_LIMIT,
+            })
+            .await
+            .map_err(classify_run_error)?;
+        if !output.success {
+            return Err(classify_github_failure(&output.stderr));
+        }
+        // Evict after the server accepted the write, even if its reply cannot be decoded.
+        self.pr_cache
+            .lock()
+            .await
+            .entries
+            .retain(|entry| entry.0 != format!("false:{url}"));
+        if output.stdout_truncated {
+            return Err(ChangeRequestError::Decode);
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)?;
+        Ok(zeron_proto::ChangeRequestComment {
+            viewer_did_author: true,
+            body: value["body"]
+                .as_str()
+                .ok_or(ChangeRequestError::Decode)?
+                .into(),
+            author: zeron_proto::ChangeRequestActor {
+                login: value["user"]["login"].as_str().unwrap_or_default().into(),
+            },
+            created_at: value["created_at"].as_str().unwrap_or_default().into(),
+            ..Default::default()
+        })
+    }
+
+    /// Fetch one PR without requiring a local checkout or executing shell text.
+    async fn fetch_detail(
+        &self,
+        url: &str,
+        diff: bool,
+    ) -> Result<serde_json::Value, ChangeRequestError> {
+        let url = validated_pull_request_url(url)?;
+        let mut args = vec![
+            "pr".into(),
+            if diff { "diff".into() } else { "view".into() },
+            url,
+        ];
+        if diff {
+            args.push("--color=never".into());
+        } else {
+            args.extend(["--json".into(), "title,body,url,number,author,baseRefName,headRefName,state,isDraft,reviewDecision,mergeable,additions,deletions,comments,reviews,files,statusCheckRollup".into()]);
+        }
+        let output = self
+            .runner
+            .run(ProcessRequest {
+                program: "gh".into(),
+                args,
+                cwd: None,
+                env: vec![
+                    ("GH_PROMPT_DISABLED".into(), "1".into()),
+                    ("GH_HOST".into(), "github.com".into()),
+                ],
+                timeout: GITHUB_TIMEOUT,
+                output_limit: GITHUB_OUTPUT_LIMIT,
+            })
+            .await
+            .map_err(classify_run_error)?;
+        if !output.success {
+            return Err(classify_github_failure(&output.stderr));
+        }
+        if output.stdout_truncated {
+            return Err(ChangeRequestError::Decode);
+        }
+        if diff {
+            Ok(serde_json::Value::String(
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+            ))
+        } else {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)?;
+            // GitHub uses null for absent check/review data; the wire model uses defaults.
+            fn remove_nulls(value: &mut serde_json::Value) {
+                match value {
+                    serde_json::Value::Object(map) => {
+                        map.retain(|_, v| !v.is_null());
+                        for v in map.values_mut() {
+                            remove_nulls(v);
+                        }
+                    }
+                    serde_json::Value::Array(items) => {
+                        for v in items {
+                            remove_nulls(v);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            remove_nulls(&mut value);
+            let detail: zeron_proto::ChangeRequestDetail =
+                serde_json::from_value(value).map_err(|_| ChangeRequestError::Decode)?;
+            serde_json::to_value(detail).map_err(|_| ChangeRequestError::Decode)
+        }
+    }
+
     pub fn new() -> Self {
         Self::with_runner(Arc::new(SystemProcessRunner))
     }
 
     fn with_runner(runner: Arc<dyn ProcessRunner>) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            pr_cache: Default::default(),
+        }
+    }
+
+    /// List open pull requests authored by the active GitHub CLI account.
+    pub async fn list_authored_open(
+        &self,
+        repository: &str,
+        refresh: bool,
+    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError> {
+        self.list_filtered_open(
+            repository,
+            zeron_proto::ChangeRequestFilter::Authored,
+            refresh,
+        )
+        .await
+    }
+
+    pub async fn list_filtered_open(
+        &self,
+        repository: &str,
+        filter: zeron_proto::ChangeRequestFilter,
+        refresh: bool,
+    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError> {
+        if !valid_pr_repository(repository) {
+            return Err(ChangeRequestError::UnsupportedRepository);
+        }
+        let repository = repository.to_ascii_lowercase();
+        let result = self
+            .cached_pr_request(format!("list:{repository}:{filter:?}"), refresh, async {
+                serde_json::to_value(self.fetch_filtered_open(&repository, filter).await?)
+                    .map_err(|_| ChangeRequestError::Decode)
+            })
+            .await?;
+        serde_json::from_value(result).map_err(|_| ChangeRequestError::Decode)
+    }
+
+    async fn fetch_filtered_open(
+        &self,
+        repository: &str,
+        filter: zeron_proto::ChangeRequestFilter,
+    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError> {
+        let (items, canonical) = self.fetch_scoped_search(repository, filter).await?;
+        if items.is_empty()
+            && let Some(canonical) = canonical
+            && !canonical.eq_ignore_ascii_case(repository)
+        {
+            // Search does not follow repository renames, although repository()
+            // does. Follow only that verified canonical name, at most once.
+            return self
+                .fetch_scoped_search(&canonical, filter)
+                .await
+                .map(|result| result.0);
+        }
+        Ok(items)
+    }
+
+    async fn fetch_scoped_search(
+        &self,
+        repository: &str,
+        filter: zeron_proto::ChangeRequestFilter,
+    ) -> Result<(Vec<ChangeRequestListItem>, Option<String>), ChangeRequestError> {
+        let (owner, name) = repository
+            .split_once('/')
+            .ok_or(ChangeRequestError::UnsupportedRepository)?;
+        let qualifier = match filter {
+            zeron_proto::ChangeRequestFilter::All => "",
+            zeron_proto::ChangeRequestFilter::Authored => "author:@me ",
+            zeron_proto::ChangeRequestFilter::Reviewing => "review-requested:@me ",
+        };
+        let request = ProcessRequest {
+            program: "gh".into(),
+            args: vec![
+                "api".into(),
+                "graphql".into(),
+                "-f".into(),
+                format!("query={GITHUB_SEARCH_QUERY}"),
+                "-f".into(),
+                format!("owner={owner}"),
+                "-f".into(),
+                format!("name={name}"),
+                "-f".into(),
+                format!("search=is:pr is:open {qualifier}repo:{repository} sort:updated-desc"),
+            ],
+            cwd: None,
+            env: vec![
+                ("GH_PROMPT_DISABLED".into(), "1".into()),
+                ("GH_HOST".into(), "github.com".into()),
+            ],
+            timeout: GITHUB_TIMEOUT,
+            output_limit: GITHUB_OUTPUT_LIMIT,
+        };
+        let output = self.runner.run(request).await.map_err(classify_run_error)?;
+        if !output.success {
+            return Err(classify_github_failure(&output.stderr));
+        }
+        if output.stdout_truncated {
+            return Err(ChangeRequestError::Decode);
+        }
+
+        let response: GhSearchResponse =
+            serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)?;
+        let canonical = response.data.repository.map(|repo| repo.name_with_owner);
+        if canonical
+            .as_deref()
+            .is_some_and(|repo| !valid_pr_repository(repo))
+        {
+            return Err(ChangeRequestError::Decode);
+        }
+        let mut items = response
+            .data
+            .search
+            .nodes
+            .into_iter()
+            .map(to_list_item)
+            .collect::<Result<Vec<_>, _>>()?;
+        // GitHub can return the canonical name of a renamed repository.
+        // Scope is enforced by the query, not by matching an old remote name.
+        items.truncate(50);
+        items.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| left.repository.cmp(&right.repository))
+                .then_with(|| left.number.cmp(&right.number))
+        });
+        Ok((items, canonical))
     }
 
     async fn list_for_selector(
@@ -214,7 +620,7 @@ impl GitHubCli {
                 "--json".into(),
                 GITHUB_JSON_FIELDS.into(),
             ],
-            cwd: source.checkout_root.clone(),
+            cwd: Some(source.checkout_root.clone()),
             env: vec![("GH_PROMPT_DISABLED".into(), "1".into())],
             timeout: GITHUB_TIMEOUT,
             output_limit: GITHUB_OUTPUT_LIMIT,
@@ -250,7 +656,7 @@ impl GitHubCli {
                 "--json".into(),
                 "defaultBranchRef".into(),
             ],
-            cwd: source.checkout_root.clone(),
+            cwd: Some(source.checkout_root.clone()),
             env: vec![("GH_PROMPT_DISABLED".into(), "1".into())],
             timeout: GITHUB_TIMEOUT,
             output_limit: GITHUB_OUTPUT_LIMIT,
@@ -269,6 +675,40 @@ impl GitHubCli {
 impl Default for GitHubCli {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[async_trait]
+impl OpenChangeRequestLookup for GitHubCli {
+    async fn list_authored_open(
+        &self,
+        repository: &str,
+        refresh: bool,
+    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError> {
+        GitHubCli::list_authored_open(self, repository, refresh).await
+    }
+    async fn list_filtered_open(
+        &self,
+        repository: &str,
+        filter: zeron_proto::ChangeRequestFilter,
+        refresh: bool,
+    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError> {
+        GitHubCli::list_filtered_open(self, repository, filter, refresh).await
+    }
+    async fn post_comment(
+        &self,
+        url: &str,
+        body: &str,
+    ) -> Result<zeron_proto::ChangeRequestComment, ChangeRequestError> {
+        GitHubCli::post_comment(self, url, body).await
+    }
+    async fn detail(
+        &self,
+        url: &str,
+        diff: bool,
+        refresh: bool,
+    ) -> Result<serde_json::Value, ChangeRequestError> {
+        GitHubCli::detail(self, url, diff, refresh).await
     }
 }
 
@@ -584,7 +1024,7 @@ impl GitCheckoutInspector {
             .run(ProcessRequest {
                 program: "git".into(),
                 args: args.iter().map(|arg| (*arg).to_owned()).collect(),
-                cwd: cwd.to_owned(),
+                cwd: Some(cwd.to_owned()),
                 env: Vec::new(),
                 timeout: GIT_TIMEOUT,
                 output_limit: GIT_OUTPUT_LIMIT,
@@ -625,6 +1065,48 @@ struct GhPullRequest {
     head_repository_owner: GhRepositoryOwner,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhSearchPullRequest {
+    #[serde(default)]
+    author: Option<zeron_proto::ChangeRequestActor>,
+    number: u64,
+    title: String,
+    url: String,
+    state: GhPullRequestState,
+    repository: GhSearchRepository,
+    mergeable: GhMergeability,
+    review_decision: Option<GhReviewDecision>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    is_draft: bool,
+    additions: u64,
+    deletions: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhSearchResponse {
+    data: GhSearchData,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhSearchData {
+    #[serde(default)]
+    repository: Option<GhSearchRepository>,
+    search: GhSearchConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhSearchConnection {
+    nodes: Vec<GhSearchPullRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhSearchRepository {
+    name_with_owner: String,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum GhPullRequestState {
@@ -633,12 +1115,48 @@ enum GhPullRequestState {
     Merged,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum GhMergeability {
+    Mergeable,
+    Conflicting,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum GhReviewDecision {
+    Approved,
+    ChangesRequested,
+    ReviewRequired,
+}
+
 impl From<GhPullRequestState> for ChangeRequestState {
     fn from(state: GhPullRequestState) -> Self {
         match state {
             GhPullRequestState::Open => Self::Open,
             GhPullRequestState::Closed => Self::Closed,
             GhPullRequestState::Merged => Self::Merged,
+        }
+    }
+}
+
+impl From<GhMergeability> for ChangeRequestMergeability {
+    fn from(mergeability: GhMergeability) -> Self {
+        match mergeability {
+            GhMergeability::Mergeable => Self::Mergeable,
+            GhMergeability::Conflicting => Self::Conflicting,
+            GhMergeability::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<GhReviewDecision> for ChangeRequestReviewDecision {
+    fn from(decision: GhReviewDecision) -> Self {
+        match decision {
+            GhReviewDecision::Approved => Self::Approved,
+            GhReviewDecision::ChangesRequested => Self::ChangesRequested,
+            GhReviewDecision::ReviewRequired => Self::ReviewRequired,
         }
     }
 }
@@ -726,6 +1244,86 @@ fn to_summary(
     })
 }
 
+fn to_list_item(
+    pull_request: GhSearchPullRequest,
+) -> Result<ChangeRequestListItem, ChangeRequestError> {
+    let repository = pull_request.repository.name_with_owner.trim();
+    let mut repository_parts = repository.split('/');
+    let owner = repository_parts.next().unwrap_or_default();
+    let name = repository_parts.next().unwrap_or_default();
+    if pull_request.number == 0
+        || owner.is_empty()
+        || name.is_empty()
+        || repository_parts.next().is_some()
+        || repository.chars().any(char::is_whitespace)
+        || !matches!(pull_request.state, GhPullRequestState::Open)
+    {
+        return Err(ChangeRequestError::Decode);
+    }
+
+    let title = pull_request
+        .title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if title.is_empty() {
+        return Err(ChangeRequestError::Decode);
+    }
+    let url =
+        reqwest::Url::parse(pull_request.url.trim()).map_err(|_| ChangeRequestError::Decode)?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(ChangeRequestError::Decode);
+    }
+    Ok(ChangeRequestListItem {
+        provider: "github".into(),
+        author: pull_request.author.unwrap_or_default(),
+        repository: repository.into(),
+        number: pull_request.number,
+        title,
+        url: url.to_string(),
+        state: pull_request.state.into(),
+        is_draft: pull_request.is_draft,
+        review_decision: pull_request
+            .review_decision
+            .map(Into::into)
+            .unwrap_or_default(),
+        additions: pull_request.additions,
+        deletions: pull_request.deletions,
+        mergeability: pull_request.mergeable.into(),
+        created_at: pull_request.created_at,
+        updated_at: pull_request.updated_at,
+    })
+}
+
+fn validated_pull_request_url(raw: &str) -> Result<String, ChangeRequestError> {
+    let url = reqwest::Url::parse(raw).map_err(|_| ChangeRequestError::UnsupportedRepository)?;
+    let parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
+    if url.scheme() != "https"
+        || url.host_str() != Some("github.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || parts.len() != 4
+        || parts[2] != "pull"
+        || parts[0].is_empty()
+        || parts[1].is_empty()
+        || !parts[0..2].iter().all(|part| {
+            part.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+        })
+        || parts[3]
+            .parse::<u64>()
+            .ok()
+            .is_none_or(|number| number == 0)
+    {
+        return Err(ChangeRequestError::UnsupportedRepository);
+    }
+    Ok(format!(
+        "https://github.com/{}/{}/pull/{}",
+        parts[0], parts[1], parts[3]
+    ))
+}
+
 fn classify_github_failure(stderr: &[u8]) -> ChangeRequestError {
     let stderr = String::from_utf8_lossy(stderr).to_ascii_lowercase();
     if stderr.contains("rate limit") || stderr.contains("secondary rate") {
@@ -754,7 +1352,7 @@ fn classify_run_error(error: ProcessRunError) -> ChangeRequestError {
 struct ProcessRequest {
     program: String,
     args: Vec<String>,
-    cwd: PathBuf,
+    cwd: Option<PathBuf>,
     env: Vec<(String, String)>,
     timeout: Duration,
     output_limit: usize,
@@ -794,9 +1392,11 @@ impl ProcessRunner for SystemProcessRunner {
             use std::os::windows::process::CommandExt;
             command.as_std_mut().creation_flags(0x08000000);
         }
+        command.args(&request.args);
+        if let Some(cwd) = &request.cwd {
+            command.current_dir(cwd);
+        }
         command
-            .args(&request.args)
-            .current_dir(&request.cwd)
             .envs(request.env)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -888,6 +1488,8 @@ mod tests {
     impl ProcessRunner for FakeProcessRunner {
         async fn run(&self, request: ProcessRequest) -> Result<ProcessOutput, ProcessRunError> {
             self.requests.lock().unwrap().push(request);
+            // Let competing callers reach the in-flight cache before completion.
+            tokio::task::yield_now().await;
             self.responses
                 .lock()
                 .unwrap()
@@ -951,6 +1553,143 @@ mod tests {
         })
     }
 
+    #[test]
+    fn pr_detail_rejects_unsafe_or_non_pr_targets() {
+        for url in [
+            "--help",
+            "https://example.com/a/b/pull/1",
+            "http://github.com/a/b/pull/1",
+            "https://github.com/a/b/issues/1",
+            "https://github.com/a/b/pull/0",
+            "https://user@github.com/a/b/pull/1",
+            "https://github.com/a/b/pull/1/files",
+        ] {
+            assert!(validated_pull_request_url(url).is_err(), "{url}");
+        }
+        assert_eq!(
+            validated_pull_request_url("https://github.com/a/b/pull/12#discussion").unwrap(),
+            "https://github.com/a/b/pull/12"
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_comment_posts_literal_body_once_and_invalidates_detail() {
+        let body = "Hello @octocat\n\n`$(do-not-run)` **Markdown**";
+        let runner = FakeProcessRunner::with_responses([command_success(
+            serde_json::to_vec(&serde_json::json!({
+                "body": body, "user": {"login": "octocat"}, "created_at": "2026-09-20T20:00:00Z"
+            }))
+            .unwrap(),
+        )]);
+        let github = GitHubCli::with_runner(runner.clone());
+        github.pr_cache.lock().await.entries.push((
+            "false:https://github.com/a/b/pull/1".into(),
+            Instant::now(),
+            Ok(serde_json::json!({})),
+        ));
+        let comment = github
+            .post_comment("https://github.com/a/b/pull/1", body)
+            .await
+            .unwrap();
+        assert_eq!(comment.body, body);
+        assert_eq!(comment.author.login, "octocat");
+        assert!(comment.viewer_did_author);
+        assert!(github.pr_cache.lock().await.entries.is_empty());
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].args,
+            [
+                "api",
+                "--method",
+                "POST",
+                "repos/a/b/issues/1/comments",
+                "-f",
+                &format!("body={body}")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_comment_rejects_invalid_inputs_and_never_retries_failure() {
+        let runner = FakeProcessRunner::with_responses([command_failure("request failed")]);
+        let github = GitHubCli::with_runner(runner.clone());
+        assert!(
+            github
+                .post_comment("https://evil.test/a/b/pull/1", "hello")
+                .await
+                .is_err()
+        );
+        assert!(
+            github
+                .post_comment("https://github.com/a/b/pull/1", "  ")
+                .await
+                .is_err()
+        );
+        assert!(
+            github
+                .post_comment("https://github.com/a/b/pull/1", &"x".repeat(60_001))
+                .await
+                .is_err()
+        );
+        assert!(runner.requests().is_empty());
+        assert!(
+            github
+                .post_comment("https://github.com/a/b/pull/1", "hello")
+                .await
+                .is_err()
+        );
+        assert_eq!(runner.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pr_detail_normalizes_absent_github_fields_and_uses_bounded_process() {
+        let runner = FakeProcessRunner::with_responses([command_success(br#"{"number":12,"title":"A PR","body":"Description","author":null,"reviewDecision":null,"comments":[{"viewerDidAuthor":true,"author":{"login":"viewer"},"body":"Own comment"},{"author":{"login":"other"},"body":"Other comment"}],"statusCheckRollup":[{"name":"build","status":"IN_PROGRESS","conclusion":null}]}"#.to_vec())]);
+        let result = GitHubCli::with_runner(runner.clone())
+            .detail("https://github.com/a/b/pull/12", false, false)
+            .await
+            .unwrap();
+        let detail: zeron_proto::ChangeRequestDetail = serde_json::from_value(result).unwrap();
+        assert_eq!(detail.status_check_rollup[0].status, "IN_PROGRESS");
+        assert_eq!(detail.status_check_rollup[0].conclusion, "");
+        assert!(detail.author.login.is_empty());
+        assert!(detail.comments[0].viewer_did_author);
+        assert!(!detail.comments[1].viewer_did_author);
+        let request = &runner.requests()[0];
+        assert_eq!(
+            &request.args[..3],
+            ["pr", "view", "https://github.com/a/b/pull/12"]
+        );
+        assert_eq!(request.timeout, GITHUB_TIMEOUT);
+        assert_eq!(request.output_limit, GITHUB_OUTPUT_LIMIT);
+        assert!(request.cwd.is_none());
+    }
+
+    #[tokio::test]
+    async fn pr_diff_returns_patch_and_rejects_truncated_output() {
+        let mut truncated = command_success("partial").unwrap();
+        truncated.stdout_truncated = true;
+        let runner = FakeProcessRunner::with_responses([
+            command_success("diff --git a/a b/a\n"),
+            Ok(truncated),
+        ]);
+        let github = GitHubCli::with_runner(runner.clone());
+        assert_eq!(
+            github
+                .detail("https://github.com/a/b/pull/12", true, false)
+                .await
+                .unwrap(),
+            "diff --git a/a b/a\n"
+        );
+        assert!(
+            github
+                .detail("https://github.com/a/b/pull/13", true, false)
+                .await
+                .is_err()
+        );
+        assert_eq!(runner.requests()[0].args.last().unwrap(), "--color=never");
+    }
+
     fn command_failure(stderr: &str) -> Result<ProcessOutput, ProcessRunError> {
         Ok(ProcessOutput {
             success: false,
@@ -993,6 +1732,55 @@ mod tests {
         })
     }
 
+    fn search_pull_request(
+        repository: &str,
+        number: u64,
+        title: &str,
+        state: &str,
+        mergeable: &str,
+        created_at: &str,
+        updated_at: &str,
+        is_draft: bool,
+        review_decision: Option<&str>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "number": number,
+            "author": { "login": "octocat" },
+            "title": title,
+            "url": format!("https://github.com/{repository}/pull/{number}"),
+            "state": state,
+            "mergeable": mergeable,
+            "repository": {
+                "nameWithOwner": repository,
+            },
+            "createdAt": created_at,
+            "updatedAt": updated_at,
+            "isDraft": is_draft,
+            "reviewDecision": review_decision,
+            "additions": 42,
+            "deletions": 7,
+        })
+    }
+
+    fn search_response(items: Vec<serde_json::Value>) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "data": { "search": { "nodes": items } }
+        }))
+        .unwrap()
+    }
+
+    async fn list_with(
+        response: Result<ProcessOutput, ProcessRunError>,
+    ) -> (
+        Result<Vec<ChangeRequestListItem>, ChangeRequestError>,
+        Arc<FakeProcessRunner>,
+    ) {
+        let runner = FakeProcessRunner::with_responses([response]);
+        let github = GitHubCli::with_runner(runner.clone());
+        let result = github.list_authored_open("acme/zeron", false).await;
+        (result, runner)
+    }
+
     async fn resolve_with(
         source: &CheckoutSourceContext,
         response: Result<ProcessOutput, ProcessRunError>,
@@ -1026,7 +1814,7 @@ mod tests {
         let requests = runner.requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].program, "gh");
-        assert_eq!(requests[0].cwd, Path::new("/checkout"));
+        assert_eq!(requests[0].cwd.as_deref(), Some(Path::new("/checkout")));
         assert_eq!(
             requests[0].args,
             [
@@ -1045,6 +1833,409 @@ mod tests {
         assert_eq!(requests[0].env, [("GH_PROMPT_DISABLED".into(), "1".into())]);
         assert_eq!(requests[0].timeout, GITHUB_TIMEOUT);
         assert_eq!(requests[0].output_limit, GITHUB_OUTPUT_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn pr_default_repository_uses_only_local_origin_metadata() {
+        let runner =
+            FakeProcessRunner::with_responses([command_success("git@github.com:acme/zeron.git\n")]);
+        let resolver = ChangeRequestResolver {
+            inspector: GitCheckoutInspector::new(runner.clone()),
+            github: GitHubCli::with_runner(runner.clone()),
+        };
+        assert_eq!(
+            resolver
+                .repository_for_checkout(Path::new("/checkout"))
+                .await
+                .as_deref(),
+            Some("acme/zeron")
+        );
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].program, "git");
+        assert_eq!(requests[0].args, ["remote", "get-url", "origin"]);
+        assert_eq!(requests[0].cwd.as_deref(), Some(Path::new("/checkout")));
+    }
+
+    #[tokio::test]
+    async fn pr_scoped_search_accepts_canonical_names_after_repository_rename() {
+        let json = search_response(vec![search_pull_request(
+            "acme/new-name",
+            1,
+            "PR",
+            "OPEN",
+            "UNKNOWN",
+            "2026-08-10T09:30:00Z",
+            "2026-08-19T12:00:00Z",
+            false,
+            None,
+        )]);
+        let (result, runner) = list_with(command_success(json)).await;
+        let items = result.unwrap();
+        assert_eq!(items[0].repository, "acme/new-name");
+        assert_eq!(items[0].author.login, "octocat");
+        assert!(
+            runner.requests()[0]
+                .args
+                .iter()
+                .any(|arg| arg.contains("repo:acme/zeron"))
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_renamed_empty_search_follows_once_and_caches_result() {
+        let redirect = serde_json::json!({"data": {
+            "repository": {"nameWithOwner": "acme/new-name"},
+            "search": {"nodes": []}
+        }});
+        let items = search_response(vec![search_pull_request(
+            "acme/new-name",
+            1,
+            "PR",
+            "OPEN",
+            "UNKNOWN",
+            "2026-08-10T09:30:00Z",
+            "2026-08-19T12:00:00Z",
+            false,
+            None,
+        )]);
+        let runner = FakeProcessRunner::with_responses([
+            command_success(serde_json::to_vec(&redirect).unwrap()),
+            command_success(items),
+        ]);
+        let github = GitHubCli::with_runner(runner.clone());
+        for _ in 0..2 {
+            let items = github
+                .list_authored_open("acme/old-name", false)
+                .await
+                .unwrap();
+            assert_eq!(items[0].repository, "acme/new-name");
+        }
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].args.iter().any(|arg| arg == "name=new-name"));
+        assert_eq!(
+            requests[1].args.last().unwrap(),
+            "search=is:pr is:open author:@me repo:acme/new-name sort:updated-desc"
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_empty_canonical_search_does_not_retry() {
+        let response = serde_json::json!({"data": {
+            "repository": {"nameWithOwner": "acme/zeron"},
+            "search": {"nodes": []}
+        }});
+        let (items, runner) =
+            list_with(command_success(serde_json::to_vec(&response).unwrap())).await;
+        assert!(items.unwrap().is_empty());
+        assert_eq!(runner.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pr_filters_are_scoped_cached_and_never_prefetched() {
+        use zeron_proto::ChangeRequestFilter::{All, Authored, Reviewing};
+        let runner = FakeProcessRunner::with_responses(
+            (0..3).map(|_| command_success(search_response(vec![]))),
+        );
+        let github = GitHubCli::with_runner(runner.clone());
+        for (index, filter) in [All, Authored, Reviewing].into_iter().enumerate() {
+            github
+                .list_filtered_open("acme/zeron", filter, false)
+                .await
+                .unwrap();
+            assert_eq!(runner.requests().len(), index + 1);
+            github
+                .list_filtered_open("ACME/ZERON", filter, false)
+                .await
+                .unwrap();
+            assert_eq!(runner.requests().len(), index + 1);
+        }
+        let requests = runner.requests();
+        for (request, qualifier) in
+            requests
+                .iter()
+                .zip(["", "author:@me ", "review-requested:@me "])
+        {
+            assert_eq!(
+                request.args.last().unwrap(),
+                &format!("search=is:pr is:open {qualifier}repo:acme/zeron sort:updated-desc")
+            );
+        }
+        github
+            .list_filtered_open("acme/zeron", All, false)
+            .await
+            .unwrap();
+        assert_eq!(runner.requests().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn pr_cache_coalesces_reads_throttles_refresh_and_expires() {
+        let runner = FakeProcessRunner::with_responses([
+            command_success(search_response(vec![])),
+            command_success(search_response(vec![])),
+            command_success(search_response(vec![])),
+        ]);
+        let github = GitHubCli::with_runner(runner.clone());
+        let (a, b) = tokio::join!(
+            github.list_authored_open("acme/zeron", false),
+            github.list_authored_open("ACME/ZERON", false)
+        );
+        assert!(a.unwrap().is_empty() && b.unwrap().is_empty());
+        github.list_authored_open("acme/zeron", true).await.unwrap();
+        assert_eq!(
+            runner.requests().len(),
+            1,
+            "concurrent and immediate refresh calls reuse one response"
+        );
+        github.pr_cache.lock().await.entries[0].1 = Instant::now() - Duration::from_secs(16);
+        github.list_authored_open("acme/zeron", true).await.unwrap();
+        assert_eq!(runner.requests().len(), 2);
+        github.pr_cache.lock().await.entries[0].1 = Instant::now() - Duration::from_secs(301);
+        github
+            .list_authored_open("acme/zeron", false)
+            .await
+            .unwrap();
+        assert_eq!(runner.requests().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn pr_rate_limit_cooldown_covers_other_repositories_and_details() {
+        let runner =
+            FakeProcessRunner::with_responses([command_failure("API rate limit exceeded")]);
+        let github = GitHubCli::with_runner(runner.clone());
+        assert_eq!(
+            github.list_authored_open("a/one", false).await,
+            Err(ChangeRequestError::RateLimited)
+        );
+        assert_eq!(
+            github.list_authored_open("a/two", true).await,
+            Err(ChangeRequestError::RateLimited)
+        );
+        assert_eq!(
+            github
+                .detail("https://github.com/a/one/pull/1", true, true)
+                .await,
+            Err(ChangeRequestError::RateLimited)
+        );
+        assert_eq!(
+            runner.requests().len(),
+            1,
+            "refresh and a different key must not bypass backoff"
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_cache_is_bounded_and_repository_filter_cannot_be_broadened() {
+        let runner = FakeProcessRunner::with_responses(
+            (0..26).map(|_| command_success(search_response(vec![]))),
+        );
+        let github = GitHubCli::with_runner(runner.clone());
+        for invalid in ["", "acme", "a/b repo:c/d", "a/*", "a/b/c", "a/.."] {
+            assert_eq!(
+                github.list_authored_open(invalid, false).await,
+                Err(ChangeRequestError::UnsupportedRepository)
+            );
+        }
+        assert!(runner.requests().is_empty());
+        for index in 0..26 {
+            github
+                .list_authored_open(&format!("a/repo-{index}"), false)
+                .await
+                .unwrap();
+        }
+        let cache = github.pr_cache.lock().await;
+        assert_eq!(cache.entries.len(), 24);
+        assert!(
+            cache
+                .entries
+                .iter()
+                .all(|entry| entry.0 != "list:a/repo-0:Authored")
+        );
+    }
+
+    #[tokio::test]
+    async fn github_search_uses_exact_repository_arguments_and_environment() {
+        let json = search_response(vec![search_pull_request(
+            "acme/zeron",
+            123,
+            "Dashboard",
+            "OPEN",
+            "CONFLICTING",
+            "2026-08-10T09:30:00Z",
+            "2026-08-19T12:00:00Z",
+            true,
+            Some("CHANGES_REQUESTED"),
+        )]);
+        let (result, runner) = list_with(command_success(json)).await;
+
+        let item = &result.unwrap()[0];
+        assert_eq!(item.repository, "acme/zeron");
+        assert!(item.is_draft);
+        assert_eq!(
+            item.review_decision,
+            ChangeRequestReviewDecision::ChangesRequested
+        );
+        assert_eq!(item.additions, 42);
+        assert_eq!(item.deletions, 7);
+        assert_eq!(item.mergeability, ChangeRequestMergeability::Conflicting);
+        assert_eq!(
+            item.created_at,
+            DateTime::parse_from_rfc3339("2026-08-10T09:30:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].program, "gh");
+        assert_eq!(requests[0].cwd, None);
+        assert_eq!(
+            requests[0].args,
+            [
+                "api",
+                "graphql",
+                "-f",
+                &format!("query={GITHUB_SEARCH_QUERY}"),
+                "-f",
+                "owner=acme",
+                "-f",
+                "name=zeron",
+                "-f",
+                "search=is:pr is:open author:@me repo:acme/zeron sort:updated-desc"
+            ]
+        );
+        assert_eq!(
+            requests[0].env,
+            [
+                ("GH_PROMPT_DISABLED".into(), "1".into()),
+                ("GH_HOST".into(), "github.com".into()),
+            ]
+        );
+        assert_eq!(requests[0].timeout, GITHUB_TIMEOUT);
+        assert_eq!(requests[0].output_limit, GITHUB_OUTPUT_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn github_search_normalizes_titles_and_sorts_results_stably() {
+        let json = search_response(vec![
+            search_pull_request(
+                "acme/zeron",
+                8,
+                "  A title\nwith\tspacing  ",
+                "OPEN",
+                "MERGEABLE",
+                "2026-08-01T08:00:00Z",
+                "2026-08-19T11:00:00Z",
+                false,
+                Some("APPROVED"),
+            ),
+            search_pull_request(
+                "acme/zeron",
+                4,
+                "Alpha",
+                "OPEN",
+                "UNKNOWN",
+                "2026-08-02T08:00:00Z",
+                "2026-08-19T12:00:00Z",
+                true,
+                Some("REVIEW_REQUIRED"),
+            ),
+            search_pull_request(
+                "acme/zeron",
+                2,
+                "Earlier number",
+                "OPEN",
+                "MERGEABLE",
+                "2026-08-03T08:00:00Z",
+                "2026-08-19T12:00:00Z",
+                false,
+                None,
+            ),
+        ]);
+
+        let (result, _) = list_with(command_success(json)).await;
+        let items = result.unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (item.repository.as_str(), item.number))
+                .collect::<Vec<_>>(),
+            [("acme/zeron", 2), ("acme/zeron", 4), ("acme/zeron", 8)]
+        );
+        assert_eq!(items[2].title, "A title with spacing");
+        assert_eq!(items[0].state, ChangeRequestState::Open);
+    }
+
+    #[tokio::test]
+    async fn github_search_rejects_invalid_structural_fields() {
+        let base = search_pull_request(
+            "acme/zeron",
+            1,
+            "Valid",
+            "OPEN",
+            "MERGEABLE",
+            "2026-08-01T08:00:00Z",
+            "2026-08-19T12:00:00Z",
+            false,
+            None,
+        );
+        let mut invalid_items = Vec::new();
+        for (pointer, value) in [
+            ("/number", serde_json::json!(0)),
+            ("/title", serde_json::json!(" \n\t ")),
+            ("/repository/nameWithOwner", serde_json::json!("zeron")),
+            ("/repository/nameWithOwner", serde_json::json!("a/b/c")),
+            ("/url", serde_json::json!("file:///tmp/pr")),
+            ("/state", serde_json::json!("CLOSED")),
+            ("/mergeable", serde_json::json!("BLOCKED")),
+        ] {
+            let mut item = base.clone();
+            *item.pointer_mut(pointer).unwrap() = value;
+            invalid_items.push(item);
+        }
+
+        for item in invalid_items {
+            let json = search_response(vec![item]);
+            let (result, _) = list_with(command_success(json)).await;
+            assert_eq!(result.unwrap_err(), ChangeRequestError::Decode);
+        }
+    }
+
+    #[tokio::test]
+    async fn github_search_classifies_process_and_output_failures() {
+        for (response, expected) in [
+            (
+                Err(ProcessRunError::Spawn(io::ErrorKind::NotFound)),
+                ChangeRequestError::CliUnavailable,
+            ),
+            (Err(ProcessRunError::Timeout), ChangeRequestError::Timeout),
+            (
+                command_failure("not logged in; token secret-value"),
+                ChangeRequestError::Authentication,
+            ),
+            (
+                command_failure("API rate limit exceeded"),
+                ChangeRequestError::RateLimited,
+            ),
+        ] {
+            let (result, _) = list_with(response).await;
+            let error = result.unwrap_err();
+            assert_eq!(error, expected);
+            assert!(!error.to_string().contains("secret-value"));
+        }
+
+        for output in [
+            command_success(b"not-json".to_vec()),
+            Ok(ProcessOutput {
+                success: true,
+                stdout: search_response(Vec::new()),
+                stderr: Vec::new(),
+                stdout_truncated: true,
+            }),
+        ] {
+            let (result, _) = list_with(output).await;
+            assert_eq!(result.unwrap_err(), ChangeRequestError::Decode);
+        }
     }
 
     #[tokio::test]
@@ -1530,7 +2721,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         assert_eq!(source.branch.owner.as_deref(), Some("contributor"));
         assert_eq!(source.default_branch.as_deref(), Some("main"));
         let requests = runner.requests();
-        assert_eq!(requests[0].cwd, Path::new("/nested/path"));
+        assert_eq!(requests[0].cwd.as_deref(), Some(Path::new("/nested/path")));
         assert_eq!(requests[0].args, ["rev-parse", "--show-toplevel"]);
         assert_eq!(requests[4].args, ["remote", "get-url", "--push", "fork"]);
     }
