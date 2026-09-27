@@ -19,14 +19,21 @@ enum DeliveryMode: String {
     case interrupt
 }
 
-/// A context chip in the composer toolbar (model, effort, branch…).
+/// A context chip in the composer toolbar (model, branch…).
 struct ComposerChip: Equatable {
+    struct Detail: Equatable {
+        let text: String
+        var emphasized = false
+    }
+
     let id: String
     let title: String
     let symbol: String?
     var tint: UIColor? = nil
     /// Brand mark / custom glyph (takes precedence over `symbol`).
     var icon: UIImage? = nil
+    /// The model chip's muted second tone, like the desktop chip's suffix.
+    var detail: [Detail] = []
 }
 
 /// The composer. One glass surface with two states that morph into each
@@ -34,7 +41,7 @@ struct ComposerChip: Equatable {
 ///
 /// - resting: a single-line capsule — [+]  Message…  [↑]
 /// - active (focused, or holding a draft/photos): a card — photos, full-width
-///   text, and a toolbar row inside the glass: [+] [model] [effort] [branch] … [Send]
+///   text, and a toolbar row inside the glass: [+] [model] [branch] … [Send]
 ///
 /// The action button is one control that becomes Send, Queue/Steer (a labelled
 /// pill while an agent works) or Stop.
@@ -76,6 +83,9 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     var chipMenus: [String: () -> UIMenu?] = [:] { didSet { applyChipMenus() } }
     /// Stay in the card state even when idle (new-session canvas).
     var chipsAlwaysVisible = false { didSet { updateMode(animated: false) } }
+    /// Keep the card while something anchored to its chips is open, even after
+    /// the text view hands off the keyboard.
+    var holdsCard = false { didSet { if holdsCard != oldValue { updateMode(animated: true) } } }
     var images: [StagedImage] = [] { didSet { rebuildThumbs(); refreshAction(animated: true); updateMode(animated: true) } }
 
     var text: String {
@@ -97,6 +107,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     private let toolbar = UIView()
     private let chipStrip = UIStackView()
     private let chipScroll = FadingScrollView()
+    private var chipButtons: [String: UIButton] = [:]
     private var textHeight: NSLayoutConstraint!
     private var thumbsHeight: NSLayoutConstraint!
     private var toolbarHeight: NSLayoutConstraint!
@@ -306,7 +317,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     /// The card is for composing: focused, holding photos, or pinned open
     /// (new-session canvas). An unfocused draft rests as the capsule.
     private var wantsCard: Bool {
-        chipsAlwaysVisible || textView.isFirstResponder || !images.isEmpty
+        chipsAlwaysVisible || holdsCard || textView.isFirstResponder || !images.isEmpty
     }
 
     private func updateMode(animated: Bool) {
@@ -419,49 +430,91 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         onFocusChange?(false)
     }
 
+    /// A popover anchors to the chip, so it must show in full.
+    func reveal(_ chip: UIView) {
+        guard chip.isDescendant(of: chipScroll) else { return }
+        chipScroll.scrollRectToVisible(chip.convert(chip.bounds, to: chipScroll), animated: false)
+    }
+
     private func rebuildChips() {
-        chipStrip.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        for chip in chips {
-            var config = UIButton.Configuration.filled()
-            config.title = chip.title
-            if let icon = chip.icon {
-                config.image = icon
-            } else if let symbol = chip.symbol {
-                config.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 11.5, weight: .semibold))
-            }
-            config.imagePadding = chip.id == "pr" ? 5 : 6
-            // Tinted chips (the PR badge) use the desktop's tone wash: fill
-            // @ 0.08, ink @ 0.85.
-            config.baseForegroundColor = chip.tint.map { $0.withAlphaComponent(0.85) } ?? Palette.text
-            config.baseBackgroundColor = chip.tint.map { $0.withAlphaComponent(0.1) } ?? Palette.controlFill
-            config.cornerStyle = .capsule
-            config.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 11, bottom: 7, trailing: 11)
-            config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attrs in
-                var a = attrs
-                let mono = chip.id == "branch" || chip.id == "pr"
-                a.font = Fonts.ui(mono ? .monoMedium : .sansMedium, mono ? 12.5 : 13.5)
-                return a
-            }
-            let b = UIButton(configuration: config)
-            b.accessibilityIdentifier = "composer-chip-\(chip.id)"
-            b.setContentHuggingPriority(.required, for: .horizontal)
-            b.setContentCompressionResistancePriority(.required, for: .horizontal)
-            b.addAction(UIAction { [weak self, weak b] _ in
-                guard let self, let b else { return }
-                self.onChipTap?(chip.id, b)
-            }, for: .touchUpInside)
-            chipStrip.addArrangedSubview(b)
+        let ids = Set(chips.map(\.id))
+        let removed = chipButtons.keys.filter { !ids.contains($0) }
+        for id in removed {
+            guard let button = chipButtons.removeValue(forKey: id) else { continue }
+            chipStrip.removeArrangedSubview(button)
+            button.removeFromSuperview()
+        }
+        let buttons = chips.map { chip in
+            let button = chipButtons[chip.id] ?? makeChipButton(id: chip.id)
+            chipButtons[chip.id] = button
+            button.configuration = Self.chipConfiguration(chip)
+            button.accessibilityLabel = chip.detail.isEmpty ? nil : ([chip.title] + chip.detail.map(\.text)).joined(separator: ", ")
+            return button
+        }
+        let ordered = chipStrip.arrangedSubviews.count == buttons.count
+            && zip(chipStrip.arrangedSubviews, buttons).allSatisfy { pair in pair.0 === pair.1 }
+        if !ordered {
+            chipStrip.arrangedSubviews.forEach { chipStrip.removeArrangedSubview($0) }
+            buttons.forEach { chipStrip.addArrangedSubview($0) }
         }
         applyChipMenus()
     }
 
+    private func makeChipButton(id: String) -> UIButton {
+        let button = UIButton(configuration: .filled())
+        button.accessibilityIdentifier = "composer-chip-\(id)"
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        button.addAction(UIAction { [weak self, weak button] _ in
+            guard let self, let button else { return }
+            self.onChipTap?(id, button)
+        }, for: .touchUpInside)
+        return button
+    }
+
+    private static func chipConfiguration(_ chip: ComposerChip) -> UIButton.Configuration {
+        var config = UIButton.Configuration.filled()
+        if let icon = chip.icon {
+            config.image = icon
+        } else if let symbol = chip.symbol {
+            config.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 11.5, weight: .semibold))
+        }
+        config.imagePadding = chip.id == "pr" ? 5 : 6
+        // Tinted chips (the PR badge) use the desktop's tone wash: fill
+        // @ 0.08, ink @ 0.85.
+        config.baseForegroundColor = chip.tint.map { $0.withAlphaComponent(0.85) } ?? Palette.text
+        config.baseBackgroundColor = chip.tint.map { $0.withAlphaComponent(0.1) } ?? Palette.controlFill
+        config.cornerStyle = .capsule
+        config.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 11, bottom: 7, trailing: 11)
+        let mono = chip.id == "branch" || chip.id == "pr"
+        let titleFont = Fonts.ui(mono ? .monoMedium : .sansMedium, mono ? 12.5 : 13.5)
+        var attributed = AttributedString(chip.title)
+        attributed.font = titleFont
+        if !chip.detail.isEmpty {
+            var spacing = AttributedString("  ")
+            spacing.font = titleFont
+            attributed.append(spacing)
+            for (index, detail) in chip.detail.enumerated() {
+                if index > 0 {
+                    var separator = AttributedString(" · ")
+                    separator.font = titleFont
+                    separator.foregroundColor = Palette.secondary
+                    attributed.append(separator)
+                }
+                var part = AttributedString(detail.text)
+                part.font = titleFont
+                part.foregroundColor = detail.emphasized ? Palette.text.withAlphaComponent(0.85) : Palette.secondary
+                attributed.append(part)
+            }
+        }
+        config.attributedTitle = attributed
+        return config
+    }
+
     private func applyChipMenus() {
-        for case let b as UIButton in chipStrip.arrangedSubviews {
-            guard let id = b.accessibilityIdentifier?.replacingOccurrences(of: "composer-chip-", with: ""),
-                  let provider = chipMenus[id]
-            else { continue }
-            b.menu = provider()
-            b.showsMenuAsPrimaryAction = b.menu != nil
+        for (id, button) in chipButtons {
+            button.menu = chipMenus[id]?()
+            button.showsMenuAsPrimaryAction = button.menu != nil
         }
     }
 

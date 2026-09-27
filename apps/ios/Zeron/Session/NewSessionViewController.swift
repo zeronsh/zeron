@@ -10,6 +10,19 @@ struct NewSessionDraft: Equatable, Codable {
     var harness = "claude-code"
     var model: String?
     var effort: String?
+    /// Non-default option picks; only choices the model offers are sent.
+    /// Optional so drafts saved before this field still decode.
+    var modelOptions: [String: String]?
+
+    var modelSelection: ModelSelection {
+        get { ModelSelection(harness: harness, model: model, effort: effort, options: modelOptions ?? [:]) }
+        set {
+            harness = newValue.harness
+            model = newValue.model
+            effort = newValue.effort
+            modelOptions = newValue.options.isEmpty ? nil : newValue.options
+        }
+    }
 }
 
 /// Options the pickers offer (from the core's workspace + host catalogs).
@@ -30,17 +43,9 @@ struct HostOption: Equatable {
     let online: Bool
 }
 
-struct ModelChoice: Equatable {
-    let harness: String
-    let harnessLabel: String
-    let id: String
-    let label: String
-    let efforts: [String]
-}
-
-/// "Ask anything" → a composer-first canvas. Context is set with native menus
-/// (project, branch/worktree, model, effort) that load lazily; the composer is
-/// focused immediately so the common case is: tap, type, send.
+/// "Ask anything" → a composer-first canvas. Context is set with native
+/// project/branch menus plus the model picker; the composer is focused
+/// immediately so the common case is: tap, type, send.
 final class NewSessionViewController: UIViewController, UIGestureRecognizerDelegate {
     private let app: AppModel
     private let onCreated: (String, DraftHandoff?) -> Void
@@ -49,7 +54,12 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private let wallpaper = WallpaperView()
     private let mark = UIImageView()
     private var draft: NewSessionDraft
-    private var models: [ModelChoice] = []
+    private var catalog = ModelCatalog.fallback()
+    /// The last catalog each host reported, so the chip opens on a real model
+    /// name while a fresh one comes back over the relay.
+    private static var catalogCache: [String: ModelCatalog] = [:]
+    private var catalogDevice: String?
+    private weak var modelPicker: ModelPickerViewController?
 
     /// Embedded in the iPad split's main column (no sheet chrome).
     private let embedded: Bool
@@ -135,7 +145,9 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             guard let self else { return UIMenu() }
             return AttachmentPicker.menu(host: self, limit: 8 - self.composer.images.count) { [weak self] in self?.composer.addImages($0) }
         }
-        composer.onChipTap = { _, _ in }
+        composer.onChipTap = { [weak self] id, chip in
+            if id == "model" { self?.presentModelPicker(from: chip) }
+        }
         composer.mentionSearch = { [weak self] q in
             guard let self, let p = self.project else { return [] }
             return await self.app.searchFiles(deviceId: p.device, spaceId: p.id, query: q)
@@ -177,33 +189,28 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         loadModels()
     }
 
-    /// The last catalog each host reported, so the chip opens on a real model
-    /// name while a fresh one comes back over the relay.
-    private static var modelCache: [String: [ModelChoice]] = [:]
-    private var modelsDevice: String?
-
-    /// Models for the draft's host: cached (or the built-in catalog) at once,
-    /// then the host's own list.
-    private func loadModels() {
+    /// Models for the draft's host: cached (or built in) at once, then the
+    /// host's own list. `refresh` re-lists the same host when the picker opens.
+    private func loadModels(refresh: Bool = false) {
         let device = deviceId
-        guard device != modelsDevice else { return refreshChips() }
-        modelsDevice = device
-        models = Self.modelCache[device] ?? Self.catalogModels()
-        refreshChips()
+        if !refresh, device == catalogDevice {
+            refreshChips()
+            return
+        }
+        if device != catalogDevice {
+            catalogDevice = device
+            catalog = Self.catalogCache[device] ?? .fallback()
+            refreshChips()
+        }
         Task { [weak self] in
             guard let self else { return }
-            let fresh = await self.app.models(for: device)
-            guard !fresh.isEmpty else { return }
-            Self.modelCache[device] = fresh
-            guard self.modelsDevice == device else { return }
-            self.models = fresh
+            let fresh = await self.app.modelCatalog(for: device)
+            guard !fresh.providers.isEmpty else { return }
+            Self.catalogCache[device] = fresh
+            guard self.catalogDevice == device, fresh != self.catalog else { return }
+            self.catalog = fresh
             self.refreshChips()
-        }
-    }
-
-    private static func catalogModels() -> [ModelChoice] {
-        fallbackHarnesses().filter(\.offered).flatMap { h in
-            fallbackModels(harness: h.id).map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels) }
+            self.modelPicker?.update(catalog: fresh)
         }
     }
 
@@ -243,21 +250,21 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             chips.append(ComposerChip(id: "project", title: "No project", symbol: "tray"))
             chips.append(ComposerChip(id: "host", title: host?.name ?? "Choose host", symbol: "desktopcomputer"))
         }
-        let model = models.first { $0.harness == draft.harness && $0.id == draft.model } ?? models.first { $0.harness == draft.harness }
+        let pick = draft.modelSelection
         // Never the harness name in place of a model: a model this host
         // hasn't listed still gets its catalog label.
-        let modelTitle = model?.label ?? draft.model.map { modelLabel(harness: draft.harness, model: $0) } ?? fallbackModels(harness: draft.harness).first?.label ?? HarnessNames.label(draft.harness)
-        chips.append(ComposerChip(id: "model", title: modelTitle, symbol: nil, icon: BrandMarks.image(for: draft.harness, side: 13)))
-        if let efforts = model?.efforts, !efforts.isEmpty {
-            chips.append(ComposerChip(id: "effort", title: (draft.effort ?? efforts[efforts.count / 2]).capitalized, symbol: "gauge.with.dots.needle.67percent"))
-        }
+        chips.append(ComposerChip(
+            id: "model",
+            title: catalog.title(for: pick),
+            symbol: nil,
+            icon: BrandMarks.image(for: pick.harness, side: 13),
+            detail: catalog.chipDetail(for: pick)
+        ))
         composer.chips = chips
         composer.chipMenus = [
             "project": { [weak self] in self?.projectMenu() },
             "host": { [weak self] in self?.hostMenu() },
             "branch": { [weak self] in self?.branchMenu() },
-            "model": { [weak self] in self?.modelMenu() },
-            "effort": { [weak self] in self?.effortMenu() },
         ]
         mark.image = BrandMarks.image(for: draft.harness, side: 34)
     }
@@ -328,34 +335,26 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         ])
     }
 
-    private func modelMenu() -> UIMenu {
-        let byHarness = Dictionary(grouping: models, by: \.harness)
-        return UIMenu(title: "Model", children: byHarness.keys.sorted().map { h in
-            UIMenu(title: byHarness[h]!.first!.harnessLabel, image: BrandMarks.image(for: h, side: 16), options: .displayInline, children: byHarness[h]!.map { m in
-                UIAction(title: m.label, state: m.harness == draft.harness && m.id == draft.model ? .on : .off) { [weak self] _ in
-                    self?.draft.harness = m.harness
-                    self?.draft.model = m.id
-                    self?.draft.effort = nil
-                    self?.refreshChips()
-                }
-            })
-        })
-    }
-
-    private func effortMenu() -> UIMenu {
-        let model = models.first { $0.harness == draft.harness && $0.id == draft.model } ?? models.first { $0.harness == draft.harness }
-        return UIMenu(title: "Reasoning effort", children: (model?.efforts ?? []).map { e in
-            UIAction(title: e.capitalized, state: e == draft.effort ? .on : .off) { [weak self] _ in
-                self?.draft.effort = e
-                self?.refreshChips()
-            }
-        })
+    /// The model chip opens the picker, not a menu, and revalidates the host's
+    /// catalog on every open like desktop.
+    private func presentModelPicker(from chip: UIView) {
+        guard presentedViewController == nil else { return }
+        let picker = ModelPickerViewController(catalog: catalog, selection: draft.modelSelection, locked: false)
+        picker.onChange = { [weak self] pick in
+            self?.draft.modelSelection = pick
+            self?.refreshChips()
+        }
+        modelPicker = picker
+        picker.present(anchoredTo: chip, holding: composer, over: self)
+        loadModels(refresh: true)
     }
 
     /// False when the session couldn't be created (the prompt stays put).
     private func create(text: String, images: [StagedImage]) -> Bool {
         app.lastDraft = draft
-        guard let chatId = app.createSession(draft: draft, text: text, images: images) else {
+        let run = catalog.resolved(draft.modelSelection, keepingUnlistedOptions: false)
+        let config = ChatConfig(harness: run.harness, model: run.model, reasoning: run.effort, modelOptions: run.options, sandbox: .workspaceWrite)
+        guard let chatId = app.createSession(draft: draft, config: config, text: text, images: images) else {
             let alert = UIAlertController(title: "Couldn't start the session", message: "Choose a project or a host that can run it.", preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "OK", style: .default))
             present(alert, animated: true)
@@ -369,9 +368,4 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         onCreated(chatId, DraftHandoff.capture(from: self, composer: composer, text: text))
         return true
     }
-}
-
-enum HarnessNames {
-    /// The core's harness catalog label (same table as desktop).
-    static func label(_ id: String) -> String { harnessLabel(harness: id) }
 }

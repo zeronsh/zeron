@@ -81,6 +81,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             return .sent
         }
         composer.onStop = { [weak self] in self?.source.stop() }
+        composer.onChipTap = { [weak self] id, chip in
+            guard id == "model" else { return }
+            self?.presentModelPicker(from: chip)
+        }
         composer.text = Drafts.load(chatId)
         composer.mentionSearch = { [weak self] q in await self?.source.searchFiles(q) ?? [] }
         composer.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
@@ -263,6 +267,14 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     func finishArrival() {
         list.alpha = 1
         bottom.alpha = 1
+    }
+
+    private func presentModelPicker(from chip: UIView) {
+        guard presentedViewController == nil, let selection = source.modelSelection else { return }
+        let picker = ModelPickerViewController(catalog: source.modelCatalog, selection: selection, locked: true)
+        picker.onChange = { [weak self] selection in self?.source.setModelSelection(selection) }
+        picker.present(anchoredTo: chip, holding: composer, over: self)
+        source.refreshModels { [weak picker] catalog in picker?.update(catalog: catalog) }
     }
 
     @objc private func dismissComposer() {

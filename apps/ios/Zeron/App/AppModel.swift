@@ -51,9 +51,9 @@ final class AppModel {
         }
     }
 
-    /// The demo (and the UI tests on it) keep the new-session page in memory
-    /// only: one run's leftovers must not seed the next.
-    private static let persistsNewSession = !ProcessInfo.processInfo.arguments.contains("-demo")
+    /// The demo (and the UI tests on it) keep the new-session page and starred
+    /// models in memory only: one run's leftovers must not seed the next.
+    static let persistsNewSession = !ProcessInfo.processInfo.arguments.contains("-demo")
     private var volatileNewSessionText = ""
 
     /// What was typed on the new-session page when it was closed unsent.
@@ -488,15 +488,28 @@ final class AppModel {
         client?.devices().first { $0.id == id }?.name ?? "Unknown device"
     }
 
-    func models(for deviceId: String) async -> [ModelChoice] {
-        guard let client else { return [] }
-        let harnesses = (try? await client.listHarnesses(deviceId: deviceId)) ?? fallbackHarnesses()
-        var out: [ModelChoice] = []
-        for h in harnesses where h.offered {
-            let models = (try? await client.listModels(deviceId: deviceId, harness: h.id)) ?? fallbackModels(harness: h.id)
-            out += models.map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels) }
+    /// The run device's providers and models. The core falls back to cached or
+    /// curated lists per call; models load concurrently here.
+    func modelCatalog(for deviceId: String) async -> ModelCatalog {
+        guard let client else { return ModelCatalog(providers: []) }
+        let offered = await client.listHarnesses(deviceId: deviceId).filter(\.offered)
+        var models = Array(repeating: [ModelInfo](), count: offered.count)
+        await withTaskGroup(of: (Int, [ModelInfo]).self) { group in
+            for (index, harness) in offered.enumerated() {
+                group.addTask {
+                    (index, await client.listModels(deviceId: deviceId, harness: harness.id))
+                }
+            }
+            for await (index, listed) in group { models[index] = listed }
         }
-        return out
+        return ModelCatalog(providers: offered.enumerated().map { pair in
+            ModelCatalog.Provider(
+                id: pair.element.id,
+                label: pair.element.label,
+                reasoningLevels: pair.element.reasoningLevels,
+                models: models[pair.offset]
+            )
+        })
     }
 
     func listFolders(deviceId: String, path: String?) async -> FolderListing? {
@@ -528,7 +541,7 @@ final class AppModel {
     }
 
     /// Create the chat, open it, and send the first message.
-    func createSession(draft: NewSessionDraft, text: String, images: [StagedImage]) -> String? {
+    func createSession(draft: NewSessionDraft, config: ChatConfig, text: String, images: [StagedImage]) -> String? {
         guard let client else { return nil }
         let target: SessionTarget
         if let p = draft.projectId {
@@ -538,7 +551,6 @@ final class AppModel {
         } else {
             return nil
         }
-        let config = ChatConfig(harness: draft.harness, model: draft.model, reasoning: draft.effort, modelOptions: [:], sandbox: .workspaceWrite)
         do {
             let chatId = try client.createSession(newSession: NewSession(target: target, config: config, branch: draft.worktree ? nil : draft.branch, cwd: nil, title: nil))
             let handle = try client.openSession(chatId: chatId)

@@ -105,6 +105,35 @@ fn front_page_mirrors_the_desktop_sidebar() {
     assert_eq!(hits[0].session.id, "chat-ios-scroll");
 }
 
+/// The demo host offers Devin with Fusion (lead, sidekick, effort, Fast
+/// Mode), so the phone's Fusion card works offline.
+#[test]
+fn demo_host_offers_devin_fusion() {
+    let (client, _dir) = demo(fast());
+    let runtime = zeron_client::runtime::shared();
+    let harnesses = runtime.block_on(client.list_harnesses("dev-mac"));
+    assert!(harnesses.iter().any(|h| h.id == "devin" && h.offered()));
+    let models = runtime.block_on(client.list_models("dev-mac", "devin"));
+    assert_eq!(
+        models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        ["swe-1-7-medium", "claude-fable-5-1-high", "adaptive", "fusion"]
+    );
+    let fusion = &models[3];
+    assert_eq!(fusion.reasoning_levels, ["low", "medium", "high", "max"]);
+    assert_eq!(
+        fusion
+            .options
+            .iter()
+            .map(|o| (o.id.as_str(), o.label.as_str(), o.default_choice.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("lead", "Lead", "claude-fable-5-1"),
+            ("sidekick", "Sidekick", "swe-2-medium"),
+            ("speed", "Fast Mode", "standard"),
+        ]
+    );
+}
+
 #[test]
 fn sidebar_writes_reorder_the_front_page() {
     let (client, _dir) = demo(fast());

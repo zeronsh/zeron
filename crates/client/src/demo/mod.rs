@@ -956,6 +956,15 @@ impl DemoHost {
             harness.enabled = Some(true);
         }
         list.push(HarnessInfo {
+            id: "devin".into(),
+            label: "Devin".into(),
+            supports_steering: Some(true),
+            steering_mode: Some("step-boundary".into()),
+            reasoning_levels: Vec::new(),
+            installed: true,
+            enabled: Some(true),
+        });
+        list.push(HarnessInfo {
             id: "opencode".into(),
             label: "OpenCode".into(),
             supports_steering: Some(false),
@@ -969,7 +978,17 @@ impl DemoHost {
 
     pub(crate) async fn list_models(&self, harness: &str) -> Vec<ModelInfo> {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        catalog::fallback_models(harness)
+        let mut models = catalog::fallback_models(harness);
+        if harness == "devin" {
+            // Devin lists Fusion directly under Adaptive.
+            let at = models
+                .iter()
+                .position(|m| m.id == "adaptive")
+                .map_or(models.len(), |i| i + 1);
+            models.insert(at, fixtures::devin_fusion());
+        }
+        catalog::learn_labels(harness, &models);
+        models
     }
 
     fn seeded_refs(path: &str) -> Vec<RepoRef> {

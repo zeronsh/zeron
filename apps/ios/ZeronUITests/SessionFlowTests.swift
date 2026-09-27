@@ -21,6 +21,25 @@ final class SessionFlowTests: XCTestCase {
         add(shot)
     }
 
+    private func waitForLabel(_ element: XCUIElement, containing text: String, timeout: TimeInterval = 5) -> Bool {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", text), object: element)
+        return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func waitForValue(_ element: XCUIElement, _ value: String, timeout: TimeInterval = 5) -> Bool {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", value), object: element)
+        return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func dismissPopover(_ app: XCUIApplication) {
+        let region = app.otherElements["PopoverDismissRegion"]
+        if region.exists {
+            region.tap()
+        } else {
+            app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03)).tap()
+        }
+    }
+
     func testFrontPageShowsFoldersAndRecents() {
         let app = launch()
         XCTAssertTrue(app.staticTexts["Sessions"].waitForExistence(timeout: 10))
@@ -228,23 +247,27 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "tool-detail")
     }
 
-    /// Regression: picking a reasoning effort from the composer chip crashed.
-    func testEffortPickerInSession() {
+    /// The model chip opens the picker; its Effort row sets the chat's effort
+    /// (regression: picking an effort from the composer crashed).
+    func testModelPickerEffortInSession() {
         let app = launch(["-route", "chat:chat-deploy"])
         let input = app.textViews["composer-input"]
         XCTAssertTrue(input.waitForExistence(timeout: 10))
         input.tap()
-        let chip = app.buttons["composer-chip-effort"]
+        XCTAssertFalse(app.buttons["composer-chip-effort"].exists)
+        let chip = app.buttons["composer-chip-model"]
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
         chip.tap()
-        let item = app.collectionViews.buttons.element(boundBy: 0)
-        XCTAssertTrue(item.waitForExistence(timeout: 5), "effort levels load")
+        let effort = app.buttons["model-setting-effort"]
+        XCTAssertTrue(effort.waitForExistence(timeout: 5))
+        snapshot(app, "model-picker")
+        effort.tap()
+        XCTAssertTrue(app.buttons["Low"].firstMatch.waitForExistence(timeout: 5))
         snapshot(app, "effort-menu")
-        item.tap()
-        XCTAssertTrue(input.waitForExistence(timeout: 5))
-        XCTAssertEqual(app.state, .runningForeground)
-        chip.tap()
-        XCTAssertTrue(app.collectionViews.buttons.element(boundBy: 0).waitForExistence(timeout: 5))
+        app.buttons["Low"].firstMatch.tap()
+        XCTAssertTrue(waitForLabel(chip, containing: "Low"))
+        dismissPopover(app)
+        XCTAssertTrue(effort.waitForNonExistence(timeout: 5))
         XCTAssertEqual(app.state, .runningForeground)
     }
 
@@ -267,11 +290,15 @@ final class SessionFlowTests: XCTestCase {
         let input = app.textViews["composer-input"]
         XCTAssertTrue(input.waitForExistence(timeout: 5))
         input.typeText("Half-written idea")
-        let effort = app.buttons["composer-chip-effort"]
+        let model = app.buttons["composer-chip-model"]
+        XCTAssertTrue(model.waitForExistence(timeout: 5))
+        model.tap()
+        let effort = app.buttons["model-setting-effort"]
         XCTAssertTrue(effort.waitForExistence(timeout: 5))
         effort.tap()
         app.buttons["Low"].firstMatch.tap()
-        XCTAssertTrue(effort.label.contains("Low"))
+        XCTAssertTrue(waitForLabel(model, containing: "Low"))
+        dismissPopover(app)
         // Drag the sheet away by its top edge.
         let bar = app.navigationBars["New Session"]
         let top = bar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
@@ -281,7 +308,7 @@ final class SessionFlowTests: XCTestCase {
         accessory.tap()
         XCTAssertTrue(input.waitForExistence(timeout: 5))
         XCTAssertEqual(input.value as? String, "Half-written idea", "typed text comes back")
-        XCTAssertTrue(app.buttons["composer-chip-effort"].label.contains("Low"), "picked effort comes back")
+        XCTAssertTrue(app.buttons["composer-chip-model"].label.contains("Low"), "picked effort comes back")
 
         // Sending uses it up: the next page starts empty.
         app.buttons["composer-send"].tap()
@@ -293,16 +320,76 @@ final class SessionFlowTests: XCTestCase {
         XCTAssertNotEqual(input.value as? String, "Half-written idea")
     }
 
-    func testEffortPickerInNewSession() {
+    /// New-session provider tabs, search, and model settings share one
+    /// picker; a tab only browses and a row tap picks.
+    func testModelPickerInNewSession() {
         let app = launch(["-route", "new"])
-        let chip = app.buttons["composer-chip-effort"]
+        let chip = app.buttons["composer-chip-model"]
         XCTAssertTrue(chip.waitForExistence(timeout: 10))
         chip.tap()
-        let item = app.collectionViews.buttons.element(boundBy: 0)
-        XCTAssertTrue(item.waitForExistence(timeout: 5))
-        item.tap()
-        XCTAssertTrue(chip.waitForExistence(timeout: 5))
-        XCTAssertEqual(app.state, .runningForeground)
+        let codex = app.buttons["model-tab-codex"]
+        XCTAssertTrue(codex.waitForExistence(timeout: 5))
+        codex.tap()
+        let astra = app.cells["model-row-gpt-6-astra"]
+        XCTAssertTrue(astra.waitForExistence(timeout: 5))
+        XCTAssertFalse(chip.label.contains("GPT-6-Astra"), "a tab browses without picking")
+        XCTAssertFalse(app.buttons["model-setting-serviceTier"].exists)
+        astra.tap()
+        XCTAssertTrue(waitForLabel(chip, containing: "GPT-6-Astra"))
+        XCTAssertTrue(chip.label.contains("Standard"))
+        let tier = app.buttons["model-setting-serviceTier"]
+        XCTAssertTrue(tier.waitForExistence(timeout: 5))
+        tier.tap()
+        app.buttons["Fast"].firstMatch.tap()
+        XCTAssertTrue(waitForLabel(chip, containing: "Fast"))
+        let search = app.textFields["model-search"]
+        search.tap()
+        search.typeText("sonnet")
+        XCTAssertTrue(app.staticTexts["No models found"].waitForExistence(timeout: 5), "the query stays in the viewed tab")
+        app.buttons["model-tab-claude-code"].tap()
+        let sonnet = app.cells["model-row-claude-sonnet-5"]
+        XCTAssertTrue(sonnet.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.cells["model-row-claude-opus-5"].exists)
+        XCTAssertTrue(chip.label.contains("GPT-6-Astra"), "a tab browses without picking")
+        sonnet.tap()
+        XCTAssertTrue(waitForLabel(chip, containing: "Sonnet 5"))
+        dismissPopover(app)
+    }
+
+    /// Devin Fusion keeps its settings in its own card (Lead, Effort,
+    /// Sidekick, then a Fast Mode switch): tapping its row picks it and opens
+    /// the card; the card's back row returns to the list.
+    func testFusionCardInNewSession() {
+        let app = launch(["-route", "new"])
+        let chip = app.buttons["composer-chip-model"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 10))
+        chip.tap()
+        let devin = app.buttons["model-tab-devin"]
+        XCTAssertTrue(devin.waitForExistence(timeout: 5))
+        devin.tap()
+        let fusion = app.cells["model-row-fusion"]
+        XCTAssertTrue(fusion.waitForExistence(timeout: 5))
+        fusion.tap()
+        XCTAssertTrue(waitForLabel(chip, containing: "Fusion"))
+        let lead = app.buttons["model-setting-lead"]
+        XCTAssertTrue(lead.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["model-setting-effort"].exists)
+        XCTAssertTrue(app.buttons["model-setting-sidekick"].exists)
+        let fast = app.switches["model-toggle-speed"]
+        XCTAssertTrue(fast.exists)
+        snapshot(app, "fusion-card")
+        lead.tap()
+        let sol = app.buttons["GPT-6 Sol"].firstMatch
+        XCTAssertTrue(sol.waitForExistence(timeout: 5))
+        snapshot(app, "fusion-lead-menu")
+        sol.tap()
+        XCTAssertTrue(waitForValue(lead, "GPT-6 Sol"))
+        fast.tap()
+        XCTAssertTrue(waitForValue(fast, "1"))
+        app.buttons["model-card-back"].tap()
+        XCTAssertTrue(fusion.waitForExistence(timeout: 5))
+        XCTAssertTrue(lead.waitForNonExistence(timeout: 5), "Fusion's settings stay out of the tray")
+        dismissPopover(app)
     }
 
     /// Regression: "+" in the resting capsule did nothing (the focus tap
@@ -327,7 +414,7 @@ final class SessionFlowTests: XCTestCase {
         XCTAssertTrue(app.buttons["Photo Library"].waitForExistence(timeout: 5), "attach menu opens from the card")
     }
 
-    /// Regression: the model chip's menu completed off the main thread.
+    /// A live chat can switch models without closing its picker.
     func testModelPickerInSession() {
         let app = launch(["-route", "chat:chat-deploy"])
         let input = app.textViews["composer-input"]
@@ -336,11 +423,31 @@ final class SessionFlowTests: XCTestCase {
         let chip = app.buttons["composer-chip-model"]
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
         chip.tap()
-        let item = app.collectionViews.buttons.element(boundBy: 0)
-        XCTAssertTrue(item.waitForExistence(timeout: 5), "models load")
-        item.tap()
-        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        let opus = app.cells["model-row-claude-opus-5"]
+        XCTAssertTrue(opus.waitForExistence(timeout: 5))
+        opus.tap()
+        XCTAssertTrue(waitForLabel(chip, containing: "Opus 5"))
+        dismissPopover(app)
         XCTAssertEqual(app.state, .runningForeground)
+    }
+
+    /// Service Tier is shown in the model chip and changes from its setting row.
+    func testServiceTierInSession() {
+        let app = launch(["-route", "chat:chat-ios-scroll"])
+        let input = app.textViews["composer-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        input.tap()
+        let chip = app.buttons["composer-chip-model"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 5))
+        XCTAssertTrue(chip.label.contains("Ultra"))
+        XCTAssertTrue(chip.label.contains("Standard"))
+        chip.tap()
+        let tier = app.buttons["model-setting-serviceTier"]
+        XCTAssertTrue(tier.waitForExistence(timeout: 5))
+        tier.tap()
+        app.buttons["Fast"].firstMatch.tap()
+        XCTAssertTrue(waitForLabel(chip, containing: "Fast"))
+        dismissPopover(app)
     }
 
     /// Regression: a drag that starts at the tail re-latched follow at once,

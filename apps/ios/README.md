@@ -42,7 +42,8 @@ Zeron/
   Session/     SessionViewController, SessionSource (Core/Fixture), new-session
                canvas
   Composer/    ComposerBar (glass capsule ⇄ card with inline context chips;
-               send/queue/steer/stop), question and queue panels, attachments
+               model picker popover; send/queue/steer/stop), question and queue
+               panels, attachments
   Threads/     Sessions (foldable sidebar sections)/folder/search lists,
                cells, new-project folder browser
   Shell/       Tab bar (Sessions, Settings, search; "New session" accessory

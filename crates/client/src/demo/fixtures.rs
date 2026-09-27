@@ -9,6 +9,7 @@ use zeron_proto::{
     SessionStatus, SidebarPinChange, SidebarSectionChange, Space,
 };
 
+use crate::catalog::{ModelInfo, ModelOption, ModelOptionChoice};
 use crate::client::ms;
 use crate::config::DemoFixture;
 use crate::rpc::capability;
@@ -16,6 +17,51 @@ use crate::rpc::capability;
 pub(crate) const MAC: &str = "dev-mac";
 pub(crate) const VPS: &str = "dev-vps";
 pub(crate) const STUDIO: &str = "dev-studio";
+
+/// Devin Fusion as the Devin harness folds its pairs (`devin_models`): one
+/// model whose `lead` and `sidekick` options pick the pair, with effort and
+/// Fast Mode.
+pub(crate) fn devin_fusion() -> ModelInfo {
+    let option = |id: &str, label: &str, choices: &[(&str, &str)]| ModelOption {
+        id: id.into(),
+        label: label.into(),
+        choices: choices
+            .iter()
+            .map(|(id, label)| ModelOptionChoice {
+                id: (*id).into(),
+                label: (*label).into(),
+            })
+            .collect(),
+        default_choice: choices[0].0.into(),
+    };
+    ModelInfo {
+        id: "fusion".into(),
+        label: "Fusion".into(),
+        description: Some("A lead model with a sidekick".into()),
+        reasoning_levels: vec!["low".into(), "medium".into(), "high".into(), "max".into()],
+        options: vec![
+            option(
+                "lead",
+                "Lead",
+                &[
+                    ("claude-fable-5-1", "Claude Fable 5.1"),
+                    ("claude-opus-5-5", "Claude Opus 5.5"),
+                    ("gpt-6-sol", "GPT-6 Sol"),
+                ],
+            ),
+            option(
+                "sidekick",
+                "Sidekick",
+                &[
+                    ("swe-2-medium", "SWE-2 Medium"),
+                    ("swe-2-high", "SWE-2 High"),
+                    ("gpt-6-luna-high", "GPT-6 Luna High"),
+                ],
+            ),
+            option("speed", "Fast Mode", &[("standard", "Standard"), ("fast", "Fast")]),
+        ],
+    }
+}
 
 pub(crate) struct DemoChat {
     pub id: &'static str,

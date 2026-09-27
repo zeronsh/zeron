@@ -71,8 +71,16 @@ protocol SessionSource: AnyObject {
     func beginEdit(_ id: String) async -> String?
     /// Commit (text) or cancel (nil) the active edit.
     func finishEdit(text: String?) async
-    /// Menu for a composer chip (model, effort, branch…), or nil.
+    /// Menu for a composer chip (PR…), or nil — the model chip opens the
+    /// model picker instead.
     func chipMenu(_ id: String) -> UIMenu?
+    /// The chat's own harness catalog.
+    var modelCatalog: ModelCatalog { get }
+    /// Nil until the chat's config or row is known.
+    var modelSelection: ModelSelection? { get }
+    /// Re-list the host's models (the picker opened); calls back on the main thread.
+    func refreshModels(_ done: @escaping (ModelCatalog) -> Void)
+    func setModelSelection(_ selection: ModelSelection)
     func loadImage(_ reference: String, into view: UIImageView)
     /// Workspace files for `@` mentions.
     func searchFiles(_ query: String) async -> [FileMatch]
@@ -95,14 +103,17 @@ final class FixtureSessionSource: SessionSource {
     private var entries: [DebugEntry] = []
     private var timer: Timer?
     private let fixture = layoutFixtureMarkdown()
+    private let catalog = ModelCatalog(providers: [
+        .init(id: "claude-code", label: "Claude Code", models: fallbackModels(harness: "claude-code")),
+    ])
+    private var pick = ModelSelection(harness: "claude-code")
 
     init(title: String, subtitle: String) {
         chrome.title = title
         chrome.subtitle = subtitle
         chrome.placeholder = "Message Claude"
         chrome.chips = [
-            ComposerChip(id: "model", title: "Opus 4.5", symbol: nil, icon: BrandMarks.image(for: "claude-code", side: 13)),
-            ComposerChip(id: "effort", title: "High", symbol: "gauge.with.dots.needle.67percent"),
+            ComposerChip(id: "model", title: catalog.title(for: pick), symbol: nil, icon: BrandMarks.image(for: pick.harness, side: 13), detail: catalog.chipDetail(for: pick)),
             ComposerChip(id: "branch", title: "ios-rewrite", symbol: nil, icon: BranchIcon.sized()),
         ]
         for i in 0..<3 {
@@ -202,26 +213,21 @@ final class FixtureSessionSource: SessionSource {
     func retryDelivery() {}
     func beginEdit(_ id: String) async -> String? { chrome.queue.first { $0.id == id }?.text }
     func finishEdit(text: String?) async {}
-    func chipMenu(_ id: String) -> UIMenu? {
-        switch id {
-        case "model":
-            return UIMenu(title: "Model", children: ["Opus 4.5", "Sonnet 4.5", "Haiku 4.5"].map { m in
-                UIAction(title: m, state: chrome.chips.first { $0.id == "model" }?.title == m ? .on : .off) { [weak self] _ in
-                    self?.update { c in
-                        if let i = c.chips.firstIndex(where: { $0.id == "model" }) { c.chips[i] = ComposerChip(id: "model", title: m, symbol: nil, icon: BrandMarks.image(for: "claude-code", side: 13)) }
-                    }
-                }
-            })
-        case "effort":
-            return UIMenu(title: "Reasoning effort", children: ["Low", "Medium", "High", "Max"].map { e in
-                UIAction(title: e, state: chrome.chips.first { $0.id == "effort" }?.title == e ? .on : .off) { [weak self] _ in
-                    self?.update { c in
-                        if let i = c.chips.firstIndex(where: { $0.id == "effort" }) { c.chips[i] = ComposerChip(id: "effort", title: e, symbol: "gauge.with.dots.needle.67percent") }
-                    }
-                }
-            })
-        default:
-            return nil
+    func chipMenu(_ id: String) -> UIMenu? { nil }
+    var modelCatalog: ModelCatalog { catalog }
+    var modelSelection: ModelSelection? { pick }
+    func refreshModels(_ done: @escaping (ModelCatalog) -> Void) { done(catalog) }
+    func setModelSelection(_ selection: ModelSelection) {
+        pick = selection
+        update { chrome in
+            guard let index = chrome.chips.firstIndex(where: { $0.id == "model" }) else { return }
+            chrome.chips[index] = ComposerChip(
+                id: "model",
+                title: catalog.title(for: selection),
+                symbol: nil,
+                icon: BrandMarks.image(for: selection.harness, side: 13),
+                detail: catalog.chipDetail(for: selection)
+            )
         }
     }
     func loadImage(_ reference: String, into view: UIImageView) {}
