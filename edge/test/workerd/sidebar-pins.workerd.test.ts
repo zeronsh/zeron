@@ -68,3 +68,22 @@ describe("synced sidebar sections on real SQLite", () => {
     expect(current.find(r => r.kind === "chats")?.fields).toEqual({ title: "Keep me" });
   });
 });
+
+describe("draft send reservations", () => {
+  it("reserves one revision and replays the same send after an uncertain response", async () => {
+    const stub = room();
+    const claim = (revision: string) => stub.fetch("https://registry/draft-claim", {
+      method: "POST", headers: { [AUTH_USER_HEADER]: "user" }, body: JSON.stringify({ id: "draft-a", revision }),
+    });
+    const responses = await Promise.all([claim("rev-a"), claim("rev-b")]);
+    expect(responses.map(r => r.status).sort()).toEqual([200, 409]);
+    const winner = responses[0].status === 200 ? "rev-a" : "rev-b";
+    expect((await claim(winner)).status).toBe(200);
+  });
+  it("does not reserve a discarded draft", async () => {
+    const stub = room();
+    await push(stub, [{ ...op("draft-a", { closed: true }), kind: "promptDrafts" }]);
+    const response = await stub.fetch("https://registry/draft-claim", { method: "POST", headers: { [AUTH_USER_HEADER]: "user" }, body: JSON.stringify({ id: "draft-a", revision: "rev" }) });
+    expect(response.status).toBe(409);
+  });
+});

@@ -763,13 +763,13 @@ final class SessionStore {
     // MARK: Command plane (ledger rule 1: append-only, own entries only)
 
     func sendRun(prompt: String, chat: Chat, attachments: [String] = [],
-                 worktree: WorktreeSpec? = nil) {
+                 worktree: WorktreeSpec? = nil, draftId: String? = nil) {
         if offline {
             demoResponder?(prompt)
             lastSubmittedMessageId = entries.last(where: { $0.role == .user })?.id
             return
         }
-        let messageId = UUID().uuidString.lowercased()
+        let messageId = draftId.map { "draft-message-\($0)" } ?? UUID().uuidString.lowercased()
         let request = RunRequest(prompt: prompt,
                                  harness: chat.config?.harness,
                                  model: chat.config?.model,
@@ -783,7 +783,7 @@ final class SessionStore {
             "kind": "run",
             "request": encodableJSON(request),
             "messageId": messageId,
-        ])
+        ], commandId: draftId.map { "draft-command-\($0)" })
         let now = nowMs()
         pendingSends.append(PendingSend(messageId: messageId, text: prompt, at: now, started: now))
         lastSubmittedMessageId = messageId
@@ -816,7 +816,7 @@ final class SessionStore {
     /// send no longer dies with a dead link.
     func sendWithTransfers(prompt: String, chat: Chat, live: Bool,
                            transfers: [AttachmentTransfer],
-                           worktree: WorktreeSpec? = nil) {
+                           worktree: WorktreeSpec? = nil, draftId: String? = nil) {
         // Stash bytes FIRST — before anything references them — so escorts
         // survive a relaunch and retries can re-derive their transfers.
         for transfer in transfers {
@@ -827,7 +827,7 @@ final class SessionStore {
         if live {
             sendSteer(prompt: content)
         } else {
-            sendRun(prompt: content, chat: chat, attachments: refs, worktree: worktree)
+            sendRun(prompt: content, chat: chat, attachments: refs, worktree: worktree, draftId: draftId)
         }
         spawnEscort(transfers: transfers)
     }
@@ -845,11 +845,15 @@ final class SessionStore {
     }
 
     /// schema.rs queue_command, field for field.
-    private func queueCommand(kind: String, payload: [String: Any]) {
+    func hasDraftCommand(_ id: String) -> Bool {
+        (doc.getDeepValue().mapValue?["commands"]?.listValue ?? []).contains { $0.mapValue?["id"]?.stringValue == "draft-command-\(id)" }
+    }
+    private func queueCommand(kind: String, payload: [String: Any], commandId: String? = nil) {
+        if let commandId, (doc.getDeepValue().mapValue?["commands"]?.listValue ?? []).contains(where: { $0.mapValue?["id"]?.stringValue == commandId }) { return }
         let commands = doc.getList(id: "commands")
         do {
             let map = try commands.pushContainer(child: LoroMap())
-            try map.insert(key: "id", v: UUID().uuidString.lowercased())
+            try map.insert(key: "id", v: commandId ?? UUID().uuidString.lowercased())
             try map.insert(key: "kind", v: kind)
             try map.insert(key: "payload", v: LoroValue.fromJSON(payload))
             try map.insert(key: "issuedBy", v: config.deviceId)

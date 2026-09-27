@@ -545,7 +545,15 @@ final class RegistryDoc {
 
     // MARK: Local writes
 
-    private func nextHlc() -> Hlc {
+    func observePromptDraftClock(kind: String, id: String) {
+        guard let latest = overlayRow(kind: kind, id: id)?.clocks.values.max() else { return }
+        let parts = latest.split(separator: "-", maxSplits: 2)
+        if parts.count == 3, let ms = Int64(parts[0]), let counter = UInt32(parts[1]), ms > clock.lastMs || (ms == clock.lastMs && counter > clock.counter) {
+            clock.lastMs = ms; clock.counter = counter
+        }
+    }
+
+    func nextHlc() -> Hlc {
         clock.next(nowMs: nowMs(), device: deviceId)
     }
 

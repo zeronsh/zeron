@@ -557,6 +557,35 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// An offline retry may append the same command identity in another list
+    /// slot. A terminal host outcome also owns those late-arriving copies.
+    pub fn reconcile_command_outcomes(&self) -> Result<(), DocError> {
+        let commands = self.read_commands()?;
+        let mut groups = std::collections::HashMap::<&str, Vec<&SessionCommandEntry>>::new();
+        for command in &commands {
+            groups.entry(&command.id).or_default().push(command);
+        }
+        for (id, group) in groups {
+            if group.len() < 2 {
+                continue;
+            }
+            let outcome = group
+                .iter()
+                .find(|c| c.status == SessionCommandStatus::Applied)
+                .or_else(|| {
+                    group
+                        .iter()
+                        .find(|c| c.status != SessionCommandStatus::Pending)
+                });
+            if let Some(outcome) = outcome {
+                if group.iter().any(|c| c.status != outcome.status) {
+                    self.set_command_status(id, outcome.status, outcome.resolution.as_deref())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Rule 2: host (or the issuing composer, for `cancelled`) writes an outcome.
     pub fn set_command_status(
         &self,
@@ -565,6 +594,7 @@ impl SessionDoc {
         resolution: Option<&str>,
     ) -> Result<(), DocError> {
         let commands = self.doc.get_list("commands");
+        let mut found = false;
         for i in 0..commands.len() {
             if let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
                 commands.get(i)
@@ -582,13 +612,19 @@ impl SessionDoc {
                     )?;
                     if let Some(r) = resolution {
                         map.insert("resolution", r)?;
+                    } else {
+                        map.delete("resolution")?;
                     }
-                    self.doc.commit();
-                    return Ok(());
+                    found = true;
                 }
             }
         }
-        Err(DocError::Schema(format!("command {command_id} not found")))
+        if found {
+            self.doc.commit();
+            Ok(())
+        } else {
+            Err(DocError::Schema(format!("command {command_id} not found")))
+        }
     }
 
     /// Stamp a terminal status on an existing message entry by id (recovery:
@@ -2017,6 +2053,54 @@ mod tests {
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].status, SessionCommandStatus::Applied);
         assert_eq!(commands[0].payload, entry.payload);
+    }
+
+    #[test]
+    fn concurrent_and_late_draft_commands_keep_the_applied_outcome() {
+        use crate::commands::SessionCommandPayload;
+        let host = SessionDoc::init("draft-chat").unwrap();
+        let remote = SessionDoc::init("draft-chat").unwrap();
+        let entry = SessionCommandEntry {
+            id: "draft-command-same".into(),
+            payload: SessionCommandPayload::Interrupt {},
+            issued_by: "local".into(),
+            issued_at: 1,
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+        };
+        host.queue_command(&entry).unwrap();
+        remote.queue_command(&entry).unwrap();
+        host.doc()
+            .import(&remote.export_snapshot().unwrap())
+            .unwrap();
+        assert_eq!(host.read_commands().unwrap().len(), 2);
+        host.set_command_status(&entry.id, SessionCommandStatus::Applied, None)
+            .unwrap();
+        assert!(
+            host.read_commands()
+                .unwrap()
+                .iter()
+                .all(|c| c.status == SessionCommandStatus::Applied)
+        );
+        let late = SessionDoc::init("draft-chat").unwrap();
+        late.queue_command(&entry).unwrap();
+        host.doc().import(&late.export_snapshot().unwrap()).unwrap();
+        assert!(
+            host.read_commands()
+                .unwrap()
+                .iter()
+                .any(|c| c.status == SessionCommandStatus::Pending)
+        );
+        host.reconcile_command_outcomes().unwrap();
+        assert_eq!(host.read_commands().unwrap().len(), 3);
+        assert!(
+            host.read_commands()
+                .unwrap()
+                .iter()
+                .all(|c| c.status == SessionCommandStatus::Applied)
+        );
     }
 
     #[test]

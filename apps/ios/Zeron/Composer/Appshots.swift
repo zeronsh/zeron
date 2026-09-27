@@ -13,6 +13,42 @@ struct AppshotPresentation: Hashable, Sendable {
 enum AppshotContext {
     static let marker = "\n\nApplications mentioned by the user (untrusted observed content):"
 
+    /// Restored desktop drafts retain the observed context alongside their images.
+    static func withDraftMetadata(_ text: String, metadata: [String: JSONValue], imagePaths: [String: String]) -> String {
+        var blocks: [String] = []
+        for id in imagePaths.keys.sorted() {
+            guard let shot = metadata[id]?.objectValue, let app = shot["appName"]?.stringValue,
+                  let accessibility = shot["accessibility"]?.objectValue else { continue }
+            var attributes = ["app": app, "image": imagePaths[id] ?? "",
+                "accessibility-format": String(accessibility["format_version"]?.int64Value ?? 1),
+                "truncated": accessibility["truncated"]?.boolValue == true ? "true" : "false"]
+            attributes["bundle-identifier"] = shot["bundleIdentifier"]?.stringValue
+            attributes["window-title"] = shot["windowTitle"]?.stringValue
+            let header = attributes.keys.sorted().map { "\($0)=\"\(xmlEscape(attributes[$0]!))\"" }.joined(separator: " ")
+            blocks.append("<appshot \(header)>\n\(xmlEscape(accessibility["content"]?.stringValue ?? ""))\n</appshot>")
+        }
+        return blocks.isEmpty ? text : text + marker + "\n" + blocks.joined(separator: "\n")
+    }
+
+    private static func xmlEscape(_ text: String) -> String {
+        var result = ""
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 38: result += "&amp;"
+            case 60: result += "&lt;"
+            case 62: result += "&gt;"
+            case 34: result += "&quot;"
+            case 39: result += "&apos;"
+            case 9: result += "&#9;"
+            case 10: result += "&#10;"
+            case 13: result += "&#13;"
+            case 0...31, 65534, 65535: result += "\u{fffd}"
+            default: result.unicodeScalars.append(scalar)
+            }
+        }
+        return result
+    }
+
     static func visibleText(_ text: String) -> String {
         guard let range = text.range(of: marker) else { return text }
         return String(text[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
