@@ -93,7 +93,7 @@ mod tests {
         assert!(
             make(&["../../outside"])
                 .root
-                .starts_with(root.path().join("browser"))
+                .starts_with(root.path().canonicalize().unwrap().join("browser"))
         );
     }
 

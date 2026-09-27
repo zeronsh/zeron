@@ -631,7 +631,7 @@ impl BrowserContext {
     ) {
         #[cfg(target_os = "macos")]
         {
-            use wry::WebViewExtMacOS;
+            use wry::WebViewExtDarwin;
             if native::persistent_profiles_supported() {
                 let profile = profile::BrowserProfile::for_workspace(
                     data_dir,
