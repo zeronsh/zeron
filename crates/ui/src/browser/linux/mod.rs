@@ -85,6 +85,22 @@ fn helper_path() -> Result<std::path::PathBuf, String> {
         .map_err(|e| e.to_string())?;
     Ok(path)
 }
+fn read_startup(stdout: &mut impl Read) -> Result<(), String> {
+    let mut header = [0u8; 9];
+    stdout.read_exact(&mut header).map_err(|error| format!("Browser helper could not start: {error}. Check the WebKitGTK 4.1 runtime and display."))?;
+    let length = u32::from_le_bytes(header[5..9].try_into().unwrap()) as usize;
+    if length > 16384 || header[1..5] != [0; 4] {
+        return Err("Invalid browser startup response".into());
+    }
+    let mut message = vec![0; length];
+    stdout.read_exact(&mut message).map_err(|error| error.to_string())?;
+    match header[0] {
+        b'R' if message.is_empty() => Ok(()),
+        b'E' => Err(String::from_utf8_lossy(&message).into_owned()),
+        _ => Err("Invalid browser startup response".into()),
+    }
+}
+
 impl BrowserData {
     pub fn for_profile(profile: super::profile::BrowserProfile) -> Self {
         Self { profile: Some(profile), ..Default::default() }
@@ -103,10 +119,34 @@ impl BrowserData {
                 return Ok(worker);
             }
         }
-        let mut child = Command::new(helper_path()?).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn()
+        let mut command = Command::new(helper_path()?);
+        if let Some(profile) = &self.profile {
+            command.arg("--profile").arg(&profile.root);
+        }
+        let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn()
             .map_err(|e| format!("Could not start WebKitGTK: {e}. Install the WebKitGTK 4.1 runtime for your distribution."))?;
         let stdin = child.stdin.take().unwrap();
-        let mut stdout = child.stdout.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        // Report startup/storage failures on the page instead of silently opening
+        // an ephemeral session. Bound the wait if the display/runtime hangs.
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let mut stdout = stdout;
+            let result = read_startup(&mut stdout).map(|_| stdout);
+            let _ = ready_tx.send(result);
+        });
+        let mut stdout = match ready_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok(stdout)) => stdout,
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(match result {
+                    Ok(Err(error)) => error,
+                    Err(error) => format!("Browser startup did not complete: {error}"),
+                    _ => unreachable!(),
+                });
+            }
+        };
         let routes: Arc<Mutex<HashMap<u32, Weak<Route>>>> = Arc::default();
         let reader_routes = routes.clone();
         std::thread::Builder::new().name("browser-frames".into()).spawn(move || {
