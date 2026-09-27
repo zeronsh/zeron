@@ -221,7 +221,7 @@ impl PullRequestDetailPage {
                     div()
                         .text_size(px(11.0))
                         .text_color(theme.text_muted)
-                        .child("Markdown · @ mention"),
+                        .child("Markdown"),
                 )
                 .child(
                     widgets::ghost_action(theme)
