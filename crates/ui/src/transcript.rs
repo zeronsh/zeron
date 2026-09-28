@@ -3150,6 +3150,11 @@ pub struct Transcript {
         u64,
         HashMap<SharedString, Rc<Vec<crate::workspace_links::FileLinkRoot>>>,
     ),
+    /// Inline code spans that name an existing file, rewritten into the
+    /// Markdown links they stand for per text part (see
+    /// [`crate::markdown::inline_code_links`]). Reset with the same
+    /// link-roots revision that resets `file_link_roots`.
+    inline_code_links: crate::markdown::inline_code_links::InlineCodeLinkCache,
     rendered_rows: HashSet<SharedString>,
     /// Last UI typography generation reflected in `list` item measurements.
     /// Family and size changes can alter prose wrapping without changing row
@@ -3346,6 +3351,31 @@ impl Transcript {
             .clone()
     }
 
+    /// The row's text with every inline code span that names an existing
+    /// file rewritten into the Markdown link it stands for (see
+    /// [`crate::markdown::inline_code_links`]). The walk is memoized per part
+    /// and link-roots revision; a revision change also drops the flatten
+    /// cache, whose entries were shaped with the previous roots' styling.
+    fn inline_code_tree(
+        &mut self,
+        tree: &Arc<BlockTree>,
+        ui: Option<&render::LinkUi>,
+        cx: &gpui::App,
+    ) -> Arc<BlockTree> {
+        let Some(ui) = ui else {
+            return tree.clone();
+        };
+        let Some(roots) = ui.file_roots.as_deref() else {
+            return tree.clone();
+        };
+        let revision = self.state.read(cx).link_roots_revision;
+        if self.inline_code_links.set_revision(revision) {
+            self.render_cache.borrow_mut().clear();
+        }
+        self.inline_code_links
+            .linked_tree(tree, roots, ui.source_local)
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         Self::build(state, None, true, cx)
     }
@@ -3458,6 +3488,7 @@ impl Transcript {
             render_cache: Rc::new(RefCell::new(RenderCache::default())),
             workspace_link: None,
             file_link_roots: Default::default(),
+            inline_code_links: Default::default(),
             rendered_rows: HashSet::new(),
             typography_generation: crate::typography::generation(cx),
             content_width: crate::settings::transcript_width(cx),
@@ -6448,6 +6479,8 @@ impl Transcript {
                 column.into_any_element()
             }
             RowKind::Markdown { tree, block_ix } => {
+                let link = self.link_ui(cx);
+                let tree = self.inline_code_tree(tree, link.as_ref(), cx);
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -6460,11 +6493,11 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
-                    link: self.link_ui(cx),
+                    link,
                     workspace_root: workspace_root.clone(),
                     code,
                 };
-                let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
+                let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
                 render::render_block(
                     &top.block,
                     *block_ix,
@@ -6479,6 +6512,8 @@ impl Transcript {
                 )
             }
             RowKind::LiveMarkdown { tree, block_ix } => {
+                let link = self.link_ui(cx);
+                let tree = self.inline_code_tree(tree, link.as_ref(), cx);
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -6510,7 +6545,7 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
-                    link: self.link_ui(cx),
+                    link,
                     workspace_root: workspace_root.clone(),
                     code,
                 };
@@ -6532,7 +6567,7 @@ impl Transcript {
                         veil.borrow_mut().finish_seeding();
                     }
                 }
-                let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
+                let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
                 let timer = frame_stats_enabled().then(Instant::now);
                 let el = render::render_block(
                     &top.block,

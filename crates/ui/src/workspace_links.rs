@@ -1,6 +1,7 @@
 //! Safe resolution of agent-authored Markdown links into workspace files.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
 const FILE_MENTION_SCHEME: &str = "zeron-file:";
@@ -97,6 +98,145 @@ impl FileLinkRoot {
     /// raw link text, always from the resolved root join.
     pub(crate) fn absolute(&self, link: &WorkspaceFileLink) -> PathBuf {
         Path::new(&self.root).join(&link.path)
+    }
+}
+
+/// What one filesystem probe found at a candidate path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PathKind {
+    File,
+    Directory,
+    Missing,
+}
+
+/// Memoized path probes behind inline-code file links: one `metadata` call
+/// per path per link-roots revision, however many spans and frames ask.
+#[derive(Default)]
+pub(crate) struct PathProbes {
+    kinds: HashMap<PathBuf, PathKind>,
+}
+
+impl PathProbes {
+    pub(crate) fn kind(&mut self, path: &Path) -> PathKind {
+        if let Some(kind) = self.kinds.get(path) {
+            return *kind;
+        }
+        let kind = match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => PathKind::File,
+            Ok(metadata) if metadata.is_dir() => PathKind::Directory,
+            _ => PathKind::Missing,
+        };
+        self.kinds.insert(path.to_path_buf(), kind);
+        kind
+    }
+}
+
+/// An inline code span that names something on this device.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum InlineCodePath {
+    /// An existing regular file: the `file://` target that opens it, its
+    /// `:line`/`#L` anchor kept.
+    File(String),
+    /// An existing directory: a later span in the same text part may resolve
+    /// a bare name against it.
+    Directory(PathBuf),
+}
+
+/// Resolve one inline code span under the file-link grammar and report what
+/// exists behind it: an absolute path (`~/` expanded to the home directory),
+/// then each root in order, then each context directory an earlier span in
+/// the same text part named. Only local roots are probed — a remote chat's
+/// checkout is not on this disk. A path shape with nothing behind it stays
+/// plain code.
+pub(crate) fn resolve_inline_code_path(
+    candidate: &str,
+    roots: &[FileLinkRoot],
+    context_dirs: &[PathBuf],
+    probes: &mut PathProbes,
+) -> Option<InlineCodePath> {
+    // A file name is one token: wrapping whitespace or a newline means the
+    // model wrote prose, and a URL shape means it wrote a link.
+    if candidate.is_empty()
+        || candidate.trim() != candidate
+        || candidate.contains(['\n', '\r'])
+        || candidate.contains("://")
+        || candidate.starts_with("mailto:")
+    {
+        return None;
+    }
+    let (raw, fragment) = split_line_fragment(candidate)?;
+    let (raw, suffix) = split_line_suffix(raw)?;
+    let decoded: Cow<str> = if raw.contains('%') {
+        match percent_decode_path(raw) {
+            Some(decoded) => Cow::Owned(decoded),
+            None => Cow::Borrowed(raw),
+        }
+    } else {
+        Cow::Borrowed(raw)
+    };
+    // The trailing slash of a directory the text introduces ("all under
+    // `dir/`:") is presentation, not part of the path.
+    let decoded = decoded.trim_end_matches('/');
+    if decoded.is_empty() || !clean_path(decoded) {
+        return None;
+    }
+    // The anchor rides along on the link target, so opening it lands on the
+    // line the author named.
+    let anchor = match fragment.line.or(suffix.line) {
+        Some(line) => match fragment.column.or(suffix.column) {
+            Some(column) => format!(":{line}:{column}"),
+            None => format!(":{line}"),
+        },
+        None => String::new(),
+    };
+    let file = |path: &Path| {
+        Some(InlineCodePath::File(format!(
+            "file://{}{anchor}",
+            percent_encode_path(&path.to_string_lossy())
+        )))
+    };
+    if let Some(rest) = decoded.strip_prefix("~/") {
+        let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
+        return probe_path(&Path::new(&home).join(rest), probes, file);
+    }
+    if decoded.starts_with('~') {
+        return None;
+    }
+    if Path::new(decoded).has_root() {
+        return probe_path(Path::new(decoded), probes, file);
+    }
+    if has_url_scheme(decoded) {
+        return None;
+    }
+    let relative = safe_relative_path(Path::new(decoded))?;
+    for root in roots.iter().filter(|root| root.local) {
+        let path = Path::new(&root.root).join(&relative);
+        match probes.kind(&path) {
+            PathKind::File => return file(&path),
+            PathKind::Directory => return Some(InlineCodePath::Directory(path)),
+            PathKind::Missing => {}
+        }
+    }
+    for dir in context_dirs {
+        let path = dir.join(&relative);
+        if probes.kind(&path) == PathKind::File {
+            return file(&path);
+        }
+    }
+    None
+}
+
+/// Probe `path` once and describe what the caller asked for: a file becomes
+/// its link target, a directory the context it provides.
+fn probe_path(
+    path: &Path,
+    probes: &mut PathProbes,
+    file: impl Fn(&Path) -> Option<InlineCodePath>,
+) -> Option<InlineCodePath> {
+    match probes.kind(path) {
+        PathKind::File => file(path),
+        PathKind::Directory => Some(InlineCodePath::Directory(path.to_path_buf())),
+        PathKind::Missing => None,
     }
 }
 
@@ -757,6 +897,95 @@ mod tests {
             assert!(resolve_workspace_file_link(target, root).is_none());
         }
         assert!(resolve_workspace_file_link("/tmp/%3Fb.md", root).is_none());
+    }
+
+    /// The `file://` target an inline code span links carries the line
+    /// anchor the author wrote and reopens through the ordinary file-link
+    /// resolution, even for a name the dot-shaped grammar would skip.
+    #[test]
+    fn an_inline_code_target_reopens_through_the_file_link_resolution() {
+        let roots = ["/repo dir", "/other"];
+        assert!(resolution_eq(
+            first_root_owning("file:///repo%20dir/Makefile:12", roots),
+            owned(0, link("Makefile", Some(12), None))
+        ));
+        assert!(resolution_eq(
+            first_root_owning(
+                "file:///repo%20dir/2026-09-28/Some%20Title/SOURCES.md#L4",
+                roots
+            ),
+            owned(0, link("2026-09-28/Some Title/SOURCES.md", Some(4), None))
+        ));
+        assert!(matches!(
+            first_root_owning("file:///elsewhere/notes.md", roots),
+            Some(FileLinkResolution::Outside(link)) if link.path == "/elsewhere/notes.md"
+        ));
+    }
+
+    #[test]
+    fn inline_code_spans_probe_only_paths_that_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("checkout");
+        std::fs::create_dir_all(root.join("Some Title")).unwrap();
+        std::fs::write(root.join("Some Title/Some Title.txt"), "x").unwrap();
+        std::fs::write(root.join("Makefile"), "x").unwrap();
+        let local = vec![FileLinkRoot {
+            chat: Some("chat".into()),
+            root: root.to_string_lossy().into_owned(),
+            local: true,
+        }];
+        let mut probes = PathProbes::default();
+        let target = |path: &Path| format!("file://{}", path.to_string_lossy().replace(' ', "%20"));
+        // Percent escapes decode once, and the line anchor survives.
+        assert_eq!(
+            resolve_inline_code_path(
+                "Some%20Title/Some%20Title.txt#L12",
+                &local,
+                &[],
+                &mut probes
+            ),
+            Some(InlineCodePath::File(format!(
+                "{}:12",
+                target(&root.join("Some Title/Some Title.txt"))
+            )))
+        );
+        // A dotless bare name is still a file when one exists.
+        assert!(matches!(
+            resolve_inline_code_path("Makefile", &local, &[], &mut probes),
+            Some(InlineCodePath::File(t)) if t == target(&root.join("Makefile"))
+        ));
+        // The directory a span names is context for later spans, never a
+        // link of its own.
+        assert!(matches!(
+            resolve_inline_code_path("Some Title/", &local, &[], &mut probes),
+            Some(InlineCodePath::Directory(d)) if d == root.join("Some Title")
+        ));
+        // A bare name under a directory an earlier span named.
+        assert!(matches!(
+            resolve_inline_code_path(
+                "Some Title.txt",
+                &local,
+                &[root.join("Some Title")],
+                &mut probes
+            ),
+            Some(InlineCodePath::File(t))
+                if t == target(&root.join("Some Title/Some Title.txt"))
+        ));
+        // Shapes with nothing behind them, URLs, and escapes out of the
+        // root stay plain code.
+        assert!(resolve_inline_code_path("missing.md", &local, &[], &mut probes).is_none());
+        assert!(
+            resolve_inline_code_path("https://example.com/x.md", &local, &[], &mut probes)
+                .is_none()
+        );
+        assert!(resolve_inline_code_path("../outside.md", &local, &[], &mut probes).is_none());
+        // A remote root's checkout is not on this disk.
+        let remote = vec![FileLinkRoot {
+            chat: Some("chat".into()),
+            root: root.to_string_lossy().into_owned(),
+            local: false,
+        }];
+        assert!(resolve_inline_code_path("Makefile", &remote, &[], &mut probes).is_none());
     }
 
     #[test]
