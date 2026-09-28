@@ -133,7 +133,9 @@ final class CoreSessionSource: SessionSource {
 
     func queueAction(_ id: String, _ action: QueueAction) {
         switch action {
-        case .sendNow: Task { _ = try? await handle.sendQueuedNow(id: id) }
+        // Steers text into the live turn (never interrupts it); only
+        // attachment rows stop the turn to send.
+        case .sendNow: Task { _ = try? await handle.deliverQueuedNow(id: id) }
         case .remove: Task { _ = try? await handle.removeQueued(id: id) }
         case .moveUp: _ = try? handle.moveQueuedBy(id: id, delta: -1)
         case .moveDown: _ = try? handle.moveQueuedBy(id: id, delta: 1)

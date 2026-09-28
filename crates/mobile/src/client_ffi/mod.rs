@@ -356,6 +356,33 @@ impl CoreClient {
             .collect()
     }
 
+    /// Ask for session notifications on this device (APNs token as hex,
+    /// "production" | "sandbox", and which kinds).
+    pub async fn register_push_target(
+        &self,
+        token: String,
+        environment: String,
+        prefs: PushPrefs,
+    ) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move {
+            client
+                .register_push_target(
+                    &token,
+                    &environment,
+                    zc::PushPrefs { done: prefs.done, input: prefs.input, failed: prefs.failed },
+                )
+                .await
+        })
+        .await
+    }
+
+    /// Stop session notifications to this device.
+    pub async fn unregister_push_target(&self) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move { client.unregister_push_target().await }).await
+    }
+
     pub async fn list_refs(
         &self,
         device_id: String,

@@ -59,6 +59,30 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "reply-complete")
     }
 
+    /// Leaving a session with a long draft and coming back rests the
+    /// composer as a preview of whole lines (ending in "…"), not a scrolled
+    /// box with the next line sliced through the bottom edge.
+    func testLongDraftRestsAsWholeLinePreview() {
+        let app = launch(["-route", "chat:chat-deploy"])
+        let input = app.textViews["composer-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        input.tap()
+        input.typeText("let's fix the new worktree icon it makes no sense, also let's make it so that there's no descriptions the line is too long and wraps onto a fourth line")
+        snapshot(app, "draft-focused")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let row = app.cells["session-chat-deploy"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.tap()
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 3))
+        snapshot(app, "draft-resting")
+        // Two whole lines plus the capsule's insets — never a third.
+        XCTAssertLessThan(input.frame.height, 90)
+        input.tap()
+        XCTAssertGreaterThan(input.frame.height, 90, "focusing restores the full draft")
+        snapshot(app, "draft-reopened")
+    }
+
     func testQuestionPanelAnswersAndResumes() {
         let app = launch(["-route", "chat:chat-deploy"])
         let input = app.textViews["composer-input"]
@@ -132,6 +156,53 @@ final class SessionFlowTests: XCTestCase {
             XCTAssertTrue(accessory.waitForExistence(timeout: 5), "accessory back after search")
             XCTAssertTrue(accessory.isHittable, "accessory usable after search")
         }
+    }
+
+    /// Tapping a link in the transcript opens it (in-app Safari for web).
+    func testTappingLinkOpensIt() {
+        let app = launch(["-route", "chat:chat-cjk"])
+        XCTAssertTrue(app.scrollViews["transcript"].waitForExistence(timeout: 10))
+        let link = app.descendants(matching: .any).matching(NSPredicate(format: "identifier == 'transcript-link' AND value CONTAINS 'wikipedia'")).firstMatch
+        XCTAssertTrue(link.waitForExistence(timeout: 10), "link exposed")
+        for _ in 0..<4 where !link.isHittable { app.scrollViews["transcript"].swipeUp() }
+        link.tap()
+        // SFSafariViewController's toolbar.
+        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 8) || app.buttons["Close"].waitForExistence(timeout: 1), "link opened")
+        snapshot(app, "link-opened")
+    }
+
+    /// Settings turns notifications on (system prompt), and tapping a
+    /// session notification opens that session. The notification is sent
+    /// from the host (`xcrun simctl push`, same payload as the edge) once the
+    /// test signals it's in the background via /tmp/zeron-push-ready.
+    func testNotificationTapOpensSession() throws {
+        // Needs a host-side sender (see the comment above); skip without one.
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: "/tmp/zeron-push-host"), "no host push sender")
+        let ready = "/tmp/zeron-push-ready"
+        try? FileManager.default.removeItem(atPath: ready)
+        let app = launch()
+        XCTAssertTrue(app.tabBars.buttons["Settings"].waitForExistence(timeout: 10))
+        app.tabBars.buttons["Settings"].tap()
+        let toggle = app.switches["toggle-notify:enabled"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        if (toggle.value as? String) != "1" {
+            toggle.tap()
+            let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+            let allow = springboard.buttons["Allow"]
+            if allow.waitForExistence(timeout: 5) { allow.tap() }
+        }
+        XCTAssertTrue(app.switches["toggle-notify:done"].waitForExistence(timeout: 5), "kinds shown once on")
+        snapshot(app, "notification-settings")
+        XCUIDevice.shared.press(.home)
+        FileManager.default.createFile(atPath: ready, contents: Data())
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let banner = springboard.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'Run finished'")).firstMatch
+        guard banner.waitForExistence(timeout: 45) else {
+            throw XCTSkip("no notification delivered (host didn't push)")
+        }
+        banner.tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Wrangler deploy hygiene'")).firstMatch.waitForExistence(timeout: 10), "tapped session opened")
+        snapshot(app, "notification-opened")
     }
 
     func testTabsAndSearch() {

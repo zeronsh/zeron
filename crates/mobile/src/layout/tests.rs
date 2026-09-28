@@ -287,3 +287,20 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
     let failed = frame_for(SubagentStatus::Failed);
     assert!(failed.display(0).unwrap().runs.iter().any(|r| r.color == display::ColorRole::Danger), "failed subagent is tinted danger");
 }
+
+#[test]
+fn links_get_hit_regions() {
+    for md in [
+        "See [the docs](https://example.com/docs) for details.",
+        "1. first\n2. second\n3. third [link](https://ja.wikipedia.org/wiki/x)",
+        "- [UIScrollView docs](https://developer.apple.com/documentation/uikit/uiscrollview)",
+        "> quoted [link](https://example.com/q)",
+    ] {
+        let mut w = worker(390.0);
+        w.input = transcript_one(md);
+        w.pass();
+        let frame = w.shared.frame.lock().unwrap().clone();
+        let links: Vec<_> = (0..frame.row_count()).flat_map(|i| frame.display(i).unwrap().links).collect();
+        assert!(!links.is_empty(), "no link hits for {md:?}");
+    }
+}

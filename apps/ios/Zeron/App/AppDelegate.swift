@@ -1,4 +1,5 @@
 import UIKit
+import UserNotifications
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -6,7 +7,17 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
-        true
+        // Before launch finishes, so a tap that launched the app is delivered.
+        UNUserNotificationCenter.current().delegate = PushNotifications.shared
+        return true
+    }
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        PushNotifications.shared.didRegister(deviceToken: deviceToken)
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        PushNotifications.shared.didFailToRegister(error)
     }
 
     func application(

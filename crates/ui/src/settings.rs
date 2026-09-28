@@ -685,6 +685,9 @@ pub struct UiSettings {
     pub sidebar_show_harness: bool,
     pub sidebar_show_branch: bool,
     pub sidebar_show_pull_request: bool,
+    /// The sidebar's "Star on GitHub" banner was dismissed (its close button
+    /// or following the link). Device-local; never shown again once set.
+    pub github_star_banner_dismissed: bool,
     /// The last selected space — restored on boot when the row still exists;
     /// also the new-tab default when the sidebar filter is "All".
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -732,6 +735,9 @@ pub struct UiSettings {
     /// the foreground case).
     pub notifications_background_only: bool,
     pub files_panel_width: f32,
+    /// Desktop banners for newly discovered agent CLI releases. In-app chips
+    /// remain enabled independently of this preference.
+    pub agent_update_notifications: bool,
     pub right_pane_width: f32,
     /// Legacy: panel *open* flags are session-scoped in-memory state now
     /// (`shell::SessionPanels`, zeron `sessionPanels` parity). Kept for file
@@ -835,6 +841,7 @@ impl Default for UiSettings {
             sidebar_show_harness: true,
             sidebar_show_branch: true,
             sidebar_show_pull_request: true,
+            github_star_banner_dismissed: false,
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
@@ -850,6 +857,7 @@ impl Default for UiSettings {
             notifications_enabled: true,
             notifications_background_only: true,
             files_panel_width: FILES_PANEL_DEFAULT,
+            agent_update_notifications: true,
             right_pane_width: RIGHT_PANE_DEFAULT,
             right_pane_open: false,
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
@@ -2215,6 +2223,7 @@ mod tests {
             sidebar_show_harness: false,
             sidebar_show_branch: false,
             sidebar_show_pull_request: false,
+            github_star_banner_dismissed: true,
             last_space_id: Some("space-1".into()),
             last_project_action_by_space_id: std::collections::HashMap::from([(
                 "space-1".into(),
@@ -2245,6 +2254,7 @@ mod tests {
             notifications_enabled: false,
             notifications_background_only: false,
             files_panel_width: 310.0,
+            agent_update_notifications: false,
             right_pane_width: 700.0,
             right_pane_open: true,
             terminal_height: 320.0,

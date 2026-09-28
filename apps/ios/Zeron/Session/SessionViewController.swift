@@ -337,6 +337,13 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         return true
     }
 
+    /// Putting the composer away rides along with the transcript's own taps
+    /// (links, images). Tap recognizers are exclusive by default: this one
+    /// won and every link tap was dropped.
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        other.view.map { $0 === list || $0.isDescendant(of: list) } ?? false
+    }
+
     private let bottomFade = EdgeFadeOverlay()
 
     override func viewDidLayoutSubviews() {

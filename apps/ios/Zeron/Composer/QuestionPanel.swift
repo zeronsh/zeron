@@ -259,7 +259,7 @@ final class QueuePanel: UIView {
         sendConfig.image = UIImage(systemName: "arrow.up.circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .regular))
         sendConfig.baseForegroundColor = Palette.text
         let send = UIButton(configuration: sendConfig, primaryAction: UIAction { [weak self] _ in self?.onAction?(item.id, .sendNow) })
-        send.accessibilityLabel = "Send now"
+        send.accessibilityLabel = "Send"
         var moreConfig = UIButton.Configuration.plain()
         moreConfig.image = UIImage(systemName: "ellipsis", withConfiguration: UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold))
         moreConfig.baseForegroundColor = Palette.secondary

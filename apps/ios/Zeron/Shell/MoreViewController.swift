@@ -1,4 +1,5 @@
 import UIKit
+import UserNotifications
 
 /// Settings & utilities: account, devices, appearance, archive, diagnostics.
 final class MoreViewController: UIViewController, UICollectionViewDelegate {
@@ -20,6 +21,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             case none
             case check(Bool)
             case dot(Bool)
+            case toggle(Bool)
         }
     }
 
@@ -44,7 +46,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         collectionView.delegate = self
         view.addSubview(collectionView)
 
-        let cell = UICollectionView.CellRegistration<UICollectionViewListCell, Row> { cell, _, row in
+        let cell = UICollectionView.CellRegistration<UICollectionViewListCell, Row> { [weak self] cell, _, row in
             var c = UIListContentConfiguration.subtitleCell()
             c.text = row.title
             c.textProperties.font = Fonts.ui(.sansMedium, 16)
@@ -67,7 +69,17 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
                 dot.backgroundColor = online ? Palette.success : Palette.tertiary
                 dot.layer.cornerRadius = 4
                 cell.accessories = [.customView(configuration: .init(customView: dot, placement: .trailing()))]
+            case let .toggle(on):
+                let toggle = UISwitch()
+                toggle.isOn = on
+                toggle.onTintColor = Palette.accent
+                toggle.accessibilityIdentifier = "toggle-\(row.id)"
+                toggle.addAction(UIAction { [weak self, weak toggle] _ in
+                    self?.toggled(row.id, toggle?.isOn ?? false)
+                }, for: .valueChanged)
+                cell.accessories = [.customView(configuration: .init(customView: toggle, placement: .trailing()))]
             }
+            cell.accessibilityIdentifier = "settings-\(row.id)"
         }
         let header = UICollectionView.SupplementaryRegistration<UICollectionViewListCell>(elementKind: UICollectionView.elementKindSectionHeader) { [weak self] view, _, path in
             var c = UIListContentConfiguration.groupedHeader()
@@ -84,11 +96,81 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         wallpaperObserver = NotificationCenter.default.addObserver(forName: WallpaperStore.didChange, object: nil, queue: .main) { [weak self] _ in self?.reload() }
         // Devices go on/offline and the org name backfills after opening.
         appToken = app.observe { [weak self] in self?.reload() }
+        // Back from iOS Settings (notifications may have been allowed there).
+        foregroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.refreshNotificationStatus()
+        }
     }
+
+    private var foregroundObserver: NSObjectProtocol?
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         if dataSource != nil { reload() }
+        refreshNotificationStatus()
+    }
+
+    // MARK: Notifications
+
+    private var notificationStatus: UNAuthorizationStatus = .notDetermined
+
+    private func refreshNotificationStatus() {
+        Task { @MainActor in
+            let status = await PushNotifications.shared.authorizationStatus()
+            guard status != self.notificationStatus else { return }
+            self.notificationStatus = status
+            self.reload()
+        }
+    }
+
+    /// On when this phone wants them and iOS allows them.
+    private var notificationsOn: Bool {
+        PushNotifications.shared.enabled && (notificationStatus == .authorized || notificationStatus == .provisional || notificationStatus == .ephemeral)
+    }
+
+    private func notificationRows() -> [Row] {
+        var rows = [Row(id: "notify:enabled", title: "Notifications", subtitle: notificationStatus == .denied ? "Turned off in iOS Settings" : "When a session finishes, needs you or fails", symbol: "bell", accessory: .toggle(notificationsOn))]
+        if notificationsOn {
+            rows += PushNotifications.Kind.allCases.map { kind in
+                let symbol: String = switch kind {
+                case .done: "checkmark.circle"
+                case .input: "questionmark.bubble"
+                case .failed: "exclamationmark.triangle"
+                }
+                return Row(id: "notify:\(kind.rawValue)", title: kind.title, symbol: symbol, accessory: .toggle(PushNotifications.shared.isOn(kind)))
+            }
+        }
+        return rows
+    }
+
+    private func toggled(_ id: String, _ on: Bool) {
+        let push = PushNotifications.shared
+        if id == "notify:enabled" {
+            guard on else {
+                push.enabled = false
+                return reload()
+            }
+            if notificationStatus == .denied {
+                // Only the Settings app can turn them back on.
+                let alert = UIAlertController(title: "Notifications are off", message: "Allow notifications for Zeron in iOS Settings.", preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "Not Now", style: .cancel) { [weak self] _ in self?.reload() })
+                alert.addAction(UIAlertAction(title: "Open Settings", style: .default) { [weak self] _ in
+                    if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                    self?.reload()
+                })
+                return present(alert, animated: true)
+            }
+            push.enabled = true
+            Task { @MainActor in
+                await push.requestPermission()
+                self.notificationStatus = await push.authorizationStatus()
+                self.reload()
+            }
+            return
+        }
+        if let kind = PushNotifications.Kind(rawValue: String(id.dropFirst("notify:".count))) {
+            push.set(kind, on)
+        }
     }
 
     private var wallpaperObserver: NSObjectProtocol?
@@ -102,6 +184,8 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         ])
         s.appendSections(["Devices"])
         s.appendItems(app.hostOptions.map { Row(id: "device:\($0.id)", title: $0.name, subtitle: $0.online ? "Online" : "Offline", symbol: "desktopcomputer", accessory: .dot($0.online)) })
+        s.appendSections(["Notifications"])
+        s.appendItems(notificationRows())
         s.appendSections(["Appearance"])
         let style = UserDefaults.standard.integer(forKey: "appearance")
         s.appendItems([

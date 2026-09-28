@@ -274,6 +274,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
     let (steer_tx, steering) = mpsc::channel(8);
     let token = CancellationToken::new();
     let controls = RunControls {
+        execution_lease: None,
         request_input: Box::new(move |questions| {
             let (tx, rx) = oneshot::channel();
             let answers: Vec<UserInputAnswer> = questions

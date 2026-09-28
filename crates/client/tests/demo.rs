@@ -469,6 +469,32 @@ fn idle_chat_send_completes_and_stops_working() {
 }
 
 #[test]
+fn steering_while_busy_sends_a_steer_not_a_queue_row() {
+    let (client, _dir) = demo(DemoOptions::default());
+    let session = client.open_session("chat-home").unwrap();
+    // The composer learns mid-turn steering from the host's live catalog.
+    let host = session.composer().host.device_id.clone();
+    zeron_client::runtime::shared().block_on(client.list_harnesses(&host));
+    session.send(SendRequest::text("first")).unwrap();
+    wait_for("turn running and steerable", Duration::from_secs(5), || {
+        let composer = session.composer();
+        composer.live.turn_running && composer.host.capabilities.mid_turn_steering == Some(true)
+    });
+    let outcome = session
+        .send(SendRequest {
+            busy: zeron_client::BusyPolicy::Steer,
+            ..SendRequest::text("also this")
+        })
+        .unwrap();
+    // A parked row's only exit on mobile was an interrupting Send now.
+    assert!(
+        matches!(outcome, SendOutcome::Steered { .. }),
+        "steer, not queue: {outcome:?}"
+    );
+    assert!(session.composer().queue.is_empty());
+}
+
+#[test]
 fn queueing_while_busy_at_realistic_speed() {
     let (client, _dir) = demo(DemoOptions::default());
     let session = client.open_session("chat-home").unwrap();

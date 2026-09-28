@@ -44,13 +44,12 @@ struct FolderRowVM: Hashable {
 /// and PR badge follow the desktop sidebar.
 ///
 ///   [mark]  Title of the session ··········· ⠿ Working
-///           ● project  branch ··············· ⎇ 412
+///           [P] project  branch ············· ⎇ 412
 final class SessionCell: UICollectionViewListCell {
     static var height: CGFloat { (62 * TypeScale.factor).rounded() }
 
     private let harness = UIImageView()
     private let title = FadingLabel()
-    private let projectTile = ProjectTileView()
     private let meta = FadingLabel()
     private let time = UILabel()
     private let status = StatusGlyph()
@@ -65,10 +64,14 @@ final class SessionCell: UICollectionViewListCell {
         time.textAlignment = .right
         harness.contentMode = .scaleAspectFit
         harness.tintColor = Palette.text
-        for v in [harness, title, projectTile, meta, time, status, prBadge] as [UIView] { contentView.addSubview(v) }
+        for v in [harness, title, meta, time, status, prBadge] as [UIView] { contentView.addSubview(v) }
         var bg = UIBackgroundConfiguration.listCell()
         bg.backgroundColor = .clear
         backgroundConfiguration = bg
+        // The project tile is a rasterized attachment: redraw it in the new tone.
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (cell: SessionCell, _) in
+            if let vm = cell.vm { cell.configure(vm) }
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -102,12 +105,19 @@ final class SessionCell: UICollectionViewListCell {
 
     func configure(_ vm: SessionRowVM) {
         self.vm = vm
-        harness.image = BrandMarks.image(for: vm.harness ?? "claude-code", side: 20)
+        harness.image = BrandMarks.image(for: vm.harness ?? "claude-code", side: Self.markSide)
         title.text = vm.title
         title.font = Fonts.ui(vm.unseen ? .sansSemibold : .sansMedium, TypeScale.size(16.5))
         title.textColor = vm.unseen || vm.status != .idle ? Palette.text : Palette.text.withAlphaComponent(0.88)
-        projectTile.configure(name: vm.hasProject ? vm.projectName : "Home", colorIndex: vm.colorIndex)
-        let metaText = NSMutableAttributedString(string: vm.projectName, attributes: [.font: Fonts.ui(.sans, TypeScale.size(13.5)), .foregroundColor: Palette.secondary])
+        // The project tile rides the meta line as an attachment, so the text
+        // system itself centers it on the name's x-height and starts it at
+        // the title's leading edge (a separately framed tile drifted high).
+        let metaFont = Fonts.ui(.sans, TypeScale.size(13.5))
+        let tileSide = (14 * TypeScale.factor).rounded()
+        let tile = NSTextAttachment(image: ProjectTile.image(name: vm.hasProject ? vm.projectName : "Home", colorIndex: vm.colorIndex, side: tileSide))
+        tile.bounds = CGRect(x: 0, y: (metaFont.xHeight - tileSide) / 2, width: tileSide, height: tileSide)
+        let metaText = NSMutableAttributedString(attachment: tile)
+        metaText.append(NSAttributedString(string: "  " + vm.projectName, attributes: [.font: metaFont, .foregroundColor: Palette.secondary]))
         if let b = vm.branch, !b.isEmpty, let icon = BranchIcon.image?.withTintColor(Palette.subline, renderingMode: .alwaysOriginal) {
             // Desktop line 3: git-branch icon + branch in the subline tone.
             let font = Fonts.ui(.sans, TypeScale.size(12.5))
@@ -154,8 +164,14 @@ final class SessionCell: UICollectionViewListCell {
         let titleH = (22 * k).rounded()
         let metaY = (35 * k).rounded()
         let metaH = (18 * k).rounded()
-        harness.frame = CGRect(x: left, y: titleY + titleH / 2 - 10, width: 20, height: 20)
-        let textX = left + 20 + 14
+        // The mark centers on the title's x-height (font metrics, not the
+        // line box): titles are mostly lowercase, and centering on the
+        // capitals left the mark riding high — the project tile's rule too.
+        let mark = Self.markSide
+        let titleFont = title.font ?? Fonts.ui(.sansMedium, TypeScale.size(16.5))
+        let baseline = titleY + (titleH - titleFont.lineHeight) / 2 + titleFont.ascender
+        harness.frame = CGRect(x: left, y: (baseline - titleFont.xHeight / 2 - mark / 2).rounded(), width: mark, height: mark)
+        let textX = left + mark + 14
         let tw = ceil(time.sizeThatFits(CGSize(width: 140, height: 40)).width)
         time.frame = CGRect(x: b.width - right - tw, y: titleY, width: tw, height: titleH)
         var trailing = time.frame.minX - 10
@@ -164,9 +180,7 @@ final class SessionCell: UICollectionViewListCell {
             trailing = status.frame.minX - 10
         }
         title.frame = CGRect(x: textX, y: titleY, width: max(0, trailing - textX), height: titleH)
-        let tile = (14 * k).rounded()
-        projectTile.frame = CGRect(x: textX, y: Self.xHeightCenter(Fonts.ui(.sans, TypeScale.size(13.5)), top: metaY, height: metaH) - tile / 2, width: tile, height: tile)
-        let x = textX + tile + 7
+        let x = textX
         var metaRight = b.width - right
         if !prBadge.isHidden {
             let size = prBadge.intrinsicContentSize
@@ -176,13 +190,8 @@ final class SessionCell: UICollectionViewListCell {
         meta.frame = CGRect(x: x, y: metaY, width: max(0, metaRight - x), height: metaH)
     }
 
-    /// Where lowercase text next to a glyph visually centers: the middle of
-    /// the x-height above the baseline a single-line label draws at. (Line-box
-    /// centering left the project tile riding high beside "zgui".)
-    static func xHeightCenter(_ font: UIFont, top: CGFloat, height: CGFloat) -> CGFloat {
-        let baseline = top + (height - font.lineHeight) / 2 + font.ascender
-        return (baseline - font.xHeight / 2).rounded()
-    }
+    /// Harness mark side.
+    static let markSide: CGFloat = 20
 }
 
 /// Folder row: icon, name, count, chevron.

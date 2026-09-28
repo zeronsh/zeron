@@ -2,43 +2,6 @@ import UIKit
 
 /// The desktop's project monogram: a rounded tile in the project's tone
 /// (fill @ 0.08, letter @ 0.85, mono medium) — `ui/src/shell/project_icon.rs`.
-final class ProjectTileView: UIView {
-    private let letter = UILabel()
-    private var tone: UIColor = Palette.projectDots[0]
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        layer.cornerCurve = .continuous
-        letter.textAlignment = .center
-        addSubview(letter)
-        isUserInteractionEnabled = false
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    func configure(name: String, colorIndex: Int) {
-        tone = Palette.projectDots[colorIndex % Palette.projectDots.count]
-        letter.text = ProjectTile.letter(name)
-        restyle()
-    }
-
-    private func restyle() {
-        backgroundColor = tone.withAlphaComponent(0.08)
-        letter.textColor = tone.withAlphaComponent(0.85)
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        // 13pt desktop tile → radius 3, letter 9pt; scale with the tile.
-        let k = bounds.width / 13
-        layer.cornerRadius = 3 * k
-        let font = Fonts.ui(.monoMedium, 9 * k)
-        letter.font = font
-        // Center the capital, not the line box (which rides the letter high).
-        letter.frame = CGRect(x: 0, y: bounds.midY - (font.ascender - font.capHeight / 2), width: bounds.width, height: font.lineHeight)
-    }
-}
-
 enum ProjectTile {
     static func letter(_ name: String) -> String {
         String(name.trimmingCharacters(in: .whitespaces).first ?? "?").uppercased()

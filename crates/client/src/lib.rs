@@ -39,7 +39,7 @@ pub mod runtime;
 pub mod session;
 pub mod workspace;
 
-pub use client::{Client, NewSession, PRELOAD_CAP, SessionTarget, WARM_SESSION_CAP};
+pub use client::{Client, NewSession, PRELOAD_CAP, PushPrefs, SessionTarget, WARM_SESSION_CAP};
 pub use config::{
     AuthTokens, ClientConfig, Credentials, DemoFixture, DemoOptions, StreamSpeed, TranscriptScale,
 };

@@ -14,10 +14,22 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         window.overrideUserInterfaceStyle = UIUserInterfaceStyle(rawValue: UserDefaults.standard.integer(forKey: "appearance")) ?? .unspecified
         window.tintColor = Palette.accent
         self.window = window
-        app.onSignedIn = { [weak self] in self?.showRoot(animated: true) }
-        app.onSignOut = { [weak self] in
-            self?.app.signOutLocally()
+        let push = PushNotifications.shared
+        push.install(app: app)
+        push.openChat = { [weak self] chatId in
+            guard let router = self?.window?.rootViewController as? AppRouter else { return false }
+            router.openSession(chatId)
+            return true
+        }
+        app.onSignedIn = { [weak self] in
             self?.showRoot(animated: true)
+            self?.shellShown()
+        }
+        app.onSignOut = { [weak self] in
+            guard let self else { return }
+            push.signingOut(client: self.app.client)
+            self.app.signOutLocally()
+            self.showRoot(animated: true)
         }
         let args = ProcessInfo.processInfo.arguments
         // `-wallpaper <path> [-wallpaper-effect ascii]`: set the wallpaper at
@@ -39,6 +51,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             showRoot(animated: false)
         }
         window.makeKeyAndVisible()
+        if !args.contains("-lab") { shellShown() }
 
         if let router = window.rootViewController as? AppRouter, let i = args.firstIndex(of: "-route"), i + 1 < args.count {
             let route = args[i + 1]
@@ -49,6 +62,14 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                 if route == "search" { router.showSearch() }
             }
         }
+    }
+
+    /// The signed-in shell is up: refresh this phone's notification
+    /// registration and open a session a notification was tapped for.
+    private func shellShown() {
+        guard app.isSignedIn else { return }
+        if !app.isDemo { PushNotifications.shared.signedIn() }
+        PushNotifications.shared.shellReady()
     }
 
     private func showRoot(animated: Bool) {

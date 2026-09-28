@@ -107,6 +107,22 @@ The test launches the app with `-harness mock`: a chat's configured harness
 wins over the engine's `ZERON_HARNESS` default, so without it a real agent
 would run.
 
+## Session notifications
+
+The edge sends them (`edge/src/push-notify.ts`, `registry-room.ts`): when a
+session's registry row changes it applies the desktop's rule (run finished,
+waiting on your input, run failed) and pushes to every phone that registered
+with `POST /registry/:org/push-target`. The app asks for permission the first
+time a session is started from the phone (or from Settings → Notifications),
+registers its APNs token with the choices from Settings, stays quiet while
+open, and opens the session a notification is tapped for.
+
+Setup once per deployment: an APNs auth key (Apple Developer → Keys →
+Apple Push Notifications service), then `wrangler secret put APNS_KEY_P8` (the
+`.p8` contents) and `wrangler secret put APNS_KEY_ID` in `edge/`. The
+TestFlight workflow enables the Push capability on the App ID itself.
+`/registry/:org/stats` shows registered phones and recent deliveries.
+
 ## TestFlight release
 
 Run the **TestFlight** workflow from GitHub Actions on `main`. It installs the

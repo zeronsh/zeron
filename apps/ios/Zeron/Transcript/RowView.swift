@@ -51,11 +51,42 @@ final class RowView: UIView {
     override var accessibilityElements: [Any]? {
         get {
             textElement?.accessibilityFrameInContainerSpace = bounds
-            // Controls first: accessibility hit-testing takes the first match,
-            // and the row's text element spans the whole row.
-            return widgetViews.filter { $0 is UIControl || $0.gestureRecognizers?.isEmpty == false } + (textElement.map { [$0] } ?? [])
+            // Controls and links first: accessibility hit-testing takes the
+            // first match, and the row's text element spans the whole row.
+            return widgetViews.filter { $0 is UIControl || $0.gestureRecognizers?.isEmpty == false }
+                + positionedLinkElements()
+                + (textElement.map { [$0] } ?? [])
         }
         set {}
+    }
+
+    /// One element per link fragment (links are painted text, invisible to
+    /// VoiceOver otherwise). Held here: accessibility doesn't retain them.
+    private var linkElements: [(element: UIAccessibilityElement, hit: LinkHit)] = []
+
+    private func rebuildLinkElements(_ d: RowDisplay) {
+        linkElements = d.links.map { l in
+            let e = UIAccessibilityElement(accessibilityContainer: self)
+            e.accessibilityLabel = URL(string: l.url)?.host() ?? l.url
+            e.accessibilityValue = l.url
+            e.accessibilityTraits = .link
+            e.accessibilityIdentifier = "transcript-link"
+            return (e, l)
+        }
+    }
+
+    /// Link elements where they're painted now (code/table scrollers move).
+    private func positionedLinkElements() -> [UIAccessibilityElement] {
+        linkElements.compactMap { e, l in
+            var r = CGRect(x: CGFloat(l.x), y: CGFloat(l.y), width: CGFloat(l.w), height: CGFloat(l.h))
+            if let s = l.scroller {
+                guard Int(s) < scrollers.count else { return nil }
+                let sv = scrollers[Int(s)]
+                r = r.offsetBy(dx: sv.frame.minX - sv.contentOffset.x, dy: sv.frame.minY)
+            }
+            e.accessibilityFrameInContainerSpace = r
+            return e
+        }
     }
     weak var delegate: RowViewDelegate?
     /// Rings over thumbnails still uploading (`pending://` refs).
@@ -123,6 +154,7 @@ final class RowView: UIView {
         element.accessibilityTraits = .staticText
         element.accessibilityFrameInContainerSpace = bounds
         textElement = element
+        rebuildLinkElements(d)
         // Scrollers: reuse views in order.
         while scrollers.count < d.scrollers.count {
             let s = FadingScrollView()

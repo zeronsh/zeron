@@ -60,6 +60,16 @@ pub(crate) fn registry_push(edge: &str, org_id: &str, device_id: &str) -> String
     )
 }
 
+/// A phone's APNs registration (POST) / removal (DELETE).
+pub(crate) fn registry_push_target(edge: &str, org_id: &str, device_id: &str) -> String {
+    format!(
+        "{}/registry/{}/push-target?device={}",
+        edge.trim_end_matches('/'),
+        encode(org_id),
+        encode(device_id)
+    )
+}
+
 pub(crate) fn chat_ws(edge: &str, chat_id: &str, token: &str, device_id: &str) -> String {
     format!(
         "{}/chat2/{}/ws?token={}&device={}",
@@ -128,6 +138,10 @@ mod tests {
         assert_eq!(
             registry_rows("https://e.sh", "o", "d", 0),
             "https://e.sh/registry/o/rows?device=d&beat=1"
+        );
+        assert_eq!(
+            registry_push_target("https://e.sh/", "org_1", "ios-1"),
+            "https://e.sh/registry/org_1/push-target?device=ios-1"
         );
         assert_eq!(
             nudge("https://e.sh", "dev-mac"),

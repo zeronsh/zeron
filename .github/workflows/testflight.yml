@@ -90,6 +90,35 @@ jobs:
           latest_build="$(jq -r '[.data[].attributes.version | select(test("^[0-9]+$")) | tonumber] | max // 0' "$builds")"
           build_number="$((latest_build + 1))"
 
+          # Session notifications need the Push capability on the App ID (so
+          # the distribution profile the export makes includes it). Best
+          # effort with the reason logged: if it's still missing, the export
+          # fails with a clear provisioning error.
+          asc() { curl --globoff --silent --show-error -o "$1" -w '%{http_code}' -H "Authorization: Bearer $token" -H 'Content-Type: application/json' "${@:2}"; }
+          bundle_ids="$RUNNER_TEMP/bundle-ids.json"
+          status="$(asc "$bundle_ids" 'https://api.appstoreconnect.apple.com/v1/bundleIds?filter[identifier]=sh.zeron.ios')"
+          bundle_id="$(jq -r '[.data[]? | select(.attributes.identifier == "sh.zeron.ios")][0].id // empty' "$bundle_ids" 2>/dev/null || true)"
+          if [ "$status" != 200 ] || [ -z "$bundle_id" ]; then
+            echo "::warning::Couldn't look up the sh.zeron.ios App ID ($status): $(cat "$bundle_ids")"
+          else
+            caps="$RUNNER_TEMP/capabilities.json"
+            status="$(asc "$caps" "https://api.appstoreconnect.apple.com/v1/bundleIds/$bundle_id/bundleIdCapabilities")"
+            if [ "$status" != 200 ]; then
+              echo "::warning::Couldn't read the App ID's capabilities ($status): $(cat "$caps")"
+            elif jq -e '.data[] | select(.attributes.capabilityType == "PUSH_NOTIFICATIONS")' "$caps" > /dev/null; then
+              echo "Push Notifications already enabled on sh.zeron.ios."
+            else
+              created="$RUNNER_TEMP/capability.json"
+              status="$(asc "$created" -X POST 'https://api.appstoreconnect.apple.com/v1/bundleIdCapabilities' \
+                --data "$(jq -n --arg id "$bundle_id" '{data: {type: "bundleIdCapabilities", attributes: {capabilityType: "PUSH_NOTIFICATIONS"}, relationships: {bundleId: {data: {type: "bundleIds", id: $id}}}}}')")"
+              if [ "$status" = 201 ]; then
+                echo "Enabled Push Notifications on sh.zeron.ios."
+              else
+                echo "::warning::Couldn't enable Push Notifications ($status): $(cat "$created")"
+              fi
+            fi
+          fi
+
           echo "AC_KEY_PATH=$key_path" >> "$GITHUB_ENV"
           echo "AC_TOKEN_PATH=$token_path" >> "$GITHUB_ENV"
           echo "ASC_APP_ID=$app_id" >> "$GITHUB_ENV"
@@ -117,12 +146,23 @@ jobs:
           # Unsigned: signing here made Xcode mint an Apple Development
           # certificate on every (fresh) runner until the team hit Apple's
           # certificate limit. The export below signs for distribution with
-          # the cloud-managed certificate instead (the app has no entitlements).
+          # the cloud-managed certificate instead; entitlements are put on
+          # the archived app in the next step.
           xcodebuild -project Zeron.xcodeproj -scheme Zeron \
             -configuration Release -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/Zeron.xcarchive" archive \
             CODE_SIGNING_ALLOWED=NO \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
+
+      - name: Entitlements for export
+        run: |
+          # An unsigned archive carries no entitlements, and export re-signs
+          # with the ones it finds: ad-hoc sign the app with Zeron.entitlements
+          # (push) so the distribution signature keeps them (aps-environment
+          # becomes production from the App Store profile).
+          app="$RUNNER_TEMP/Zeron.xcarchive/Products/Applications/Zeron.app"
+          codesign --force --sign - --entitlements apps/ios/Zeron.entitlements "$app"
+          codesign -d --entitlements :- "$app" | grep -q aps-environment
 
       - name: Upload to TestFlight
         run: |

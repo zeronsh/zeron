@@ -1076,3 +1076,11 @@ pub struct FileMatch {
 pub fn file_mention_link(path: String, is_dir: bool) -> String {
     zeron_proto::file_mentions::local_file_link(&path, is_dir)
 }
+
+/// Which session notifications this device wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct PushPrefs {
+    pub done: bool,
+    pub input: bool,
+    pub failed: bool,
+}

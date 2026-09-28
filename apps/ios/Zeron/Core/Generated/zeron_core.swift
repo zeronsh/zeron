@@ -1011,6 +1011,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func readAttachment(deviceId: String, path: String) async throws  -> Data
     
+    /**
+     * Ask for session notifications on this device (APNs token as hex,
+     * "production" | "sandbox", and which kinds).
+     */
+    func registerPushTarget(token: String, environment: String, prefs: PushPrefs) async throws 
+    
     func renameProject(spaceId: String, name: String?) throws 
     
     func renameSection(sectionId: String, name: String) throws 
@@ -1064,6 +1070,11 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func unarchiveSession(chatId: String) throws 
     
     func unpinSession(chatId: String) throws 
+    
+    /**
+     * Stop session notifications to this device.
+     */
+    func unregisterPushTarget() async throws 
     
     /**
      * The platform restored/re-signed a newer WorkOS pair.
@@ -1589,6 +1600,26 @@ open func readAttachment(deviceId: String, path: String)async throws  -> Data  {
         )
 }
     
+    /**
+     * Ask for session notifications on this device (APNs token as hex,
+     * "production" | "sandbox", and which kinds).
+     */
+open func registerPushTarget(token: String, environment: String, prefs: PushPrefs)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_register_push_target(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(token),FfiConverterString.lower(environment),FfiConverterTypePushPrefs_lower(prefs)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
 open func renameProject(spaceId: String, name: String?)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_method_coreclient_rename_project(
@@ -1783,6 +1814,25 @@ open func unpinSession(chatId: String)throws   {try rustCallWithError(FfiConvert
         FfiConverterString.lower(chatId),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * Stop session notifications to this device.
+     */
+open func unregisterPushTarget()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_unregister_push_target(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -2709,6 +2759,12 @@ public protocol SessionHandleProtocol: AnyObject, Sendable {
     func composer()  -> ComposerState
     
     /**
+     * A row's primary action: steer text into the live turn (never
+     * interrupts); attachments send now.
+     */
+    func deliverQueuedNow(id: String) async throws  -> Bool
+    
+    /**
      * Park a message on the shared queue directly. Returns the row id.
      */
     func enqueue(text: String, attachments: [String], holdForTurnEnd: Bool) throws  -> String
@@ -2866,6 +2922,26 @@ open func composer() -> ComposerState  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * A row's primary action: steer text into the live turn (never
+     * interrupts); attachments send now.
+     */
+open func deliverQueuedNow(id: String)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_sessionhandle_deliver_queued_now(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(id)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_i8,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_i8,
+            freeFunc: ffi_zeron_mobile_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -6386,6 +6462,67 @@ public func FfiConverterTypePullRequestGroups_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypePullRequestGroups_lower(_ value: PullRequestGroups) -> RustBuffer {
     return FfiConverterTypePullRequestGroups.lower(value)
+}
+
+
+/**
+ * Which session notifications this device wants.
+ */
+public struct PushPrefs: Equatable, Hashable {
+    public var done: Bool
+    public var input: Bool
+    public var failed: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(done: Bool, input: Bool, failed: Bool) {
+        self.done = done
+        self.input = input
+        self.failed = failed
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PushPrefs: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePushPrefs: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PushPrefs {
+        return
+            try PushPrefs(
+                done: FfiConverterBool.read(from: &buf), 
+                input: FfiConverterBool.read(from: &buf), 
+                failed: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PushPrefs, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.done, into: &buf)
+        FfiConverterBool.write(value.input, into: &buf)
+        FfiConverterBool.write(value.failed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePushPrefs_lift(_ buf: RustBuffer) throws -> PushPrefs {
+    return try FfiConverterTypePushPrefs.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePushPrefs_lower(_ value: PushPrefs) -> RustBuffer {
+    return FfiConverterTypePushPrefs.lower(value)
 }
 
 
@@ -13071,6 +13208,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_read_attachment() != 50982) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_register_push_target() != 33942) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_rename_project() != 6571) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13119,6 +13259,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_unpin_session() != 9102) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_unregister_push_target() != 55720) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_update_tokens() != 39229) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13147,6 +13290,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_composer() != 12678) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_sessionhandle_deliver_queued_now() != 65003) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_enqueue() != 37832) {

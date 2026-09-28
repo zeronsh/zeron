@@ -22,6 +22,22 @@ pub struct InstanceLock {
     _file: File,
 }
 
+#[cfg(unix)]
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        // A child between fork and exec can still own a duplicate descriptor.
+        // Release the shared open-file-description lock explicitly instead of
+        // waiting for every inherited descriptor to close.
+        loop {
+            let rc = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+            if rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                break;
+            }
+        }
+    }
+}
+
 impl InstanceLock {
     /// Acquire the exclusive lock, non-blocking. Errors with a descriptive
     /// message (including the holder's pid when readable) if another engine
@@ -189,6 +205,23 @@ fn windows_holder_pid(data_dir: &Path) -> String {
 #[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn drop_releases_lock_while_a_duplicate_descriptor_remains_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = InstanceLock::acquire(dir.path()).expect("acquire");
+        // dup shares the same open file description as a descriptor inherited
+        // across fork, without needing to fork the multithreaded test process.
+        let inherited = lock._file.try_clone().expect("duplicate descriptor");
+        drop(lock);
+        assert_eq!(InstanceLock::holder(dir.path()), None);
+        let replacement = InstanceLock::acquire(dir.path()).expect("acquire after release");
+        drop(inherited);
+        assert!(InstanceLock::holder(dir.path()).is_some());
+        drop(replacement);
+        assert_eq!(InstanceLock::holder(dir.path()), None);
+    }
 
     #[test]
     fn holder_probe_reports_pid_without_disturbing_the_lock() {

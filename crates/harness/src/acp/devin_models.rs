@@ -14,6 +14,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde::Deserialize;
+use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
@@ -133,17 +134,33 @@ impl Catalog {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let output = tokio::time::timeout(timeout, cmd.output())
-            .await
+        let mut child = cmd.spawn()?;
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        let mut stderr = child.stderr.take().expect("piped stderr");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let result = tokio::time::timeout(timeout, async {
+            let (status, _, _) = tokio::try_join!(
+                child.wait(),
+                stdout.read_to_end(&mut out),
+                stderr.read_to_end(&mut err)
+            )?;
+            Ok::<_, std::io::Error>(status)
+        })
+        .await;
+        // In particular, timeout must reap the probe before its registry
+        // execution lease can be released to an installer.
+        crate::shutdown_child(&mut child, Duration::from_millis(250)).await;
+        let status = result
             .map_err(|_| HarnessError::Protocol("Devin model discovery timed out".into()))??;
-        if !output.status.success() {
+        if !status.success() {
             return Err(HarnessError::Protocol(format!(
                 "Devin models list failed ({}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                status,
+                String::from_utf8_lossy(&err).trim()
             )));
         }
-        let (models, groups) = parse_catalog(&output.stdout)?;
+        let (models, groups) = parse_catalog(&out)?;
         *latest = Some((Instant::now(), models.clone(), groups));
         Ok(models)
     }
@@ -710,5 +727,37 @@ mod tests {
         ] {
             assert!(parse_catalog(bytes.as_bytes()).is_err(), "{bytes}");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timed_out_catalog_probe_is_reaped_before_returning() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("devin");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\ntrap '' INT TERM\necho $$ > \"$(dirname \"$0\")/pid\"\nexec sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let result = super::Catalog::default()
+            .refresh(&executable, std::time::Duration::from_millis(500))
+            .await;
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+        let pid: i32 = std::fs::read_to_string(temp.path().join("pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "probe still alive after timeout returned"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
     }
 }

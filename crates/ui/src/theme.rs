@@ -1944,6 +1944,18 @@ pub fn flatten(fg: Hsla, bg: Hsla) -> Hsla {
     hsla(h, s, l, 1.0)
 }
 
+/// Shared silver/slate edge for the composer and its companion surfaces.
+pub fn composer_surface_border(theme: &Theme) -> Hsla {
+    if theme.is_frost() {
+        match theme.appearance {
+            Appearance::Dark => hsla(210.0 / 360.0, 0.18, 0.78, 0.09),
+            Appearance::Light => hsla(210.0 / 360.0, 0.18, 0.32, 0.10),
+        }
+    } else {
+        theme.border
+    }
+}
+
 /// Linear per-component mix of two colors (paint helper for the gradient spinner).
 pub fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
     let t = t.clamp(0.0, 1.0);

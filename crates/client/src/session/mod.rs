@@ -54,9 +54,17 @@ pub enum BusyPolicy {
     /// Park it on the shared queue until the turn ends (the default).
     #[default]
     Queue,
-    /// Deliver mid-turn: a queue row the host may steer into the live turn,
-    /// or a steer command on hosts without the shared queue.
+    /// Deliver mid-turn: a steer command into the live turn when the
+    /// harness steers mid-turn (the host holds it for turn-boundary agents
+    /// and never interrupts to deliver it); otherwise it queues.
     Steer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueAction {
+    SendNow,
+    Steer,
+    Remove,
 }
 
 /// Image bytes picked in the composer.
@@ -992,7 +1000,19 @@ impl SessionHandle {
         let prompt_text = request.text.trim_end().to_owned();
         let device_id = client.config.device_id.clone();
 
-        let outcome = if busy && caps.message_queue && (refs.is_empty() || caps.queue_attachments) {
+        // Steering is a Steer command, never a queue row: the host no longer
+        // steers rows on its own, and the row's only other exit on mobile was
+        // an interrupting Send now, which killed the live turn (and a Codex
+        // app-server's subagents with it).
+        let steer = busy
+            && request.busy == BusyPolicy::Steer
+            && caps.mid_turn_steering == Some(true)
+            && refs.is_empty();
+        let outcome = if !steer
+            && busy
+            && caps.message_queue
+            && (refs.is_empty() || caps.queue_attachments)
+        {
             let text = if refs.is_empty() || caps.clean_attachment_text {
                 if prompt_text.is_empty() {
                     attachments::ATTACHMENT_ONLY_TEXT.to_owned()
@@ -1261,7 +1281,8 @@ impl SessionHandle {
         }
     }
 
-    async fn queue_action(&self, id: &str, send_now: bool) -> Result<bool> {
+    async fn queue_action(&self, id: &str, action: QueueAction) -> Result<bool> {
+        let send_now = action != QueueAction::Remove;
         {
             let mut st = lock(&self.core.state);
             let Some(row) = st.queue.iter().find(|q| q.id == id) else {
@@ -1276,10 +1297,10 @@ impl SessionHandle {
         if let Ok(client) = self.core.client() {
             self.core.recompute_composer(&client);
         }
-        let method = if send_now {
-            zeron_rpc::methods::SEND_QUEUED_MESSAGE_NOW
-        } else {
-            zeron_rpc::methods::REMOVE_QUEUED_MESSAGE
+        let method = match action {
+            QueueAction::SendNow => zeron_rpc::methods::SEND_QUEUED_MESSAGE_NOW,
+            QueueAction::Steer => zeron_rpc::methods::STEER_QUEUED_MESSAGE_NOW,
+            QueueAction::Remove => zeron_rpc::methods::REMOVE_QUEUED_MESSAGE,
         };
         let result = self
             .queue_rpc(
@@ -1325,12 +1346,33 @@ impl SessionHandle {
 
     /// Deliver a queued row now (interrupting the live turn if needed).
     pub async fn send_queued_now(&self, id: &str) -> Result<bool> {
-        self.queue_action(id, true).await
+        self.queue_action(id, QueueAction::SendNow).await
+    }
+
+    /// Deliver a queued row without interrupting: steered into a live turn
+    /// that reads mid-turn, else sent next at the turn boundary.
+    pub async fn steer_queued_now(&self, id: &str) -> Result<bool> {
+        self.queue_action(id, QueueAction::Steer).await
+    }
+
+    /// A row's primary action, as the desktop resolves it: text never
+    /// interrupts the turn (steer / send next); only attachments, which need
+    /// a fresh request, send now.
+    pub async fn deliver_queued_now(&self, id: &str) -> Result<bool> {
+        let has_attachments = lock(&self.core.state)
+            .queue
+            .iter()
+            .any(|q| q.id == id && !q.attachments.is_empty());
+        if has_attachments {
+            self.send_queued_now(id).await
+        } else {
+            self.steer_queued_now(id).await
+        }
     }
 
     /// Remove a queued row (applied locally only after the host acks).
     pub async fn remove_queued(&self, id: &str) -> Result<bool> {
-        self.queue_action(id, false).await
+        self.queue_action(id, QueueAction::Remove).await
     }
 
     pub fn clear_queue_error(&self) {
