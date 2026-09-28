@@ -14,6 +14,58 @@ fn code_gutter(rows: &[CodeRow]) -> f32 {
     (digits as f32 * 6.6 + 14.0).max(crate::changes::GUTTER_WIDTH)
 }
 
+fn diff_line(row: &CodeRow) -> crate::changes::DiffLine {
+    crate::changes::DiffLine {
+        kind: row.kind,
+        old_no: row.old.parse().ok(),
+        new_no: row.new.parse().ok(),
+        text: row.text.to_string(),
+    }
+}
+
+/// Cache index pairs once per patch, using the Changes pane's hunk pairing.
+pub(super) fn split_files(
+    rows: &[CodeRow],
+    files: &[(String, usize)],
+) -> Vec<Vec<crate::changes::LinePair>> {
+    files
+        .iter()
+        .enumerate()
+        .map(|(file, (_, start))| {
+            let end = files.get(file + 1).map_or(rows.len(), |(_, start)| *start);
+            let mut cursor = start + 1; // The selected path is already in the toolbar.
+            let mut pairs = Vec::new();
+            while cursor < end {
+                if rows[cursor].kind == crate::changes::LineKind::Meta {
+                    pairs.push((Some(cursor as u32), Some(cursor as u32)));
+                    cursor += 1;
+                    continue;
+                }
+                let first = cursor;
+                while cursor < end
+                    && (rows[cursor].kind != crate::changes::LineKind::Meta
+                        || rows[cursor].text.as_ref() == "No newline at end of file")
+                {
+                    cursor += 1;
+                }
+                let lines = rows[first..cursor]
+                    .iter()
+                    .map(diff_line)
+                    .collect::<Vec<_>>();
+                pairs.extend(crate::changes::split_pairs(&lines).into_iter().map(
+                    |(left, right)| {
+                        (
+                            left.map(|i| i + first as u32),
+                            right.map(|i| i + first as u32),
+                        )
+                    },
+                ));
+            }
+            pairs
+        })
+        .collect()
+}
+
 impl PullRequestDetailPage {
     pub(super) fn code_workspace(
         &self,
@@ -169,6 +221,10 @@ impl PullRequestDetailPage {
                     .when(!wide, |el| el.w_full().h(px(136.0)))
                     .child(
                         div()
+                            .h(px(crate::surface_chrome::CONTROL_SIZE))
+                            .flex_none()
+                            .flex()
+                            .items_center()
                             .px(px(10.0))
                             .text_size(px(12.0))
                             .text_color(theme.text_muted)
@@ -268,6 +324,31 @@ impl PullRequestDetailPage {
                         })),
                 )
                 .child(
+                    action(
+                        "pr-split",
+                        if self.code_split {
+                            "Show unified diff"
+                        } else {
+                            "Show split diff"
+                        },
+                        theme,
+                    )
+                    .aria_selected(self.code_split)
+                    .when(self.code_split, |el| el.bg(theme.glass_hover()))
+                    .on_click(cx.listener(|page, _, _, cx| {
+                        page.code_split = !page.code_split;
+                        let split = page.code_split;
+                        crate::settings::update(
+                            crate::settings::SavePolicy::Immediate,
+                            cx,
+                            |settings| {
+                                settings.diff_split = split;
+                            },
+                        );
+                        page.select_code_file(page.selected_code_file, cx);
+                    })),
+                )
+                .child(
                     action("pr-copy-patch", "Copy diff", theme).on_click(move |_, _, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                             patch.as_ref().clone(),
@@ -284,63 +365,140 @@ impl PullRequestDetailPage {
             (self.code_width - 128.0) / 7.0 * crate::changes::diff_text_size(theme) * 0.7
                 + 144.0
                 + 2.0 * (gutter - crate::changes::GUTTER_WIDTH);
+        let text_width =
+            (self.code_width - 128.0) / 7.0 * crate::changes::diff_text_size(theme) * 0.7;
+        let horizontal = self.code_horizontal.clone();
+        let split = self.code_split;
+        let pairs = self.code_pairs.clone();
+        let row_count = if split {
+            pairs.get(current).map_or(0, Vec::len)
+        } else {
+            visible.len()
+        };
         let rows = self.code_rows.clone();
         let colors = theme.clone();
         let scroll = self.code_scroll.0.borrow().base_handle.clone();
-        editor = editor.child(
-            div()
-                .id("pr-code-viewport")
-                .debug_selector(|| "pr-code-viewport".into())
-                .flex_1()
-                .min_h_0()
-                .border_t_1()
-                .border_color(theme.border)
-                .overflow_x_scroll()
-                .track_scroll(&self.code_horizontal)
-                .child(
-                    crate::edge_fade::edge_faded(
-                        12.0,
-                        true,
-                        true,
-                        gpui::uniform_list("pr-code-lines", visible.len(), move |range, _, _| {
-                            range
-                                .map(|index| {
-                                    let row = &rows[index + visible.start];
-                                    if row.kind == crate::changes::LineKind::Meta {
-                                        div()
-                                            .w_full()
-                                            .h(px(crate::changes::diff_line_height(&colors)))
-                                            .px(px(12.0))
-                                            .bg(crate::theme::wash(0.035))
-                                            .font_family(colors.font_mono.clone())
-                                            .text_size(px(11.0))
-                                            .text_color(colors.text_muted)
-                                            .child(row.text.clone())
-                                            .into_any_element()
-                                    } else {
-                                        crate::changes::readonly_diff_line(
-                                            &crate::changes::DiffLine {
-                                                kind: row.kind,
-                                                old_no: row.old.parse().ok(),
-                                                new_no: row.new.parse().ok(),
-                                                text: row.text.to_string(),
-                                            },
-                                            &row.spans,
-                                            &colors,
-                                            gutter,
-                                        )
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .w(px(code_width))
-                        .min_w_full()
-                        .h_full()
-                        .track_scroll(&self.code_scroll),
-                    )
-                    .fade_overflow_y(&scroll),
-                ),
-        );
+        editor =
+            editor.child(
+                div()
+                    .id("pr-code-viewport")
+                    .debug_selector(|| "pr-code-viewport".into())
+                    .flex_1()
+                    .min_h_0()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .overflow_hidden()
+                    .when(!split, |el| {
+                        el.overflow_x_scroll()
+                            .track_scroll(&self.code_horizontal)
+                            .map(|mut el| {
+                                el.style().restrict_scroll_to_axis = Some(true);
+                                el
+                            })
+                    })
+                    .child(
+                        crate::edge_fade::edge_faded(
+                            12.0,
+                            true,
+                            true,
+                            gpui::uniform_list("pr-code-lines", row_count, move |range, _, _| {
+                                range
+                                    .map(|index| {
+                                        let (left, right) = if split {
+                                            pairs[current][index]
+                                        } else {
+                                            (Some((index + visible.start) as u32), None)
+                                        };
+                                        let row = &rows[left.or(right).unwrap() as usize];
+                                        if row.kind == crate::changes::LineKind::Meta {
+                                            div()
+                                                .w_full()
+                                                .h(px(crate::changes::diff_line_height(&colors)))
+                                                .px(px(12.0))
+                                                .bg(crate::theme::wash(0.035))
+                                                .font_family(colors.font_mono.clone())
+                                                .text_size(px(11.0))
+                                                .text_color(colors.text_muted)
+                                                .child(row.text.clone())
+                                                .into_any_element()
+                                        } else if split {
+                                            let left_row = left.map(|i| &rows[i as usize]);
+                                            let right_row = right.map(|i| &rows[i as usize]);
+                                            let left_line = left_row.map(diff_line);
+                                            let right_line = right_row.map(diff_line);
+                                            crate::changes::readonly_split_line(
+                                                left_line.as_ref().zip(left_row).map(
+                                                    |(line, row)| (line, row.spans.as_slice()),
+                                                ),
+                                                right_line.as_ref().zip(right_row).map(
+                                                    |(line, row)| (line, row.spans.as_slice()),
+                                                ),
+                                                &colors,
+                                                gutter,
+                                                text_width,
+                                                &horizontal,
+                                                index,
+                                            )
+                                        } else {
+                                            crate::changes::readonly_diff_line(
+                                                &crate::changes::DiffLine {
+                                                    kind: row.kind,
+                                                    old_no: row.old.parse().ok(),
+                                                    new_no: row.new.parse().ok(),
+                                                    text: row.text.to_string(),
+                                                },
+                                                &row.spans,
+                                                &colors,
+                                                gutter,
+                                            )
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .debug_selector(|| "pr-code-lines".into())
+                            .when(split, |el| el.w_full())
+                            .when(!split, |el| el.w(px(code_width)))
+                            .min_w_full()
+                            .h_full()
+                            .track_scroll(&self.code_scroll),
+                        )
+                        .fade_overflow_y(&scroll),
+                    ),
+            );
         workspace.child(editor).into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pull_request_split_pairs_preserve_hunks_files_and_missing_newlines() {
+        let patch = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,2 @@\n same\n-old\n-removed\n+new\n@@ -10 +9 @@\n-before\n\\ No newline at end of file\n+after\n\\ No newline at end of file\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -0,0 +1 @@\n+added\n";
+        let parsed = ParsedDiff::new(patch.into());
+        let text = |side: Option<u32>| side.map(|i| parsed.rows[i as usize].text.as_ref());
+        let first = parsed.pairs[0]
+            .iter()
+            .map(|(a, b)| (text(*a), text(*b)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            first,
+            vec![
+                (Some("@@ -1,3 +1,2 @@"), Some("@@ -1,3 +1,2 @@")),
+                (Some("same"), Some("same")),
+                (Some("old"), Some("new")),
+                (Some("removed"), None),
+                (Some("@@ -10 +9 @@"), Some("@@ -10 +9 @@")),
+                (Some("before"), Some("after")),
+                (
+                    Some("No newline at end of file"),
+                    Some("No newline at end of file")
+                ),
+            ]
+        );
+        assert_eq!(parsed.pairs[1].len(), 2);
+        assert_eq!(parsed.pairs[1][1].0, None);
+        assert_eq!(text(parsed.pairs[1][1].1), Some("added"));
     }
 }

@@ -136,12 +136,14 @@ struct ParsedDiff {
     patch: Arc<String>,
     rows: Arc<Vec<CodeRow>>,
     files: Arc<Vec<(String, usize)>>,
+    pairs: Arc<Vec<Vec<crate::changes::LinePair>>>,
 }
 
 impl ParsedDiff {
     fn new(patch: String) -> Self {
         let (rows, files) = code_rows(&patch);
         Self {
+            pairs: Arc::new(code::split_files(&rows, &files)),
             patch: Arc::new(patch),
             rows: Arc::new(rows),
             files: Arc::new(files),
@@ -204,6 +206,8 @@ pub struct PullRequestDetailPage {
     copied_link: bool,
     diff: Option<Arc<String>>,
     code_rows: Arc<Vec<CodeRow>>,
+    code_pairs: Arc<Vec<Vec<crate::changes::LinePair>>>,
+    code_split: bool,
     code_files: Arc<Vec<(String, usize)>>,
     code_width: f32,
     code_horizontal: gpui::ScrollHandle,
@@ -262,6 +266,8 @@ impl PullRequestDetailPage {
             copied_link: false,
             diff: None,
             code_rows: Default::default(),
+            code_pairs: Default::default(),
+            code_split: crate::settings::current(cx).diff_split,
             code_files: Default::default(),
             code_width: 128.0,
             code_horizontal: gpui::ScrollHandle::new(),
@@ -534,6 +540,7 @@ impl PullRequestDetailPage {
 
     fn diff_snapshot(&self) -> Option<ParsedDiff> {
         Some(ParsedDiff {
+            pairs: self.code_pairs.clone(),
             patch: self.diff.clone()?,
             rows: self.code_rows.clone(),
             files: self.code_files.clone(),
@@ -541,6 +548,7 @@ impl PullRequestDetailPage {
     }
 
     fn install_diff(&mut self, diff: ParsedDiff) {
+        self.code_pairs = diff.pairs;
         self.diff = Some(diff.patch);
         self.code_rows = diff.rows;
         self.code_files = diff.files;
@@ -750,9 +758,10 @@ impl Render for PrActionTooltip {
 fn action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let icon_only = matches!(
         id,
-        "pr-back" | "pr-external" | "pr-copy-url" | "pr-copy-patch" | "pr-files" | "pr-detail-refresh" | "pr-previous-file" | "pr-next-file"
+        "pr-back" | "pr-external" | "pr-copy-url" | "pr-copy-patch" | "pr-files" | "pr-detail-refresh" | "pr-previous-file" | "pr-next-file" | "pr-split"
     );
     let glyph = match id {
+        "pr-split" => Some(crate::icons::SPLIT_COLUMNS),
         "pr-previous-file" => Some(crate::icons::ALT_ARROW_LEFT),
         "pr-next-file" => Some(crate::icons::ALT_ARROW_RIGHT),
         "pr-back" => Some(crate::icons::ALT_ARROW_LEFT),
@@ -1659,7 +1668,7 @@ mod tests {
         let page = host.read_with(cx, |host, _| host.page.clone());
         page.update(cx, |page, cx| {
             let patch = ["a.rs", "nested/b.rs", "c.rs"].iter().map(|name| format!(
-                "diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-old\n+new\n"
+                "diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-old\n+{}\n", "new ".repeat(100)
             )).collect::<String>();
             page.install_diff(ParsedDiff::new(patch));
             let cached = page.code_rows.clone();
@@ -1701,7 +1710,25 @@ mod tests {
             } else {
                 assert!(browser.bottom() < viewport.top(), "compact picker stays above the diff");
             }
-            for selector in ["pr-files", "pr-copy-patch", "pr-previous-file", "pr-next-file"] {
+            let toggle = cx.debug_bounds("pr-split").unwrap();
+            cx.simulate_mouse_down(toggle.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+            cx.simulate_mouse_up(toggle.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+            cx.run_until_parked();
+            page.read_with(cx, |page, _| {
+                assert!(page.code_split);
+                assert_eq!(page.selected_code_file, 1);
+            });
+            let left = cx.debug_bounds("pr-split-cell-1-true").unwrap();
+            let right = cx.debug_bounds("pr-split-cell-1-false").unwrap();
+            assert!(left.left() >= viewport.left());
+            assert!(right.right() <= viewport.right());
+            assert!((left.size.width - right.size.width).abs() < px(1.0));
+            assert!(left.right() <= right.left());
+            cx.simulate_mouse_down(toggle.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+            cx.simulate_mouse_up(toggle.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+            cx.run_until_parked();
+            page.read_with(cx, |page, _| assert!(!page.code_split));
+            for selector in ["pr-files", "pr-copy-patch", "pr-previous-file", "pr-next-file", "pr-split"] {
                 let control = cx.debug_bounds(selector).unwrap();
                 assert!(control.left() >= px(24.0) && control.right() <= px(width - 24.0), "{selector}: {control:?}");
             }

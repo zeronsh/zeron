@@ -4436,6 +4436,51 @@ pub(crate) fn readonly_diff_line(
     diff_line_row(line, spans, theme, gutter_px, DiffCodeWidth::Clipped, None)
 }
 
+/// Read-only split row using the same cells and divider as the Changes pane.
+pub(crate) fn readonly_split_line(
+    left: Option<(&DiffLine, &[zeron_syntax::HighlightSpan])>,
+    right: Option<(&DiffLine, &[zeron_syntax::HighlightSpan])>,
+    theme: &Theme,
+    gutter_px: f32,
+    text_width: f32,
+    scroll: &gpui::ScrollHandle,
+    row: usize,
+) -> AnyElement {
+    let width = DiffCodeWidth::Scrollable(DiffHorizontalMetrics {
+        max_text_width: text_width,
+        max_gutter_width: gutter_px,
+    });
+    let cell = |side: Option<(&DiffLine, &[zeron_syntax::HighlightSpan])>, old: bool| {
+        let content = side
+            .map(|(line, spans)| {
+                let runs = render::runs_for_syntax_line_with_plain(
+                    &line.text,
+                    spans,
+                    &font(theme.font_mono.clone()),
+                    theme.text.opacity(0.92),
+                    theme,
+                );
+                split_line_cell(
+                    line,
+                    if old { line.old_no } else { line.new_no },
+                    runs,
+                    theme,
+                    gutter_px,
+                    width,
+                    Some(DiffCodeScroll {
+                        handle: scroll.clone(),
+                        id: format!("pr-split-code-{row}-{old}").into(),
+                    }),
+                )
+            })
+            .unwrap_or_else(split_filler);
+        content
+            .debug_selector(move || format!("pr-split-cell-{row}-{old}"))
+            .into_any_element()
+    };
+    split_row(cell(left, true), cell(right, false), false, theme).into_any_element()
+}
+
 /// One +/−/context/meta diff line: coloured accent bar, dual line-number
 /// gutters (`gutter_px` wide — see [`gutter_width`]), marker column, and
 /// paint-only syntax runs.
