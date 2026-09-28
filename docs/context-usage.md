@@ -14,7 +14,7 @@ The host normalizes context occupancy separately from billing `Usage` events:
 | Claude Code | Latest parent assistant message's input plus cache-read/cache-creation tokens; capacity from that model's result metadata. Aggregate result billing and child agents are excluded. |
 | Codex | Latest model call (`tokenUsage.last`), with `modelContextWindow`; never the cumulative thread total. |
 | OpenCode | Latest parent assistant message's total, or input/output/cache counts; capacity from the advertised provider/model catalog. Empty in-progress placeholders do not clear a measurement. |
-| ACP (Devin, Grok, Hermes, pi) | `usage_update.used` and advertised capacity when the agent reports them. |
+| ACP (Devin, Grok, Hermes, pi, omp) | `usage_update.used` and advertised capacity when the agent reports them. |
 | Cursor | The pinned SDK exposes billed per-turn counts, not context occupancy. The shared control shows unavailable. |
 | Mock / older hosts | Unavailable until a context snapshot is supplied. |
 

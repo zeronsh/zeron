@@ -118,6 +118,7 @@ fn project_dirs(harness: HarnessId) -> &'static [&'static str] {
         HarnessId::Grok => &[".agents/skills", ".claude/skills", ".grok/skills"],
         HarnessId::Hermes => &[".agents/skills"],
         HarnessId::Pi => &[".agents/skills", ".pi/skills"],
+        HarnessId::Omp => &[".agents/skills", ".omp/skills"],
         HarnessId::Devin => &[".agents/skills"],
         HarnessId::Antigravity => &[".agents/skills", ".gemini/skills"],
         HarnessId::Codex => &[".agents/skills", ".codex/skills"],
@@ -145,6 +146,7 @@ fn discover_at(harness: HarnessId, cwd: &Path, home: &Path) -> Result<Vec<Skill>
                 .join("skills"),
             String::new(),
         )),
+        HarnessId::Omp => roots.push((home.join(".omp/agent/skills"), String::new())),
         HarnessId::Hermes => roots.push((
             std::env::var_os("HERMES_HOME")
                 .map(PathBuf::from)
@@ -789,6 +791,7 @@ mod tests {
             (HarnessId::Cursor, ".cursor"),
             (HarnessId::Grok, ".grok"),
             (HarnessId::Pi, ".pi"),
+            (HarnessId::Omp, ".omp"),
             (HarnessId::Opencode, ".opencode"),
         ] {
             let native_path = write(

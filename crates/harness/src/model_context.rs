@@ -63,6 +63,12 @@ pub(crate) fn context(
         HarnessId::Pi => {
             vec![root("PI_CODING_AGENT_DIR", home.join(".pi/agent")).join("auth.json")]
         }
+        // Credentials live in agent.db, a WAL SQLite store rewritten by every
+        // run; hashing it would miss the cache on each probe.
+        HarnessId::Omp => {
+            let root = root("PI_CODING_AGENT_DIR", home.join(".omp/agent"));
+            vec![root.join("config.yml"), root.join("models.yml")]
+        }
         HarnessId::Devin => {
             let data = root("XDG_DATA_HOME", home.join(".local/share"));
             let mut files = vec![data.join("devin/credentials.toml")];
@@ -103,6 +109,7 @@ pub(crate) fn context(
         HarnessId::Grok => &["GROK_", "XAI_"],
         HarnessId::Hermes => &["HERMES_", "OPENAI_", "ANTHROPIC_"],
         HarnessId::Pi => &["PI_", "OPENAI_", "ANTHROPIC_"],
+        HarnessId::Omp => &["PI_", "OMP_", "OPENAI_", "ANTHROPIC_"],
         HarnessId::Devin => &["DEVIN_"],
         HarnessId::Antigravity => &["GEMINI_", "GOOGLE_"],
         HarnessId::Cursor => &["CURSOR_"],

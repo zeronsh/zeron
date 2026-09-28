@@ -61,6 +61,7 @@ not built yet).
 | Grok (ACP) | done | Shared `AcpHarness` spec; `grok agent stdio`, turn-boundary steering. |
 | Hermes (ACP) | done | Shared `AcpHarness` spec; `hermes acp` (Nous Research's native ACP server), turn-boundary steering, no effort ladder yet. |
 | Pi (ACP) | done | Shared `AcpHarness` spec; community `pi-acp` adapter (pinned 0.0.33, npx fallback), turn-boundary steering, minimal→max thinking ladder. |
+| Omp (ACP) | done | Shared `AcpHarness` spec; `omp acp` (Oh My Pi's native ACP server), turn-boundary steering, minimal→max thinking ladder (off/auto left at the agent default). **Live-verified against the real `omp` CLI 18.2.5**: initialize handshake, session/new model + thinking config options, set_config_option wire shape; model switches rewrite the thinking ladder, so the run applies the model first and resolves thinking against the returned config. |
 | Mock harness | done | Scripted event replay; powers tests + the e2e smoke. |
 
 ## §5 Session doc schema
