@@ -11108,12 +11108,17 @@ mod tests {
         let composer = cx.new(|cx| Composer::new(side.clone(), cx));
         // Discovery must work before createChat, including a different agent
         // from the parent's. Opening any completion must remain read-only.
-        for harness in [HarnessId::Codex, HarnessId::ClaudeCode] {
+        // Ends on the inherited harness, so the first send below mints the
+        // fixture's config.
+        let inherited = side
+            .read_with(cx, |state, _| {
+                state.selected_chat_row().and_then(|c| c.config.clone())
+            })
+            .unwrap();
+        for harness in [HarnessId::ClaudeCode, HarnessId::Codex] {
             side.update(cx, |state, cx| {
-                let config = serde_json::from_value(serde_json::json!({
-                    "harness": harness, "sandbox": "workspace-write",
-                }))
-                .unwrap();
+                let mut config = inherited.clone();
+                config.harness = harness;
                 state.apply_chat_config("side", config);
                 cx.notify();
             });
