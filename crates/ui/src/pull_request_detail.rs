@@ -49,6 +49,21 @@ enum Tab {
     Activity,
 }
 
+/// Navigation segments in display order: (tab, label, element id, glyph).
+const TABS: [(Tab, &str, &str, &str); 3] = [
+    (Tab::Summary, "Summary", "pr-summary", crate::icons::DOCUMENT),
+    (Tab::Code, "Code", "pr-code", crate::icons::FILE_CODE),
+    (Tab::Activity, "Activity", "pr-activity", crate::icons::CHAT_ROUND_LINE),
+];
+
+/// Slot of `tab` in the navigation pill, in segments from the leading edge.
+fn tab_slot(tab: Tab) -> f32 {
+    TABS.iter().position(|(candidate, ..)| *candidate == tab).unwrap_or(0) as f32
+}
+
+const NAV_PADDING: f32 = 4.0;
+const NAV_SEGMENT_HEIGHT: f32 = 36.0;
+
 #[derive(Clone)]
 struct CodeRow {
     text: SharedString,
@@ -196,7 +211,7 @@ pub struct PullRequestDetailPage {
     diff_error: Option<String>,
     tab: Tab,
     checks_expanded: bool,
-    tab_fades: crate::motion::HoverFades,
+    tab_slide: crate::motion::IndicatorSlide,
     selected_code_file: usize,
     file_search: Entity<crate::composer::ComposerInput>,
     file_search_subscription: Option<Subscription>,
@@ -229,8 +244,6 @@ impl PullRequestDetailPage {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut tab_fades = crate::motion::HoverFades::default();
-        tab_fades.set_at("pr-summary", true, true, Instant::now());
         let mut page = Self {
             state,
             url,
@@ -256,7 +269,7 @@ impl PullRequestDetailPage {
             diff_error: None,
             tab: Tab::Summary,
             checks_expanded: false,
-            tab_fades,
+            tab_slide: crate::motion::IndicatorSlide::at(tab_slot(Tab::Summary), Instant::now()),
             selected_code_file: 0,
             file_search: cx.new(|cx| crate::composer::ComposerInput::with_context(
                 "Find a changed file…", "PaletteSearch", cx,
@@ -535,66 +548,85 @@ impl PullRequestDetailPage {
         self.code_width = code_content_width(&self.code_rows[self.code_range()]);
     }
 
+    /// Floating pill nav. One raised thumb glides between equal-width segments
+    /// (positioned as a fraction of the track, so it stays aligned at any label
+    /// length or text scale) while each segment's icon and label fade with the
+    /// thumb's coverage. The pill sizes to its content and only shrinks when
+    /// the window is narrower than that.
     fn navigation(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let now = Instant::now();
+        let slots = TABS.len() as f32;
+        let position = self.tab_slide.value_at(Instant::now());
+        let thumb = div()
+            .debug_selector(|| "pr-detail-nav-thumb".into())
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(gpui::relative(position / slots))
+            .w(gpui::relative(1.0 / slots))
+            .rounded_full()
+            .bg(theme.glass_hover())
+            .shadow(crate::theme::card_selected_shadows());
+        let segments = TABS.into_iter().enumerate().map(|(slot, (tab, label, id, glyph))| {
+            // 1 while the thumb sits on this slot, 0 once it is a slot away.
+            let covered = (1.0 - (position - slot as f32).abs()).clamp(0.0, 1.0);
+            let hover_key = format!("pr-detail-{}-{id}", cx.entity_id());
+            let hover = crate::motion::hover_t(&hover_key);
+            let emphasis = covered.max(hover);
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .role(gpui::Role::Button)
+                .aria_label(label)
+                .aria_selected(tab == self.tab)
+                .tab_index(0)
+                .min_w_0()
+                .h(px(NAV_SEGMENT_HEIGHT))
+                .px(px(14.0))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(6.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(crate::motion::mix(theme.text_muted, theme.text, emphasis))
+                .bg(crate::motion::mix(
+                    theme.glass_hover().opacity(0.0),
+                    theme.glass_hover(),
+                    hover * (1.0 - covered) * 0.6,
+                ))
+                .focus_visible(|style| style.bg(theme.glass_hover()))
+                .cursor_pointer()
+                .on_hover(crate::motion::hover_listener(hover_key))
+                .child(
+                    crate::icons::icon(glyph)
+                        .size(px(14.0))
+                        .text_color(crate::motion::mix(theme.text_muted, theme.accent, covered)),
+                )
+                .child(div().min_w_0().truncate().child(label))
+                .on_click(cx.listener(move |page, _, _, cx| page.select_tab(tab, cx)))
+        });
         let tabs = div()
             .id("pr-detail-nav")
             .debug_selector(|| "pr-detail-nav".into())
             .occlude()
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_up(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .w_full()
-            .p(px(4.0))
-            .rounded(px(14.0))
+            .p(px(NAV_PADDING))
+            .rounded_full()
             .bg(theme.input_glass_bg())
             .shadow_lg()
-            .gap(px(4.0))
             .flex_none()
-            .flex()
-            .children(
-                [
-                    (Tab::Summary, "Summary", "pr-summary"),
-                    (Tab::Code, "Code", "pr-code"),
-                    (Tab::Activity, "Activity", "pr-activity"),
-                ]
-                .into_iter()
-                .map(|(tab, label, id)| {
-                    let selected = self.tab_fades.value_at(id, now);
-                    let hover_key = format!("pr-detail-{}-{id}", cx.entity_id());
-                    let hover = crate::motion::hover_t(&hover_key);
-                    div()
-                        .id(id)
-                        .debug_selector(move || id.into())
-                        .role(gpui::Role::Button)
-                        .aria_label(label)
-                        .aria_selected(tab == self.tab)
-                        .tab_index(0)
-                        .flex_1()
-                        .min_w_0()
-                        .h(px(36.0))
-                        .rounded(px(10.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(crate::motion::mix(
-                            theme.text_muted,
-                            theme.text,
-                            selected.max(hover),
-                        ))
-                        .bg(crate::motion::mix(
-                            theme.glass_hover().opacity(0.0),
-                            theme.glass_hover(),
-                            selected.max(hover * 0.6),
-                        ))
-                        .focus_visible(|style| style.bg(theme.glass_hover()))
-                        .cursor_pointer()
-                        .on_hover(crate::motion::hover_listener(hover_key))
-                        .child(label)
-                        .on_click(cx.listener(move |page, _, _, cx| page.select_tab(tab, cx)))
-                }),
+            .child(
+                div()
+                    .relative()
+                    .grid()
+                    .grid_cols(TABS.len() as u16)
+                    .child(thumb)
+                    .children(segments),
             );
+        // Concentric: the pill radius is the segment radius plus the padding.
+        let radius = NAV_SEGMENT_HEIGHT / 2.0 + NAV_PADDING;
         div()
             .absolute()
             .bottom(px(16.0))
@@ -603,8 +635,8 @@ impl PullRequestDetailPage {
             .px(px(16.0))
             .flex()
             .justify_center()
-            .child(div().w(px(280.0)).max_w_full().child(crate::frost::frosted(
-                14.0,
+            .child(div().max_w_full().child(crate::frost::frosted(
+                radius,
                 crate::frost::MENU_BLUR,
                 tabs,
             )))
@@ -635,19 +667,11 @@ impl PullRequestDetailPage {
         if self.tab == tab {
             return;
         }
-        let now = Instant::now();
-        for (candidate, key) in [
-            (Tab::Summary, "pr-summary"),
-            (Tab::Code, "pr-code"),
-            (Tab::Activity, "pr-activity"),
-        ] {
-            self.tab_fades.set_at(
-                key,
-                candidate == tab,
-                crate::motion::reduced_motion(cx),
-                now,
-            );
-        }
+        self.tab_slide.retarget(
+            tab_slot(tab),
+            crate::motion::reduced_motion(cx),
+            Instant::now(),
+        );
         self.tab = tab;
         self.scroll.scroll.set_offset(gpui::Point::default());
         if tab == Tab::Code && self.diff.is_none() && self.diff_task.is_none() {
@@ -1408,7 +1432,7 @@ impl Render for PullRequestDetailPage {
                 .into_any_element()
         };
         let navigation = self.navigation(&theme, cx);
-        if self.tab_fades.tick_at(Instant::now()) {
+        if self.tab_slide.animating_at(Instant::now()) {
             window.request_animation_frame();
         }
         let composer = (self.tab == Tab::Activity).then(|| self.comment_composer(&theme, cx));
@@ -1776,6 +1800,39 @@ mod tests {
             assert_eq!(host.clicks, 1);
             assert_eq!(host.raw_presses.get(), 1);
         });
+    }
+
+    #[gpui::test]
+    fn pull_request_navigation_thumb_slides_onto_the_selected_tab(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            let state = cx.new(|_| AppState::new());
+            let page = cx.new(|cx| PullRequestDetailPage::new(
+                state, "https://github.com/a/b/pull/1".into(), None,
+                Default::default(), None, window, cx,
+            ));
+            NavigationHitHost { page, presses: 0, clicks: 0, raw_presses: Default::default() }
+        });
+        let page = host.read_with(cx, |host, _| host.page.clone());
+        cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
+        for width in [320.0, 900.0] {
+            cx.simulate_resize(gpui::size(px(width), px(400.0)));
+            cx.run_until_parked();
+            let nav = cx.debug_bounds("pr-detail-nav").unwrap();
+            assert!(nav.left() >= px(16.0) && nav.right() <= px(width - 16.0), "{nav:?}");
+            let segments: Vec<_> = TABS.iter().map(|(_, _, id, _)| cx.debug_bounds(id).unwrap()).collect();
+            for pair in segments.windows(2) {
+                assert!((pair[0].size.width - pair[1].size.width).abs() <= px(1.0), "{segments:?}");
+            }
+            for (tab, slot) in [(Tab::Code, 1), (Tab::Activity, 2), (Tab::Summary, 0)] {
+                page.update(cx, |page, cx| page.select_tab(tab, cx));
+                cx.run_until_parked();
+                let thumb = cx.debug_bounds("pr-detail-nav-thumb").unwrap();
+                assert!((thumb.origin.x - segments[slot].origin.x).abs() <= px(1.0), "{thumb:?}");
+                assert!((thumb.size.width - segments[slot].size.width).abs() <= px(1.0));
+            }
+        }
     }
 
     #[gpui::test]
