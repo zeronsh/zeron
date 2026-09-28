@@ -92,14 +92,7 @@ impl TitleGenerator {
 
         let generated = self.run_title_model(harness_id, prompt, cwd).await;
         // Fallback so a chat is always named even if the model run produced nothing.
-        let fallback: String = prompt
-            .split_whitespace()
-            .take(7)
-            .collect::<Vec<_>>()
-            .join(" ")
-            .chars()
-            .take(48)
-            .collect();
+        let fallback = fallback_title(prompt);
         let title = generated.unwrap_or(fallback);
         if title.is_empty() {
             return Ok(());
@@ -255,15 +248,121 @@ fn cheapest_model(models: &[Model]) -> Option<String> {
     small.or(models.last()).map(|m| m.id.clone())
 }
 
-/// First line, stripped of quote/heading dressing, capped at 60 chars.
+/// First 7 words of the prompt, cut at a word boundary within 48 chars.
+/// The previous `.chars().take(48)` could slice mid-word; grow word-by-word
+/// instead and only hard-cut a single over-long word.
+fn fallback_title(prompt: &str) -> String {
+    let words: Vec<&str> = prompt.split_whitespace().take(7).collect();
+    let joined = words.join(" ");
+    if joined.chars().count() <= 48 {
+        return joined;
+    }
+    let mut out = String::new();
+    for w in words {
+        let next_len = if out.is_empty() {
+            w.chars().count()
+        } else {
+            out.chars().count() + 1 + w.chars().count()
+        };
+        if next_len > 48 {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(w);
+    }
+    if out.is_empty() {
+        joined.chars().take(48).collect()
+    } else {
+        out
+    }
+}
+
+/// First line, stripped of common model dressing, capped at 60 chars.
+/// Handles `Title:` prefixes, list numbering (`1.`, `-`), markdown
+/// emphasis/code (`**..**`, `` `..` ``), quote/heading marks, and trailing
+/// punctuation the model adds despite TITLE_INSTRUCTIONS.
 fn clean_title(raw: &str) -> String {
-    let first = raw.trim().lines().next().unwrap_or("");
-    first
-        .trim_start_matches(['"', '\'', '#', ' ', '\t'])
-        .trim_end_matches(['"', '\'', ' ', '\t'])
-        .chars()
-        .take(60)
-        .collect()
+    let first = raw.trim().lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        return String::new();
+    }
+    let mut s: &str = first;
+
+    // Strip `Title:` / `Session title:` prefix (case-insensitive).
+    let lower = s.to_lowercase();
+    for prefix in ["title:", "session title:", "chat title:"] {
+        if lower.starts_with(prefix) {
+            s = s[prefix.len()..].trim_start();
+            break;
+        }
+    }
+
+    // Strip list numbering: `1. `, `1) `, `- `, `* `.
+    let bytes = s.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        idx += 1;
+    }
+    if idx > 0 && idx < bytes.len() && (bytes[idx] == b'.' || bytes[idx] == b')') {
+        s = s[idx + 1..].trim_start();
+    } else if s.starts_with("- ") || s.starts_with("* ") {
+        s = s[2..].trim_start();
+    }
+
+    // Iteratively strip surrounding quotes / markdown emphasis / code.
+    loop {
+        let t = s.trim();
+        let stripped = t
+            .strip_prefix("**")
+            .and_then(|r| r.strip_suffix("**"))
+            .or_else(|| t.strip_prefix("__").and_then(|r| r.strip_suffix("__")))
+            .or_else(|| {
+                if t.len() >= 2
+                    && (t.starts_with('`') && t.ends_with('`')
+                        || t.starts_with('"') && t.ends_with('"')
+                        || t.starts_with('\'') && t.ends_with('\'')
+                        || t.starts_with('*') && t.ends_with('*')
+                        || t.starts_with('_') && t.ends_with('_'))
+                {
+                    Some(&t[1..t.len() - 1])
+                } else {
+                    None
+                }
+            });
+        match stripped {
+            Some(inner) => s = inner.trim(),
+            None => {
+                s = t.trim_start_matches(['"', '\'', '#', '`', '*', '_', '~', '>', ' ', '\t']);
+                break;
+            }
+        }
+        if s.is_empty() {
+            return String::new();
+        }
+    }
+
+    let mut cleaned: String = s
+        .trim_end_matches(['"', '\'', '`', '*', '_', '~', ' ', '\t'])
+        .trim_end_matches(['.', ',', ':', ';', '!', '?'])
+        .trim()
+        .to_string();
+    if cleaned.chars().count() > 60 {
+        let truncated: String = cleaned.chars().take(60).collect();
+        // Prefer a word boundary over a mid-word slice.
+        if let Some(last_space) = truncated.rfind(' ') {
+            let cut = truncated[..last_space].trim_end().to_string();
+            if !cut.is_empty() {
+                cleaned = cut;
+            } else {
+                cleaned = truncated;
+            }
+        } else {
+            cleaned = truncated;
+        }
+    }
+    cleaned
 }
 
 /// Drive one titling run through the harness: no steering, questions resolved
@@ -498,5 +597,30 @@ mod tests {
         assert_eq!(clean_title("\"Fix Login Flow\"\nextra"), "Fix Login Flow");
         assert_eq!(clean_title("# Add Dark Mode  "), "Add Dark Mode");
         assert_eq!(clean_title("   "), "");
+        // Common model decorations despite TITLE_INSTRUCTIONS.
+        assert_eq!(clean_title("Title: Fix Login Flow"), "Fix Login Flow");
+        assert_eq!(clean_title("**Fix Login Flow**"), "Fix Login Flow");
+        assert_eq!(clean_title("`Fix Login Flow`"), "Fix Login Flow");
+        assert_eq!(clean_title("Fix Login Flow."), "Fix Login Flow");
+        assert_eq!(clean_title("1. Fix Login Flow"), "Fix Login Flow");
+        assert_eq!(clean_title("- Fix Login Flow!"), "Fix Login Flow");
+    }
+
+    #[test]
+    fn fallback_never_cuts_mid_word() {
+        assert_eq!(fallback_title("short prompt here"), "short prompt here");
+        assert_eq!(
+            fallback_title("find out how zeron.sh are generates, the session title"),
+            "find out how zeron.sh are generates, the"
+        );
+        // 7-word join exceeds 48 chars: must stop at a word boundary.
+        let long = fallback_title(
+            "supercalifragilisticexpialidocious alpha beta gamma delta epsilon zeta",
+        );
+        assert!(long.chars().count() <= 48);
+        assert_eq!(long, "supercalifragilisticexpialidocious alpha beta");
+        // Single over-long word: hard-cut is the only option.
+        let word = "a".repeat(60);
+        assert_eq!(fallback_title(&word).chars().count(), 48);
     }
 }
