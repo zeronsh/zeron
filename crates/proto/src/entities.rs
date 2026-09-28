@@ -614,6 +614,10 @@ pub enum WorkspaceReadOnlyReason {
     TooLarge,
     PermissionDenied,
     NotRegularFile,
+    /// A file read by absolute path beyond the chat's workspace root: reads
+    /// are allowed, writes never are. Older peers never see this variant —
+    /// only a new UI asks for an absolute path — so the wire stays additive.
+    OutsideWorkspace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1190,6 +1194,18 @@ pub struct ChatConnectivity {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn outside_workspace_reads_round_trip_without_breaking_older_reasons() {
+        let reason = WorkspaceReadOnlyReason::OutsideWorkspace;
+        assert_eq!(serde_json::to_value(reason).unwrap(), "outsideWorkspace");
+        assert_eq!(
+            serde_json::from_value::<WorkspaceReadOnlyReason>(serde_json::json!("symlink"))
+                .unwrap(),
+            WorkspaceReadOnlyReason::Symlink,
+            "older peers keep parsing every reason they knew"
+        );
+    }
 
     #[test]
     fn legacy_chat_connectivity_has_no_live_delivery_proof() {
