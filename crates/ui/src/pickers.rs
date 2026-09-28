@@ -2831,7 +2831,7 @@ impl Pickers {
             .flex_row()
             .items_center()
             .gap(px(6.0))
-            // The model trigger sits immediately beside the attachment.
+            // The model trigger sits beside the right-hand composer actions.
             // Its own padding participates in that visible gap; footer and
             // destination triggers keep their wider independent hit areas.
             .px(px(if kind == PickerKind::HarnessModel {
@@ -5690,7 +5690,7 @@ impl Render for Pickers {
             None => None,
         };
 
-        // The composer places this model chip beside the attachment button:
+        // The composer places this model chip beside Send:
         // brand icon + model name, then the effort as the chip's muted second
         // tone. No suffix when the model has no reasoning ladder, nor for the
         // title picker (titles always run at minimal reasoning).

@@ -392,7 +392,7 @@ pub const CLUSTER_Y_DELTA: f32 =
     ACTIONS_BOTTOM_PAD + 16.0 + PILL_BORDER_V / 2.0 - COMPACT_TOTAL_HEIGHT / 2.0;
 
 /// Attachment and Send share an outer inset: compact 8px, expanded 12px.
-/// Glide both edges together while the model picker changes groups.
+/// Keep both action groups aligned with the changing surface inset.
 pub const CLUSTER_X_DELTA: f32 = 4.0;
 /// Optical join between the picker group and the paperclip. This is tighter
 /// than the structural spacing ladder because the narrow paperclip glyph
@@ -400,17 +400,6 @@ pub const CLUSTER_X_DELTA: f32 = 4.0;
 pub const ACTION_UTILITY_GAP: f32 = 2.0;
 /// Structural separation between utility actions and the primary Send action.
 pub const ACTION_PRIMARY_GAP: f32 = Theme::SPACE_SM;
-
-/// Fade out at the old endpoint, relocate while invisible, then fade in at
-/// the new endpoint. Only a six-pixel nudge is visible; a long label never
-/// sweeps across the prompt. Compact amount is reversible with the shared clock.
-fn model_handoff(compact: f32) -> (f32, f32, f32) {
-    let compact = compact.clamp(0.0, 1.0);
-    let side = if compact < 0.5 { 0.0 } else { 1.0 };
-    let opacity = ((compact - 0.5).abs() - 0.06).max(0.0) / 0.44;
-    let drift = (1.0 - opacity) * if side == 0.0 { 6.0 } else { -6.0 };
-    (side, opacity, drift)
-}
 
 /// The shared outer inset for the in-flight morph: eases from the OLD mode's resting
 /// inset to the committed mode's (compact 8 ↔ expanded 12).
@@ -5368,9 +5357,7 @@ pub struct Composer {
     /// Pill height actually rendered last frame — a committed flip morphs
     /// from here, so mid-flight reversals hand off without a jump.
     last_rendered_height: f32,
-    model_handoff_position: f32,
-    model_handoff_from: f32,
-    model_handoff_morph: Option<FlipMorph>,
+    #[cfg(test)]
     model_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     dock_frame: Option<crate::composer_dock::DockFrame>,
     dock_reflow: crate::composer_dock::DockReflow,
@@ -5589,9 +5576,7 @@ impl Composer {
             settle_task: None,
             flip_morph: None,
             last_rendered_height: 0.0,
-            model_handoff_position: 1.0,
-            model_handoff_from: 1.0,
-            model_handoff_morph: None,
+            #[cfg(test)]
             model_bounds: Default::default(),
             dock_frame: None,
             dock_reflow: Default::default(),
@@ -9366,31 +9351,9 @@ impl Render for Composer {
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
-        // (round-9 follow-up: the send/attach/chips must not ride the height,
-        // while the model picker fades between its two horizontal anchors).
+        // while the model selector stays in the right action group.
         let cluster_dy = morph_cluster_dy(layout_morph_t);
         let action_inset = morph_cluster_inset(expanded, layout_morph_t);
-        // Share the height/route timeline instead of starting an independent
-        // animation. Reversals continue from the current handoff phase.
-        if self.model_handoff_morph != self.flip_morph {
-            self.model_handoff_from = self.model_handoff_position;
-            self.model_handoff_morph = self.flip_morph;
-        }
-        let compact_target = if expanded { 0.0 } else { 1.0 };
-        self.model_handoff_position = if dock_owns_layout {
-            dock_compact_amount
-        } else {
-            self.flip_morph.map_or(compact_target, |morph| {
-                motion::lerp(
-                    self.model_handoff_from,
-                    compact_target,
-                    motion::EASE_IN_OUT.eval(morph.raw(now_ms)),
-                )
-            })
-        };
-        // The shell supplies this frame's animated width before rendering us.
-        // Measured bounds still belong to the previous frame here; using them
-        // would add the per-frame width delta to the model selector's glide.
         let surface_width = self.last_available_width.map_or_else(
             || {
                 self.surface_bounds
@@ -9401,37 +9364,23 @@ impl Render for Composer {
             },
             |width| (width - 2.0 * Theme::SPACE_LG).max(0.0),
         );
-        let model_travel = (surface_width
-            - PILL_BORDER_V
-            - action_inset
-            - 28.0
-            - ACTION_UTILITY_GAP
-            - self
-                .model_bounds
-                .get()
-                .map_or(0.0, |bounds| f32::from(bounds.size.width))
-            - ACTION_PRIMARY_GAP
-            - 28.0
-            - action_inset)
-            .max(0.0);
-        let (model_side, model_opacity, model_drift) = model_handoff(self.model_handoff_position);
-        let model_offset = (model_side - compact_target) * model_travel + model_drift;
-        let measured_model_bounds = self.model_bounds.clone();
         let model_picker = div()
             .min_w_0()
             .max_w(px(surface_width * 0.45))
             .relative()
-            .left(px(model_offset))
-            .opacity(model_opacity)
-            .child(self.pickers.clone())
-            .child(
+            .child(self.pickers.clone());
+        #[cfg(test)]
+        let model_picker = {
+            let measured_model_bounds = self.model_bounds.clone();
+            model_picker.child(
                 gpui::canvas(
                     move |bounds, _, _| measured_model_bounds.set(Some(bounds)),
                     |_, _, _, _| {},
                 )
                 .absolute()
                 .inset_0(),
-            );
+            )
+        };
         let body = if expanded {
             // Expanded: textarea on top (`px-4 pb-1 pt-4`), actions row
             // (8px bottom + 2px top, 32px chips → 42px) ABSOLUTE at the pill's
@@ -9440,7 +9389,7 @@ impl Render for Composer {
             // text viewport follows the animated height so it cannot paint
             // over the controls. Its width stays fixed (no tween rewraps);
             // top padding eases 12→16. Attachment and Send stay on the bottom
-            // anchor while the model chip fades between its horizontal slots.
+            // anchor with the model selector always beside Send.
             pill.h(px(pill_height))
                 .overflow_hidden()
                 .relative()
@@ -9469,9 +9418,7 @@ impl Render for Composer {
                         .flex()
                         .flex_row()
                         .items_center()
-                        // Shared group geometry (see CLUSTER_X_DELTA): the
-                        // attachment belongs to the utility pickers, while
-                        // Send has a larger structural separation.
+                        // Attachment stays left; model and Send stay right.
                         .gap(px(ACTION_PRIMARY_GAP))
                         .px(px(action_inset))
                         .pt(px(2.0))
@@ -9484,9 +9431,9 @@ impl Render for Composer {
                                 .flex_row()
                                 .items_center()
                                 .gap(px(ACTION_UTILITY_GAP))
-                                .child(attach)
-                                .child(model_picker),
+                                .child(attach),
                         )
+                        .child(model_picker)
                         .child(send_button),
                 )
         } else {
@@ -9496,7 +9443,7 @@ impl Render for Composer {
             // top sweeps down over a stationary row, the text walks down from
             // its expanded resting place via a decaying relative offset, and
             // attachment/Send hold their spots (the centering delta gliding
-            // in), with the model handoff sharing that same timeline.
+            // in). The model selector remains beside Send.
             let text_glide = if dock_owns_layout {
                 collapse_text_glide(dock_layout.hero_height, dock_compact_amount)
             } else {
@@ -9792,80 +9739,69 @@ mod tests {
         let input = handle
             .read_with(cx, |composer, _| composer.input.clone())
             .unwrap();
-        for thread_width in [436.0, 592.0, 768.0, 1232.0] {
-            for docked in [true, false] {
-                let amounts = if docked {
-                    [0.0, 0.2, 0.6, 0.98, 1.0]
-                } else {
-                    [1.0, 0.98, 0.6, 0.2, 0.0]
-                };
-                for amount in amounts {
-                    let outer_width = motion::lerp(COMPOSER_MAX_WIDTH, thread_width, amount);
-                    cx.update(|cx| {
-                    handle
-                        .update(cx, |composer, window, cx| {
-                            window.resize(size(px(outer_width), px(800.0)));
-                            composer.set_available_width(outer_width, cx);
-                            composer.state.update(cx, |state, _| {
-                                state.selected_chat = docked.then(|| "chat".into());
-                            });
-                            composer.on_state_changed(cx);
-                            composer
-                                .input
-                                .update(cx, |input, cx| input.set_text("Hi", cx));
-                            composer.expanded_mode = false;
-                            let mut frame = crate::composer_dock::DockFrame::settled(docked);
-                            frame.amount = amount;
-                            frame.active = amount != if docked { 1.0 } else { 0.0 };
-                            composer.set_dock_frame(frame, cx);
+        // The trigger stays beside Send whichever picker the chip opens.
+        for compact_picker in [false, true] {
+            cx.update(|cx| {
+                crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
+                    settings.compact_model_picker = compact_picker;
+                });
+            });
+            for thread_width in [436.0, 592.0, 768.0, 1232.0] {
+                for docked in [true, false] {
+                    let amounts = if docked {
+                        [0.0, 0.2, 0.6, 0.98, 1.0]
+                    } else {
+                        [1.0, 0.98, 0.6, 0.2, 0.0]
+                    };
+                    for amount in amounts {
+                        let outer_width = motion::lerp(COMPOSER_MAX_WIDTH, thread_width, amount);
+                        cx.update(|cx| {
+                        handle
+                            .update(cx, |composer, window, cx| {
+                                window.resize(size(px(outer_width), px(800.0)));
+                                composer.set_available_width(outer_width, cx);
+                                composer.state.update(cx, |state, _| {
+                                    state.selected_chat = docked.then(|| "chat".into());
+                                });
+                                composer.on_state_changed(cx);
+                                composer
+                                    .input
+                                    .update(cx, |input, cx| input.set_text("Hi", cx));
+                                composer.expanded_mode = false;
+                                let mut frame = crate::composer_dock::DockFrame::settled(docked);
+                                frame.amount = amount;
+                                frame.active = amount != if docked { 1.0 } else { 0.0 };
+                                composer.set_dock_frame(frame, cx);
+                            })
+                            .unwrap();
+                        cx.update_window(handle.into(), |_, window, cx| {
+                            window.refresh();
+                            window.draw(cx).clear();
                         })
                         .unwrap();
-                    cx.update_window(handle.into(), |_, window, cx| {
-                        window.refresh();
-                        window.draw(cx).clear();
-                    })
-                    .unwrap();
-                    // Inspect the first painted frame before TestAppContext
-                    // flushes effects and automatically draws dirty views.
-                    handle.read_with(cx, |composer, cx| {
-                    assert_eq!(composer.input, input);
-                    let surface = composer.surface_bounds.get().unwrap();
-                    assert!((f32::from(surface.size.width) - (outer_width - 2.0 * Theme::SPACE_LG)).abs() <= 1.0,
-                        "surface width clipped: docked={docked}, amount={amount}, outer={outer_width}, surface={surface:?}");
-                    let origin = input.read(cx).last_bounds.unwrap().origin;
-                    assert!((f32::from(origin.y - surface.top()) - (17.0 - 4.0 * amount)).abs() <= 1.0,
-                        "editor jumped: docked={docked}, amount={amount}, origin={origin:?}, surface={surface:?}");
-                    let model = composer.model_bounds.get().unwrap();
-                    let inset = motion::lerp(12.0, 8.0, amount);
-                    let left = surface.left() + px(1.0 + inset + 28.0 + ACTION_UTILITY_GAP);
-                    let travel = surface.size.width - px(2.0 + inset + 28.0 + ACTION_UTILITY_GAP
-                        + ACTION_PRIMARY_GAP + 28.0 + inset) - model.size.width;
-                    let (side, _, drift) = model_handoff(amount);
-                    let expected_x = left + travel * side + px(drift);
-                    assert!((f32::from(model.left() - expected_x)).abs() <= 1.0,
-                        "model jumped: docked={docked}, amount={amount}, actual={model:?}, expected={expected_x:?}");
-                    let expected = if docked { COMPACT_TOTAL_HEIGHT } else { COMPOSER_MIN_HEIGHT };
-                    assert!((composer.last_rendered_height + composer.dock_clearance_correction - expected).abs() < 0.1);
-                    assert!((composer.last_rendered_height - motion::lerp(COMPOSER_MIN_HEIGHT, COMPACT_TOTAL_HEIGHT, amount)).abs() < 0.1);
-                        }).unwrap();
-                    });
+                        // Inspect the first painted frame before TestAppContext
+                        // flushes effects and automatically draws dirty views.
+                        handle.read_with(cx, |composer, cx| {
+                        assert_eq!(composer.input, input);
+                        let surface = composer.surface_bounds.get().unwrap();
+                        assert!((f32::from(surface.size.width) - (outer_width - 2.0 * Theme::SPACE_LG)).abs() <= 1.0,
+                            "surface width clipped: docked={docked}, amount={amount}, outer={outer_width}, surface={surface:?}");
+                        let origin = input.read(cx).last_bounds.unwrap().origin;
+                        assert!((f32::from(origin.y - surface.top()) - (17.0 - 4.0 * amount)).abs() <= 1.0,
+                            "editor jumped: docked={docked}, amount={amount}, origin={origin:?}, surface={surface:?}");
+                        let model = composer.model_bounds.get().unwrap();
+                        let inset = motion::lerp(12.0, 8.0, amount);
+                        let expected_right = surface.right() - px(1.0 + inset + 28.0 + ACTION_PRIMARY_GAP);
+                        assert!((f32::from(model.right() - expected_right)).abs() <= 1.0,
+                            "model must stay right aligned: compact_picker={compact_picker}, docked={docked}, amount={amount}, actual={model:?}, expected={expected_right:?}");
+                        let expected = if docked { COMPACT_TOTAL_HEIGHT } else { COMPOSER_MIN_HEIGHT };
+                        assert!((composer.last_rendered_height + composer.dock_clearance_correction - expected).abs() < 0.1);
+                        assert!((composer.last_rendered_height - motion::lerp(COMPOSER_MIN_HEIGHT, COMPACT_TOTAL_HEIGHT, amount)).abs() < 0.1);
+                            }).unwrap();
+                        });
+                    }
                 }
             }
-        }
-    }
-
-    #[test]
-    fn model_handoff_hides_relocation_and_keeps_visible_motion_local() {
-        assert_eq!(model_handoff(0.0), (0.0, 1.0, 0.0));
-        assert_eq!(model_handoff(1.0), (1.0, 1.0, -0.0));
-        for amount in [0.44, 0.49, 0.50, 0.51, 0.56] {
-            assert!(model_handoff(amount).1 < 0.0001);
-        }
-        for step in 0..=100 {
-            let (side, opacity, drift) = model_handoff(step as f32 / 100.0);
-            assert!((0.0..=1.0).contains(&opacity));
-            assert!(drift.abs() <= 6.0);
-            assert!(side == 0.0 || side == 1.0);
         }
     }
 
@@ -9996,7 +9932,6 @@ mod tests {
                         "text growth jumped from {before} to {}",
                         composer.last_rendered_height
                     );
-                    assert!((composer.model_handoff_position - 0.7).abs() < 0.001);
                     assert!(
                         (f32::from(composer.model_bounds.get().unwrap().left() - model_before))
                             .abs()
@@ -10090,10 +10025,10 @@ mod tests {
             .read_with(cx, |composer, _| {
                 let surface = composer.surface_bounds.get().unwrap();
                 let model = composer.model_bounds.get().unwrap();
-                let left = surface.left() + px(1.0 + 12.0 + 28.0 + ACTION_UTILITY_GAP);
+                let right = surface.right() - px(1.0 + 12.0 + 28.0 + ACTION_PRIMARY_GAP);
                 assert!(
-                    (f32::from(model.left() - left)).abs() <= 1.0,
-                    "expanded controls must finish on the left"
+                    (f32::from(model.right() - right)).abs() <= 1.0,
+                    "expanded controls must remain on the right"
                 );
             })
             .unwrap();
