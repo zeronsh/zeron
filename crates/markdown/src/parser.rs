@@ -31,6 +31,9 @@ pub struct InlineStyle {
     pub link: Option<String>,
     pub image: Option<InlineImage>,
     pub task: Option<TaskMarker>,
+    /// `@chat:<uuid>` orchestration mention — the run covers the raw token;
+    /// the renderer substitutes a pill only when a resolver is wired.
+    pub chat: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,7 +347,9 @@ fn parse_block_sequence(cur: &mut Cursor) -> Vec<Block> {
 fn flush_paragraph(out: &mut Vec<Block>, acc: &mut Vec<InlineRun>) {
     if !acc.is_empty() {
         out.push(Block::Paragraph {
-            runs: merge_runs(std::mem::take(acc)),
+            // Tight list items accumulate bare inline events here — they get
+            // the same autolink/mention pass as a real paragraph.
+            runs: mention_runs(autolink_runs(merge_runs(std::mem::take(acc)))),
         });
     }
 }
@@ -406,8 +411,9 @@ fn parse_inline_container(cur: &mut Cursor, style: &InlineStyle) -> Vec<InlineRu
     }
     // Autolink AFTER merging: pulldown splits Text events at would-be
     // emphasis chars ("…/Foo_(bar)" arrives as three events), so scanning
-    // per-event would truncate URLs at every underscore.
-    autolink_runs(merge_runs(runs))
+    // per-event would truncate URLs at every underscore. Mentions ride the
+    // same stage — `@chat:` ids split mid-event the same way.
+    mention_runs(autolink_runs(merge_runs(runs)))
 }
 
 fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &InlineStyle) {
@@ -573,6 +579,61 @@ fn bare_url_len(text: &str) -> usize {
         url = &url[..url.len() - last.len_utf8()];
     }
     url.len()
+}
+
+/// Mark `@chat:` mentions for pill display (zeron_proto::orchestration's
+/// display scanner: strict full uuids plus the short `<prefix>…` form agents
+/// type). Plain runs split around each mention; a code span upgrades only
+/// when its whole text is one mention; link text never matches. Fenced code
+/// never reaches here — blocks, not inline runs. Idempotent like
+/// [`autolink_runs`].
+fn mention_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
+    let mut out = Vec::with_capacity(runs.len());
+    for run in runs {
+        if run.style.link.is_some() {
+            out.push(run);
+            continue;
+        }
+        if run.style.code {
+            let mentions = zeron_proto::orchestration::chat_display_mentions(&run.text);
+            let exact = mentions
+                .first()
+                .filter(|m| mentions.len() == 1 && m.range == (0..run.text.len()))
+                .map(|m| m.chat_id.to_string());
+            let mut run = run;
+            run.style.chat = exact;
+            out.push(run);
+            continue;
+        }
+        let mentions = zeron_proto::orchestration::chat_display_mentions(&run.text);
+        if mentions.is_empty() {
+            out.push(run);
+            continue;
+        }
+        let mut at = 0;
+        for mention in &mentions {
+            if mention.range.start > at {
+                out.push(InlineRun {
+                    text: run.text[at..mention.range.start].to_string(),
+                    style: run.style.clone(),
+                });
+            }
+            let mut style = run.style.clone();
+            style.chat = Some(mention.chat_id.to_string());
+            out.push(InlineRun {
+                text: run.text[mention.range.clone()].to_string(),
+                style,
+            });
+            at = mention.range.end;
+        }
+        if at < run.text.len() {
+            out.push(InlineRun {
+                text: run.text[at..].to_string(),
+                style: run.style.clone(),
+            });
+        }
+    }
+    out
 }
 
 /// Merge adjacent identically-styled runs (keeps run counts small and makes the
@@ -1108,6 +1169,133 @@ mod tests {
             only_link("[https://shown.dev](https://real.dev)\n"),
             Some(("https://shown.dev".into(), "https://real.dev".into()))
         );
+    }
+
+    const CHAT_ID: &str = "3f6b2a18-9c4d-4e5f-8a7b-1c2d3e4f5a6b";
+    const CHAT_ID2: &str = "3F6B2A18-9C4D-4E5F-8A7B-1C2D3E4F5A6B";
+
+    /// Chat mention runs in the first paragraph: (run text, chat id).
+    fn chat_runs(source: &str) -> Vec<(String, String)> {
+        let tree = parse_full(source);
+        let mut out = Vec::new();
+        fn walk(block: &Block, out: &mut Vec<(String, String)>) {
+            match block {
+                Block::Paragraph { runs } | Block::Heading { runs, .. } => {
+                    out.extend(
+                        runs.iter()
+                            .filter_map(|r| Some((r.text.clone(), r.style.chat.clone()?))),
+                    );
+                }
+                Block::BlockQuote { children } => children.iter().for_each(|b| walk(b, out)),
+                Block::List { items, .. } => items.iter().flatten().for_each(|b| walk(b, out)),
+                Block::Table { header, rows, .. } => {
+                    header.iter().chain(rows.iter().flatten()).for_each(|cell| {
+                        out.extend(
+                            cell.iter()
+                                .filter_map(|r| Some((r.text.clone(), r.style.chat.clone()?))),
+                        )
+                    });
+                }
+                _ => {}
+            }
+        }
+        for top in &tree.blocks {
+            walk(&top.block, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn chat_mentions_parse_in_text() {
+        let src = format!("spawned @chat:{CHAT_ID} to review");
+        let mentions = chat_runs(&src);
+        assert_eq!(
+            mentions,
+            [(format!("@chat:{CHAT_ID}"), CHAT_ID.to_string())]
+        );
+        // Two mentions in one line.
+        let src = format!("@chat:{CHAT_ID} vs @chat:{CHAT_ID2}");
+        let mentions = chat_runs(&src);
+        assert_eq!(mentions.len(), 2);
+        assert_eq!(mentions[1].1, CHAT_ID2);
+        // Adjacent punctuation stays outside the run.
+        let tree = parse_full(&format!("see (@chat:{CHAT_ID})."));
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!()
+        };
+        assert_eq!(runs[0].text, "see (");
+        assert_eq!(runs[1].style.chat.as_deref(), Some(CHAT_ID));
+        assert_eq!(runs[2].text, ").");
+    }
+
+    #[test]
+    fn chat_mentions_upgrade_only_whole_code_spans() {
+        let src = format!("`@chat:{CHAT_ID}`");
+        let tree = parse_full(&src);
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!()
+        };
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].style.code);
+        assert_eq!(runs[0].style.chat.as_deref(), Some(CHAT_ID));
+        // Code around a mention stays plain code.
+        let src = format!("`see @chat:{CHAT_ID}`");
+        assert!(chat_runs(&src).is_empty());
+        // A partial (still-streaming) id never matches, in or out of code.
+        let src = "`@chat:3f6b2a18-9c4d-4e5f` and @chat:3f6b2a18";
+        assert!(chat_runs(src).is_empty());
+    }
+
+    #[test]
+    fn chat_mentions_skip_fences_and_link_text() {
+        // Fenced code is a block, not inline runs.
+        let src = format!("```\n@chat:{CHAT_ID}\n```");
+        assert!(chat_runs(&src).is_empty());
+        // Link text never becomes a pill.
+        let src = format!("[@chat:{CHAT_ID}](https://x.dev)");
+        assert!(chat_runs(&src).is_empty());
+        let tree = parse_full(&src);
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!()
+        };
+        assert_eq!(runs[0].style.link.as_deref(), Some("https://x.dev"));
+        assert!(runs[0].style.chat.is_none());
+    }
+
+    #[test]
+    fn chat_mentions_boundaries_match_proto() {
+        // Glued to a preceding alphanumeric / extended by -, _, alnum: no.
+        for bad in [
+            format!("foo@chat:{CHAT_ID}"),
+            format!("@chat:{CHAT_ID}-x"),
+            format!("@chat:{CHAT_ID}_x"),
+            format!("@chat:{CHAT_ID}z"),
+        ] {
+            assert!(chat_runs(&bad).is_empty(), "{bad}");
+        }
+        // Tight list items and block quotes mark mentions too.
+        assert_eq!(chat_runs(&format!("- @chat:{CHAT_ID}")).len(), 1);
+        assert_eq!(chat_runs(&format!("> @chat:{CHAT_ID}")).len(), 1);
+    }
+
+    #[test]
+    fn chat_mentions_upgrade_short_prefix_tokens_glued_to_an_ellipsis() {
+        // The abbreviated form agents type upgrades too; the run keeps the
+        // ellipsis so selection and copy still yield the written token.
+        assert_eq!(
+            chat_runs("Launched @chat:ba6888c8... to review"),
+            [("@chat:ba6888c8...".to_string(), "ba6888c8".to_string())]
+        );
+        // The one-char ellipsis, and a code span that IS one short mention.
+        assert_eq!(
+            chat_runs("`@chat:ba6888c8…`"),
+            [("@chat:ba6888c8…".to_string(), "ba6888c8".to_string())]
+        );
+        // A bare prefix, or an ellipsis glued to more text, stays plain —
+        // a still-streaming id can't become a pill mid-write.
+        assert!(chat_runs("see @chat:ba6888c8").is_empty());
+        assert!(chat_runs("see @chat:ba6888c8...x").is_empty());
+        assert!(chat_runs("`see @chat:ba6888c8...`").is_empty());
     }
 
     #[test]

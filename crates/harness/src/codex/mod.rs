@@ -97,6 +97,29 @@ fn codex_mcp_overrides(mcp: &zeron_proto::McpServer) -> Vec<(String, Value)> {
     ]
 }
 
+/// `shell_environment_policy.set.*` config overrides for an injected agent
+/// context: the sandboxed shell never inherits the app-server process env,
+/// so the ZERON_* vars and the cli_dir-first PATH ride the thread params.
+fn agent_shell_overrides(
+    agent: &zeron_proto::AgentContext,
+    path: Option<&str>,
+) -> Vec<(String, Value)> {
+    let mut overrides: Vec<(String, Value)> = agent
+        .env
+        .iter()
+        .map(|(key, value)| {
+            (
+                format!("shell_environment_policy.set.{key}"),
+                value.clone().into(),
+            )
+        })
+        .collect();
+    if let Some(path) = path {
+        overrides.push(("shell_environment_policy.set.PATH".into(), path.into()));
+    }
+    overrides
+}
+
 /// A ready-to-spawn `codex login` command for the engine's account flow.
 ///
 /// Shares the harness's full resolution (`CODEX_EXECUTABLE`, PATH, login-shell
@@ -664,6 +687,7 @@ impl Harness for CodexHarness {
         request.worktree = None;
         request.attachments.clear();
         request.mcp = None;
+        request.agent = None;
         request.model_options.clear();
         request.auto_approve = false;
         self.run_with_mode(request, controls, true).await
@@ -708,6 +732,10 @@ impl CodexHarness {
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
         crate::compose_child_path(&mut cmd, &exe);
+        // The app-server process itself sees the ZERON_* env; the sandboxed
+        // shell gets it through `shell_environment_policy.set.*` overrides on
+        // the thread params (see run_session), which need this PATH value.
+        let agent_path = crate::apply_agent_env(&mut cmd, request.agent.as_ref());
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }
@@ -752,6 +780,7 @@ impl CodexHarness {
             incoming,
             event_tx,
             controls,
+            agent_path: agent_path.map(|p| p.to_string_lossy().into_owned()),
             request,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
@@ -776,6 +805,9 @@ struct Session {
     incoming: mpsc::Receiver<Incoming>,
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
+    /// PATH composed for the child (cli_dir first) — repeated to the
+    /// sandboxed shell via `shell_environment_policy.set.PATH`.
+    agent_path: Option<String>,
     request: RunRequest,
     interrupt_grace: Duration,
     kill_grace: Duration,
@@ -952,6 +984,7 @@ async fn run_session(session: Session) {
         mut incoming,
         event_tx,
         controls,
+        agent_path,
         request,
         interrupt_grace,
         kill_grace,
@@ -1024,6 +1057,14 @@ async fn run_session(session: Session) {
                 .expect("thread/start config overrides are an object");
             overrides.extend(codex_mcp_overrides(mcp));
         }
+        if let Some(agent) = request.agent.as_ref().filter(|_| !title_only) {
+            let overrides = p
+                .entry("config")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .expect("thread/start config overrides are an object");
+            overrides.extend(agent_shell_overrides(agent, agent_path.as_deref()));
+        }
         p.insert("approvalPolicy".into(), approval_policy.into());
         p.insert("sandbox".into(), sandbox_mode(request.sandbox).into());
         if let Some(model) = &request.model {
@@ -1053,6 +1094,30 @@ async fn run_session(session: Session) {
         client.notify("initialized", None);
 
         let mut start_params = start_params.clone();
+        if let Some(agent) = request.agent.as_ref().filter(|_| !title_only) {
+            // The staged bundle becomes a Codex skills root when the
+            // app-server knows `skills/extraRoots/set`; older builds get the
+            // skills listed inside the developer instructions instead.
+            // Either way `developerInstructions` covers thread/start AND
+            // thread/resume from the same params.
+            let instructions = match agent.skills_root() {
+                Some(root) => match client
+                    .request("skills/extraRoots/set", json!({ "extraRoots": [root] }))
+                    .await
+                {
+                    Ok(_) => agent.instructions.clone(),
+                    Err(error) => {
+                        tracing::debug!(
+                            target: "zeron_harness::codex",
+                            "skills/extraRoots/set unavailable ({error}); skills ride the instructions"
+                        );
+                        agent.instructions_with_skills()
+                    }
+                },
+                None => agent.instructions_with_skills(),
+            };
+            start_params.insert("developerInstructions".into(), instructions.into());
+        }
         if title_only {
             // Disable each configured MCP server explicitly: an empty table
             // would merge with user configuration and leave servers enabled.
@@ -2010,6 +2075,42 @@ mod mcp_injection_tests {
             overrides["mcp_servers.zeron.env"],
             json!({ "ZERON_CHAT_ID": "chat-1" })
         );
+    }
+
+    #[test]
+    fn agent_shell_overrides_carry_env_and_path_to_the_sandboxed_shell() {
+        let agent = zeron_proto::AgentContext {
+            env: [
+                ("ZERON_CHAT_ID".to_owned(), "chat-1".to_owned()),
+                ("ZERON_CLI".to_owned(), "/data/bin/zeron".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            cli_dir: "/data/bin".into(),
+            instructions: "guide".into(),
+            skill_bundle: None,
+            skills: vec![],
+        };
+        let overrides: serde_json::Map<String, Value> =
+            agent_shell_overrides(&agent, Some("/data/bin:/usr/bin"))
+                .into_iter()
+                .collect();
+        assert_eq!(
+            overrides["shell_environment_policy.set.ZERON_CHAT_ID"],
+            "chat-1"
+        );
+        assert_eq!(
+            overrides["shell_environment_policy.set.ZERON_CLI"],
+            "/data/bin/zeron"
+        );
+        assert_eq!(
+            overrides["shell_environment_policy.set.PATH"],
+            "/data/bin:/usr/bin"
+        );
+        // Without a composed PATH there is no PATH override.
+        let bare: serde_json::Map<String, Value> =
+            agent_shell_overrides(&agent, None).into_iter().collect();
+        assert!(!bare.contains_key("shell_environment_policy.set.PATH"));
     }
 }
 

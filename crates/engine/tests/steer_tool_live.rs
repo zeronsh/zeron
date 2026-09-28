@@ -143,6 +143,7 @@ async fn steering_never_aborts_a_running_tool() {
                             .into_iter()
                             .collect(),
                     }),
+                    agent: None,
                     prompt: "Call the slow_wait tool from the `slow` MCP server exactly once and \
                              wait for it, then tell me the secret word it returned."
                         .into(),

@@ -57,7 +57,10 @@ use crate::state::{
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
 use crate::theme::Theme;
 use crate::transcript::{self, Transcript, TranscriptEvent};
-use crate::workspace_links::resolve_workspace_file_link;
+
+/// How deep agent-spawned chats may nest. File-link resolution and the
+/// report-link guard never walk further than a spawn could ever reach.
+const MAX_SPAWN_DEPTH: usize = 4;
 
 mod actions_ui;
 mod command_palette;
@@ -1759,6 +1762,10 @@ pub struct Shell {
     pub(super) archived_shown: usize,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
+    /// Per-parent collapse choice for the orchestration tree (`None` = the
+    /// default: open while any descendant is running). Session-transient,
+    /// like the group disclosures.
+    pub(super) sidebar_collapsed_trees: std::collections::HashMap<String, bool>,
     /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
     pub(super) sidebar_disclosure_motion:
         std::collections::HashMap<String, SidebarDisclosureMotion>,
@@ -1887,6 +1894,11 @@ pub struct Shell {
     /// under a still pointer would otherwise never show its archive pill;
     /// while set, rows adopt the hover from a paint-time hit test instead.
     chat_hover_resync: bool,
+    /// Parent row whose CORNER is hovered — only on the corner itself does
+    /// the Archive control appear (the disclosure chevron took the leading
+    /// status slot; a corner that flips under the pointer archived whole
+    /// subtrees).
+    chat_corner_hover: Option<String>,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
     /// In-flight reorder for the pinned section only.
@@ -2233,6 +2245,7 @@ impl Shell {
             sessions_open: true,
             archived_shown: 0,
             sidebar_collapsed_groups: std::collections::HashSet::new(),
+            sidebar_collapsed_trees: std::collections::HashMap::new(),
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
             terminal: None,
@@ -2313,6 +2326,7 @@ impl Shell {
             project_icons: Default::default(),
             chat_status_hover: None,
             chat_hover_resync: false,
+            chat_corner_hover: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
             pinned_session_drag: None,
             pinned_session_drag_generation: 0,
@@ -3342,7 +3356,13 @@ impl Shell {
         let from_main = !self.active_chat.is_empty()
             && source == self.active_chat
             && self.state.read(cx).selected_chat.as_deref() == Some(self.active_chat.as_str());
-        if !from_main && !self.side_chat_open_here(&source, cx) {
+        // A report card or an attributed message names the child chat whose
+        // work produced it; that chat is on screen inside this transcript
+        // even when it has no right-pane tab of its own.
+        if !from_main
+            && !self.side_chat_open_here(&source, cx)
+            && !self.agent_descendant_on_screen(&source, cx)
+        {
             return LinkOutcome::Rejected;
         }
         if activation.target.navigation.is_err() {
@@ -3457,10 +3477,23 @@ impl Shell {
         if chat_id == self.active_chat {
             return Some((chat_id.to_owned(), self.state.clone()));
         }
-        self.side_chats
+        if let Some(side) = self
+            .side_chats
             .values()
             .find(|side| side.state.read(cx).selected_chat.as_deref() == Some(chat_id))
-            .map(|side| (chat_id.to_owned(), side.state.clone()))
+        {
+            return Some((chat_id.to_owned(), side.state.clone()));
+        }
+        // Agent-spawned children are not right-pane side chats, but they are
+        // registry rows in this state — a report's file links open in the
+        // child's own checkout, resolved by chat id exactly like a side
+        // chat's would be.
+        self.state
+            .read(cx)
+            .chats
+            .iter()
+            .any(|chat| chat.id == chat_id)
+            .then(|| (chat_id.to_owned(), self.state.clone()))
     }
 
     /// Open or focus the editor for `path` owned by `owner` (chat id + the
@@ -3582,6 +3615,10 @@ impl Shell {
 
     /// Open a transcript's file link in the linking chat's own checkout: a
     /// side chat's link resolves against, and edits, the side chat's files.
+    /// When that checkout cannot own the target, agent-spawned descendants
+    /// get the next word (each child works in its own worktree), then the
+    /// parent chat — the first known root that owns the path wins, and the
+    /// file opens in that chat's context.
     fn open_workspace_file_link(
         &mut self,
         chat_id: &str,
@@ -3589,20 +3626,16 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(owner) = self.link_owner(chat_id, cx) else {
+        let roots: Vec<(String, String)> = self
+            .file_link_candidates(chat_id, cx)
+            .into_iter()
+            .filter_map(|candidate| self.chat_cwd(&candidate, cx).map(|root| (candidate, root)))
+            .collect();
+        let root_refs: Vec<&str> = roots.iter().map(|(_, root)| root.as_str()).collect();
+        let Some((ix, link)) = crate::workspace_links::first_root_owning(target, root_refs) else {
             return false;
         };
-        let Some(root) = owner
-            .1
-            .read(cx)
-            .chats
-            .iter()
-            .find(|chat| chat.id == chat_id)
-            .and_then(|chat| chat.cwd.clone())
-        else {
-            return false;
-        };
-        let Some(link) = resolve_workspace_file_link(target, &root) else {
+        let Some(owner) = self.link_owner(&roots[ix].0, cx) else {
             return false;
         };
 
@@ -3621,6 +3654,98 @@ impl Shell {
             cx,
         );
         true
+    }
+
+    /// The checkout a link may resolve against, in order: the linking chat,
+    /// its agent-spawned descendants (the spawn nesting limit bounds the
+    /// walk), then the parent chat.
+    fn file_link_candidates(&self, chat_id: &str, cx: &App) -> Vec<String> {
+        let state = self.state.read(cx);
+        let mut candidates = vec![chat_id.to_owned()];
+        let mut frontier = vec![chat_id.to_owned()];
+        for _ in 0..MAX_SPAWN_DEPTH {
+            let mut next = Vec::new();
+            for parent in frontier {
+                let Some(children) = state.children_by_parent.agents.get(&parent) else {
+                    continue;
+                };
+                for &ix in children {
+                    let Some(child) = state.chats.get(ix) else {
+                        continue;
+                    };
+                    if !candidates.contains(&child.id) {
+                        candidates.push(child.id.clone());
+                    }
+                    next.push(child.id.clone());
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+        if let Some(parent) = state
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.parent_chat_id.clone())
+            && !candidates.contains(&parent)
+        {
+            candidates.push(parent);
+        }
+        candidates
+    }
+
+    /// The checkout a chat's files live in, from the state that owns it: a
+    /// side chat resolves through its own state, everyone else through the
+    /// main one.
+    fn chat_cwd(&self, chat_id: &str, cx: &App) -> Option<String> {
+        let owner = self
+            .link_owner(chat_id, cx)
+            .map(|(_, state)| state)
+            .unwrap_or_else(|| self.state.clone());
+        owner
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.cwd.clone())
+    }
+
+    /// Whether `chat_id` is an agent-spawned descendant of a chat this panel
+    /// shows: a report card's or attributed message's child belongs to the
+    /// transcript even though it is not a side-chat tab itself. The main
+    /// chat and every open side chat root the walk.
+    fn agent_descendant_on_screen(&self, chat_id: &str, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        let mut frontier: Vec<String> = state.selected_chat.iter().cloned().collect();
+        frontier.extend(
+            self.side_chats
+                .values()
+                .filter_map(|side| side.state.read(cx).selected_chat.clone()),
+        );
+        for _ in 0..MAX_SPAWN_DEPTH {
+            let mut next = Vec::new();
+            for parent in frontier {
+                let Some(children) = state.children_by_parent.agents.get(&parent) else {
+                    continue;
+                };
+                for &ix in children {
+                    let Some(child) = state.chats.get(ix) else {
+                        continue;
+                    };
+                    if child.id == chat_id {
+                        return true;
+                    }
+                    next.push(child.id.clone());
+                }
+            }
+            if next.is_empty() {
+                return false;
+            }
+            frontier = next;
+        }
+        false
     }
 
     fn rename_file_surface(
@@ -3750,6 +3875,9 @@ impl Shell {
                     *frozen,
                     cx,
                 );
+            }
+            TranscriptEvent::OpenChildChat { chat_id } => {
+                self.open_child_chat_tab(chat_id, cx);
             }
         }
     }
@@ -4740,9 +4868,7 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
-            SettingsSection::Shortcuts
-            | SettingsSection::General
-            | SettingsSection::Appshots => {
+            SettingsSection::Shortcuts | SettingsSection::General | SettingsSection::Appshots => {
                 if self.shortcuts_page.is_none() {
                     let state = self.state.clone();
                     let keymap = self.settings.keymap.clone();
@@ -6816,6 +6942,10 @@ impl Shell {
         // nine chips appear together instead of leaving a hole on whichever
         // row is busy or under the pointer.
         jump_label: Option<SharedString>,
+        // Orchestration-tree affordance for a row that has
+        // `spawned_by_agent` children — the disclosure chevron in the
+        // leading status slot plus the collapsed running count in the corner.
+        tree: Option<spaces::SidebarTreeRow>,
         search_query: Option<&str>,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -6846,8 +6976,23 @@ impl Shell {
             });
         let project_icon = (search_query.is_none() && self.settings.sidebar_show_project_icon)
             .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
-        let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
-        let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
+        let row_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
+        // A parent with agent children keeps its disclosure in the LEADING
+        // status slot; the corner's Archive swap is then gated on the
+        // corner's OWN hover so aiming at the chevron can never meet a
+        // control that archives the whole subtree. Rows without children
+        // keep the row-hover swap exactly as it ships today.
+        let tree_children = tree
+            .as_ref()
+            .and_then(|tree| tree.children.as_ref())
+            .copied();
+        let archive_hovered = !preview
+            && if tree_children.is_some() {
+                self.chat_corner_hover.as_deref() == Some(row_id.as_str())
+            } else {
+                row_hovered
+            };
+        let archived_muted = archived && search_query.is_none() && !selected && !row_hovered;
         let project_icon = project_icon.map(|icon| {
             div()
                 .flex_none()
@@ -6891,44 +7036,110 @@ impl Shell {
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
         let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
-        let compact_status = compact.then(|| {
-            let glyph = if working {
-                loaders::mini_glyph_spinner(
-                    format!("{row_id}-working"),
-                    2.0,
-                    theme.glyph,
-                    self.sidebar_pane.entity_id(),
-                    cx,
-                )
-                .into_any_element()
-            } else if status == zeron_proto::ChatIndicator::Completed && !queued && !undelivered {
-                icon(icons::CHECK)
-                    .size(px(11.0))
-                    .text_color(status_color)
-                    .into_any_element()
-            } else {
-                div()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(status_color)
-                    .into_any_element()
-            };
-            div()
-                .id(SharedString::from(format!("{row_id}-status")))
-                .debug_selector({
-                    let id = id.clone();
-                    move || format!("chat-status-{id}")
-                })
-                .size(px(13.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .aria_label(status_label.unwrap_or("Idle"))
-                .child(glyph)
-                .into_any_element()
+        // The leading status slot: every compact row carries one, and a
+        // parent row carries it in every density so the disclosure chevron
+        // always has "the status slot" to swap into while the row is
+        // hovered. The chevron is the sidebar's own element and rotation
+        // motion; its footprint never changes, so the swap can't move the
+        // title, and stop_propagation keeps the click from selecting the
+        // chat or reaching the corner's Archive.
+        let leading_status = (compact || tree_children.is_some()).then(|| {
+            let slot = div().flex_none().flex().items_center().justify_center();
+            match tree_children.filter(|_| row_hovered) {
+                Some(children) => {
+                    let motion_key = format!("chat-tree:{id}");
+                    let open = children.open;
+                    let body_height = children.body_height;
+                    let toggle_id = id.clone();
+                    let chev_hover = format!("{row_id}-tree-chev");
+                    let chevron = self.sidebar_disclosure_chevron_colored(
+                        &motion_key,
+                        open,
+                        motion::hover_blend(&chev_hover, theme.text_muted, theme.text),
+                    );
+                    slot.id(SharedString::from(format!("{row_id}-tree-toggle")))
+                        .debug_selector({
+                            let id = id.clone();
+                            move || format!("chat-tree-toggle-{id}")
+                        })
+                        // Painted slot stays 13px; negative side margins
+                        // stretch the hit target to 20px without touching
+                        // the title's position.
+                        .w(px(20.0))
+                        .ml(px(-3.5))
+                        .mr(px(-3.5))
+                        .h(px(17.0))
+                        .cursor_pointer()
+                        .aria_label(if open {
+                            "Collapse subagents"
+                        } else {
+                            "Expand subagents"
+                        })
+                        .tooltip(crate::settings::widgets::text_tooltip(if open {
+                            "Collapse subagents"
+                        } else {
+                            "Expand subagents"
+                        }))
+                        .on_hover(motion::hover_listener(chev_hover))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.begin_sidebar_disclosure_motion(
+                                &motion_key,
+                                if open { body_height } else { 0.0 },
+                                if open { 0.0 } else { body_height },
+                            );
+                            this.sidebar_collapsed_trees.insert(toggle_id.clone(), open);
+                            cx.notify();
+                        }))
+                        .child(chevron)
+                        .into_any_element()
+                }
+                None => {
+                    let glyph = if working {
+                        loaders::mini_glyph_spinner(
+                            format!("{row_id}-working"),
+                            2.0,
+                            theme.glyph,
+                            self.sidebar_pane.entity_id(),
+                            cx,
+                        )
+                        .into_any_element()
+                    } else if status == zeron_proto::ChatIndicator::Completed
+                        && !queued
+                        && !undelivered
+                    {
+                        icon(icons::CHECK)
+                            .size(px(11.0))
+                            .text_color(status_color)
+                            .into_any_element()
+                    } else {
+                        div()
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(status_color)
+                            .into_any_element()
+                    };
+                    slot.id(SharedString::from(format!("{row_id}-status")))
+                        .debug_selector({
+                            let id = id.clone();
+                            move || format!("chat-status-{id}")
+                        })
+                        .size(px(13.0))
+                        .aria_label(status_label.unwrap_or("Idle"))
+                        .child(glyph)
+                        .into_any_element()
+                }
+            }
         });
         let compact_jump_label = compact.then(|| jump_label.clone()).flatten();
+        // The hint owns its corner outright while it is up: the non-compact
+        // chip replaces the status/time (and a collapsed parent's subagent
+        // count), the compact hint replaces the trailing time column. A row
+        // wearing a shortcut advertises one thing; another control beside it
+        // is a misclick waiting to happen.
+        let jump_shown = jump_label.is_some();
+        let jump_chip_shown = jump_shown && !compact;
         let corner_body: AnyElement = if let Some(label) = jump_label.filter(|_| !compact) {
             // The jump hint replaces the status/time corner while the modifier
             // is held, cut to the sidebar PR badge's exact cloth
@@ -6939,6 +7150,10 @@ impl Shell {
             {
                 let tone = theme.text_muted;
                 div()
+                    .debug_selector({
+                        let id = id.clone();
+                        move || format!("chat-jump-{id}")
+                    })
                     .h(px(16.0))
                     .flex_none()
                     .flex()
@@ -6951,11 +7166,16 @@ impl Shell {
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(tone.opacity(0.85))
                     .font_family(theme.font_mono.clone())
+                    .whitespace_nowrap()
                     .child(label)
                     .into_any_element()
             }
-        } else if corner_hovered {
+        } else if archive_hovered {
             div()
+                .debug_selector({
+                    let id = id.clone();
+                    move || format!("chat-archive-{id}")
+                })
                 .flex()
                 .flex_row()
                 .items_center()
@@ -7055,6 +7275,49 @@ impl Shell {
                     .into_any_element(),
             }
         };
+        // A COLLAPSED parent carries the BOT glyph and running-child count
+        // in its corner, ahead of the status/time — the disclosure chevron
+        // itself lives in the leading status slot. The count steps aside
+        // only while the corner itself offers Archive or the jump hint
+        // takes the corner outright.
+        // Compact rows mount their corner only for remote/hover — a parent
+        // must keep the affordance on the same terms.
+        let tree_affordance = tree_children.is_some();
+        let corner_body = match tree_children
+            .filter(|children| !children.open && !archive_hovered && !jump_chip_shown)
+        {
+            Some(children) => {
+                let mut affordance = div()
+                    .debug_selector({
+                        let id = id.clone();
+                        move || format!("chat-tree-count-{id}")
+                    })
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(
+                        icon(icons::BOT)
+                            .size(px(11.0))
+                            .flex_none()
+                            .text_color(theme.text_muted.opacity(0.8)),
+                    );
+                affordance = affordance.when(children.running > 0, |el| {
+                    el.child(
+                        div()
+                            .text_size(crate::typography::ui_rems(10.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(spaces::status_dot_color(
+                                zeron_proto::ChatIndicator::Working,
+                                theme,
+                            ))
+                            .child(SharedString::from(format!("{}", children.running))),
+                    )
+                });
+                affordance.child(corner_body).into_any_element()
+            }
+            None => corner_body,
+        };
         // One stable wrapper across both states (identity keeps the hover
         // from flickering as the content swaps); the swap is driven by the
         // ROW's hover (user request — corner-only felt undiscoverable), but
@@ -7062,13 +7325,14 @@ impl Shell {
         // stays the selector.
         let corner: AnyElement = {
             let archive_id = id.clone();
+            let corner_id = row_id.clone();
             div()
                 .id(SharedString::from(format!("{row_id}-corner")))
                 .debug_selector({
                     let row_id = row_id.clone();
                     move || format!("{row_id}-corner")
                 })
-                .aria_label(if corner_hovered {
+                .aria_label(if archive_hovered {
                     if archived { "Unarchive" } else { "Archive" }
                 } else {
                     if compact {
@@ -7081,7 +7345,10 @@ impl Shell {
                         status_label.unwrap_or("Idle")
                     }
                 })
-                .when(compact, |el| el.w(px(18.0)).justify_center())
+                // `min_w` so the collapsed parent's running count can widen
+                // the corner — for ordinary rows the content is ≤18px either
+                // way.
+                .when(compact, |el| el.min_w(px(18.0)).justify_center())
                 .flex_none()
                 // Pin the corner to line 1's text height so the archive pill
                 // (taller, padded) overflows vertically instead of growing the
@@ -7095,7 +7362,23 @@ impl Shell {
                 .flex()
                 .items_center()
                 .when(!preview, |el| el.cursor_pointer())
-                .when(corner_hovered, |el| {
+                // A parent's Archive arms only under the corner itself —
+                // tracked apart from the row hover that reveals the
+                // leading-slot chevron.
+                .when(!preview && tree_children.is_some(), |el| {
+                    el.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered {
+                            if this.chat_corner_hover.as_deref() != Some(corner_id.as_str()) {
+                                this.chat_corner_hover = Some(corner_id.clone());
+                                cx.notify();
+                            }
+                        } else if this.chat_corner_hover.as_deref() == Some(corner_id.as_str()) {
+                            this.chat_corner_hover = None;
+                            cx.notify();
+                        }
+                    }))
+                })
+                .when(archive_hovered, |el| {
                     el.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
@@ -7223,7 +7506,7 @@ impl Shell {
                             // The hit test is final by paint, so popovers
                             // over the row still occlude it.
                             let hovered = hitbox.is_hovered(window) && !cx.has_active_drag();
-                            if hovered == corner_hovered {
+                            if hovered == row_hovered {
                                 return;
                             }
                             window.defer(cx, move |_, cx| {
@@ -7273,7 +7556,7 @@ impl Shell {
                     } else {
                         SIDEBAR_ACTIVE_HARNESS_TITLE_GAP
                     }))
-                    .children(compact_status)
+                    .children(leading_status)
                     .when_some(
                         harness.map(crate::pickers::harness_brand_icon),
                         |el, (path, tint)| {
@@ -7310,7 +7593,11 @@ impl Shell {
                     })
                     .when(
                         if compact {
-                            remote || corner_hovered
+                            // The compact hint lives in the trailing slot; the
+                            // corner stands down while it is up so the time,
+                            // remote badge, archive control and a collapsed
+                            // parent's subagent count never crowd it.
+                            !jump_shown && (remote || row_hovered || tree_affordance)
                         } else {
                             !show_label
                         },
@@ -7349,8 +7636,15 @@ impl Shell {
                                     let id = id.clone();
                                     move || format!("chat-time-{id}")
                                 })
-                                .w(px(30.0))
+                                // The 30px column fits a relative timestamp
+                                // but not a "Ctrl+1" combo. While a hint is up
+                                // the column takes its full intrinsic width and
+                                // the title (the row's only flexible slot)
+                                // truncates to make room — a shortcut must
+                                // never wrap or clip, however deep the indent.
+                                .when(compact_jump_label.is_none(), |el| el.w(px(30.0)))
                                 .flex_none()
+                                .whitespace_nowrap()
                                 .text_right()
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(subline)
@@ -7516,13 +7810,19 @@ impl Shell {
         use zeron_proto::ConnectivityState as S;
         let conn = self.state.read(cx).connectivity.clone();
         let selected = self.state.read(cx).selected_chat.as_deref();
-        let chat = conn.chats.iter()
+        let chat = conn
+            .chats
+            .iter()
             .find(|c| Some(c.chat_id.as_str()) == selected);
         let chat_state = chat.map(|c| c.sync_state);
         let (label, glyph): (SharedString, AnyElement) = match conn.state {
             _ if chat_state == Some(zeron_proto::ChatSyncState::StorageError) => (
                 "Changes could not be saved".into(),
-                div().size(px(5.0)).rounded_full().bg(theme.warning).into_any_element(),
+                div()
+                    .size(px(5.0))
+                    .rounded_full()
+                    .bg(theme.warning)
+                    .into_any_element(),
             ),
             S::Disabled => return None,
             S::Connected => {
@@ -7530,9 +7830,13 @@ impl Shell {
                 (
                     caption.into(),
                     loaders::mini_mono_spinner(
-                        "chat-sync-spinner", 2.0, theme.text_muted,
-                        self.sidebar_pane.entity_id(), cx,
-                    ).into_any_element(),
+                        "chat-sync-spinner",
+                        2.0,
+                        theme.text_muted,
+                        self.sidebar_pane.entity_id(),
+                        cx,
+                    )
+                    .into_any_element(),
                 )
             }
             S::Offline => (
@@ -7784,7 +8088,6 @@ impl Shell {
 
         // t3code's archived accordion, below the active list.
         let archived_section = self.render_archived_section(theme, cx);
-
 
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
@@ -10934,22 +11237,20 @@ impl Shell {
                 // up the carve-out. The bubble dispatch reaches the chip
                 // before the strip, and the handler consumes the drag, so
                 // the two never double-apply.
-                .on_drop::<RightTabDrag>(cx.listener(
-                    move |this, payload: &RightTabDrag, _, cx| {
-                        if payload.panel_key != this.panel_key(cx) {
-                            this.right_tab_drag = None;
-                            cx.notify();
-                            return;
-                        }
-                        let to = this
-                            .right_tab_drag
-                            .as_ref()
-                            .map(|d| d.over)
-                            .unwrap_or(payload.from);
+                .on_drop::<RightTabDrag>(cx.listener(move |this, payload: &RightTabDrag, _, cx| {
+                    if payload.panel_key != this.panel_key(cx) {
                         this.right_tab_drag = None;
-                        this.reorder_right_tabs(payload.from, to, cx);
-                    },
-                ))
+                        cx.notify();
+                        return;
+                    }
+                    let to = this
+                        .right_tab_drag
+                        .as_ref()
+                        .map(|d| d.over)
+                        .unwrap_or(payload.from);
+                    this.right_tab_drag = None;
+                    this.reorder_right_tabs(payload.from, to, cx);
+                }))
                 .child(
                     // Leading slot: icon normally, ✕ on tab hover — two
                     // stacked layers opacity-swapped by the group hover.
@@ -12684,7 +12985,10 @@ impl Render for Shell {
 mod tests {
     use super::*;
 
-    fn chat_with_path(cwd: Option<&str>, source: Option<(&str, &str)>) -> zeron_proto::Chat {
+    pub(super) fn chat_with_path(
+        cwd: Option<&str>,
+        source: Option<(&str, &str)>,
+    ) -> zeron_proto::Chat {
         zeron_proto::Chat {
             id: "chat".into(),
             device_id: "remote-device".into(),
@@ -12713,6 +13017,7 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             parent_chat_id: None,
+            spawned_by_agent: false,
         }
     }
 
@@ -12781,17 +13086,26 @@ mod tests {
 
         chat.sync_state = S::Waiting;
         chat.connected = false;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
+        assert_eq!(
+            chat_sync_pill_caption(&chat),
+            Some("Sync queued — changes are saved")
+        );
         chat.sync_state = S::Connecting;
         assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
         chat.sync_state = S::Offline;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Offline — changes are saved"));
+        assert_eq!(
+            chat_sync_pill_caption(&chat),
+            Some("Offline — changes are saved")
+        );
 
         // Real pending pushes remain visible even with a live room.
         chat.connected = true;
         chat.pending_pushes = 1;
         chat.sync_state = S::Waiting;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
+        assert_eq!(
+            chat_sync_pill_caption(&chat),
+            Some("Sync queued — changes are saved")
+        );
         chat.sync_state = S::Connecting;
         assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
     }
@@ -14843,6 +15157,86 @@ mod exit_regressions {
         assert!(weak.upgrade().is_none());
     }
 
+    /// A file link inside a report resolves against the reporting child's
+    /// worktree: the child has no right-pane tab, yet its link opens the file
+    /// in the child's checkout. A session the panel does not show still
+    /// cannot reach any file context.
+    #[gpui::test]
+    fn report_links_open_files_in_the_reporting_childs_checkout(cx: &mut TestAppContext) {
+        use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
+        let dir = tempfile::tempdir().unwrap();
+        let child_dir = dir.path().join("child-worktree");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(child_dir.join("script.md"), "hi\n").unwrap();
+        let parent_root = dir.path().join("parent-repo");
+        std::fs::create_dir_all(&parent_root).unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                let mut parent =
+                    super::tests::chat_with_path(Some(&parent_root.to_string_lossy()), None);
+                parent.id = "parent".into();
+                let mut child =
+                    super::tests::chat_with_path(Some(&child_dir.to_string_lossy()), None);
+                child.id = "child".into();
+                child.parent_chat_id = Some("parent".into());
+                child.spawned_by_agent = true;
+                shell.active_chat = "parent".into();
+                shell.state.update(cx, |state, _| {
+                    state.apply_chats(vec![parent, child]);
+                    state.selected_chat = Some("parent".into());
+                });
+
+                // The report names a file that exists only in the child's
+                // own worktree.
+                let mut activation = LinkActivation {
+                    target: LinkTarget::new("script.md", "script.md"),
+                    action: LinkAction::Primary,
+                    source_session: Some("child".into()),
+                };
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Internal
+                );
+                let id = shell.file_surface_seq;
+                let surface = shell.file_surfaces.get(&id).cloned().expect("file surface");
+                assert_eq!(surface.read(cx).chat_id(), "child");
+                assert_eq!(
+                    shell.file_surface_paths.get(&id).map(String::as_str),
+                    Some("script.md")
+                );
+
+                // A session the panel does not show stays rejected.
+                activation.source_session = Some("stranger".into());
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Rejected
+                );
+            })
+            .unwrap();
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[gpui::test]
     fn markdown_preview_events_open_browser_from_tree_and_file_tabs(cx: &mut TestAppContext) {
@@ -15711,9 +16105,20 @@ impl Shell {
         self.settings.sidebar_collapsed = collapsed;
         cx.notify();
     }
+
     pub fn fixture_appshots_transcript_start(&self, cx: &mut Context<Self>) {
         self.transcript
             .update(cx, |t, cx| t.fixture_appshots_start(cx));
+    }
+
+    pub fn fixture_appshots_transcript_agent_folds(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.transcript
+            .update(cx, |t, cx| t.fixture_appshots_agent_folds(open, cx));
+    }
+
+    pub fn fixture_appshots_transcript_end(&mut self, cx: &mut Context<Self>) {
+        self.transcript
+            .update(cx, |t, cx| t.fixture_appshots_end(cx));
     }
 }
 
@@ -16128,5 +16533,188 @@ mod settings_modal_regressions {
             assert_eq!(shell.route, Route::Chat);
             assert_eq!(shell.settings.settings_section, SettingsSection::Devices);
         });
+    }
+}
+
+#[cfg(test)]
+mod sidebar_tree_row_regressions {
+    use super::*;
+    use gpui::{AppContext, TestAppContext, VisualTestContext};
+
+    // Render one sidebar chat row against a real Shell so the disclosure,
+    // corner and hover wiring are the production elements, not a fixture.
+    struct RowHost {
+        shell: Entity<Shell>,
+        _data_dir: tempfile::TempDir,
+    }
+
+    impl Render for RowHost {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.shell.update(cx, |shell, cx| {
+                let theme = Theme::of(cx).clone();
+                // Mirror the production open rule: parents start expanded,
+                // only an explicit collapse flips the remembered bit.
+                let open = !shell
+                    .sidebar_collapsed_trees
+                    .get("parent")
+                    .copied()
+                    .unwrap_or(false);
+                div().size_full().p(px(20.0)).child(shell.render_chat_row(
+                    "parent".into(),
+                    "Parent".into(),
+                    "5m".into(),
+                    "home @ fedora".into(),
+                    None,
+                    None,
+                    None,
+                    zeron_proto::ChatIndicator::Idle,
+                    false,
+                    false,
+                    false,
+                    None,
+                    None,
+                    Some(spaces::SidebarTreeRow {
+                        children: Some(spaces::SidebarTreeChildren {
+                            open,
+                            running: 2,
+                            body_height: 60.0,
+                        }),
+                    }),
+                    None,
+                    &theme,
+                    cx,
+                ))
+            })
+        }
+    }
+
+    fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            let shell = cx.new(|cx| {
+                let state = cx.new(|_| {
+                    let mut state = AppState::new();
+                    state.local_device_id = Some("local".into());
+                    state.selected_chat = Some("other".into());
+                    state.chats = serde_json::from_value(serde_json::json!([
+                        { "id": "parent", "deviceId": "local", "archived": false,
+                          "createdAt": Utc::now() },
+                        { "id": "other", "deviceId": "local", "archived": false,
+                          "createdAt": Utc::now() }
+                    ]))
+                    .unwrap();
+                    state
+                });
+                Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                )
+            });
+            RowHost {
+                shell,
+                _data_dir: dir,
+            }
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+        (shell, cx)
+    }
+
+    #[gpui::test]
+    fn parent_row_disclosure_lives_in_leading_slot(cx: &mut TestAppContext) {
+        let (_shell, cx) = setup(cx);
+        // Rest: the status slot paints, no disclosure, expanded parent
+        // carries no count.
+        assert!(cx.debug_bounds("chat-status-parent").is_some());
+        assert!(cx.debug_bounds("chat-tree-toggle-parent").is_none());
+        assert!(cx.debug_bounds("chat-tree-count-parent").is_none());
+        // Hover the row body — the chevron mounts in the leading slot.
+        let row = cx.debug_bounds("chat-parent").unwrap();
+        cx.simulate_mouse_move(
+            gpui::point(row.left() + px(60.0), row.center().y),
+            None,
+            gpui::Modifiers::default(),
+        );
+        cx.update(|window, cx| window.draw(cx).clear());
+        let toggle = cx
+            .debug_bounds("chat-tree-toggle-parent")
+            .expect("hovered parent mounts the disclosure chevron");
+        let corner = cx.debug_bounds("chat-parent-corner").unwrap();
+        assert!(toggle.center().x < row.center().x, "chevron is not leading");
+        assert!(
+            !corner.contains(&toggle.center()),
+            "the corner must not hold the disclosure element"
+        );
+        assert!(cx.debug_bounds("chat-status-parent").is_none());
+        // The corner is untouched by row hover: no Archive — and pointing
+        // at the chevron still never meets Archive (the original bug).
+        assert!(cx.debug_bounds("chat-archive-parent").is_none());
+        cx.simulate_mouse_move(toggle.center(), None, gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("chat-archive-parent").is_none());
+    }
+
+    #[gpui::test]
+    fn leading_chevron_toggles_collapse_without_selecting(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        let row = cx.debug_bounds("chat-parent").unwrap();
+        cx.simulate_mouse_move(
+            gpui::point(row.left() + px(60.0), row.center().y),
+            None,
+            gpui::Modifiers::default(),
+        );
+        cx.update(|window, cx| window.draw(cx).clear());
+        let toggle = cx.debug_bounds("chat-tree-toggle-parent").unwrap();
+        cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.sidebar_collapsed_trees.get("parent"), Some(&true));
+            assert_eq!(
+                shell.state.read(cx).selected_chat.as_deref(),
+                Some("other"),
+                "the disclosure click reached the row's select handler"
+            );
+        });
+        // Collapsed + row still hovered: BOT + running count ride the
+        // corner; the chevron stays leading.
+        assert!(cx.debug_bounds("chat-tree-count-parent").is_some());
+        // Corner hover arms Archive only under the corner itself.
+        let corner = cx.debug_bounds("chat-parent-corner").unwrap();
+        cx.simulate_mouse_move(corner.center(), None, gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("chat-archive-parent").is_some());
+    }
+
+    #[gpui::test]
+    fn collapsed_parent_keeps_count_until_corner_hover(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.sidebar_collapsed_trees.insert("parent".into(), true);
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        // Not hovered: status dot leads, BOT + count ride the corner.
+        assert!(cx.debug_bounds("chat-status-parent").is_some());
+        assert!(cx.debug_bounds("chat-tree-count-parent").is_some());
+        assert!(cx.debug_bounds("chat-archive-parent").is_none());
+        let corner = cx.debug_bounds("chat-parent-corner").unwrap();
+        cx.simulate_mouse_move(corner.center(), None, gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("chat-archive-parent").is_some());
+        assert!(cx.debug_bounds("chat-tree-count-parent").is_none());
     }
 }

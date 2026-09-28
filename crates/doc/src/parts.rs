@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use zeron_proto::orchestration::ChildOutcome;
 use zeron_proto::{AgentEvent, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, UserInputQuestion};
 
 use crate::constants::MSG_INLINE_MAX;
@@ -218,6 +219,24 @@ pub enum MessagePart {
         /// source does not rewrite history.
         source_title: String,
     },
+    /// A settle notification from an agent-spawned child chat, written into
+    /// the PARENT's doc by the child notifier as a `role: System` entry (one
+    /// per deduped turn key; see the `child_notifications` ledger). Content
+    /// rides dedicated doc fields (`childChatId`, `childTitle`,
+    /// `childOutcome`, `childExcerpt`), never `text`, so old readers whose
+    /// unknown-kind fallback renders `text` degrade to an invisible empty
+    /// part instead of leaking the card body. iOS drops unknown kinds.
+    #[serde(rename_all = "camelCase")]
+    ChildUpdate {
+        id: String,
+        child_chat_id: String,
+        /// The child's title at delivery time — read without a registry
+        /// lookup, and a later rename does not rewrite the card's history.
+        child_title: String,
+        outcome: ChildOutcome,
+        /// Trimmed tail of the child's last reply, when one was recorded.
+        excerpt: Option<String>,
+    },
 }
 
 impl MessagePart {
@@ -229,7 +248,8 @@ impl MessagePart {
             | MessagePart::Tool { id, .. }
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. }
-            | MessagePart::Fork { id, .. } => id,
+            | MessagePart::Fork { id, .. }
+            | MessagePart::ChildUpdate { id, .. } => id,
         }
     }
 
@@ -267,6 +287,12 @@ impl MessagePart {
                 source_title,
                 ..
             } => source_chat_id.len() + source_title.len(),
+            MessagePart::ChildUpdate {
+                child_chat_id,
+                child_title,
+                excerpt,
+                ..
+            } => child_chat_id.len() + child_title.len() + excerpt.as_ref().map_or(0, String::len),
         }
     }
 }

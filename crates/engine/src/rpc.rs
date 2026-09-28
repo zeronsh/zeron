@@ -530,6 +530,10 @@ enum MutateParams {
         /// on the row as `parentChatId` for orchestration trees.
         #[serde(default)]
         parent_chat_id: Option<String>,
+        /// An agent spawned this chat (`zeron chat spawn`, MCP create_chat):
+        /// only such children push settle notifications to their parent.
+        #[serde(default)]
+        spawned_by_agent: bool,
     },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
@@ -1099,6 +1103,7 @@ impl EngineRpc {
                 branch,
                 cwd,
                 parent_chat_id,
+                spawned_by_agent,
             } => {
                 self.workspace
                     .create_chat_with_parent(
@@ -1108,6 +1113,7 @@ impl EngineRpc {
                         config,
                         cwd,
                         parent_chat_id,
+                        spawned_by_agent,
                     )
                     .map_err(failed)?;
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
@@ -1179,11 +1185,21 @@ impl EngineRpc {
                 .set_chat_host(&chat_id, &device_id)
                 .map_err(failed)
                 .map(drop),
-            MutateParams::SetChatArchived { chat_id, archived } => self
-                .workspace
-                .set_chat_archived(&chat_id, archived)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::SetChatArchived { chat_id, archived } => {
+                // Archive cascades to descendants (children first); unarchive
+                // touches only the named chat.
+                if archived {
+                    self.workspace
+                        .archive_chat_tree(&chat_id)
+                        .map_err(failed)
+                        .map(drop)
+                } else {
+                    self.workspace
+                        .set_chat_archived(&chat_id, false)
+                        .map_err(failed)
+                        .map(drop)
+                }
+            }
             MutateParams::ChangeSidebarPin { change } => {
                 self.workspace.change_sidebar_pin(&change).map_err(failed)
             }
@@ -1212,6 +1228,34 @@ impl EngineRpc {
                     .map(drop)
             }
         }
+    }
+
+    /// Accept child-update acks: one durable ledger write per entry whose
+    /// parent matches the child's actual parent. Boxed at the dispatch site so
+    /// the dispatch future stays small enough for the default worker stack.
+    async fn ack_child_updates(&self, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        let p: zeron_proto::orchestration::AckChildUpdatesParams = parse_params(params)?;
+        let store = self.doc_host.docs_store();
+        for update in &p.updates {
+            // Only accept acks whose parentChatId matches the child's actual
+            // parent — anything else is a stale or foreign caller and must not
+            // suppress another parent's ledger.
+            let parent_ok = self
+                .workspace
+                .chat(&update.child_chat_id)
+                .ok()
+                .flatten()
+                .is_some_and(|chat| {
+                    chat.parent_chat_id.as_deref() == Some(p.parent_chat_id.as_str())
+                });
+            if !parent_ok {
+                continue;
+            }
+            store
+                .ack_child_notification(&update.child_chat_id, &update.turn_key, &p.parent_chat_id)
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+        }
+        RpcReply::value(&serde_json::json!({}))
     }
 }
 
@@ -1906,6 +1950,8 @@ impl RpcService for EngineRpc {
                 let mut chat = source.clone();
                 chat.id = p.chat_id;
                 chat.parent_chat_id = Some(parent_chat_id);
+                // Forks are user-made, not agent-spawned — they never notify.
+                chat.spawned_by_agent = false;
                 chat.title = None; // First side-chat turn receives its own generated title.
                 chat.archived = false;
                 chat.created_at = chrono::Utc::now();
@@ -1978,6 +2024,7 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({}))
             }
+            methods::ACK_CHILD_UPDATES => Box::pin(self.ack_child_updates(params)).await,
             methods::WATCH_DOC_MESSAGES => {
                 // Opt-in: older viewports retain the full-reset contract.
                 let opening_tail = params

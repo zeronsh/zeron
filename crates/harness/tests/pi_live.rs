@@ -45,6 +45,7 @@ async fn real_pi_mock_lifecycle() {
             auto_approve: true,
             attachments: Vec::new(),
             worktree: None,
+            agent: None,
             resume: if scenario == "resume" {
                 session.clone()
             } else {

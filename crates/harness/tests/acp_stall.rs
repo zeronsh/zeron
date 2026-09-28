@@ -58,6 +58,7 @@ async fn silent_agent_errors_via_the_prompt_stall_watchdog() {
         auto_approve: true,
         attachments: Vec::new(),
         worktree: None,
+        agent: None,
         resume: None,
     };
     let harness = AcpHarness::grok().with_executable(fixture_path());

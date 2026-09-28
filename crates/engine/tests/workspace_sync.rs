@@ -156,6 +156,7 @@ fn run_request(prompt: &str) -> RunRequest {
         auto_approve: true,
         attachments: Vec::new(),
         worktree: None,
+        agent: None,
         resume: None,
     }
 }
@@ -713,6 +714,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 harness_session_id: Some("hs-9".into()),
                 room_gen: None,
                 parent_chat_id: None,
+                spawned_by_agent: false,
                 harness_session_cwd: Some("/tmp/legacy".into()),
                 space_id: Some("space-legacy".into()),
                 last_seen_at: Some(now),

@@ -209,6 +209,63 @@ pub fn compose_child_path(cmd: &mut process::Command, exe: &std::path::Path) {
     );
 }
 
+/// Stamp a chat run's [`zeron_proto::AgentContext`] onto the child spawn:
+/// the `ZERON_*` env for the harness process (and every tool it runs), with
+/// `cli_dir` pushed ahead of the PATH `compose_child_path` produced. Call it
+/// right after `compose_child_path` in chat-run spawns only — probes,
+/// sign-in and install paths take no per-chat context. Returns the PATH the
+/// child will see, for drivers that must also repeat it as wire config
+/// (Codex's `shell_environment_policy.set.PATH` override).
+pub fn apply_agent_env(
+    cmd: &mut process::Command,
+    agent: Option<&zeron_proto::AgentContext>,
+) -> Option<std::ffi::OsString> {
+    let agent = agent?;
+    for (key, value) in &agent.env {
+        cmd.env(key, value);
+    }
+    let mut paths = vec![std::path::PathBuf::from(&agent.cli_dir)];
+    let existing = cmd
+        .as_std()
+        .get_envs()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+        .and_then(|(_, value)| value.map(std::ffi::OsString::from))
+        .or_else(|| std::env::var_os("PATH"));
+    if let Some(existing) = existing {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    let joined = std::env::join_paths(paths).ok()?;
+    cmd.env("PATH", &joined);
+    Some(joined)
+}
+
+/// Once-per-session delivery state for the injected instructions prefix on
+/// harnesses with no system-prompt channel (ACP, OpenCode, Cursor). The
+/// frame is withheld while the next text the agent reads is a native slash
+/// command — a `<system_instructions>` preamble would break `/cmd`
+/// resolution — and lands on the first ordinary prompt or steer instead.
+/// Never delivered twice.
+pub struct AgentPrefix(Option<String>);
+
+impl AgentPrefix {
+    pub fn new(agent: Option<&zeron_proto::AgentContext>) -> Self {
+        Self(agent.map(|a| a.prompt_prefix()))
+    }
+
+    /// `text` with the pending prefix applied, or `text` unchanged: slash
+    /// commands pass through and keep the prefix pending, and once delivered
+    /// nothing is ever prefixed again.
+    pub fn apply(&mut self, text: String) -> String {
+        if text.trim_start().starts_with('/') {
+            return text;
+        }
+        match self.0.take() {
+            Some(prefix) => format!("{prefix}{text}"),
+            None => text,
+        }
+    }
+}
+
 fn compose_path<'a>(
     cmd: &mut std::process::Command,
     executable_dir: impl IntoIterator<Item = &'a std::path::Path>,
@@ -465,6 +522,84 @@ pub fn supports_titles(id: HarnessId) -> bool {
         id,
         HarnessId::Codex | HarnessId::ClaudeCode | HarnessId::Mock
     )
+}
+
+#[cfg(test)]
+mod agent_env_tests {
+    use zeron_proto::AgentContext;
+
+    fn agent() -> AgentContext {
+        AgentContext {
+            env: [
+                ("ZERON_CHAT_ID".to_owned(), "chat-1".to_owned()),
+                ("ZERON_CLI".to_owned(), "/data/bin/zeron".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            cli_dir: "/data/bin".into(),
+            instructions: "instructions".into(),
+            skill_bundle: Some("/data/runtime/skills/hash".into()),
+            skills: vec![],
+        }
+    }
+
+    #[test]
+    fn apply_agent_env_sets_env_and_prepends_cli_dir_to_path() {
+        let mut cmd = crate::process::Command::new("true");
+        crate::compose_child_path(&mut cmd, std::path::Path::new("/opt/agent/agent"));
+        let path = crate::apply_agent_env(&mut cmd, Some(&agent()))
+            .expect("agent env returns the composed PATH");
+        let envs: Vec<_> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            envs.iter().find(|(k, _)| k == "ZERON_CHAT_ID").unwrap().1,
+            Some("chat-1".into())
+        );
+        let child_path = envs
+            .iter()
+            .find(|(k, _)| k == "PATH")
+            .unwrap()
+            .1
+            .clone()
+            .unwrap();
+        assert_eq!(std::ffi::OsString::from(&child_path), path);
+        assert_eq!(
+            std::env::split_paths(&child_path).next().unwrap(),
+            std::path::Path::new("/data/bin")
+        );
+        // The agent's own executable dir still rides ahead of the ambient PATH.
+        let paths: Vec<_> = std::env::split_paths(&child_path).collect();
+        assert_eq!(paths[1], std::path::Path::new("/opt/agent"));
+    }
+
+    #[test]
+    fn apply_agent_env_is_a_noop_without_a_context() {
+        let mut cmd = crate::process::Command::new("true");
+        assert!(crate::apply_agent_env(&mut cmd, None).is_none());
+        assert!(cmd.as_std().get_envs().next().is_none());
+    }
+
+    #[test]
+    fn agent_prefix_frames_the_first_ordinary_prompt_only() {
+        let mut prefix = crate::AgentPrefix::new(Some(&agent()));
+        // A slash command passes through untouched and keeps the prefix.
+        assert_eq!(prefix.apply("/review src".to_owned()), "/review src");
+        // The next ordinary prompt gets it — once.
+        let out = prefix.apply("do the thing".to_owned());
+        assert!(out.starts_with("<system_instructions>\ninstructions\n</system_instructions>\n\n"));
+        assert!(out.ends_with("do the thing"));
+        assert_eq!(prefix.apply("again".to_owned()), "again");
+        let mut bare = crate::AgentPrefix::new(None);
+        assert_eq!(bare.apply("plain".to_owned()), "plain");
+    }
 }
 
 #[cfg(test)]

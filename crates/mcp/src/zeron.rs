@@ -18,6 +18,7 @@ use zeron_doc::{
 };
 use zeron_proto::{
     Chat, Device, HarnessId, Model, ReasoningLevel, Session, SessionStatus, Space, SteeringMode,
+    orchestration::{AckChildUpdatesParams, ChildUpdateRef},
 };
 use zeron_rpc::{RpcClient, RpcError, RpcSubscription, connect_ws, methods};
 
@@ -328,6 +329,31 @@ impl Zeron {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned())
+    }
+
+    /// Agent-side report that the parent already consumed these child
+    /// updates (`zeron chat wait`/`output` run inside the parent): acked
+    /// keys are never delivered to the parent again. Best-effort — a failed
+    /// ack only means a duplicate notification later, so it logs and never
+    /// fails the caller's command.
+    pub async fn ack_child_updates(&self, parent_chat_id: &str, updates: Vec<ChildUpdateRef>) {
+        if updates.is_empty() {
+            return;
+        }
+        let params = AckChildUpdatesParams {
+            parent_chat_id: parent_chat_id.to_owned(),
+            updates,
+        };
+        let payload = match serde_json::to_value(&params) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(%error, "AckChildUpdates: could not serialize params");
+                return;
+            }
+        };
+        if let Err(error) = self.call(methods::ACK_CHILD_UPDATES, payload).await {
+            tracing::warn!(%error, "AckChildUpdates failed");
+        }
     }
 
     // ---- resolution --------------------------------------------------------
@@ -651,6 +677,7 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             parent_chat_id: None,
+            spawned_by_agent: false,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

@@ -232,6 +232,13 @@ pub struct Chat {
     /// deleted) is tolerated rather than cascaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
+    /// Created by an agent through `zeron chat spawn` or the Zeron MCP's
+    /// create_chat — NOT by the user's own side chats and forks. Only these
+    /// children notify their parent when they settle (completion, failure,
+    /// interruption, blocked-on-input); user-made children stay quiet.
+    /// Additive + serde-defaulted, skipped on the wire when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spawned_by_agent: bool,
 }
 
 impl Chat {

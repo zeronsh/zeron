@@ -48,6 +48,31 @@ enum Command {
     /// proxying to the running engine's IPC. Agents use it to create, read,
     /// and message chats. Logs go to stderr; stdout is the protocol.
     Mcp,
+    /// Work with chats from a shell or an agent session: spawn, message,
+    /// wait for, read and manage chats. Logs go to stderr; stdout is the
+    /// result (or one JSON document with --json).
+    Chat {
+        #[command(subcommand)]
+        command: Box<zeron_mcp::cli::ChatCommand>,
+    },
+    /// List agent harnesses available on this device.
+    Harness {
+        #[command(subcommand)]
+        command: zeron_mcp::cli::HarnessCommand,
+    },
+    /// List the models a harness offers on this device.
+    Model {
+        #[command(subcommand)]
+        command: zeron_mcp::cli::ModelCommand,
+    },
+    /// Print the Zeron agent guide (no engine needed).
+    Guide {
+        /// Chapter name (see bare `zeron guide` for the list).
+        chapter: Option<String>,
+        /// Print one JSON document on stdout.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage `zeron headless` as a background service (launchd / systemd --user).
     Daemon {
         #[command(subcommand)]
@@ -120,12 +145,36 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     attach_parent_console();
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let _ = error.print();
+            std::process::exit(usage_exit_code(
+                error.exit_code(),
+                invoked_command(std::env::args().skip(1)).as_deref(),
+            ));
+        }
+    };
     #[cfg(windows)]
     if let Some(pid) = cli.wait_for_exit {
         zeron_update::windows::wait_for_exit(pid)?;
     } else if matches!(&cli.command, None | Some(Command::Headless)) {
         zeron_update::windows::cleanup_previous_image();
+    }
+    // Inside a chat the engine stamps ZERON_CLI at its own binary, but a tool
+    // shell that rebuilds PATH from the login profile can resolve `zeron` to a
+    // different install. The agent-facing commands converge on the stamped
+    // binary; a failure falls through to running in-process.
+    if matches!(
+        &cli.command,
+        Some(
+            Command::Chat { .. }
+                | Command::Harness { .. }
+                | Command::Model { .. }
+                | Command::Guide { .. }
+        )
+    ) {
+        maybe_reexec_injected_cli();
     }
     // Long-running modes log at info, one-shot CLI commands at warn (RUST_LOG
     // overrides either).
@@ -159,9 +208,20 @@ fn main() -> anyhow::Result<()> {
     {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
-        // `zeron mcp` owns stdout for the protocol: a single log line on it
-        // would corrupt the JSON-RPC stream, so its diagnostics go to stderr.
-        if matches!(&cli.command, Some(Command::Mcp)) {
+        // `zeron mcp` owns stdout for the protocol, and the `chat`/`harness`/
+        // `model`/`guide` commands own it for their result document (`--json`
+        // output must stay a single clean document): a single log line on it
+        // would corrupt the stream, so their diagnostics go to stderr.
+        if matches!(
+            &cli.command,
+            Some(
+                Command::Mcp
+                    | Command::Chat { .. }
+                    | Command::Harness { .. }
+                    | Command::Model { .. }
+                    | Command::Guide { .. }
+            )
+        ) {
             tracing_subscriber::registry()
                 .with(filter)
                 .with(
@@ -227,6 +287,27 @@ fn main() -> anyhow::Result<()> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(zeron_mcp::run(zeron_mcp::McpConfig::from_env()))
         }
+        Some(Command::Chat { command }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            std::process::exit(
+                runtime.block_on(zeron_mcp::cli::run_chat(*command, ipc_port_from_env())),
+            );
+        }
+        Some(Command::Harness { command }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            std::process::exit(
+                runtime.block_on(zeron_mcp::cli::run_harness(command, ipc_port_from_env())),
+            );
+        }
+        Some(Command::Model { command }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            std::process::exit(
+                runtime.block_on(zeron_mcp::cli::run_model(command, ipc_port_from_env())),
+            );
+        }
+        Some(Command::Guide { chapter, json }) => {
+            std::process::exit(zeron_mcp::cli::run_guide(chapter, json));
+        }
         #[cfg(target_os = "linux")]
         Some(Command::Appshot) => {
             zeron_ui::appshots::request_running_appshot(&engine_config_from_env().data_dir)
@@ -250,10 +331,7 @@ fn main() -> anyhow::Result<()> {
             // daemon, or embeds the engine in-process (ARCHITECTURE §1).
             zeron_ui::run_app(zeron_ui::UiConfig {
                 data_dir: paths::data_dir(),
-                ipc_port: std::env::var("ZERON_IPC_PORT")
-                    .ok()
-                    .and_then(|p| p.parse().ok())
-                    .unwrap_or(27654),
+                ipc_port: ipc_port_from_env(),
                 edge_url: edge_url_from_env(),
                 workos_client_id: workos_client_id_from_env(&edge_token),
                 edge_token,
@@ -264,6 +342,41 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// The exit code for a clap parse failure. Help and version still exit 0.
+/// Everything else is a usage error: on the agent-facing commands (`chat`,
+/// `harness`, `model`, `guide`) that is 1 — those commands reserve 2 for
+/// "awaiting input" — while every other command keeps clap's default 2.
+fn usage_exit_code(clap_code: i32, invoked: Option<&str>) -> i32 {
+    if clap_code == 0 {
+        return 0;
+    }
+    match invoked {
+        Some("chat" | "harness" | "model" | "guide") => 1,
+        _ => clap_code,
+    }
+}
+
+/// The invoked subcommand: the first argv token (after the binary name)
+/// that is not a global flag. `--wait-for-exit <pid>` (Windows) is the only
+/// global flag carrying a separate value, so its value is skipped.
+fn invoked_command(args: impl Iterator<Item = String>) -> Option<String> {
+    let mut skip_value = false;
+    for arg in args {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if arg.starts_with('-') {
+            if arg == "--wait-for-exit" {
+                skip_value = true;
+            }
+            continue;
+        }
+        return Some(arg);
+    }
+    None
 }
 
 #[cfg(windows)]
@@ -300,10 +413,7 @@ fn engine_config_from_env() -> zeron_engine::EngineConfig {
     zeron_engine::EngineConfig {
         data_dir: paths::data_dir(),
         edge_url: edge_url_from_env(),
-        ipc_port: std::env::var("ZERON_IPC_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(27654),
+        ipc_port: ipc_port_from_env(),
         default_harness: harness_from_env(),
         // WorkOS mode: the signed-in session's org wins; ZERON_ORG_ID (dev
         // default "dev-org") scopes the workspace room otherwise.
@@ -312,6 +422,73 @@ fn engine_config_from_env() -> zeron_engine::EngineConfig {
         // `workos_client_id_from_env` for the dev-mode escape hatches.
         workos_client_id: workos_client_id_from_env(&edge_token),
         edge_token,
+    }
+}
+
+/// `ZERON_IPC_PORT` for the loopback engine IPC — the one resolver shared by
+/// `sync`, `chat`, `harness`, `model`, the engine config and the headed app's
+/// daemon probe (`guide` needs no engine).
+fn ipc_port_from_env() -> u16 {
+    std::env::var("ZERON_IPC_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(27654)
+}
+
+/// Which binary `zeron chat`/`harness`/`model`/`guide` should re-exec into:
+/// the `ZERON_CLI` path the engine stamped, when it exists and is a different
+/// binary than the running one. `ZERON_CLI_REEXEC` breaks the exec loop when
+/// the injected path itself invokes `zeron` again.
+fn injected_cli_target(
+    injected: Option<&std::ffi::OsStr>,
+    current_exe: Option<&std::path::Path>,
+    reexec_guard_set: bool,
+) -> Option<std::path::PathBuf> {
+    if reexec_guard_set {
+        return None;
+    }
+    let injected = injected?;
+    if injected.is_empty() {
+        return None;
+    }
+    let injected = std::path::PathBuf::from(injected);
+    if !injected.is_file() {
+        return None;
+    }
+    let canon = std::fs::canonicalize(&injected).unwrap_or_else(|_| injected.clone());
+    let current = current_exe.and_then(|p| std::fs::canonicalize(p).ok());
+    if current.as_deref() == Some(canon.as_path()) {
+        return None;
+    }
+    Some(injected)
+}
+
+fn maybe_reexec_injected_cli() {
+    let target = injected_cli_target(
+        std::env::var_os("ZERON_CLI").as_deref(),
+        std::env::current_exe().ok().as_deref(),
+        std::env::var_os("ZERON_CLI_REEXEC").is_some(),
+    );
+    let Some(target) = target else { return };
+    // Safety: this runs before the tokio runtime or any thread exists — the
+    // process is single-threaded, so mutating the environment cannot race.
+    // The child must not re-exec again — the guard is inherited.
+    unsafe { std::env::set_var("ZERON_CLI_REEXEC", "1") };
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        // exec() only returns on failure — fall through to in-process.
+        let _ = std::process::Command::new(&target).args(&argv).exec();
+    }
+    #[cfg(not(unix))]
+    {
+        let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        if let Ok(mut child) = std::process::Command::new(&target).args(&argv).spawn()
+            && let Ok(status) = child.wait()
+        {
+            std::process::exit(status.code().unwrap_or(1));
+        }
     }
 }
 
@@ -577,5 +754,105 @@ fn sweep_stale_pid_logs(dir: &std::path::Path, mode: &str) {
         if stale {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("zeron-cli-test-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn injected_cli_unset_or_guarded_stays_in_process() {
+        assert!(injected_cli_target(None, Some(Path::new("/bin/true")), false).is_none());
+        assert!(
+            injected_cli_target(
+                Some(std::ffi::OsStr::new("/bin/false")),
+                Some(Path::new("/bin/true")),
+                true
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn injected_cli_missing_file_stays_in_process() {
+        let target = injected_cli_target(
+            Some(std::ffi::OsStr::new("/nonexistent/zeron")),
+            Some(Path::new("/bin/true")),
+            false,
+        );
+        assert!(target.is_none());
+    }
+
+    #[test]
+    fn injected_cli_same_binary_via_symlink_stays_in_process() {
+        let dir = scratch("symlink");
+        let real = dir.join("zeron-real");
+        std::fs::write(&real, b"").unwrap();
+        let link = dir.join("zeron-link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&real, &link).unwrap();
+        assert!(injected_cli_target(Some(link.as_os_str()), Some(real.as_path()), false).is_none());
+    }
+
+    #[test]
+    fn injected_cli_different_binary_reexecs() {
+        let dir = scratch("different");
+        let injected = dir.join("zeron-stamped");
+        let running = dir.join("zeron-other");
+        std::fs::write(&injected, b"").unwrap();
+        std::fs::write(&running, b"").unwrap();
+        assert_eq!(
+            injected_cli_target(Some(injected.as_os_str()), Some(running.as_path()), false)
+                .as_deref(),
+            Some(injected.as_path())
+        );
+    }
+
+    fn argv(argv: &[&str]) -> Option<String> {
+        invoked_command(argv.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn usage_exit_code_maps_agent_commands_to_one() {
+        for invoked in ["chat", "harness", "model", "guide"] {
+            assert_eq!(usage_exit_code(2, Some(invoked)), 1, "{invoked}");
+        }
+        assert_eq!(usage_exit_code(2, Some("status")), 2);
+        assert_eq!(usage_exit_code(2, Some("headless")), 2);
+        assert_eq!(usage_exit_code(2, None), 2);
+        // Help and version keep their exit 0 on every command.
+        assert_eq!(usage_exit_code(0, Some("chat")), 0);
+        assert_eq!(usage_exit_code(0, Some("status")), 0);
+    }
+
+    #[test]
+    fn invoked_command_skips_global_flags() {
+        assert_eq!(argv(&["chat", "spawn"]).as_deref(), Some("chat"));
+        assert_eq!(
+            argv(&["--wait-for-exit", "42", "chat"]).as_deref(),
+            Some("chat")
+        );
+        assert_eq!(
+            argv(&["--wait-for-exit=42", "model"]).as_deref(),
+            Some("model")
+        );
+        assert_eq!(
+            argv(&["--verbose", "guide", "chats"]).as_deref(),
+            Some("guide")
+        );
+        assert_eq!(argv(&[]), None);
+        assert_eq!(argv(&["--help"]), None);
     }
 }

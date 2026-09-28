@@ -12190,6 +12190,7 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "zeron-doc",
+ "zeron-guide",
  "zeron-harness",
  "zeron-preview",
  "zeron-proto",
@@ -12197,6 +12198,13 @@ dependencies = [
  "zeron-sync",
  "zeron-update",
  "zip",
+]
+
+[[package]]
+name = "zeron-guide"
+version = "0.2.97"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -12231,6 +12239,7 @@ name = "zeron-markdown"
 version = "0.2.97"
 dependencies = [
  "pulldown-cmark",
+ "zeron-proto",
 ]
 
 [[package]]
@@ -12240,13 +12249,18 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "clap",
  "futures",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "uuid",
  "zeron-doc",
+ "zeron-engine",
+ "zeron-guide",
+ "zeron-harness",
  "zeron-proto",
  "zeron-rpc",
 ]

@@ -991,8 +991,9 @@ impl AcpHarness {
     /// sign-in stored.
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
         let home = std::env::var("HOME").ok();
-        let (_scratch, mut child, _stderr) =
-            self.spawn_agent(home.as_deref(), false, &[], None).await?;
+        let (_scratch, mut child, _stderr) = self
+            .spawn_agent(home.as_deref(), false, &[], None, None)
+            .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1372,6 +1373,7 @@ impl AcpHarness {
         block_on_install: bool,
         extra_args: &[String],
         mcp: Option<&zeron_proto::McpServer>,
+        agent: Option<&zeron_proto::AgentContext>,
     ) -> Result<(Option<ScratchDir>, Child, crate::StderrTail), HarnessError> {
         let (exe, args) = self.resolve_program(block_on_install).await?;
         let mut cmd = Command::new(&exe);
@@ -1379,6 +1381,7 @@ impl AcpHarness {
         cmd.args(extra_args);
         child::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
+        crate::apply_agent_env(&mut cmd, agent);
         self.configure_adapter_environment(&mut cmd, &exe);
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
@@ -1437,7 +1440,7 @@ impl AcpHarness {
         cwd: Option<&std::path::Path>,
     ) -> Result<Vec<SlashCommand>, HarnessError> {
         let (_scratch, mut child, _stderr) = self
-            .spawn_agent(cwd.and_then(|p| p.to_str()), false, &[], None)
+            .spawn_agent(cwd.and_then(|p| p.to_str()), false, &[], None, None)
             .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
@@ -1504,7 +1507,8 @@ impl AcpHarness {
     /// wire is the source of truth — the spec's static catalog only enriches
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
-        let (_scratch, mut child, stderr_tail) = self.spawn_agent(None, false, &[], None).await?;
+        let (_scratch, mut child, stderr_tail) =
+            self.spawn_agent(None, false, &[], None, None).await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1997,7 +2001,13 @@ impl Harness for AcpHarness {
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let (scratch, mut child, stderr_tail) = self
-            .spawn_agent(Some(&request.cwd), true, &[], request.mcp.as_ref())
+            .spawn_agent(
+                Some(&request.cwd),
+                true,
+                &[],
+                request.mcp.as_ref(),
+                request.agent.as_ref(),
+            )
             .await?;
         let stdin = child
             .stdin
@@ -3445,13 +3455,22 @@ async fn run_session(session: Session) {
     };
     let mut prompt_stall_deadline: Option<tokio::time::Instant> =
         prompt_stall.map(|d| tokio::time::Instant::now() + d);
+    // Pending session-instructions prefix: withheld from slash commands,
+    // attached to the first ordinary prompt or steer the agent reads.
+    let mut agent_prefix = crate::AgentPrefix::new(request.agent.as_ref());
     // The text of the prompt in flight (re-sent by a preempt when the agent
     // drops an unstarted cancelled prompt).
-    let mut current_prompt_text = prompt_transform(request.reasoning, &request.prompt);
+    let mut current_prompt_text =
+        agent_prefix.apply(prompt_transform(request.reasoning, &request.prompt));
     let mut turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some({
         prompt_turn(
             client.clone(),
             session_id.clone(),
+            // The first `session/prompt` after `session/new`/`session/load`
+            // (fresh-session fallback included) carries the injected
+            // instructions — ACP has no system-prompt channel. Exactly once
+            // per session, on the first ordinary prompt: a leading slash
+            // command passes through untouched and keeps it pending.
             current_prompt_text.clone(),
             current_prompt_id.clone(),
         )
@@ -3720,7 +3739,7 @@ async fn run_session(session: Session) {
                         prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
                     prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
-                    current_prompt_text = texts.join("\n\n");
+                    current_prompt_text = agent_prefix.apply(texts.join("\n\n"));
                     turn = Some(prompt_turn(
                         client.clone(),
                         session_id.clone(),
@@ -4031,17 +4050,21 @@ async fn run_session(session: Session) {
                         prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
                     prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
-                    current_prompt_text = text.clone();
+                    current_prompt_text = agent_prefix.apply(text.clone());
                     turn = Some(prompt_turn(
                         client.clone(),
                         session_id.clone(),
-                        text,
+                        current_prompt_text.clone(),
                         current_prompt_id.clone(),
                     ));
                 }
                 while let Some(next_text) = steer_backlog.pop_front() {
                     if turn.is_some() && !interrupted {
-                        let fut = steering_call_future(&client, &session_id, &next_text);
+                        let fut = steering_call_future(
+                            &client,
+                            &session_id,
+                            &agent_prefix.apply(next_text.clone()),
+                        );
                         steering_call = Some((next_text, fut));
                         break;
                     }
@@ -4081,11 +4104,11 @@ async fn run_session(session: Session) {
                         prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
                     prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
-                    current_prompt_text = text.clone();
+                    current_prompt_text = agent_prefix.apply(text.clone());
                     turn = Some(prompt_turn(
                         client.clone(),
                         session_id.clone(),
-                        text,
+                        current_prompt_text.clone(),
                         current_prompt_id.clone(),
                     ));
                 } else if turn.is_none() && !steering_open {
@@ -4154,11 +4177,11 @@ async fn run_session(session: Session) {
                         prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
                     prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
-                    current_prompt_text = text.clone();
+                    current_prompt_text = agent_prefix.apply(text.clone());
                     turn = Some(prompt_turn(
                         client.clone(),
                         session_id.clone(),
-                        text,
+                        current_prompt_text.clone(),
                         current_prompt_id.clone(),
                     ));
                 } else if !steering_open {
@@ -4218,11 +4241,11 @@ async fn run_session(session: Session) {
                         prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
                     prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
-                    current_prompt_text = text.clone();
+                    current_prompt_text = agent_prefix.apply(text.clone());
                     turn = Some(prompt_turn(
                         client.clone(),
                         session_id.clone(),
-                        text,
+                        current_prompt_text.clone(),
                         current_prompt_id.clone(),
                     ));
                     } else if steer_ext {
@@ -4233,7 +4256,11 @@ async fn run_session(session: Session) {
                         if steering_call.is_some() {
                             steer_backlog.push_back(text);
                         } else {
-                            let fut = steering_call_future(&client, &session_id, &text);
+                            let fut = steering_call_future(
+                                &client,
+                                &session_id,
+                                &agent_prefix.apply(text.clone()),
+                            );
                             steering_call = Some((text, fut));
                         }
                     } else {

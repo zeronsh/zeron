@@ -149,6 +149,24 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
             // The fork seam is a transcript marker, not agent content: an
             // orchestrator reads the copied history as ordinary turns.
             MessagePart::Fork { .. } => {}
+            // Child settle notifications read as one status line so `zeron
+            // chat log` shows them to the parent agent.
+            MessagePart::ChildUpdate {
+                child_chat_id,
+                child_title,
+                outcome,
+                ..
+            } => {
+                let verb = match outcome {
+                    zeron_proto::orchestration::ChildOutcome::Completed => "completed",
+                    zeron_proto::orchestration::ChildOutcome::Errored => "failed",
+                    zeron_proto::orchestration::ChildOutcome::Interrupted => "was interrupted",
+                    zeron_proto::orchestration::ChildOutcome::NeedsInput => "needs help",
+                };
+                tools.push(format!(
+                    "Child {child_title} (@chat:{child_chat_id}) {verb}"
+                ));
+            }
         }
     }
     RenderedMessage {

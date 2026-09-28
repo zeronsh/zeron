@@ -892,11 +892,14 @@ impl WorkspaceHost {
         config: Option<ChatConfig>,
         cwd: Option<String>,
     ) -> Result<(), EngineError> {
-        self.create_chat_with_parent(chat_id, space_id, device_id, config, cwd, None)
+        self.create_chat_with_parent(chat_id, space_id, device_id, config, cwd, None, false)
     }
 
     /// [`create_chat`](Self::create_chat) recording the creating chat
     /// (`parentChatId`) — the Zeron MCP's orchestration link.
+    /// `spawned_by_agent` marks agent-spawned children: only they push settle
+    /// notifications to their parent.
+    #[allow(clippy::too_many_arguments)] // Mutate seam, not a public API
     pub fn create_chat_with_parent(
         &self,
         chat_id: &str,
@@ -905,6 +908,7 @@ impl WorkspaceHost {
         config: Option<ChatConfig>,
         cwd: Option<String>,
         parent_chat_id: Option<String>,
+        spawned_by_agent: bool,
     ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(()); // idempotent: optimistic client retries never duplicate
@@ -953,6 +957,7 @@ impl WorkspaceHost {
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
+                spawned_by_agent,
             })
         })?;
         Ok(())
@@ -1101,6 +1106,47 @@ impl WorkspaceHost {
 
     pub fn set_chat_archived(&self, chat_id: &str, archived: bool) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
+    }
+
+    /// Archive cascade: archiving a chat archives its whole
+    /// descendant tree — children before parents, any device (the rows are
+    /// LWW; each device's registry applies them). No unarchive cascade; the
+    /// caller routes `archived=false` to [`Self::set_chat_archived`]
+    /// directly. `parent_chat_id` cycles are guarded so a corrupted row set
+    /// can never loop the walk. Returns the archived ids in write order.
+    pub fn archive_chat_tree(&self, chat_id: &str) -> Result<Vec<String>, EngineError> {
+        let chats = self.read_chats()?;
+        let mut children: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        for chat in &chats {
+            if let Some(parent) = chat.parent_chat_id.as_deref() {
+                children.entry(parent).or_default().push(chat.id.as_str());
+            }
+        }
+        // Post-order DFS: every descendant lands in `order` ahead of its
+        // ancestors, so a reader never sees an unarchived child under an
+        // already-archived parent between row writes.
+        let mut order: Vec<String> = Vec::new();
+        let mut visiting: std::collections::HashSet<String> = std::collections::HashSet::new();
+        fn visit<'a>(
+            id: &'a str,
+            children: &std::collections::HashMap<&'a str, Vec<&'a str>>,
+            order: &mut Vec<String>,
+            visiting: &mut std::collections::HashSet<String>,
+        ) {
+            if !visiting.insert(id.to_string()) {
+                return; // already walked (cycle) — a row names its ancestor
+            }
+            for child in children.get(id).into_iter().flatten() {
+                visit(child, children, order, visiting);
+            }
+            order.push(id.to_string());
+        }
+        visit(chat_id, &children, &mut order, &mut visiting);
+        for id in &order {
+            self.set_chat_archived(id, true)?;
+        }
+        Ok(order)
     }
 
     /// LWW full-config replace on the chat row (zeron `SetChatConfig` — the

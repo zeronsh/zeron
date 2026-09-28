@@ -4,6 +4,21 @@ use std::path::{Component, Path};
 
 const FILE_MENTION_SCHEME: &str = "zeron-file:";
 
+/// The first root in `roots` that owns `target`, paired with its index.
+/// Roots are tried in order — the linking chat's own checkout first — so the
+/// search only widens for a target the own root cannot own: an absolute path
+/// inside a child's worktree, say. Everything that already resolved keeps its
+/// root and its file context.
+pub(crate) fn first_root_owning<'a>(
+    target: &str,
+    roots: impl IntoIterator<Item = &'a str>,
+) -> Option<(usize, WorkspaceFileLink)> {
+    roots
+        .into_iter()
+        .enumerate()
+        .find_map(|(ix, root)| resolve_workspace_file_link(target, root).map(|link| (ix, link)))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkspaceFileLink {
     pub path: String,
@@ -159,6 +174,39 @@ fn percent_encode_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolution_widens_from_the_linking_root_to_children_then_parent() {
+        let repo = "/home/dev/project";
+        let child = "/home/dev/.zeron/worktrees/project/brisk-fox";
+        let parent = "/home/dev/parent";
+        let roots = [repo, child, parent];
+        let link = |path: &str| WorkspaceFileLink {
+            path: path.into(),
+            line: None,
+            column: None,
+        };
+        // A relative link keeps the linking chat's own root (unchanged
+        // behaviour); the wider roots are only consulted when it cannot own
+        // the target.
+        assert_eq!(
+            first_root_owning("src/lib.rs", roots),
+            Some((0, link("src/lib.rs")))
+        );
+        // An absolute path inside the child's worktree resolves against the
+        // child's root, not the repo it was branched from.
+        assert_eq!(
+            first_root_owning(&format!("{child}/src/lib.rs"), roots),
+            Some((1, link("src/lib.rs")))
+        );
+        assert_eq!(
+            first_root_owning(&format!("{parent}/README.md"), roots),
+            Some((2, link("README.md")))
+        );
+        // A path outside every known root never resolves.
+        assert_eq!(first_root_owning("/tmp/elsewhere.md", roots), None);
+        assert_eq!(first_root_owning("../outside.md", roots), None);
+    }
 
     #[test]
     fn resolves_relative_absolute_and_location_links() {

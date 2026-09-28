@@ -335,6 +335,7 @@ impl Shell {
                     false,
                     None,
                     None,
+                    None,
                     Some(&query),
                     &theme,
                     cx,

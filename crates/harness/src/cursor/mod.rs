@@ -311,6 +311,7 @@ impl Harness for CursorHarness {
             cmd.env("ZERON_CURSOR_STATE_DIR", state::state_root());
         }
         crate::compose_child_path(&mut cmd, &exe);
+        crate::apply_agent_env(&mut cmd, request.agent.as_ref());
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }
@@ -348,9 +349,16 @@ impl Harness for CursorHarness {
 
         let (stdin_tx, stdin_rx) = mpsc::unbounded_channel::<String>();
         tokio::spawn(stdin_writer(stdin, stdin_rx));
+        // The first prompt of the run carries the injected instructions as a
+        // prefix — the SDK exposes no system-prompt channel. The transcript
+        // is untouched: the engine writes the user bubble from the request.
+        // A leading slash command passes through untouched; the pending
+        // prefix moves with the session and lands on the next ordinary text.
+        let mut agent_prefix = crate::AgentPrefix::new(request.agent.as_ref());
+        let first_prompt = agent_prefix.apply(request.prompt.clone());
         let first = json!({
             "op": "run",
-            "prompt": request.prompt,
+            "prompt": first_prompt,
             "cwd": request.cwd,
             "model": request.model,
             // Typed parameter picks (thinking/context/effort/fast/…) — the
@@ -375,6 +383,7 @@ impl Harness for CursorHarness {
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             stderr_tail,
+            agent_prefix,
         }));
 
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
@@ -495,6 +504,7 @@ struct Session {
     interrupt_grace: Duration,
     kill_grace: Duration,
     stderr_tail: crate::StderrTail,
+    agent_prefix: crate::AgentPrefix,
 }
 
 fn new_message_id() -> String {
@@ -514,6 +524,7 @@ async fn run_session(session: Session) {
         interrupt_grace,
         kill_grace,
         stderr_tail,
+        mut agent_prefix,
     } = session;
     let RunControls {
         execution_lease: _execution_lease,
@@ -653,7 +664,8 @@ async fn run_session(session: Session) {
                     pending_steers += 1;
                     parked = false;
                     any_done = false;
-                    let _ = stdin_tx.send(json!({ "op": "steer", "prompt": msg.prompt }).to_string());
+                    let _ = stdin_tx
+                        .send(json!({ "op": "steer", "prompt": agent_prefix.apply(msg.prompt) }).to_string());
                 }
                 None => {
                     steering_open = false;

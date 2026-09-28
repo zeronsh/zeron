@@ -251,6 +251,94 @@ pub struct RunRequest {
     /// no Zeron tools; title runs never carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpServer>,
+    /// Agent-orchestration context for chat runs, stamped by the HOST engine:
+    /// the `zeron` CLI on PATH, the chat/device env it needs to reach the
+    /// engine, and the system instructions + skill bundle that let the agent
+    /// spawn and coordinate child chats. Additive + serde-defaulted — an old
+    /// host leaves it unset and the agent runs without orchestration; title
+    /// runs never carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentContext>,
+}
+
+/// Everything a chat run's harness process needs to orchestrate through the
+/// `zeron` CLI (the injected-CLI contract; `zeron mcp` stays for manual use).
+/// One context per chat run — each run is its own harness process, so the
+/// per-chat env is safe to stamp on the child.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContext {
+    /// Env for the harness process and every tool it runs:
+    /// ZERON_CHAT_ID, ZERON_DEVICE_ID, ZERON_IPC_PORT, ZERON_CLI (absolute
+    /// path of the shim).
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Directory holding the `zeron` shim; prepended to the child's PATH.
+    pub cli_dir: String,
+    /// Short system instructions (`zeron_guide::instructions()`).
+    pub instructions: String,
+    /// Staged skill bundle laid out as a Claude Code plugin:
+    /// `{bundle}/.claude-plugin/plugin.json` + `{bundle}/skills/<name>/SKILL.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_bundle: Option<String>,
+    /// Skills inside the bundle, for harnesses that can only list them in
+    /// text.
+    #[serde(default)]
+    pub skills: Vec<AgentSkill>,
+}
+
+/// One skill advertised to a harness that cannot consume a plugin bundle —
+/// the name, the pitch, and where its SKILL.md lives.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkill {
+    pub name: String,
+    pub description: String,
+    /// Absolute path of the skill's SKILL.md.
+    pub path: String,
+}
+
+impl AgentContext {
+    /// The directory harnesses add to their skill search roots
+    /// (`{bundle}/skills`), when a bundle is staged.
+    pub fn skills_root(&self) -> Option<String> {
+        self.skill_bundle.as_ref().map(|bundle| {
+            std::path::Path::new(bundle)
+                .join("skills")
+                .to_string_lossy()
+                .into_owned()
+        })
+    }
+
+    /// The instructions plus a skills paragraph naming every bundled skill —
+    /// the delivery channel for harnesses without a skill mechanism. No
+    /// paragraph is appended when `skills` is empty.
+    pub fn instructions_with_skills(&self) -> String {
+        if self.skills.is_empty() {
+            return self.instructions.clone();
+        }
+        let mut out = String::with_capacity(self.instructions.len() + 256);
+        out.push_str(&self.instructions);
+        out.push_str(
+            "\n\nSkills available in this chat. Before using one, read its SKILL.md at the absolute path shown.",
+        );
+        for skill in &self.skills {
+            out.push_str(&format!(
+                "\n- {}: {} (SKILL.md: {})",
+                skill.name, skill.description, skill.path
+            ));
+        }
+        out
+    }
+
+    /// The system-instructions frame prepended once to the first prompt after
+    /// each session start/resume on harnesses with no system-prompt channel.
+    pub fn prompt_prefix(&self) -> String {
+        format!(
+            "<system_instructions>\n{}\n</system_instructions>\n\n",
+            self.instructions_with_skills()
+        )
+    }
 }
 
 /// A stdio MCP server the harness should add to the agent's session, on top
@@ -772,6 +860,95 @@ mod tests {
         );
         status.phase = HarnessUpdatePhase::Installing;
         assert!(status.show_update_notice());
+    }
+
+    #[test]
+    fn run_request_agent_default_and_round_trip() {
+        // Old-wire JSON without the field parses (additive compat)…
+        let old = r#"{"prompt":"p","model":null,"reasoning":null,"cwd":".","sandbox":"workspace-write","resume":null}"#;
+        let req: RunRequest = serde_json::from_str(old).unwrap();
+        assert!(req.agent.is_none());
+        // …and `None` serializes away (old readers never see it).
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("agent").is_none());
+        // A populated context round-trips camelCased.
+        let agent = AgentContext {
+            env: [("ZERON_CHAT_ID".to_owned(), "chat-1".to_owned())]
+                .into_iter()
+                .collect(),
+            cli_dir: "/data/bin".into(),
+            instructions: "be brief".into(),
+            skill_bundle: Some("/data/runtime/skills/abc".into()),
+            skills: vec![AgentSkill {
+                name: "zeron-cli".into(),
+                description: "Coordinate chats".into(),
+                path: "/data/runtime/skills/abc/skills/zeron-cli/SKILL.md".into(),
+            }],
+        };
+        let req = RunRequest {
+            agent: Some(agent.clone()),
+            ..serde_json::from_str::<RunRequest>(old).unwrap()
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["agent"]["cliDir"], "/data/bin");
+        assert_eq!(json["agent"]["env"]["ZERON_CHAT_ID"], "chat-1");
+        assert_eq!(json["agent"]["skills"][0]["name"], "zeron-cli");
+        let round: RunRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(round.agent, Some(agent));
+    }
+
+    #[test]
+    fn agent_context_helpers_render_exactly() {
+        let ctx = AgentContext {
+            env: Default::default(),
+            cli_dir: "/data/bin".into(),
+            instructions: "Line one.".into(),
+            skill_bundle: Some("/data/runtime/skills/abc".into()),
+            skills: vec![
+                AgentSkill {
+                    name: "zeron-cli".into(),
+                    description: "Coordinate chats".into(),
+                    path: "/abs/skills/zeron-cli/SKILL.md".into(),
+                },
+                AgentSkill {
+                    name: "review".into(),
+                    description: "Review a diff".into(),
+                    path: "/abs/skills/review/SKILL.md".into(),
+                },
+            ],
+        };
+        assert_eq!(
+            ctx.instructions_with_skills(),
+            "Line one.\n\nSkills available in this chat. Before using one, read its SKILL.md at the absolute path shown.\n- zeron-cli: Coordinate chats (SKILL.md: /abs/skills/zeron-cli/SKILL.md)\n- review: Review a diff (SKILL.md: /abs/skills/review/SKILL.md)"
+        );
+        assert_eq!(
+            ctx.prompt_prefix(),
+            "<system_instructions>\nLine one.\n\nSkills available in this chat. Before using one, read its SKILL.md at the absolute path shown.\n- zeron-cli: Coordinate chats (SKILL.md: /abs/skills/zeron-cli/SKILL.md)\n- review: Review a diff (SKILL.md: /abs/skills/review/SKILL.md)\n</system_instructions>\n\n"
+        );
+        assert_eq!(
+            ctx.skills_root().as_deref(),
+            Some(
+                std::path::Path::new("/data/runtime/skills/abc")
+                    .join("skills")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        // No skills: the paragraph is absent entirely.
+        let bare = AgentContext {
+            skills: vec![],
+            ..ctx.clone()
+        };
+        assert_eq!(bare.instructions_with_skills(), "Line one.");
+        assert_eq!(
+            bare.prompt_prefix(),
+            "<system_instructions>\nLine one.\n</system_instructions>\n\n"
+        );
+        let unpacked = AgentContext {
+            skill_bundle: None,
+            ..ctx
+        };
+        assert_eq!(unpacked.skills_root(), None);
     }
 }
 

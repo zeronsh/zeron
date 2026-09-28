@@ -99,6 +99,9 @@ pub struct RenderOptions {
     /// scroll state, keyed by the same element discriminator passed to
     /// [`render_block`]. `None` keeps non-chat Markdown surfaces unchanged.
     pub code: Option<HashMap<usize, CodeUi>>,
+    /// `@chat:` mention pill wiring — transcript surfaces only; `None` keeps
+    /// raw mention text (file previews render `@chat:<id>` verbatim).
+    pub chats: Option<super::chat_pills::ChatUi>,
 }
 
 #[derive(Clone)]
@@ -350,6 +353,7 @@ impl RenderOptions {
             link: None,
             workspace_root: None,
             code: None,
+            chats: None,
         }
     }
 }
@@ -912,6 +916,12 @@ pub struct FlatText {
     pub runs: Vec<TextRun>,
     pub links: Vec<(Range<usize>, String)>,
     pub code_ranges: Vec<Range<usize>>,
+    /// `@chat:` mention runs found by the parser — ranges in the ORIGINAL
+    /// (pre-substitution) text. Kept for tests and ref collection.
+    pub chats: Vec<(Range<usize>, String)>,
+    /// Resolved pills — displayed-text coordinates. Empty unless a
+    /// [`RenderOptions::chats`] resolver is wired.
+    pub pills: Vec<super::chat_pills::PillSpan>,
 }
 
 /// Inline-code tint: a text-safe use of the selected accent identity.
@@ -947,6 +957,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
     let mut code_ranges: Vec<Range<usize>> = Vec::new();
+    let mut chats: Vec<(Range<usize>, String)> = Vec::new();
     for run in runs {
         if run.text.is_empty() {
             continue;
@@ -1000,6 +1011,9 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
                 }
             }
         }
+        if let Some(chat_id) = &run.style.chat {
+            chats.push((start..text.len(), chat_id.clone()));
+        }
         out.push(TextRun {
             len: run.text.len(),
             font: f,
@@ -1025,12 +1039,73 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         runs: out,
         links,
         code_ranges,
+        chats,
+        pills: Vec::new(),
     }
 }
 
 /// Flatten through the cross-frame cache when one is wired: settled blocks
 /// reuse text + runs untouched (O(1) per block per frame); only blocks the
 /// incremental parser invalidated rebuild.
+/// Substitute `@chat:` mention runs with pill text (icon/status slots in
+/// NBSP) against the transcript's resolver snapshot. The source text is kept
+/// in `original` so copy/selection still yield `@chat:<uuid>`.
+fn with_chat_pills(mut flat: FlatText, opts: &RenderOptions, theme: &Theme) -> FlatText {
+    let Some(ui) = &opts.chats else {
+        return flat;
+    };
+    if flat.chats.is_empty() {
+        return flat;
+    }
+    let (text, pills, mut offsets) =
+        super::chat_pills::substitute(&flat.text, &flat.chats, &*ui.resolve);
+    // Rebuild runs over the substituted text: copied regions keep their
+    // style, pills get the UI-font label between their reserved mono slots.
+    // Pill washes are painted separately (rounded [`chat_pills::PILL_RADIUS`]
+    // on `theme.ink`), so they stay out of `code_ranges`.
+    let mut runs = Vec::with_capacity(flat.runs.len() + pills.len());
+    let mut code_ranges = Vec::with_capacity(flat.code_ranges.len());
+    let mut at = 0;
+    for (pill, (original, _)) in pills.iter().zip(offsets.omissions.iter()) {
+        runs.extend(super::link_presentation::slice_runs(
+            &flat.runs,
+            at..original.start,
+        ));
+        runs.extend(super::chat_pills::pill_runs(pill, theme));
+        at = original.end;
+    }
+    runs.extend(super::link_presentation::slice_runs(
+        &flat.runs,
+        at..flat.text.len(),
+    ));
+    code_ranges.extend(
+        flat.code_ranges
+            .iter()
+            .map(|range| offsets.local_displayed_range(range.clone())),
+    );
+    code_ranges.sort_unstable_by_key(|range| range.start);
+    code_ranges.dedup();
+    let links = flat
+        .links
+        .iter()
+        .map(|(range, url)| (offsets.local_displayed_range(range.clone()), url.clone()))
+        .collect();
+    offsets.prior = flat
+        .original
+        .take()
+        .map(|original| Box::new(original.offsets));
+    flat.original = Some(super::link_presentation::OriginalText {
+        text: flat.text.clone(),
+        offsets,
+    });
+    flat.text = text.into();
+    flat.runs = runs;
+    flat.links = links;
+    flat.code_ranges = code_ranges;
+    flat.pills = pills;
+    flat
+}
+
 fn flatten_cached(
     runs: &[InlineRun],
     base_weight: FontWeight,
@@ -1039,6 +1114,13 @@ fn flatten_cached(
     opts: &RenderOptions,
     theme: &Theme,
 ) -> Rc<FlatText> {
+    let build = || {
+        Rc::new(with_chat_pills(
+            flatten_runs_weighted(runs, theme, base_weight),
+            opts,
+            theme,
+        ))
+    };
     match &opts.cache {
         Some(cache) => {
             let mut cache = cache.borrow_mut();
@@ -1046,10 +1128,10 @@ fn flatten_cached(
             cache
                 .flats
                 .entry((opts.row_key.clone(), top_ix, ix))
-                .or_insert_with(|| Rc::new(flatten_runs_weighted(runs, theme, base_weight)))
+                .or_insert_with(build)
                 .clone()
         }
-        None => Rc::new(flatten_runs_weighted(runs, theme, base_weight)),
+        None => build(),
     }
 }
 
@@ -1129,7 +1211,9 @@ pub(super) fn flat_text_presented_element(
         .as_ref()
         .map(|original| original.offsets.clone());
     let wash = inline_code_wash(theme);
+    let pill_wash = theme.ink(0.06);
     let sel_wash = selection_wash(theme);
+    let pill_ranges: Vec<Range<usize>> = flat.pills.iter().map(|pill| pill.range.clone()).collect();
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, _| {
@@ -1139,6 +1223,18 @@ pub(super) fn flat_text_presented_element(
                         rect,
                         px(INLINE_CODE_RADIUS),
                         wash,
+                        px(0.0),
+                        gpui::transparent_black(),
+                        BorderStyle::default(),
+                    ));
+                }
+            }
+            for range in &pill_ranges {
+                for rect in range_rects(&layout, range, INLINE_CODE_PAD_X, INLINE_CODE_INSET_Y) {
+                    window.paint_quad(quad(
+                        rect,
+                        px(super::chat_pills::PILL_RADIUS),
+                        pill_wash,
                         px(0.0),
                         gpui::transparent_black(),
                         BorderStyle::default(),
@@ -1180,40 +1276,54 @@ pub(super) fn flat_text_presented_element(
         .child(underlay)
         .child(text_el)
         .into_any_element();
-    if flat.links.is_empty() {
+    let child = if flat.links.is_empty() {
+        child
+    } else {
+        super::link_interaction::LinkRanges {
+            id: format!(
+                "{}-{}-t{ix}",
+                opts.row_key,
+                opts.link
+                    .as_ref()
+                    .and_then(|ui| ui.source_session.as_deref())
+                    .unwrap_or_default()
+            )
+            .into(),
+            child,
+            layout: link_layout.clone(),
+            links: flat
+                .links
+                .iter()
+                .map(|(range, url)| {
+                    (
+                        range.clone(),
+                        LinkTarget::new(
+                            flat.original
+                                .as_ref()
+                                .map_or(&flat.text[range.clone()], |original| {
+                                    &original.text[original.offsets.original(range.start)
+                                        ..original.offsets.original(range.end)]
+                                }),
+                            url,
+                        ),
+                    )
+                })
+                .collect(),
+            ui: opts.link.clone(),
+        }
+        .into_any_element()
+    };
+    // Pill hitboxes + icon/status overlays ride the same geometry. Unknown
+    // chats still paint the muted wash — they just never mount a hitbox.
+    let Some(chats) = opts.chats.as_ref().filter(|_| !flat.pills.is_empty()) else {
         return child;
-    }
-    super::link_interaction::LinkRanges {
-        id: format!(
-            "{}-{}-t{ix}",
-            opts.row_key,
-            opts.link
-                .as_ref()
-                .and_then(|ui| ui.source_session.as_deref())
-                .unwrap_or_default()
-        )
-        .into(),
+    };
+    super::chat_pills::ChatPillRanges {
+        id: format!("{}-pill-{ix}", opts.row_key).into(),
         child,
         layout: link_layout,
-        links: flat
-            .links
-            .iter()
-            .map(|(range, url)| {
-                (
-                    range.clone(),
-                    LinkTarget::new(
-                        flat.original
-                            .as_ref()
-                            .map_or(&flat.text[range.clone()], |original| {
-                                &original.text[original.offsets.original(range.start)
-                                    ..original.offsets.original(range.end)]
-                            }),
-                        url,
-                    ),
-                )
-            })
-            .collect(),
-        ui: opts.link.clone(),
+        pills: flat.pills.clone(),
+        ui: chats.clone(),
     }
     .into_any_element()
 }
@@ -1228,24 +1338,32 @@ fn selection_wash(theme: &Theme) -> Hsla {
 /// into the frame's document-ordered registry (so drags span into adjacent
 /// markdown rows and Cmd+C joins in order), and re-registers the mouse
 /// listeners. Call from a paint-phase canvas that sits UNDER the text.
-pub(crate) fn paint_text_selection(
+/// Selection for possibly-substituted text (the user bubble's chat pills):
+/// `text`/`offsets` describe the ORIGINAL string — the wash and the registry
+/// map back through them, so copy yields the raw mention.
+pub(crate) fn paint_text_selection_mapped(
     window: &mut Window,
     key: &std::sync::Arc<str>,
     text: &SharedString,
+    offsets: Option<super::link_presentation::OffsetMap>,
     layout: &gpui::TextLayout,
     theme: &Theme,
 ) {
-    paint_text_selection_with_wash(window, key, text, layout, selection_wash(theme));
+    paint_text_selection_with_wash(window, key, text, offsets, layout, selection_wash(theme));
 }
 
 fn paint_text_selection_with_wash(
     window: &mut Window,
     key: &std::sync::Arc<str>,
     text: &SharedString,
+    offsets: Option<super::link_presentation::OffsetMap>,
     layout: &gpui::TextLayout,
     wash: Hsla,
 ) {
     if let Some(range) = super::selection::wash_range(key) {
+        let range = offsets
+            .as_ref()
+            .map_or_else(|| range.clone(), |map| map.displayed_range(range.clone()));
         for rect in range_rects(layout, &range, 0.0, 0.0) {
             window.paint_quad(quad(
                 rect,
@@ -1262,10 +1380,10 @@ fn paint_text_selection_with_wash(
             key: key.clone(),
             text: text.clone(),
             layout: layout.clone(),
-            offsets: None,
+            offsets: offsets.clone(),
         })
     });
-    register_selection_listeners(window, key, text, layout, None);
+    register_selection_listeners(window, key, text, layout, offsets);
 }
 
 /// The wrapping div shared by every selectable text region: markdown
@@ -1290,7 +1408,7 @@ fn selectable_text_element(
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, _| {
-            paint_text_selection_with_wash(window, &key, &text, &layout, wash);
+            paint_text_selection_with_wash(window, &key, &text, None, &layout, wash);
         },
     )
     .absolute()
@@ -1685,6 +1803,22 @@ fn text_element(
                 .into_any_element();
         }
     }
+    // A paragraph that is only one `@chat:` mention renders as the activity
+    // row's own line (chat badge + status glyph), like `sole_file_reference`
+    // does for files. Deferred: the status spinner needs `App`, which the
+    // render pass lacks — the child builds inside request_layout.
+    if !bold_default
+        && let Some(chats) = &opts.chats
+        && let Some(chat_id) = sole_chat_mention(runs)
+    {
+        let card = chats.card.clone();
+        return div()
+            .w_full()
+            .child(super::chat_pills::DeferredElement::new(
+                move |window, cx| card(&chat_id, window, cx),
+            ))
+            .into_any_element();
+    }
     if let Some(lines) = opts
         .workspace_root
         .as_deref()
@@ -1839,6 +1973,29 @@ fn plain_file_reference_lines(runs: &[InlineRun], workspace_root: &str) -> Optio
 fn sole_file_reference(runs: &[InlineRun], workspace_root: &str) -> Option<String> {
     sole_workspace_file_link(runs, workspace_root)
         .or_else(|| sole_plain_file_reference(runs, workspace_root))
+}
+
+/// The paragraph is exactly one `@chat:` mention (whitespace-only runs aside).
+/// A mention run's text is the whole token, so the short form's trailing
+/// ellipsis (`...` or `…`) rides along on the resolved prefix.
+fn sole_chat_mention(runs: &[InlineRun]) -> Option<String> {
+    let mut id: Option<&str> = None;
+    for run in runs.iter().filter(|run| !run.text.trim().is_empty()) {
+        let chat = run.style.chat.as_deref()?;
+        let full = format!(
+            "{}{}",
+            zeron_proto::orchestration::CHAT_MENTION_PREFIX,
+            chat
+        );
+        let token = run.text.trim();
+        if id.is_some()
+            || (token != full && token != format!("{full}...") && token != format!("{full}…"))
+        {
+            return None;
+        }
+        id = Some(chat);
+    }
+    id.map(str::to_owned)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2975,6 +3132,8 @@ mod tests {
                     runs: Vec::new(),
                     links: Vec::new(),
                     code_ranges: Vec::new(),
+                    chats: Vec::new(),
+                    pills: Vec::new(),
                 }),
             );
             cache.code.insert(
@@ -3019,6 +3178,8 @@ mod tests {
                 runs: Vec::new(),
                 links: Vec::new(),
                 code_ranges: Vec::new(),
+                chats: Vec::new(),
+                pills: Vec::new(),
             }),
         );
         cache.sync_generation(10);

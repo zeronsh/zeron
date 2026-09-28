@@ -48,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
         auto_approve: true,
         attachments: Vec::new(),
         worktree: None,
+        agent: None,
         resume: None,
     };
     println!("Running real Devin ACP with {model}");

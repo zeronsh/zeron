@@ -204,6 +204,7 @@ fn fixture(dir: &Path) -> PathBuf {
 fn request(cwd: &Path, prompt: &str, resume: Option<&str>) -> RunRequest {
     RunRequest {
         mcp: None,
+        agent: None,
         prompt: prompt.into(),
         harness: None,
         model: None,

@@ -501,6 +501,30 @@ impl Harness for MockHarness {
             })
             .into_iter()
             .flatten();
+        // Dev/testing knob: `ZERON_MOCK_CHAT_REFS=<id>,<id>` appends a
+        // paragraph that mentions those chats mid-sentence — the only
+        // data-side way to put inline `@chat:` pills on screen (real agents
+        // write the token; the canned script never names a live chat). A
+        // synthetic id exercises the unavailable state, and a trailing
+        // mention-only paragraph renders the sole-mention card.
+        let refs_event = std::env::var("ZERON_MOCK_CHAT_REFS")
+            .ok()
+            .map(|v| {
+                let mut ids = v.split(',').map(str::trim).filter(|id| !id.is_empty());
+                let first = ids
+                    .next()
+                    .unwrap_or("00000000-0000-4000-8000-000000000000")
+                    .to_owned();
+                let second = ids.next().unwrap_or(&first).to_owned();
+                AgentEvent::TextDelta {
+                    text: format!(
+                        "\n### Chat references\n\n\
+                        Fanned out @chat:{first} to scout the fold path while @chat:{second} held the commit cadence guard.\n\n\
+                        Before the rollup landed I also asked @chat:{second} to re-check every throughput number against the burst log, and the retired probe @chat:ffffffff-ffff-4fff-8fff-ffffffffffff reads as unavailable now.\n\n\
+                        @chat:{first}\n\n"
+                    ),
+                }
+            });
         let events: Vec<Result<AgentEvent, HarnessError>> = body
             .iter()
             .cycle()
@@ -512,6 +536,7 @@ impl Harness for MockHarness {
             .chain(code_event)
             .chain(table_event)
             .chain(mend_event)
+            .chain(refs_event)
             .chain(error_event)
             .chain(tail.iter().cloned())
             .map(Ok)

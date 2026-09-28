@@ -463,7 +463,7 @@ impl Element for LinkRanges {
         }
     }
 }
-fn click_is_activation(event: &ClickEvent) -> bool {
+pub(super) fn click_is_activation(event: &ClickEvent) -> bool {
     match event {
         ClickEvent::Mouse(event) => {
             event.down.button == MouseButton::Left

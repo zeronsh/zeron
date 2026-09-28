@@ -130,6 +130,7 @@ impl Rig {
             auto_approve: true,
             attachments: vec![],
             worktree: None,
+            agent: None,
             resume: None,
         }
     }

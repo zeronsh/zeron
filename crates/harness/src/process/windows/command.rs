@@ -72,6 +72,10 @@ impl Command {
     pub(crate) fn as_std_mut(&mut self) -> &mut std::process::Command {
         &mut self.metadata
     }
+    /// Read-back view (PATH composition after `compose_child_path`, etc.).
+    pub(crate) fn as_std(&self) -> &std::process::Command {
+        &self.metadata
+    }
 
     pub(super) fn prepare(&self) -> io::Result<Prepared> {
         let program = self.metadata.get_program();

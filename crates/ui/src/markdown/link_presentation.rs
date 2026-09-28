@@ -4,13 +4,24 @@ use gpui::{SharedString, TextRun};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
+/// Maps offsets between a stage's input text and its shown text. `omissions`
+/// pairs `(input range, shown range)` in order; the shown span can be SHORTER
+/// (link truncation) or LONGER (`@chat:` pill substitution). Stages chain
+/// through `prior`: a substitution map sits under a truncation map so
+/// displayed coordinates resolve all the way back to the source text.
 #[derive(Clone, Debug, Default)]
 pub struct OffsetMap {
     pub omissions: Vec<(Range<usize>, Range<usize>)>,
+    /// The previous stage's map (closer to the source text), if any.
+    pub prior: Option<Box<OffsetMap>>,
 }
 impl OffsetMap {
-    pub fn original(&self, displayed: usize) -> usize {
-        let mut shift = 0;
+    /// This stage only: input-text offset for a shown offset.
+    fn local_original(&self, displayed: usize) -> usize {
+        // The LAST overlapping-preceding omission's end delta already carries
+        // every earlier omission's effect (the coordinate systems meet
+        // there), so assigning — not summing — is the transitive shift.
+        let mut shift: isize = 0;
         for (original, shown) in &self.omissions {
             if displayed < shown.start {
                 break;
@@ -18,12 +29,13 @@ impl OffsetMap {
             if displayed < shown.end {
                 return original.start;
             }
-            shift = original.end - shown.end;
+            shift = original.end as isize - shown.end as isize;
         }
-        displayed + shift
+        displayed.saturating_add_signed(shift)
     }
-    pub fn displayed(&self, original: usize) -> usize {
-        let mut shift = 0;
+    /// This stage only: shown offset for an input-text offset.
+    fn local_displayed(&self, original: usize) -> usize {
+        let mut shift: isize = 0;
         for (source, shown) in &self.omissions {
             if original < source.start {
                 break;
@@ -31,12 +43,14 @@ impl OffsetMap {
             if original < source.end {
                 return shown.start;
             }
-            shift = source.end - shown.end;
+            shift = source.end as isize - shown.end as isize;
         }
-        original - shift
+        original.saturating_add_signed(-shift)
     }
-    pub fn displayed_range(&self, range: Range<usize>) -> Range<usize> {
-        let mut result = self.displayed(range.start)..self.displayed(range.end);
+    /// This stage only: shown range for an input range — an input range that
+    /// overlaps a replaced span expands to cover the replacement.
+    pub(crate) fn local_displayed_range(&self, range: Range<usize>) -> Range<usize> {
+        let mut result = self.local_displayed(range.start)..self.local_displayed(range.end);
         for (source, shown) in &self.omissions {
             if range.start < source.end && range.end > source.start {
                 result.start = result.start.min(shown.start);
@@ -45,6 +59,29 @@ impl OffsetMap {
         }
         result
     }
+    /// Shown offset → source-text offset (all stages).
+    pub fn original(&self, displayed: usize) -> usize {
+        let local = self.local_original(displayed);
+        self.prior
+            .as_ref()
+            .map_or(local, |prior| prior.original(local))
+    }
+    /// Source-text offset → shown offset (all stages).
+    pub fn displayed(&self, original: usize) -> usize {
+        let mid = self
+            .prior
+            .as_ref()
+            .map_or(original, |prior| prior.displayed(original));
+        self.local_displayed(mid)
+    }
+    /// Source-text range → shown range (all stages).
+    pub fn displayed_range(&self, range: Range<usize>) -> Range<usize> {
+        let mid = match &self.prior {
+            Some(prior) => prior.displayed_range(range.clone()),
+            None => range,
+        };
+        self.local_displayed_range(mid)
+    }
 }
 #[derive(Clone)]
 pub struct OriginalText {
@@ -52,7 +89,7 @@ pub struct OriginalText {
     pub offsets: OffsetMap,
 }
 
-fn slice_runs(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
+pub(crate) fn slice_runs(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
     let mut at = 0;
     runs.iter()
         .filter_map(|run| {
@@ -126,21 +163,39 @@ pub fn truncate(
     }
     text.push_str(&flat.text[at..]);
     runs.extend(slice_runs(&flat.runs, at..flat.text.len()));
+    // This stage's ranges are in `flat.text` coordinates — map them locally;
+    // `prior` then chains through any earlier substitution to the source.
+    offsets.prior = flat
+        .original
+        .as_ref()
+        .map(|original| Box::new(original.offsets.clone()));
+    let shown = |range: &Range<usize>| offsets.local_displayed_range(range.clone());
     FlatText {
         text: text.into(),
         runs,
         links: flat
             .links
             .iter()
-            .map(|(r, url)| (offsets.displayed_range(r.clone()), url.clone()))
+            .map(|(r, url)| (shown(r), url.clone()))
             .collect(),
-        code_ranges: flat
-            .code_ranges
+        code_ranges: flat.code_ranges.iter().map(shown).collect(),
+        chats: flat.chats.clone(),
+        pills: flat
+            .pills
             .iter()
-            .map(|r| offsets.displayed_range(r.clone()))
+            .map(|pill| super::chat_pills::PillSpan {
+                range: shown(&pill.range),
+                icon_slot: shown(&pill.icon_slot),
+                label: shown(&pill.label),
+                status_slot: shown(&pill.status_slot),
+                chat: pill.chat.clone(),
+            })
             .collect(),
         original: Some(OriginalText {
-            text: flat.text.clone(),
+            text: flat
+                .original
+                .as_ref()
+                .map_or_else(|| flat.text.clone(), |original| original.text.clone()),
             offsets,
         }),
     }

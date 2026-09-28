@@ -823,7 +823,24 @@ struct Capture {
 
 /// Run git capturing stdout under a hard byte ceiling — the child is killed once
 /// the cap is hit, so an arbitrarily large repository diff never buffers fully.
-async fn capture_git(cwd: &Path, args: &[&str], max_bytes: usize) -> Result<Capture, EngineError> {
+///
+/// Boxed: the 64KiB read buffer must live in the future's heap state, because
+/// an inline future copies that buffer into every poll frame along the caller's
+/// await chain (the RPC dispatch has to fit the default worker stack).
+fn capture_git<'a>(
+    cwd: &'a Path,
+    args: &'a [&'a str],
+    max_bytes: usize,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Capture, EngineError>> + Send + 'a>>
+{
+    Box::pin(capture_git_inner(cwd, args, max_bytes))
+}
+
+async fn capture_git_inner(
+    cwd: &Path,
+    args: &[&str],
+    max_bytes: usize,
+) -> Result<Capture, EngineError> {
     let mut cmd = tokio::process::Command::new("git");
     #[cfg(windows)]
     {

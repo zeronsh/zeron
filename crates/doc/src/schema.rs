@@ -98,6 +98,18 @@ struct DocPartJson {
     source_chat_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_title: Option<String>,
+    /// Child settle notification (`kind: "childUpdate", additive): the child
+    /// chat, its title at delivery, the outcome ("completed" / "errored" /
+    /// "interrupted" / "needsInput"), and an optional reply excerpt. Never
+    /// `text`, so old readers render nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    child_chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    child_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    child_outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    child_excerpt: Option<String>,
     /// Tool output summary (additive — absent on old rows and old writers;
     /// pre-strip writers stored up to 4KB of capped output here).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -224,6 +236,21 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             source_title: Some(source_title.clone()),
             ..Default::default()
         },
+        MessagePart::ChildUpdate {
+            id,
+            child_chat_id,
+            child_title,
+            outcome,
+            excerpt,
+        } => DocPartJson {
+            id: id.clone(),
+            kind: "childUpdate".into(),
+            child_chat_id: Some(child_chat_id.clone()),
+            child_title: Some(child_title.clone()),
+            child_outcome: Some(child_outcome_str(*outcome).to_owned()),
+            child_excerpt: excerpt.clone(),
+            ..Default::default()
+        },
     })
 }
 
@@ -278,6 +305,27 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
             id: p.id,
             source_chat_id: p.source_chat_id.unwrap_or_default(),
             source_title: p.source_title.unwrap_or_default(),
+        },
+        // A missing child id or an outcome this build does not know degrades
+        // the whole part to an empty Text — garbage never renders as a card.
+        "childUpdate" => match (p.child_chat_id, p.child_outcome) {
+            (Some(child_chat_id), Some(outcome)) => match child_outcome_parse(&outcome) {
+                Some(outcome) => MessagePart::ChildUpdate {
+                    id: p.id,
+                    child_chat_id,
+                    child_title: p.child_title.unwrap_or_default(),
+                    outcome,
+                    excerpt: p.child_excerpt,
+                },
+                None => MessagePart::Text {
+                    id: p.id,
+                    text: String::new(),
+                },
+            },
+            _ => MessagePart::Text {
+                id: p.id,
+                text: String::new(),
+            },
         },
         _ => MessagePart::Text {
             id: p.id,
@@ -591,6 +639,24 @@ impl SessionDoc {
         Err(DocError::Schema(format!("command {command_id} not found")))
     }
 
+    /// Cheap existence check by entry id — scans only each message's `id`
+    /// scalar, never materializing the transcript. For dedupe-before-append
+    /// call sites that run on every notification flush.
+    pub fn has_message(&self, message_id: &str) -> bool {
+        let messages = self.doc.get_list("messages");
+        (0..messages.len()).any(|i| {
+            matches!(
+                messages.get(i),
+                Some(loro::ValueOrContainer::Container(loro::Container::Map(map)))
+                    if matches!(
+                        map.get("id"),
+                        Some(loro::ValueOrContainer::Value(LoroValue::String(s)))
+                            if s.as_str() == message_id
+                    )
+            )
+        })
+    }
+
     /// Stamp a terminal status on an existing message entry by id (recovery:
     /// abandoned `streaming` entries from a dead run are stamped `aborted`).
     /// Returns `false` when no entry with that id exists.
@@ -817,6 +883,28 @@ fn write_entry_scalar_fields(map: &LoroMap, entry: &SessionMessageEntry) -> Resu
     Ok(())
 }
 
+/// `childOutcome` doc strings, matching `ChildOutcome`'s camelCase serde.
+fn child_outcome_str(outcome: zeron_proto::orchestration::ChildOutcome) -> &'static str {
+    use zeron_proto::orchestration::ChildOutcome;
+    match outcome {
+        ChildOutcome::Completed => "completed",
+        ChildOutcome::Errored => "errored",
+        ChildOutcome::Interrupted => "interrupted",
+        ChildOutcome::NeedsInput => "needsInput",
+    }
+}
+
+fn child_outcome_parse(s: &str) -> Option<zeron_proto::orchestration::ChildOutcome> {
+    use zeron_proto::orchestration::ChildOutcome;
+    Some(match s {
+        "completed" => ChildOutcome::Completed,
+        "errored" => ChildOutcome::Errored,
+        "interrupted" => ChildOutcome::Interrupted,
+        "needsInput" => ChildOutcome::NeedsInput,
+        _ => return None,
+    })
+}
+
 fn status_str(status: MessageStatus) -> &'static str {
     match status {
         MessageStatus::Streaming => "streaming",
@@ -868,6 +956,10 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     for (key, value) in [
         ("sourceChatId", &doc_part.source_chat_id),
         ("sourceTitle", &doc_part.source_title),
+        ("childChatId", &doc_part.child_chat_id),
+        ("childTitle", &doc_part.child_title),
+        ("childOutcome", &doc_part.child_outcome),
+        ("childExcerpt", &doc_part.child_excerpt),
     ] {
         if let Some(value) = value {
             map.insert(key, value.as_str())?;
@@ -1434,6 +1526,60 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, MessageRole::System);
         assert_eq!(entries[0].parts, vec![seam]);
+    }
+
+    #[test]
+    fn child_update_round_trips_through_the_doc() {
+        let doc = SessionDoc::init("parent").unwrap();
+        let part = MessagePart::ChildUpdate {
+            id: "child:c1:done:t1".into(),
+            child_chat_id: "c1".into(),
+            child_title: "Reviewer".into(),
+            outcome: zeron_proto::orchestration::ChildOutcome::Completed,
+            excerpt: Some("all green".into()),
+        };
+        doc.push_message(&SessionMessageEntry {
+            duration_ms: None,
+            id: "child:c1:done:t1".into(),
+            role: MessageRole::System,
+            parts: vec![part.clone()],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        })
+        .unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0].parts, vec![part]);
+        // The doc field names are the additive contract.
+        let json = serde_json::to_value(
+            to_doc_part(&MessagePart::ChildUpdate {
+                id: "i".into(),
+                child_chat_id: "c".into(),
+                child_title: "t".into(),
+                outcome: zeron_proto::orchestration::ChildOutcome::NeedsInput,
+                excerpt: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["kind"], "childUpdate");
+        assert_eq!(json["childChatId"], "c");
+        assert_eq!(json["childOutcome"], "needsInput");
+        assert!(json.get("text").is_none());
+    }
+
+    #[test]
+    fn child_update_with_missing_id_or_unknown_outcome_degrades_to_empty_text() {
+        for bad in [
+            serde_json::json!({"kind":"childUpdate","id":"x","childTitle":"t","childOutcome":"completed"}),
+            serde_json::json!({"kind":"childUpdate","id":"x","childChatId":"c","childOutcome":"vanished"}),
+            serde_json::json!({"kind":"childUpdate","id":"x","childChatId":"c"}),
+        ] {
+            assert!(matches!(
+                from_doc_part(serde_json::from_value(bad).unwrap()),
+                MessagePart::Text { ref text, .. } if text.is_empty()
+            ));
+        }
     }
     use zeron_proto::{AgentEvent, ToolCall};
 

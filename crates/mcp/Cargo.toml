@@ -9,6 +9,8 @@ publish.workspace = true
 zeron-proto.workspace = true
 zeron-doc.workspace = true
 zeron-rpc.workspace = true
+zeron-guide.workspace = true
+clap.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -18,3 +20,8 @@ uuid.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+
+[dev-dependencies]
+zeron-engine.workspace = true
+zeron-harness.workspace = true
+tempfile.workspace = true

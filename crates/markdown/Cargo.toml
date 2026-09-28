@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 
 # Block-level markdown model + append-incremental reparse. Shared by the gpui
-# desktop transcript and the mobile layout core, so it stays UI-free.
+# desktop transcript and the mobile layout core, so it stays UI-free. The
+# `@chat:` mention scanner lives with the rest of the wire vocabulary in
+# zeron-proto, so the parser tags mentions exactly where the CLI and engine do.
 [dependencies]
 pulldown-cmark.workspace = true
+zeron-proto.workspace = true

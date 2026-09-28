@@ -76,6 +76,17 @@ fn resolve_claude_executable() -> Option<PathBuf> {
     crate::executable::find_on_paths("claude", extra)
 }
 
+/// Chat-run-only args: the guide instructions appended to the system prompt,
+/// and the staged bundle as a plugin so the `zeron:zeron-cli` skill shows
+/// natively. Title runs keep `--system-prompt` and never see this.
+fn apply_agent_args(cmd: &mut Command, agent: Option<&zeron_proto::AgentContext>) {
+    let Some(agent) = agent else { return };
+    cmd.args(["--append-system-prompt", &agent.instructions]);
+    if let Some(bundle) = &agent.skill_bundle {
+        cmd.args(["--plugin-dir", bundle]);
+    }
+}
+
 /// The inline `--mcp-config` JSON for an injected server (the CLI accepts a
 /// JSON string as well as a file path).
 fn mcp_config_arg(mcp: &zeron_proto::McpServer) -> String {
@@ -167,6 +178,7 @@ impl ClaudeHarness {
     fn build_command(&self, exe: &PathBuf, request: &RunRequest) -> Command {
         let mut cmd = Command::new(exe);
         crate::compose_child_path(&mut cmd, exe);
+        crate::apply_agent_env(&mut cmd, request.agent.as_ref());
         cmd.args([
             "--print",
             "--input-format",
@@ -511,6 +523,7 @@ impl Harness for ClaudeHarness {
         request.worktree = None;
         request.attachments.clear();
         request.mcp = None;
+        request.agent = None;
         request.model_options.clear();
         request.auto_approve = false;
         self.run_with_mode(request, controls, true).await
@@ -538,11 +551,14 @@ impl ClaudeHarness {
                 "--setting-sources",
                 "",
             ]);
-        } else if let Some(mcp) = &request.mcp {
-            // Zeron's own server rides beside the user's configured servers
-            // (no `--strict-mcp-config`): the CLI merges an inline JSON
-            // config with settings-sourced ones.
-            cmd.args(["--mcp-config", &mcp_config_arg(mcp)]);
+        } else {
+            apply_agent_args(&mut cmd, request.agent.as_ref());
+            if let Some(mcp) = &request.mcp {
+                // Zeron's own server rides beside the user's configured servers
+                // (no `--strict-mcp-config`): the CLI merges an inline JSON
+                // config with settings-sourced ones.
+                cmd.args(["--mcp-config", &mcp_config_arg(mcp)]);
+            }
         }
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -1147,5 +1163,45 @@ mod mcp_injection_tests {
             parsed["mcpServers"]["zeron"]["env"]["ZERON_CHAT_ID"],
             "chat-1"
         );
+    }
+
+    fn agent_context() -> zeron_proto::AgentContext {
+        zeron_proto::AgentContext {
+            env: [("ZERON_CHAT_ID".to_owned(), "chat-1".to_owned())]
+                .into_iter()
+                .collect(),
+            cli_dir: "/data/bin".into(),
+            instructions: "guide instructions".into(),
+            skill_bundle: Some("/data/runtime/skills/hash".into()),
+            skills: vec![],
+        }
+    }
+
+    #[test]
+    fn agent_args_append_instructions_and_the_plugin_dir() {
+        let mut cmd = Command::new("claude");
+        apply_agent_args(&mut cmd, Some(&agent_context()));
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let flag = args
+            .iter()
+            .position(|a| a == "--append-system-prompt")
+            .expect("chat runs append the guide instructions");
+        assert_eq!(args[flag + 1], "guide instructions");
+        let flag = args
+            .iter()
+            .position(|a| a == "--plugin-dir")
+            .expect("chat runs load the staged bundle");
+        assert_eq!(args[flag + 1], "/data/runtime/skills/hash");
+    }
+
+    #[test]
+    fn agent_args_apply_nothing_without_a_context() {
+        let mut cmd = Command::new("claude");
+        apply_agent_args(&mut cmd, None);
+        assert_eq!(cmd.as_std().get_args().count(), 0);
     }
 }

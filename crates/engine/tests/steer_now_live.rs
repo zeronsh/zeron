@@ -145,6 +145,7 @@ async fn steer_now_interrupts_a_streaming_answer() {
                     auto_approve: true,
                     attachments: vec![],
                     worktree: None,
+                    agent: None,
                     resume: None,
                 },
             },

@@ -46,6 +46,7 @@ async fn managed_install_reaches_session_started() {
         auto_approve: true,
         attachments: Vec::new(),
         worktree: None,
+        agent: None,
         resume: None,
     };
 

@@ -1,8 +1,8 @@
 //! The explorer's footer: two collapsible sections docked under the file
 //! tree — **Subagents** (the spawn chips of the active chat's transcript,
-//! with their live status) and **Chats** (the side chats hanging off the
-//! active chat: forks, and chats an agent spawned through the Zeron MCP
-//! server). Rows borrow the left sidebar's compact session row — 29px, status
+//! plus the chats the agent itself spawned) and **Chats** (the side chats
+//! the user opened off the active chat: forks and follows). Rows borrow the
+//! left sidebar's compact session row — 29px, status
 //! glyph, title, time — minus the harness, project and device icons, which
 //! say nothing here (every row shares the parent's context). Clicking a row
 //! opens it in the right pane's surface host; the Chats header carries "+"
@@ -278,30 +278,40 @@ pub(super) struct ChildChatRow {
 }
 
 /// The live (unarchived) children of `chat_id`, most recent activity first —
-/// the same order the sidebar's Sessions list keeps.
+/// the same order the sidebar's Sessions list keeps. `spawned_by_agent`
+/// selects the section a child belongs to: `true` lists the chats an agent
+/// spawned under Subagents, `false` the user's own side chats and forks.
 pub(super) fn child_chat_rows(
     state: &AppState,
     chat_id: &str,
+    spawned_by_agent: bool,
     now: DateTime<Utc>,
 ) -> Vec<ChildChatRow> {
-    let mut rows: Vec<ChildChatRow> = state
-        .chats
-        .iter()
-        .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(chat_id))
-        .map(|chat| {
-            let activity = chat.last_message_at.unwrap_or(chat.created_at);
-            ChildChatRow {
-                chat_id: chat.id.clone(),
-                title: child_chat_title(chat).into(),
-                status: state.display_status_for(chat, now),
-                time_ago: zeron_proto::view::format_time_ago(activity, now).into(),
-                change_request: state.change_request_for_chat(chat).cloned(),
-                activity,
-            }
+    // The index is built once per `apply_chats` and keeps the most-recent
+    // activity order; per-row callers never rescan the whole chat list.
+    state
+        .children_by_parent
+        .activity
+        .get(chat_id)
+        .map(|children| {
+            children
+                .iter()
+                .map(|&ix| &state.chats[ix])
+                .filter(|chat| chat.spawned_by_agent == spawned_by_agent)
+                .map(|chat| {
+                    let activity = chat.last_message_at.unwrap_or(chat.created_at);
+                    ChildChatRow {
+                        chat_id: chat.id.clone(),
+                        title: child_chat_title(chat).into(),
+                        status: state.display_status_for(chat, now),
+                        time_ago: zeron_proto::view::format_time_ago(activity, now).into(),
+                        change_request: state.change_request_for_chat(chat).cloned(),
+                        activity,
+                    }
+                })
+                .collect()
         })
-        .collect();
-    rows.sort_by_key(|row| std::cmp::Reverse(row.activity));
-    rows
+        .unwrap_or_default()
 }
 
 /// A side chat titles itself on its first turn; until then the preview or a
@@ -323,15 +333,17 @@ pub(super) fn fingerprint(state: &AppState, chat_id: &str, now: DateTime<Utc>) -
         (row.status.map(|s| s as u8)).hash(&mut hasher);
     }
     0xC0FFEEu64.hash(&mut hasher);
-    for row in child_chat_rows(state, chat_id, now) {
-        row.chat_id.hash(&mut hasher);
-        row.title.as_ref().hash(&mut hasher);
-        (row.status as u8).hash(&mut hasher);
-        row.time_ago.as_ref().hash(&mut hasher);
-        row.change_request
-            .as_ref()
-            .map(|pr| (pr.number, pr.state as u8))
-            .hash(&mut hasher);
+    for spawned_by_agent in [true, false] {
+        for row in child_chat_rows(state, chat_id, spawned_by_agent, now) {
+            row.chat_id.hash(&mut hasher);
+            row.title.as_ref().hash(&mut hasher);
+            (row.status as u8).hash(&mut hasher);
+            row.time_ago.as_ref().hash(&mut hasher);
+            row.change_request
+                .as_ref()
+                .map(|pr| (pr.number, pr.state as u8))
+                .hash(&mut hasher);
+        }
     }
     hasher.finish()
 }
@@ -392,18 +404,20 @@ impl FilesSurface {
 
     pub(super) fn render_sections(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let now = Utc::now();
-        let (subagents, chats) = {
+        let (subagents, agent_chats, chats) = {
             let state = self.state.read(cx);
             (
                 subagent_rows(state, &self.chat_id),
-                child_chat_rows(state, &self.chat_id, now),
+                child_chat_rows(state, &self.chat_id, true, now),
+                child_chat_rows(state, &self.chat_id, false, now),
             )
         };
         self.sections.fingerprint = fingerprint(self.state.read(cx), &self.chat_id, now);
+        let subagent_count = subagents.len() + agent_chats.len();
         let wants = [
             content_height(
                 Section::Subagents,
-                subagents.len(),
+                subagent_count,
                 self.sections.shown(Section::Subagents),
             ),
             content_height(
@@ -419,7 +433,7 @@ impl FilesSurface {
         let budget = FOOTER_HEIGHT - chrome_height();
         let heights = body_budget(budget, wants, open);
         let view = cx.entity_id();
-        let subagent_body = self.render_subagent_rows(&subagents, view, theme, cx);
+        let subagent_body = self.render_subagent_rows(&subagents, &agent_chats, view, theme, cx);
         let chat_body = self.render_chat_rows(&chats, theme, cx);
         let chats_actions = self.render_chats_header_actions(theme, cx);
         div()
@@ -434,7 +448,7 @@ impl FilesSurface {
             .pb(px(FOOTER_PAD_BOTTOM))
             .child(self.render_section(
                 Section::Subagents,
-                subagents.len(),
+                subagent_count,
                 wants[0],
                 heights[0],
                 None,
@@ -684,11 +698,13 @@ impl FilesSurface {
     fn render_subagent_rows(
         &self,
         rows: &[SubagentRow],
+        chats: &[ChildChatRow],
         view: EntityId,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if rows.is_empty() {
+        let total = rows.len() + chats.len();
+        if total == 0 {
             return empty_state(
                 "Subagents will appear here when they are created",
                 None,
@@ -699,6 +715,7 @@ impl FilesSurface {
         let shown = self.sections.shown(Section::Subagents);
         let scroll = self.sections.scroll(Section::Subagents);
         let mut list = row_list("files-subagent-rows", &scroll);
+        let mut drawn = 0usize;
         for row in rows.iter().take(shown) {
             let glyph = status_glyph(
                 format!("files-subagent-{}", row.doc_id),
@@ -729,16 +746,66 @@ impl FilesSurface {
                         theme,
                     )),
             );
+            drawn += 1;
         }
-        if rows.len() > shown {
-            list = list.child(self.render_show_more(
-                Section::Subagents,
-                rows.len() - shown,
-                theme,
-                cx,
-            ));
+        for row in chats.iter().take(shown.saturating_sub(drawn)) {
+            list = list.child(self.render_child_chat_row(row, view, theme, cx));
+        }
+        if total > shown {
+            list = list.child(self.render_show_more(Section::Subagents, total - shown, theme, cx));
         }
         faded_list(list, &scroll)
+    }
+
+    /// One child-chat row: status glyph, title, PR badge and time. Shared by
+    /// the Chats section and the agent-spawned rows under Subagents.
+    fn render_child_chat_row(
+        &self,
+        row: &ChildChatRow,
+        view: EntityId,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let glyph = status_glyph(
+            format!("files-chat-{}", row.chat_id),
+            row.status,
+            view,
+            theme,
+            cx,
+        );
+        let open_id = row.chat_id.clone();
+        let menu_id = row.chat_id.clone();
+        compact_row(format!("files-chat-{}", row.chat_id), theme)
+            .aria_label(SharedString::from(format!("Open side chat {}", row.title)))
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.stop_propagation();
+                cx.emit(FilesEvent::OpenChildChat(open_id.clone()));
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |_, event: &gpui::MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(FilesEvent::ChildChatContextMenu {
+                        chat_id: menu_id.clone(),
+                        position: event.position,
+                    });
+                }),
+            )
+            .child(glyph)
+            .child(row_title(
+                format!("files-chat-title-{}", row.chat_id),
+                row.title.clone(),
+            ))
+            .children(row.change_request.clone().map(|summary| {
+                crate::change_requests::pull_request_badge(
+                    format!("files-chat-pr-{}", row.chat_id).into(),
+                    summary,
+                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                    theme,
+                )
+            }))
+            .child(time_ago_label(row.time_ago.clone(), theme))
+            .into_any_element()
     }
 
     fn render_chat_rows(
@@ -790,47 +857,7 @@ impl FilesSurface {
         let scroll = self.sections.scroll(Section::Chats);
         let mut list = row_list("files-chat-rows", &scroll);
         for row in rows.iter().take(shown) {
-            let glyph = status_glyph(
-                format!("files-chat-{}", row.chat_id),
-                row.status,
-                view,
-                theme,
-                cx,
-            );
-            let open_id = row.chat_id.clone();
-            let menu_id = row.chat_id.clone();
-            list = list.child(
-                compact_row(format!("files-chat-{}", row.chat_id), theme)
-                    .aria_label(SharedString::from(format!("Open side chat {}", row.title)))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.stop_propagation();
-                        cx.emit(FilesEvent::OpenChildChat(open_id.clone()));
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |_, event: &gpui::MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            cx.emit(FilesEvent::ChildChatContextMenu {
-                                chat_id: menu_id.clone(),
-                                position: event.position,
-                            });
-                        }),
-                    )
-                    .child(glyph)
-                    .child(row_title(
-                        format!("files-chat-title-{}", row.chat_id),
-                        row.title.clone(),
-                    ))
-                    .children(row.change_request.clone().map(|summary| {
-                        crate::change_requests::pull_request_badge(
-                            format!("files-chat-pr-{}", row.chat_id).into(),
-                            summary,
-                            crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                            theme,
-                        )
-                    }))
-                    .child(time_ago_label(row.time_ago.clone(), theme)),
-            );
+            list = list.child(self.render_child_chat_row(row, view, theme, cx));
         }
         if rows.len() > shown {
             list = list.child(self.render_show_more(Section::Chats, rows.len() - shown, theme, cx));
@@ -1201,7 +1228,7 @@ mod tests {
             chat("unrelated", Some("elsewhere"), 2),
             archived,
         ]);
-        let rows = child_chat_rows(&state, "main", Utc::now());
+        let rows = child_chat_rows(&state, "main", false, Utc::now());
         assert_eq!(
             rows.iter().map(|r| r.chat_id.as_str()).collect::<Vec<_>>(),
             ["a", "b"]
@@ -1209,6 +1236,33 @@ mod tests {
         assert_eq!(rows[0].title.as_ref(), "New side chat");
         assert_eq!(rows[1].title.as_ref(), "Investigate caching");
         assert_eq!(rows[0].status, ChatIndicator::Idle);
+    }
+
+    #[test]
+    fn child_chat_rows_split_agent_spawns_from_side_chats() {
+        let mut state = AppState::new();
+        state.apply_chats(vec![chat("main", None, 60)]);
+        let mut spawned = chat("agent-child", Some("main"), 5);
+        spawned.spawned_by_agent = true;
+        state.chats.push(spawned);
+        state.chats.push(chat("side", Some("main"), 3));
+        state.refresh_children_index();
+        let agent_rows = child_chat_rows(&state, "main", true, Utc::now());
+        assert_eq!(
+            agent_rows
+                .iter()
+                .map(|r| r.chat_id.as_str())
+                .collect::<Vec<_>>(),
+            ["agent-child"]
+        );
+        let side_rows = child_chat_rows(&state, "main", false, Utc::now());
+        assert_eq!(
+            side_rows
+                .iter()
+                .map(|r| r.chat_id.as_str())
+                .collect::<Vec<_>>(),
+            ["side"]
+        );
     }
 
     #[test]

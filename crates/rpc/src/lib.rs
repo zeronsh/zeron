@@ -59,6 +59,11 @@ pub mod methods {
     /// per pending command. Params `{chatId}`; IPC-only.
     pub const RETRY_DELIVERY: &str = "RetryDelivery";
     pub const FORK_SIDE_CHAT: &str = "ForkSideChat";
+    /// Agent-side ack that a parent chat consumed child settle updates:
+    /// `zeron chat wait`/`output` run inside the parent call it so the child
+    /// notifier's durable ledger never re-delivers acked keys.
+    /// Params `AckChildUpdatesParams`; replies `{}`.
+    pub const ACK_CHILD_UPDATES: &str = "AckChildUpdates";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
     /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
     /// connection; automatic subscriptions and retries must not call it.

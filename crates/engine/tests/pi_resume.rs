@@ -31,6 +31,7 @@ async fn pi_idle_crash_next_dispatch_loads_stored_session() {
             auto_approve: true,
             attachments: Vec::new(),
             worktree: None,
+            agent: None,
             resume: None,
         };
         core.sessions

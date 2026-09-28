@@ -273,6 +273,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         harness_session_id: None,
         harness_session_cwd: None,
         parent_chat_id: Some("parent-chat".into()),
+        spawned_by_agent: false,
         space_id: None,
         last_seen_at: None,
         room_gen: None,
@@ -1515,4 +1516,26 @@ fn side_chat_origin_syncs_and_survives_updates_and_restart() {
             .as_deref(),
         Some("main")
     );
+}
+
+#[test]
+fn spawned_by_agent_syncs_and_survives_restart() {
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    let mut child = chat("child", "dev-a");
+    child.parent_chat_id = Some("main".into());
+    child.spawned_by_agent = true;
+    let plain = chat("plain", "dev-a");
+    a.upsert_chat(&child).unwrap();
+    a.upsert_chat(&plain).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert!(b.chat("child").unwrap().unwrap().spawned_by_agent);
+    assert!(!b.chat("plain").unwrap().unwrap().spawned_by_agent);
+    let persisted = a.to_bytes().unwrap();
+    let restored = RegistryDoc::from_bytes(&persisted, "dev-a").unwrap();
+    assert!(restored.chat("child").unwrap().unwrap().spawned_by_agent);
+    // A row written by an old peer (no spawnedByAgent field) reads as false
+    // via the RawChat serde default — `plain` above proves it end to end.
 }
