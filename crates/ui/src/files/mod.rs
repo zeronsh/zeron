@@ -42,6 +42,13 @@ use crate::surface_chrome::{
     CONTROL_RADIUS as TOOLBAR_BUTTON_RADIUS, CONTROL_SIZE as TOOLBAR_BUTTON_SIZE, toolbar,
 };
 
+/// A file document opened by absolute path beyond the workspace root — a
+/// link-opened host file. It has no tree entry and no watch, and the owning
+/// device serves it read-only.
+pub(super) fn path_is_outside(path: &str) -> bool {
+    path.starts_with('/')
+}
+
 pub(super) fn toolbar_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
@@ -766,7 +773,11 @@ impl FilesSurface {
                 .chats
                 .iter()
                 .any(|chat| chat.id == self.chat_id && chat.space_id.is_none());
-        if !projectless_explorer {
+        // An editor opened by absolute path beyond the workspace has nothing
+        // the workspace watcher can report; outside files never register one.
+        let outside_editor = self.presentation.is_editor()
+            && self.editor_path.as_deref().is_some_and(path_is_outside);
+        if !projectless_explorer && !outside_editor {
             self.ensure_watch(cx);
         }
         if self.presentation.is_editor()

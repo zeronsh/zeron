@@ -740,6 +740,9 @@ pub struct AppState {
     /// Changes only when transcript/optimistic content changes. Presence,
     /// catalogs and other app-state notifications need no row derivation.
     pub(crate) transcript_revision: u64,
+    /// Changes whenever an input of [`Self::file_link_roots`] does — chat
+    /// rows, projects, this device's id — so views can memoize the roots.
+    pub(crate) link_roots_revision: u64,
     /// Optimistic user echoes per chat id, shown until the doc frame carrying
     /// the same message id arrives (client-minted ids make dedup exact).
     echoes: HashMap<String, Vec<SessionMessageEntry>>,
@@ -835,6 +838,7 @@ impl AppState {
             transcript_cache: Default::default(),
             prepared_transcripts: HashMap::new(),
             transcript_revision: 0,
+            link_roots_revision: 0,
             echoes: HashMap::new(),
             pending_sends: HashMap::new(),
             upload_progress: None,
@@ -1041,6 +1045,7 @@ impl AppState {
         }
         sort_chats(&mut chats);
         self.chats = chats;
+        self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         self.chats_synced = true;
         self.transcript_cache
             .retain(|cached| self.chats.iter().any(|c| c.id == cached.chat_id));
@@ -1091,6 +1096,7 @@ impl AppState {
     pub fn apply_spaces(&mut self, mut spaces: Vec<Space>) {
         sort_spaces(&mut spaces);
         self.spaces = spaces;
+        self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         self.spaces_synced = true;
         if self.no_project {
             self.selected_space = None;
@@ -1113,6 +1119,75 @@ impl AppState {
         if self.selected_space.is_none() && !self.no_project {
             self.selected_space = self.first_space_on_picked_device();
         }
+    }
+
+    /// The ordered checkouts a file link from `chat_id` may resolve against:
+    /// the chat's own checkout, its parent chat's, then every project root on
+    /// this device. Project roots have no owning chat — a link that matches
+    /// one opens in the linking chat's file context. `local` marks roots
+    /// whose files sit on this disk; a remote chat's worktree still resolves
+    /// links (reads go through its own device) but cannot offer local file
+    /// actions.
+    pub(crate) fn file_link_roots(
+        &self,
+        chat_id: &str,
+    ) -> Vec<crate::workspace_links::FileLinkRoot> {
+        use crate::workspace_links::FileLinkRoot;
+        // An unprobed device id means the chats on screen are the local
+        // engine's — everything shown counts as local until sync says else.
+        let on_this_device = |device: &str| {
+            self.local_device_id
+                .as_deref()
+                .is_none_or(|local| device == local)
+        };
+        let mut roots: Vec<FileLinkRoot> = Vec::new();
+        let mut push = |chat: Option<&Chat>, root: Option<&str>| {
+            let Some(root) = root.filter(|root| !root.is_empty()) else {
+                return;
+            };
+            if roots.iter().any(|existing| existing.root == root) {
+                return;
+            }
+            roots.push(FileLinkRoot {
+                chat: chat.map(|chat| chat.id.clone()),
+                local: chat.is_none_or(|chat| on_this_device(&chat.device_id)),
+                root: root.to_owned(),
+            });
+        };
+        let chat_row = |id: &str| self.chats.iter().find(|chat| chat.id == id);
+        push(
+            chat_row(chat_id),
+            chat_row(chat_id).and_then(|chat| chat.cwd.as_deref()),
+        );
+        if let Some(parent_id) = chat_row(chat_id).and_then(|chat| chat.parent_chat_id.clone()) {
+            push(
+                chat_row(&parent_id),
+                chat_row(&parent_id).and_then(|chat| chat.cwd.as_deref()),
+            );
+        }
+        for space in self.spaces.iter().filter(|space| {
+            self.local_device_id
+                .as_deref()
+                .is_none_or(|local| space.device_id == local)
+        }) {
+            push(None, Some(space.path.as_str()));
+        }
+        roots
+    }
+
+    /// Whether `chat_id` lives on this device — an outside file link from it
+    /// resolves to this disk, so its menu may offer local file actions. An
+    /// unprobed device id (or an unknown chat row) counts as local, matching
+    /// `file_link_roots`.
+    pub(crate) fn chat_is_local(&self, chat_id: &str) -> bool {
+        self.chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .is_none_or(|chat| {
+                self.local_device_id
+                    .as_deref()
+                    .is_none_or(|local| chat.device_id == local)
+            })
     }
 
     /// Optimistic local echo of a `setChatConfig` mutate: stamp the row now so
@@ -1947,6 +2022,7 @@ impl AppState {
         self.upload_progress = None;
         self.transfers.clear();
         self.local_device_id = None;
+        self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         cx.notify();
     }
 
@@ -2095,6 +2171,7 @@ impl AppState {
             engine_info.supports(zeron_proto::capabilities::HARNESS_UPDATES_V1);
         self.workspace_scope = Some(engine_info.workspace_scope);
         self.local_device_id = Some(engine_info.device_id.clone());
+        self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         if !supports_harness_updates {
             self.harness_updates.clear();
         }
@@ -2757,6 +2834,7 @@ fn spawn_local_device_probe(cx: &mut Context<AppState>, handle: EngineHandle) ->
         if let Some(id) = id {
             this.update(cx, |state, cx| {
                 state.local_device_id = Some(id);
+                state.link_roots_revision = state.link_roots_revision.wrapping_add(1);
                 state.apply_pending_deep_link(cx);
                 // Watches opened before this probe conservatively route through
                 // targetDeviceId. Recreate them now that local routing is known.
@@ -4216,6 +4294,66 @@ mod tests {
         // No spaces at all: selection clears.
         state.apply_spaces(vec![]);
         assert_eq!(state.selected_space, None);
+    }
+
+    #[test]
+    fn file_link_roots_order_chat_parent_then_projects() {
+        use crate::workspace_links::FileLinkRoot;
+        let mut state = AppState::new();
+        state.local_device_id = Some("dev".into());
+        let mut parent = chat("parent", 0, None);
+        parent.cwd = Some("/repo".into());
+        let mut fork = chat("fork", 1, None);
+        fork.cwd = Some("/fork/fork".into());
+        fork.parent_chat_id = Some("parent".into());
+        // A chat hosted on another device still contributes its checkout —
+        // reads go through it — but is flagged remote so system-level file
+        // actions stay hidden.
+        let mut remote = chat("remote", 2, None);
+        remote.device_id = "other".into();
+        remote.cwd = Some("/far/worktree".into());
+        remote.parent_chat_id = Some("fork".into());
+        state.apply_chats(vec![parent, fork, remote]);
+        state.apply_spaces(vec![
+            space("local", "dev", "/projects/zeron", 0),
+            space("remote", "other", "/remote/only", 1),
+        ]);
+        let root = |chat: Option<&str>, root: &str, local: bool| FileLinkRoot {
+            chat: chat.map(str::to_owned),
+            root: root.into(),
+            local,
+        };
+
+        let roots = state.file_link_roots("fork");
+        assert_eq!(
+            roots,
+            vec![
+                root(Some("fork"), "/fork/fork", true),
+                root(Some("parent"), "/repo", true),
+                root(None, "/projects/zeron", true),
+            ],
+            "own checkout, parent, then this device's projects"
+        );
+        assert!(state.chat_is_local("fork"));
+        assert!(!state.chat_is_local("remote"));
+
+        // An absolute path outside every known root is still a file: it
+        // resolves as an outside link owned by the linking chat.
+        let root_refs: Vec<&str> = roots.iter().map(|root| root.root.as_str()).collect();
+        assert!(matches!(
+            crate::workspace_links::first_root_owning("/elsewhere/x.md", root_refs.clone()),
+            Some(crate::workspace_links::FileLinkResolution::Outside(link))
+                if link.path == "/elsewhere/x.md" && link.outside
+        ));
+        // A path under the parent's checkout resolves to that root.
+        assert_eq!(
+            match crate::workspace_links::first_root_owning("/repo/src/lib.rs", root_refs) {
+                Some(crate::workspace_links::FileLinkResolution::Owned { root, link }) =>
+                    Some((roots[root].chat.clone(), link.path)),
+                _ => None,
+            },
+            Some((Some("parent".into()), "src/lib.rs".into()))
+        );
     }
 
     #[test]

@@ -4,13 +4,24 @@ use gpui::{SharedString, TextRun};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
+/// Maps offsets between a stage's input text and its shown text. `omissions`
+/// pairs `(input range, shown range)` in order; the shown span can be SHORTER
+/// (link truncation) or LONGER (a reserved glyph slot). Stages chain
+/// through `prior`: a slot insertion map sits under a truncation map so
+/// displayed coordinates resolve all the way back to the source text.
 #[derive(Clone, Debug, Default)]
 pub struct OffsetMap {
     pub omissions: Vec<(Range<usize>, Range<usize>)>,
+    /// The previous stage's map (closer to the source text), if any.
+    pub prior: Option<Box<OffsetMap>>,
 }
 impl OffsetMap {
-    pub fn original(&self, displayed: usize) -> usize {
-        let mut shift = 0;
+    /// This stage only: input-text offset for a shown offset.
+    fn local_original(&self, displayed: usize) -> usize {
+        // The LAST overlapping-preceding omission's end delta already carries
+        // every earlier omission's effect (the coordinate systems meet
+        // there), so assigning — not summing — is the transitive shift.
+        let mut shift: isize = 0;
         for (original, shown) in &self.omissions {
             if displayed < shown.start {
                 break;
@@ -18,12 +29,13 @@ impl OffsetMap {
             if displayed < shown.end {
                 return original.start;
             }
-            shift = original.end - shown.end;
+            shift = original.end as isize - shown.end as isize;
         }
-        displayed + shift
+        displayed.saturating_add_signed(shift)
     }
-    pub fn displayed(&self, original: usize) -> usize {
-        let mut shift = 0;
+    /// This stage only: shown offset for an input-text offset.
+    fn local_displayed(&self, original: usize) -> usize {
+        let mut shift: isize = 0;
         for (source, shown) in &self.omissions {
             if original < source.start {
                 break;
@@ -31,12 +43,14 @@ impl OffsetMap {
             if original < source.end {
                 return shown.start;
             }
-            shift = source.end - shown.end;
+            shift = source.end as isize - shown.end as isize;
         }
-        original - shift
+        original.saturating_add_signed(-shift)
     }
-    pub fn displayed_range(&self, range: Range<usize>) -> Range<usize> {
-        let mut result = self.displayed(range.start)..self.displayed(range.end);
+    /// This stage only: shown range for an input range — an input range that
+    /// overlaps a replaced span expands to cover the replacement.
+    pub(crate) fn local_displayed_range(&self, range: Range<usize>) -> Range<usize> {
+        let mut result = self.local_displayed(range.start)..self.local_displayed(range.end);
         for (source, shown) in &self.omissions {
             if range.start < source.end && range.end > source.start {
                 result.start = result.start.min(shown.start);
@@ -45,6 +59,29 @@ impl OffsetMap {
         }
         result
     }
+    /// Shown offset → source-text offset (all stages).
+    pub fn original(&self, displayed: usize) -> usize {
+        let local = self.local_original(displayed);
+        self.prior
+            .as_ref()
+            .map_or(local, |prior| prior.original(local))
+    }
+    /// Source-text offset → shown offset (all stages).
+    pub fn displayed(&self, original: usize) -> usize {
+        let mid = self
+            .prior
+            .as_ref()
+            .map_or(original, |prior| prior.displayed(original));
+        self.local_displayed(mid)
+    }
+    /// Source-text range → shown range (all stages).
+    pub fn displayed_range(&self, range: Range<usize>) -> Range<usize> {
+        let mid = match &self.prior {
+            Some(prior) => prior.displayed_range(range.clone()),
+            None => range,
+        };
+        self.local_displayed_range(mid)
+    }
 }
 #[derive(Clone)]
 pub struct OriginalText {
@@ -52,7 +89,7 @@ pub struct OriginalText {
     pub offsets: OffsetMap,
 }
 
-fn slice_runs(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
+pub(crate) fn slice_runs(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
     let mut at = 0;
     runs.iter()
         .filter_map(|run| {
@@ -126,31 +163,39 @@ pub fn truncate(
     }
     text.push_str(&flat.text[at..]);
     runs.extend(slice_runs(&flat.runs, at..flat.text.len()));
+    // This stage's ranges are in `flat.text` coordinates — map them locally;
+    // `prior` then chains through any earlier substitution to the source.
+    offsets.prior = flat
+        .original
+        .as_ref()
+        .map(|original| Box::new(original.offsets.clone()));
+    let shown = |range: &Range<usize>| offsets.local_displayed_range(range.clone());
     FlatText {
         text: text.into(),
         runs,
         links: flat
             .links
             .iter()
-            .map(|(r, url)| (offsets.displayed_range(r.clone()), url.clone()))
+            .map(|(r, url)| (shown(r), url.clone()))
             .collect(),
-        code_ranges: flat
-            .code_ranges
-            .iter()
-            .map(|r| offsets.displayed_range(r.clone()))
-            .collect(),
+        code_ranges: flat.code_ranges.iter().map(shown).collect(),
+        file_glyphs: flat.file_glyphs.iter().map(shown).collect(),
         original: Some(OriginalText {
-            text: flat.text.clone(),
+            text: flat
+                .original
+                .as_ref()
+                .map_or_else(|| flat.text.clone(), |original| original.text.clone()),
             offsets,
         }),
     }
 }
 
-use super::render::RenderOptions;
+use super::render::{INLINE_CODE_INSET_Y, RenderOptions, range_rects};
 use crate::theme::Theme;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId,
-    InspectorElementId, LayoutId, Pixels, Size, Window, prelude::*,
+    InspectorElementId, LayoutId, Pixels, Size, TextLayout, Window, div, point, prelude::*, px,
+    size,
 };
 use std::rc::Rc;
 
@@ -165,8 +210,10 @@ pub(super) fn present(
     width: Pixels,
     font_size: Pixels,
     window: &Window,
+    opts: &RenderOptions,
 ) -> FlatText {
-    truncate(flat, f32::from(width), |text, runs| {
+    let with_glyphs = with_file_link_glyphs(flat, opts);
+    truncate(&with_glyphs, f32::from(width), |text, runs| {
         window
             .text_system()
             .shape_text(text.to_owned().into(), font_size, runs, None, None)
@@ -178,6 +225,127 @@ pub(super) fn present(
             })
             .unwrap_or(f32::INFINITY)
     })
+}
+
+/// The slot reserved after a resolved file link for its trailing open glyph:
+/// four NBSPs of text advance, holding a 12px glyph 4px in — a reserved slot
+/// the shaped text never notices. Copy and selection map the slot back to the
+/// link end, so the raw text survives and nothing reflows on hover.
+const FILE_GLYPH_SLOT: &str = "\u{00A0}\u{00A0}\u{00A0}\u{00A0}";
+pub(crate) const FILE_GLYPH_SIZE: f32 = 12.0;
+pub(crate) const FILE_GLYPH_GAP: f32 = 4.0;
+
+/// Reserve a slot after every file link the surface's roots resolve. Web
+/// links and targets no known root owns keep their shape, as does a
+/// paragraph that is nothing but one file link — that renders as the sole
+/// file row with its own icon tile.
+fn with_file_link_glyphs(flat: &FlatText, opts: &RenderOptions) -> FlatText {
+    let Some(ui) = opts.link.as_ref().filter(|ui| ui.file_roots.is_some()) else {
+        return flat.clone();
+    };
+    if flat.links.is_empty() || paragraph_is_sole_file_link(flat, opts.workspace_root.as_deref()) {
+        return flat.clone();
+    }
+    let insertions: Vec<usize> = flat
+        .links
+        .iter()
+        .filter(|(_, target)| ui.file_link(target).is_some())
+        .map(|(range, _)| range.end)
+        .collect();
+    if insertions.is_empty() {
+        return flat.clone();
+    }
+    // Positions after an insertion slide by the slot length; an insertion
+    // point itself resolves to its "before" side so a range ending on it
+    // never swallows its own slot.
+    let shift_before = |offset: usize| -> usize {
+        insertions
+            .iter()
+            .filter(|at| **at < offset)
+            .map(|_| FILE_GLYPH_SLOT.len())
+            .sum()
+    };
+    let shift_through = |offset: usize| -> usize {
+        insertions
+            .iter()
+            .filter(|at| **at <= offset)
+            .map(|_| FILE_GLYPH_SLOT.len())
+            .sum()
+    };
+    let map_range = |range: &Range<usize>| {
+        range.start + shift_through(range.start)..range.end + shift_before(range.end)
+    };
+    let slot_run = |at: usize| {
+        let mut run = slice_runs(&flat.runs, at..flat.text.len())
+            .into_iter()
+            .next()
+            .or_else(|| flat.runs.first().cloned())?;
+        run.len = FILE_GLYPH_SLOT.len();
+        run.underline = None;
+        run.strikethrough = None;
+        Some(run)
+    };
+    let Some(slot_runs): Option<Vec<TextRun>> = insertions.iter().map(|at| slot_run(*at)).collect()
+    else {
+        return flat.clone();
+    };
+
+    let mut text =
+        String::with_capacity(flat.text.len() + insertions.len() * FILE_GLYPH_SLOT.len());
+    let mut runs: Vec<TextRun> = Vec::new();
+    let mut offsets = OffsetMap::default();
+    let mut glyphs = Vec::with_capacity(insertions.len());
+    let mut at = 0;
+    for (ix, insert_at) in insertions.iter().enumerate() {
+        text.push_str(&flat.text[at..*insert_at]);
+        runs.extend(slice_runs(&flat.runs, at..*insert_at));
+        let start = text.len();
+        text.push_str(FILE_GLYPH_SLOT);
+        runs.push(slot_runs[ix].clone());
+        offsets
+            .omissions
+            .push((*insert_at..*insert_at, start..text.len()));
+        glyphs.push(start..text.len());
+        at = *insert_at;
+    }
+    text.push_str(&flat.text[at..]);
+    runs.extend(slice_runs(&flat.runs, at..flat.text.len()));
+    offsets.prior = flat
+        .original
+        .as_ref()
+        .map(|original| Box::new(original.offsets.clone()));
+    FlatText {
+        text: text.into(),
+        runs,
+        links: flat
+            .links
+            .iter()
+            .map(|(range, url)| (map_range(range), url.clone()))
+            .collect(),
+        code_ranges: flat.code_ranges.iter().map(&map_range).collect(),
+        file_glyphs: glyphs,
+        original: Some(OriginalText {
+            text: flat
+                .original
+                .as_ref()
+                .map_or_else(|| flat.text.clone(), |original| original.text.clone()),
+            offsets,
+        }),
+    }
+}
+
+/// Whether the whole paragraph is one workspace file link: it renders as the
+/// sole-file row (file icon tile), which carries no trailing glyph.
+fn paragraph_is_sole_file_link(flat: &FlatText, workspace_root: Option<&str>) -> bool {
+    let Some(root) = workspace_root else {
+        return false;
+    };
+    let [(range, target)] = flat.links.as_slice() else {
+        return false;
+    };
+    flat.text[..range.start].trim().is_empty()
+        && flat.text[range.end..].trim().is_empty()
+        && crate::workspace_links::resolve_workspace_file_link(target, root).is_some()
 }
 impl IntoElement for ResponsiveText {
     type Element = Self;
@@ -209,6 +377,7 @@ impl Element for ResponsiveText {
                 .to_pixels(font_size.into(), window.rem_size()),
         );
         let flat = self.flat.clone();
+        let opts = self.opts.clone();
         let id = window.request_measured_layout(
             Default::default(),
             move |known, available, window, _| {
@@ -216,7 +385,7 @@ impl Element for ResponsiveText {
                     AvailableSpace::Definite(width) => Some(width),
                     _ => None,
                 });
-                let shown = width.map(|width| present(&flat, width, font_size, window));
+                let shown = width.map(|width| present(&flat, width, font_size, window, &opts));
                 let flat = shown.as_ref().unwrap_or(&flat);
                 let lines = window
                     .text_system()
@@ -247,7 +416,7 @@ impl Element for ResponsiveText {
         cx: &mut App,
     ) -> AnyElement {
         let font_size = window.text_style().font_size.to_pixels(window.rem_size());
-        let flat = present(&self.flat, bounds.size.width, font_size, window);
+        let flat = present(&self.flat, bounds.size.width, font_size, window, &self.opts);
         let mut child =
             super::render::flat_text_presented_element(&flat, self.ix, &self.opts, &self.theme);
         child.prepaint_as_root(
@@ -272,6 +441,104 @@ impl Element for ResponsiveText {
     }
 }
 
+/// Paints the trailing open glyph of every resolved file link over the
+/// shaped text — the same reserved-slot overlay pattern, so the NBSP slots
+/// keep layout, selection and copy stable.
+pub(crate) struct FileLinkGlyphs {
+    pub id: SharedString,
+    pub child: AnyElement,
+    pub layout: TextLayout,
+    pub slots: Vec<Range<usize>>,
+}
+
+impl IntoElement for FileLinkGlyphs {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for FileLinkGlyphs {
+    type RequestLayoutState = ();
+    type PrepaintState = Vec<AnyElement>;
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone().into())
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<AnyElement> {
+        self.child.prepaint(window, cx);
+        let theme = Theme::of(cx).clone();
+        let mut overlays = Vec::new();
+        for slot in &self.slots {
+            let Some(rect) = range_rects(&self.layout, slot, 0.0, INLINE_CODE_INSET_Y)
+                .first()
+                .copied()
+            else {
+                continue;
+            };
+            let mut icon_el = div()
+                .w(px(FILE_GLYPH_SIZE))
+                .h(rect.size.height)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
+                        .size(px(FILE_GLYPH_SIZE))
+                        .text_color(theme.text_faint),
+                )
+                .into_any_element();
+            icon_el.prepaint_as_root(
+                point(rect.origin.x + px(FILE_GLYPH_GAP), rect.origin.y),
+                size(px(FILE_GLYPH_SIZE), rect.size.height).map(AvailableSpace::Definite),
+                window,
+                cx,
+            );
+            overlays.push(icon_el);
+        }
+        overlays
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        overlays: &mut Vec<AnyElement>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+        for overlay in overlays {
+            overlay.paint(window, cx);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{
@@ -290,6 +557,79 @@ mod tests {
     }
     fn measured(text: &str, _: &[TextRun]) -> f32 {
         text.graphemes(true).count() as f32
+    }
+
+    #[test]
+    fn file_link_glyphs_reserve_a_slot_only_for_resolved_files() {
+        use super::super::render::{LinkOutcome, LinkUi};
+        let run = |text: &str, link: Option<&str>| InlineRun {
+            text: text.into(),
+            style: InlineStyle {
+                link: link.map(str::to_owned),
+                ..Default::default()
+            },
+        };
+        let flat = flatten_runs(
+            &[
+                run("see ", None),
+                run("src/lib.rs", Some("src/lib.rs")),
+                run(" and ", None),
+                run("docs", Some("https://example.com/x")),
+                run(" and ", None),
+                run("elsewhere.rs", Some("../elsewhere.rs")),
+            ],
+            &Theme::dark(),
+            false,
+        );
+        let mut opts = RenderOptions::settled("row".into());
+        opts.workspace_root = Some("/repo".into());
+        opts.link = Some(LinkUi {
+            source_session: Some("chat".into()),
+            source_local: true,
+            file_roots: Some(Rc::new(vec![crate::workspace_links::FileLinkRoot {
+                chat: Some("chat".into()),
+                root: "/repo".into(),
+                local: true,
+            }])),
+            handler: Rc::new(|_, _, _| LinkOutcome::Rejected),
+        });
+        let shown = with_file_link_glyphs(&flat, &opts);
+        // Only the resolved file link grows a slot: the web link and the
+        // escaped target keep their shape.
+        assert_eq!(shown.file_glyphs.len(), 1);
+        assert_eq!(&shown.text[shown.file_glyphs[0].clone()], FILE_GLYPH_SLOT);
+        assert_eq!(shown.links.len(), 3);
+        // The reserved slot sits right after the link and never reaches copy
+        // or selection — both glyph ends map back to the link's end.
+        let slot = &shown.file_glyphs[0];
+        assert_eq!(slot.start, shown.links[0].0.end);
+        let map = &shown.original.as_ref().unwrap().offsets;
+        assert_eq!(map.original(slot.start), map.original(slot.end));
+        assert_eq!(map.original(slot.start), map.original(slot.start - 1) + 1);
+
+        // A paragraph that is nothing but one file link stays the sole-file
+        // row (icon tile), never the trailing glyph.
+        let sole = flatten_runs(
+            &[run("src/lib.rs", Some("src/lib.rs"))],
+            &Theme::dark(),
+            false,
+        );
+        assert!(with_file_link_glyphs(&sole, &opts).file_glyphs.is_empty());
+
+        // Without a root snapshot no link grows a glyph (previews, web-only
+        // surfaces).
+        let mut no_roots = opts.clone();
+        no_roots.link = Some(LinkUi {
+            source_session: Some("chat".into()),
+            source_local: false,
+            file_roots: None,
+            handler: Rc::new(|_, _, _| LinkOutcome::Rejected),
+        });
+        assert!(
+            with_file_link_glyphs(&flat, &no_roots)
+                .file_glyphs
+                .is_empty()
+        );
     }
     #[test]
     fn truncation_preserves_graphemes_destinations_and_original_selection() {

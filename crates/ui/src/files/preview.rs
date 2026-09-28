@@ -1220,7 +1220,7 @@ impl FilesSurface {
                     }
                     Err(error) => {
                         tracing::warn!(path = %task_path, error = %error, "workspace file load failed");
-                        document.set_error(error.to_string());
+                        document.set_error(read_error_message(&error));
                         surface.sync_preview_list();
                     }
                 }
@@ -2285,7 +2285,12 @@ impl FilesSurface {
             .documents
             .get(path)
             .is_some_and(|d| d.show_markdown);
-        let parts = path.split('/').collect::<Vec<_>>();
+        // Outside paths are absolute: the empty crumb before their leading
+        // slash is not a segment.
+        let parts = path
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
         let reveal_path = path.to_string();
         let tooltip_path: SharedString = path.to_string().into();
         let can_save = !self.target_change_pending
@@ -2661,8 +2666,33 @@ impl FilesSurface {
         if let Some(editor) = &editor {
             self.sync_editor_comment_anchors(path, editor, cx);
         }
+        let outside = self
+            .preview
+            .documents
+            .get(path)
+            .and_then(|document| document.file.as_ref())
+            .is_some_and(|file| {
+                file.read_only_reason == Some(WorkspaceReadOnlyReason::OutsideWorkspace)
+            });
         if let Some(view) = self.prepare_markdown_preview(path, editor.as_ref(), cx) {
-            return view.into_any_element();
+            return if outside {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(outside_read_only_row(theme))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .min_w_0()
+                            .child(view.into_any_element()),
+                    )
+                    .into_any_element()
+            } else {
+                view.into_any_element()
+            };
         }
 
         let Some(document) = self.preview.documents.get(path) else {
@@ -2749,6 +2779,9 @@ impl FilesSurface {
             .min_h_0()
             .flex()
             .flex_col()
+            .when(outside, |element| {
+                element.child(outside_read_only_row(theme))
+            })
             .when(truncated, |element| {
                 element.child(
                     div()
@@ -3249,6 +3282,38 @@ fn centered_state(message: impl Into<SharedString>, color: gpui::Hsla) -> AnyEle
         .into_any_element()
 }
 
+/// The read-only line an outside file shows above its content — text or
+/// rendered Markdown — matching the truncated-preview row's shape.
+fn outside_read_only_row(theme: &Theme) -> AnyElement {
+    div()
+        .h(px(28.0))
+        .flex_none()
+        .px(px(10.0))
+        .border_b_1()
+        .border_color(theme.border)
+        .bg(crate::theme::wash(0.03))
+        .flex()
+        .items_center()
+        .text_size(px(10.0))
+        .text_color(theme.text_muted)
+        .child(read_only_message(Some(
+            WorkspaceReadOnlyReason::OutsideWorkspace,
+        )))
+        .into_any_element()
+}
+
+/// A failed read surfaces in the document's error state: a missing file
+/// shows its own message instead of the transport's RPC framing; every
+/// other failure keeps its wording.
+fn read_error_message(error: &super::client::FilesClientError) -> SharedString {
+    match error {
+        super::client::FilesClientError::Request(message) if message == "file not found" => {
+            "File not found.".into()
+        }
+        _ => error.to_string().into(),
+    }
+}
+
 fn read_only_message(reason: Option<WorkspaceReadOnlyReason>) -> SharedString {
     match reason {
         Some(WorkspaceReadOnlyReason::Binary) => "Binary files cannot be previewed.",
@@ -3261,6 +3326,7 @@ fn read_only_message(reason: Option<WorkspaceReadOnlyReason>) -> SharedString {
         Some(WorkspaceReadOnlyReason::MixedLineEndings) => {
             "Files with mixed line endings are read-only."
         }
+        Some(WorkspaceReadOnlyReason::OutsideWorkspace) => "Read-only: outside this chat's folder.",
         Some(WorkspaceReadOnlyReason::NotRegularFile) | None => "This file cannot be previewed.",
     }
     .into()
@@ -3269,6 +3335,29 @@ fn read_only_message(reason: Option<WorkspaceReadOnlyReason>) -> SharedString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A missing file gets its own wording — the transport's RPC framing
+    /// never reaches the reader — while every other failure keeps its own.
+    #[test]
+    fn missing_files_and_outside_reads_show_their_own_wording() {
+        assert_eq!(
+            read_error_message(&crate::files::client::FilesClientError::Request(
+                "file not found".into()
+            )),
+            SharedString::from("File not found.")
+        );
+        assert_eq!(
+            read_error_message(&crate::files::client::FilesClientError::Transport(
+                "gone".into()
+            ))
+            .to_string(),
+            "workspace connection unavailable: gone"
+        );
+        assert_eq!(
+            read_only_message(Some(WorkspaceReadOnlyReason::OutsideWorkspace)),
+            SharedString::from("Read-only: outside this chat's folder.")
+        );
+    }
 
     // Rendering a preview needs a window, so this asserts on `line_height`,
     // the single source both the uniform-height hint passed to

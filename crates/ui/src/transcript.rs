@@ -3144,6 +3144,12 @@ pub struct Transcript {
     /// boundary invalidates only the live tail per commit.
     render_cache: Rc<RefCell<RenderCache>>,
     workspace_link: Option<render::LinkUi>,
+    /// File-link roots per linking chat, valid for one
+    /// `AppState::link_roots_revision`: every rendered row asks for them.
+    file_link_roots: (
+        u64,
+        HashMap<SharedString, Rc<Vec<crate::workspace_links::FileLinkRoot>>>,
+    ),
     rendered_rows: HashSet<SharedString>,
     /// Last UI typography generation reflected in `list` item measurements.
     /// Family and size changes can alter prose wrapping without changing row
@@ -3292,13 +3298,52 @@ impl Transcript {
         self.workspace_link = Some(handler);
     }
 
-    pub(crate) fn link_ui(&self) -> Option<render::LinkUi> {
+    pub(crate) fn link_ui(&mut self, cx: &mut Context<Self>) -> Option<render::LinkUi> {
+        let source = self
+            .workspace_link
+            .as_ref()
+            .and_then(|link| link.source_session.clone())
+            .or_else(|| self.chat_id.clone())?;
+        self.link_ui_for(&SharedString::from(source), cx)
+    }
+
+    /// The workspace-link handler bound to `source_chat_id`: the linking
+    /// chat's own checkout resolves first, then its parent's and this
+    /// device's project roots, and the roots come along for the trailing
+    /// open glyph and the file menu.
+    fn link_ui_for(
+        &mut self,
+        source_chat_id: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> Option<render::LinkUi> {
+        let roots = self.file_link_roots(source_chat_id, cx);
+        let source_local = self.state.read(cx).chat_is_local(source_chat_id);
         self.workspace_link.clone().map(|mut link| {
-            if link.source_session.is_none() {
-                link.source_session = self.chat_id.clone();
-            }
+            link.source_session = Some(source_chat_id.to_string());
+            link.source_local = source_local;
+            link.file_roots = Some(roots);
             link
         })
+    }
+
+    /// The ordered checkouts a file link from `chat_id` may open against:
+    /// the chat's own, its parent's, then this device's project roots. The
+    /// memo keeps row rendering from rebuilding them every frame; a state
+    /// change that can move a root clears it.
+    fn file_link_roots(
+        &mut self,
+        chat_id: &SharedString,
+        cx: &gpui::App,
+    ) -> Rc<Vec<crate::workspace_links::FileLinkRoot>> {
+        let state = self.state.read(cx);
+        let (revision, memo) = &mut self.file_link_roots;
+        if *revision != state.link_roots_revision {
+            *revision = state.link_roots_revision;
+            memo.clear();
+        }
+        memo.entry(chat_id.clone())
+            .or_insert_with(|| Rc::new(state.file_link_roots(chat_id)))
+            .clone()
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
@@ -3412,6 +3457,7 @@ impl Transcript {
             veil_attach_pending: true,
             render_cache: Rc::new(RefCell::new(RenderCache::default())),
             workspace_link: None,
+            file_link_roots: Default::default(),
             rendered_rows: HashSet::new(),
             typography_generation: crate::typography::generation(cx),
             content_width: crate::settings::transcript_width(cx),
@@ -6414,7 +6460,7 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
-                    link: self.link_ui(),
+                    link: self.link_ui(cx),
                     workspace_root: workspace_root.clone(),
                     code,
                 };
@@ -6464,7 +6510,7 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
-                    link: self.link_ui(),
+                    link: self.link_ui(cx),
                     workspace_root: workspace_root.clone(),
                     code,
                 };
