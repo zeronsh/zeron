@@ -2840,7 +2840,10 @@ impl Changes {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let input = cx.new(|cx| ComposerInput::new("Request a change…", cx));
+        let input = cx.new(|cx| {
+            ComposerInput::new("Request a change…", cx)
+                .with_scrollable_viewport(comments::DRAFT_INPUT_HEIGHT)
+        });
         let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Submitted => this.commit_draft(cx),
             ComposerInputEvent::Edited => cx.notify(),

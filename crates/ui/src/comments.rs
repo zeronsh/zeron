@@ -258,6 +258,7 @@ pub const CARD_PAD_V: f32 = 20.0;
 pub const CARD_HEADER_HEIGHT: f32 = 22.0;
 pub const CARD_LINE_HEIGHT: f32 = 18.0;
 pub const DRAFT_CARD_HEIGHT: f32 = 116.0;
+pub const DRAFT_INPUT_HEIGHT: f32 = 46.0;
 pub const COMMENT_ADDER_SIZE: f32 = 16.0;
 const CARD_GAP: f32 = 6.0;
 const CARD_WRAP_COLUMNS: usize = 64;

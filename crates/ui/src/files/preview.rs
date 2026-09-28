@@ -45,6 +45,10 @@ const EDITOR_COMMENT_CARD_WIDTH: f32 = 320.0;
 const EDITOR_COMMENT_CARD_MARGIN: f32 = 8.0;
 const EDITOR_COMMENT_CARD_MIN_ANCHORED_WIDTH: f32 = 220.0;
 const EDITOR_COMMENT_DRAFT_HEIGHT: f32 = 92.0;
+const EDITOR_COMMENT_INPUT_HEIGHT: f32 = 48.0;
+const EDITOR_COMMENT_INPUT_PADDING: f32 = 5.0;
+const EDITOR_COMMENT_INPUT_VIEWPORT: f32 =
+    EDITOR_COMMENT_INPUT_HEIGHT - 2.0 * EDITOR_COMMENT_INPUT_PADDING - 2.0;
 // A read response is capped at 8 MiB and editable files at 1 MiB. The byte
 // budget bounds large previews while the entry cap bounds many tiny editors.
 // Protected documents may exceed either limit rather than risk losing work.
@@ -925,12 +929,12 @@ impl FilesSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let placeholder = if self
+        let markdown = self
             .preview
             .documents
             .get(&path)
-            .is_some_and(|d| d.show_markdown)
-        {
+            .is_some_and(|d| d.show_markdown);
+        let placeholder = if markdown {
             "Request a change…"
         } else {
             "Add a comment…"
@@ -938,6 +942,11 @@ impl FilesSurface {
         let input = cx.new(|cx| {
             ComposerInput::new(placeholder, cx)
                 .with_text_metrics(12.0, crate::composer::INPUT_LINE_HEIGHT)
+                .with_scrollable_viewport(if markdown {
+                    comments::DRAFT_INPUT_HEIGHT
+                } else {
+                    EDITOR_COMMENT_INPUT_VIEWPORT
+                })
         });
         let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Submitted => this.commit_editor_comment(cx),
@@ -2661,6 +2670,26 @@ impl FilesSurface {
         if let Some(editor) = &editor {
             self.sync_editor_comment_anchors(path, editor, cx);
         }
+        if let Some(draft) = self
+            .preview
+            .comment_draft
+            .as_ref()
+            .filter(|draft| draft.path == path)
+        {
+            let height = if self
+                .preview
+                .documents
+                .get(path)
+                .is_some_and(|d| d.show_markdown)
+            {
+                comments::DRAFT_INPUT_HEIGHT
+            } else {
+                EDITOR_COMMENT_INPUT_VIEWPORT
+            };
+            draft
+                .input
+                .update(cx, |input, cx| input.set_scrollable_viewport(height, cx));
+        }
         if let Some(view) = self.prepare_markdown_preview(path, editor.as_ref(), cx) {
             return view.into_any_element();
         }
@@ -3002,7 +3031,7 @@ impl FilesSurface {
             .py(px(8.0))
             .child(
                 div()
-                    .h(px(48.0))
+                    .h(px(EDITOR_COMMENT_INPUT_HEIGHT))
                     .flex_none()
                     .overflow_hidden()
                     .rounded(px(7.0))
@@ -3010,7 +3039,7 @@ impl FilesSurface {
                     .border_color(theme.border)
                     .bg(theme.input_glass_bg())
                     .px(px(8.0))
-                    .py(px(5.0))
+                    .py(px(EDITOR_COMMENT_INPUT_PADDING))
                     .text_size(px(12.0))
                     .child(input.into_any_element()),
             )

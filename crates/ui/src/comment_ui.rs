@@ -253,7 +253,7 @@ pub(crate) fn render_comment_draft<T: 'static>(
                 )
                 .child(
                     div()
-                        .h(px(46.0))
+                        .h(px(comments::DRAFT_INPUT_HEIGHT))
                         .flex_none()
                         .overflow_hidden()
                         .text_size(px(12.0))

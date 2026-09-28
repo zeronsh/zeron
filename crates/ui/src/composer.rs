@@ -1752,6 +1752,10 @@ pub struct ComposerInput {
     viewport_height: Option<f32>,
     /// Final content budget, excluding temporary overflow during a resize.
     settled_viewport_height: Option<f32>,
+    /// Comment drafts use a fixed viewport instead of the main composer's
+    /// auto-grow budget. The rail below drives this same `scroll_top` value.
+    scrollable_viewport: bool,
+    comment_scrollbar: crate::popover::MenuScrollbarState,
     resizing: bool,
     overflow_top_padding: f32,
     needs_measure: bool,
@@ -1855,6 +1859,8 @@ impl ComposerInput {
             scroll_top: 0.0,
             viewport_height: None,
             settled_viewport_height: None,
+            scrollable_viewport: false,
+            comment_scrollbar: crate::popover::MenuScrollbarState::default(),
             resizing: false,
             overflow_top_padding: 0.0,
             needs_measure: true,
@@ -1908,6 +1914,42 @@ impl ComposerInput {
         self.line_height = px(line_height);
         self.content_height = line_height;
         self
+    }
+
+    /// Use a fixed vertical viewport with the input's own scroll position.
+    ///
+    /// This is intended for compact comment fields, whose parent card clips a
+    /// fixed-height region. The main composer never uses this mode: its
+    /// wrapper continues to supply the animated viewport each render.
+    pub fn with_scrollable_viewport(mut self, height: f32) -> Self {
+        let height = height.max(1.0);
+        self.scrollable_viewport = true;
+        self.viewport_height = Some(height);
+        self.settled_viewport_height = Some(height);
+        self.resizing = false;
+        self.overflow_top_padding = 0.0;
+        self
+    }
+
+    /// Update the fixed viewport for a comment input that survives a surface
+    /// mode change (for example Markdown preview ↔ source editor).
+    pub fn set_scrollable_viewport(&mut self, height: f32, cx: &mut Context<Self>) {
+        let height = height.max(1.0);
+        if self.scrollable_viewport
+            && self.viewport_height == Some(height)
+            && self.settled_viewport_height == Some(height)
+        {
+            return;
+        }
+        self.scrollable_viewport = true;
+        self.viewport_height = Some(height);
+        self.settled_viewport_height = Some(height);
+        self.resizing = false;
+        self.overflow_top_padding = 0.0;
+        self.scroll_top = self
+            .scroll_top
+            .min(input_max_scroll(self.content_height, height));
+        cx.notify();
     }
 
     /// Keep compact fields on one row and reveal the caret horizontally.
@@ -3804,6 +3846,28 @@ impl ComposerInput {
         self.content_height
     }
 
+    fn scroll_fade_geometry(&self) -> (f32, f32) {
+        if self.scrollable_viewport {
+            // Keep one full row outside the edge ramps. Compact comments do
+            // not have the chat composer's top padding to fade underneath.
+            let height = self.viewport_height.unwrap_or(self.configured_line_height);
+            let band = ((height - self.configured_line_height) / 2.0).clamp(0.0, INPUT_FADE_BAND);
+            (band, 0.0)
+        } else {
+            (INPUT_FADE_BAND, self.max_ascent - self.overflow_top_padding)
+        }
+    }
+
+    fn scroll_fade_edges(&self, visible_height: f32) -> (bool, bool) {
+        input_overflow_edges(
+            self.content_height,
+            self.settled_viewport_height
+                .unwrap_or(TEXTAREA_MAX - TEXTAREA_PAD_V),
+            visible_height,
+            self.scroll_top,
+        )
+    }
+
     fn paint_bounds(&self, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
         let visible = f32::from(bounds.size.height);
         let top_overflow = input_overflow_edges(
@@ -3864,6 +3928,78 @@ impl ComposerInput {
             ),
         );
         self.scroll_top != previous
+    }
+
+    fn comment_scrollbar_metrics(&mut self) -> Option<crate::popover::MenuScrollbarMetrics> {
+        if !self.scrollable_viewport {
+            return None;
+        }
+        let viewport = self
+            .settled_viewport_height
+            .or(self.viewport_height)
+            .or_else(|| self.last_bounds.map(|bounds| f32::from(bounds.size.height)))?;
+        let max_scroll = input_max_scroll(self.content_height, viewport);
+        self.comment_scrollbar.note_scroll_offset(self.scroll_top);
+        crate::popover::MenuScrollbarMetrics::from_viewport(viewport, max_scroll, self.scroll_top)
+    }
+
+    fn set_comment_scroll_from_fraction(&mut self, fraction: f32, max_scroll: f32) -> bool {
+        let next = (fraction * max_scroll).clamp(0.0, max_scroll);
+        if next == self.scroll_top {
+            return false;
+        }
+        self.invalidate_mention_tooltip();
+        self.scroll_top = next;
+        self.follow_cursor = false;
+        true
+    }
+}
+
+/// Comment fields use the same quiet floating rail as menus, but their text
+/// element owns the scroll offset instead of a GPUI `ScrollHandle`. Keeping
+/// the rail on this entity preserves caret, hit-testing, and wheel semantics.
+impl crate::popover::ScrollRailHost for ComposerInput {
+    fn rail_bar(&mut self) -> &mut crate::popover::MenuScrollbarState {
+        &mut self.comment_scrollbar
+    }
+
+    fn rail_metrics(&mut self) -> Option<crate::popover::MenuScrollbarMetrics> {
+        self.comment_scrollbar_metrics()
+    }
+
+    fn rail_press(&mut self, pointer_y: Pixels) -> bool {
+        let Some(metrics) = self.comment_scrollbar_metrics() else {
+            return false;
+        };
+        let Some(bounds) = self.last_bounds else {
+            return false;
+        };
+        self.comment_scrollbar
+            .begin_press_in(&metrics, bounds.top(), pointer_y);
+        let Some(fraction) =
+            self.comment_scrollbar
+                .drag_target_in(&metrics, bounds.top(), pointer_y)
+        else {
+            return false;
+        };
+        self.set_comment_scroll_from_fraction(fraction, metrics.max_scroll)
+            || metrics.max_scroll > 0.0
+    }
+
+    fn rail_drag_to(&mut self, pointer_y: Pixels) -> bool {
+        let Some(metrics) = self.comment_scrollbar_metrics() else {
+            return false;
+        };
+        let Some(bounds) = self.last_bounds else {
+            return false;
+        };
+        let Some(fraction) =
+            self.comment_scrollbar
+                .drag_target_in(&metrics, bounds.top(), pointer_y)
+        else {
+            return false;
+        };
+        self.set_comment_scroll_from_fraction(fraction, metrics.max_scroll)
     }
 }
 
@@ -4174,6 +4310,12 @@ impl gpui::Element for ComposerTextElement {
             input.last_bounds = Some(bounds);
             if scrolled || layout_changed {
                 cx.emit(ComposerInputEvent::ViewportChanged);
+                if input.scrollable_viewport {
+                    // Comment rails are rendered by this entity. The first
+                    // resolved layout must schedule one more render so a
+                    // newly overflowing draft exposes its rail immediately.
+                    cx.notify();
+                }
             }
         });
         let input = self.input.read(cx);
@@ -4494,20 +4636,25 @@ impl Render for ComposerInput {
                     .ok();
             }));
         }
-        let theme = Theme::of(cx);
-        let popup_theme = theme.for_popup();
+        let base_theme = Theme::of(cx).clone();
+        let popup_theme = base_theme.for_popup();
         let theme = if self.key_context == "PaletteSearch"
             || self.accessibility_role == gpui::Role::SearchInput
         {
             &popup_theme
         } else {
-            theme
+            &base_theme
         };
         let text_color = if self.content.is_empty() {
             theme.text_faint
         } else {
             theme.text
         };
+        let scrollbar = self
+            .scrollable_viewport
+            .then(|| crate::popover::rail(self, "comment-input-scrollbar", theme, cx))
+            .flatten();
+        let scrollable_viewport = self.scrollable_viewport;
         div()
             .id(("composer-input", cx.entity_id()))
             .role(self.accessibility_role)
@@ -4567,15 +4714,24 @@ impl Render for ComposerInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .w_full()
+            .when(scrollable_viewport, |el| {
+                el.relative()
+                    .pr(px(12.0))
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        if this.comment_scrollbar.set_list_hovered(*hovered) {
+                            cx.notify();
+                        }
+                    }))
+            })
             .text_size(crate::typography::ui_rems(self.text_size))
             .line_height(crate::typography::ui_rems(self.configured_line_height))
             .text_color(text_color)
             .font_family(theme.font_sans.clone())
             .child({
                 let input = cx.entity();
-                let ascent = self.max_ascent;
+                let (fade_band, fade_inset) = self.scroll_fade_geometry();
                 crate::edge_fade::edge_faded(
-                    INPUT_FADE_BAND,
+                    fade_band,
                     true,
                     true,
                     ComposerTextElement {
@@ -4585,25 +4741,18 @@ impl Render for ComposerInput {
                             .unwrap_or(TEXTAREA_MAX - TEXTAREA_PAD_V),
                     },
                 )
-                // Fade through the existing top padding, like the transcript
-                // scrolling under its chrome. Account for GPUI's baseline
-                // sampling without consuming another inset inside the text box.
-                .inset_top(ascent - self.overflow_top_padding)
+                // The main composer fades through its top padding; compact
+                // fields keep both ramps at the viewport edges.
+                .inset_top(fade_inset)
                 .fade_overflow_y_with(move |cx| {
                     let input = input.read(cx);
                     let visible_height = input
                         .last_bounds
                         .map_or(0.0, |bounds| f32::from(bounds.size.height));
-                    input_overflow_edges(
-                        input.content_height,
-                        input
-                            .settled_viewport_height
-                            .unwrap_or(TEXTAREA_MAX - TEXTAREA_PAD_V),
-                        visible_height,
-                        input.scroll_top,
-                    )
+                    input.scroll_fade_edges(visible_height)
                 })
             })
+            .children(scrollbar)
     }
 }
 
@@ -13094,6 +13243,160 @@ mod tests {
             input_scroll_offset_for_cursor(0.0, 290.0, 20.0, 300.0, 100.0, None),
             200.0
         );
+    }
+
+    #[gpui::test]
+    fn compact_comment_fades_preserve_a_readable_row_and_endpoints(cx: &mut gpui::TestAppContext) {
+        with_composer_input(cx, |input, _, cx| {
+            input.content_height = 300.0;
+            assert_eq!(
+                input.scroll_fade_geometry(),
+                (
+                    INPUT_FADE_BAND,
+                    input.max_ascent - input.overflow_top_padding
+                )
+            );
+            for height in [36.0, 46.0] {
+                input.set_scrollable_viewport(height, cx);
+                let (band, inset) = input.scroll_fade_geometry();
+                assert_eq!(inset, 0.0, "compact comments have no top chrome");
+                assert!(band > 0.0 && band <= INPUT_FADE_BAND);
+                assert!(
+                    height - inset - 2.0 * band >= input.configured_line_height,
+                    "opposing fades must leave at least one full row readable"
+                );
+                input.scroll_top = 0.0;
+                assert_eq!(input.scroll_fade_edges(height), (false, true));
+                input.scroll_top = 100.0;
+                assert_eq!(input.scroll_fade_edges(height), (true, true));
+                input.scroll_top = 300.0 - height;
+                assert_eq!(input.scroll_fade_edges(height), (true, false));
+                assert!(
+                    height - input.configured_line_height >= inset + band,
+                    "the final row must be outside the top fade at the bottom"
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn comment_viewport_reveals_caret_and_shares_wheel_and_rail_scroll(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::popover::ScrollRailHost;
+
+        struct CommentHarness {
+            input: Entity<ComposerInput>,
+            height: f32,
+            width: f32,
+        }
+        impl Render for CommentHarness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .w(px(self.width))
+                    .h(px(self.height))
+                    .overflow_hidden()
+                    .child(self.input.clone())
+            }
+        }
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let handle = cx.add_window(|_, cx| CommentHarness {
+            input: cx.new(|cx| ComposerInput::new("Comment", cx).with_scrollable_viewport(46.0)),
+            height: 46.0,
+            width: 320.0,
+        });
+        for (height, width) in [(46.0, 320.0), (36.0, 100.0), (46.0, 320.0)] {
+            handle
+                .update(cx, |host, _, cx| {
+                    host.height = height;
+                    host.width = width;
+                    host.input.update(cx, |input, cx| {
+                        input.set_scrollable_viewport(height, cx);
+                        input.set_text(
+                            "A long review comment that wraps in a narrow field.\n".repeat(20),
+                            cx,
+                        );
+                    });
+                    cx.notify();
+                })
+                .unwrap();
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            })
+            .unwrap();
+            handle
+                .update(cx, |host, window, cx| {
+                    host.input.update(cx, |input, cx| {
+                        let bounds = input
+                            .last_bounds
+                            .expect("input must have actual layout bounds");
+                        assert!((f32::from(bounds.size.height) - height).abs() < 0.01);
+                        assert!(
+                            f32::from(bounds.size.width) < width,
+                            "reserve room for the rail"
+                        );
+                        let cursor = input.cursor_point().unwrap();
+                        let caret_bottom =
+                            f32::from(cursor.y + input.line_height) - input.scroll_top;
+                        assert!(
+                            caret_bottom <= height + 0.01,
+                            "caret must stay inside the clipped input"
+                        );
+                        let max_scroll = input_max_scroll(input.content_height, height);
+                        assert!(max_scroll > 0.0);
+                        assert!((input.scroll_top - max_scroll).abs() < 0.01);
+                        let metrics = input
+                            .rail_metrics()
+                            .expect("long comments expose a scrollbar");
+                        assert_eq!(metrics.max_scroll, max_scroll);
+
+                        input.on_scroll_wheel(
+                            &ScrollWheelEvent {
+                                delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(20.0))),
+                                ..Default::default()
+                            },
+                            window,
+                            cx,
+                        );
+                        assert!((input.scroll_top - (max_scroll - 20.0)).abs() < 0.01);
+                        input.clamp_scroll(height);
+                        assert!(
+                            (input.scroll_top - (max_scroll - 20.0)).abs() < 0.01,
+                            "manual scrolling must not snap back to the caret"
+                        );
+
+                        assert!(input.rail_press(bounds.top() + px(10.0)));
+                        input.rail_drag_to(bounds.top() - px(100.0));
+                        assert_eq!(input.scroll_top, 0.0);
+                        input.rail_drag_to(bounds.bottom() + px(100.0));
+                        assert!((input.scroll_top - max_scroll).abs() < 0.01);
+                        input.comment_scrollbar.end_press();
+
+                        input.set_text("short", cx);
+                    });
+                })
+                .unwrap();
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            })
+            .unwrap();
+            handle
+                .update(cx, |host, _, cx| {
+                    host.input.update(cx, |input, _| {
+                        assert_eq!(input.scroll_top, 0.0);
+                        assert!(
+                            input.rail_metrics().is_none(),
+                            "short comments need no scrollbar"
+                        );
+                    });
+                })
+                .unwrap();
+        }
     }
 
     #[test]
