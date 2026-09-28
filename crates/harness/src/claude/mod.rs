@@ -164,7 +164,7 @@ impl ClaudeHarness {
         })
     }
 
-    fn build_command(&self, exe: &PathBuf, request: &RunRequest) -> Command {
+    fn build_command(&self, exe: &PathBuf, request: &RunRequest, title_only: bool) -> Command {
         let mut cmd = Command::new(exe);
         crate::compose_child_path(&mut cmd, exe);
         cmd.args([
@@ -177,16 +177,23 @@ impl ClaudeHarness {
             "--verbose",
             "--include-partial-messages",
             "--replay-user-messages",
+        ]);
+        if !title_only {
             // Newer Claude models emit no readable thinking text unless a
             // summary is asked for (raw reasoning stays provider-private).
-            "--thinking-display",
-            "summarized",
-            // Route permission prompts to the stdio control channel so
-            // `can_use_tool` (and AskUserQuestion in particular) reaches us.
-            // Undocumented flag; validated live against 2.1.228.
-            "--permission-prompt-tool",
-            "stdio",
-        ]);
+            // Title-only runs use Minimal reasoning and must also work on
+            // older CLIs (e.g. 2.1.81) that reject `--thinking-display`, so
+            // these two flags stay on the coding path only. Undocumented
+            // permission flag; validated live against 2.1.228.
+            cmd.args([
+                "--thinking-display",
+                "summarized",
+                // Route permission prompts to the stdio control channel so
+                // `can_use_tool` (and AskUserQuestion in particular) reaches us.
+                "--permission-prompt-tool",
+                "stdio",
+            ]);
+        }
         // The 1M context window is selected via a model-id suffix
         // (`sonnet[1m]`), exactly how the CLI itself does it; fast mode and
         // always-on thinking are settings overrides.
@@ -525,7 +532,7 @@ impl ClaudeHarness {
         title_only: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let exe = self.resolve_executable()?;
-        let mut cmd = self.build_command(&exe, &request);
+        let mut cmd = self.build_command(&exe, &request, title_only);
         if title_only {
             cmd.args([
                 "--system-prompt",
