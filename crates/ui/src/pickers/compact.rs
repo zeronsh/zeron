@@ -227,7 +227,7 @@ impl Pickers {
     }
 
     pub(super) fn compact_model_picker(&self, cx: &App) -> bool {
-        crate::settings::compact_model_picker(cx)
+        self.title.is_none() && crate::settings::compact_model_picker(cx)
     }
 
     pub(super) fn show_compact_models(&mut self, cx: &mut Context<Self>) {
@@ -389,14 +389,11 @@ impl Pickers {
             } else {
                 5.0 + (6.0 + options as f32 * 28.0).min(64.0)
             };
-        let target = self
-            .model_space_below
-            .unwrap_or(640.0)
-            .min(if self.compact_model_list {
-                302.0
-            } else {
-                panel_height
-            });
+        let target = self.menu_geometry().height.min(if self.compact_model_list {
+            302.0
+        } else {
+            panel_height
+        });
         let (height, moving) = ScalarTransition::sample(
             &mut self.compact_motion.height,
             target,
@@ -492,12 +489,12 @@ impl Pickers {
                     }
                 }
                 CompactControl::Reset => self.reset_compact_options(cx),
-                CompactControl::Option(id) => self.open_setting(id, cx),
+                CompactControl::Option(id) => self.open_setting(SettingScope::Tray, id, cx),
                 CompactControl::Effort => {}
             },
             "right" if matches!(self.compact_control, CompactControl::Option(_)) => {
                 if let CompactControl::Option(id) = self.compact_control.clone() {
-                    self.open_setting(id, cx);
+                    self.open_setting(SettingScope::Tray, id, cx);
                 }
             }
             "left" | "right" | "home" | "end" if self.compact_control == CompactControl::Effort => {
@@ -957,9 +954,9 @@ impl Pickers {
                             .child(popover::faded_menu_list(
                                 &self.menu_scroll,
                                 popover::menu_scroll_list("compact-options", &self.menu_scroll)
-                                    .max_h(px(64.0_f32.min(
-                                        (self.model_space_below.unwrap_or(640.0) - 87.0).max(0.0),
-                                    )))
+                                    .max_h(px(
+                                        64.0_f32.min((self.menu_geometry().height - 87.0).max(0.0))
+                                    ))
                                     .child(options),
                             ))
                             .children(scrollbar),

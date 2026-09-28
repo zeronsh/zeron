@@ -2807,21 +2807,25 @@ impl Render for AppearancePage {
                         )),
                 )
                 .child(
-                    widgets::toggle_switch(&theme, ui_settings.compact_model_picker)
-                        .id("compact-model-picker")
-                        .role(gpui::Role::Button)
-                        .aria_label("Compact model picker")
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            crate::settings::update(
-                                crate::settings::SavePolicy::Debounced,
-                                cx,
-                                |settings| {
-                                    settings.compact_model_picker = !settings.compact_model_picker;
-                                },
-                            );
-                            cx.refresh_windows();
-                            cx.notify();
-                        })),
+                    widgets::toggle_switch(
+                        &theme,
+                        ui_settings.compact_model_picker,
+                        "compact-model-picker",
+                    )
+                    .id("compact-model-picker")
+                    .role(gpui::Role::Button)
+                    .aria_label("Compact model picker")
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        crate::settings::update(
+                            crate::settings::SavePolicy::Debounced,
+                            cx,
+                            |settings| {
+                                settings.compact_model_picker = !settings.compact_model_picker;
+                            },
+                        );
+                        cx.refresh_windows();
+                        cx.notify();
+                    })),
                 )
                 .into_any_element(),
         );

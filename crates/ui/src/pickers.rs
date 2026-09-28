@@ -2724,6 +2724,7 @@ impl Pickers {
 
     fn measure_trigger(&self, kind: PickerKind, cx: &Context<Self>) -> impl IntoElement {
         let entity = cx.entity().downgrade();
+        let compact = kind == PickerKind::HarnessModel && self.compact_model_picker(cx);
         // New-thread model and workspace menus open down, matching the
         // centered composer's layout. In-thread menus retain adaptive placement.
         let below = (self.title.is_some() || self.state.read(cx).selected_chat.is_none())
@@ -2748,6 +2749,12 @@ impl Pickers {
                     geometry = popover::MenuGeometry {
                         height: space_below,
                         below: true,
+                    };
+                }
+                if compact {
+                    geometry = popover::MenuGeometry {
+                        height: (f32::from(bounds.top()) - 14.0).clamp(0.0, 640.0),
+                        below: false,
                     };
                 }
                 entity
@@ -3998,7 +4005,8 @@ impl Pickers {
         // ── traits tray: the reasoning ladder + model options PINNED under
         //    the list (the separate Traits popover folded in here — user
         //    request). Hidden entirely when the selected model has neither.
-        let has_tray = !compact && self.title.is_none()
+        let has_tray = !compact
+            && self.title.is_none()
             && (!self.trait_ladder(cx).is_empty()
                 || self
                     .selected_model(cx)
@@ -5726,7 +5734,12 @@ impl Render for Pickers {
                     ),
                 ))
             });
-        let model_chip = attach_overlay_end(
+        let attach_model_overlay = if self.compact_model_picker(cx) {
+            attach_overlay
+        } else {
+            attach_overlay_end
+        };
+        let model_chip = attach_model_overlay(
             model_chip,
             &mut overlay,
             PickerKind::HarnessModel,
