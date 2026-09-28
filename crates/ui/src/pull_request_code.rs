@@ -175,7 +175,11 @@ impl PullRequestDetailPage {
                             .child(format!("Files changed · {file_count}")),
                     )
                     .child(
+                        // The shared input grows along its parent axis; this parent is a column.
                         crate::surface_chrome::input()
+                            .flex_none()
+                            .id("pr-file-search")
+                            .debug_selector(|| "pr-file-search".into())
                             .child(div().flex_1().min_w_0().child(self.file_search.clone())),
                     )
                     .child(files),

@@ -1683,7 +1683,7 @@ mod tests {
         assert!(cx.debug_bounds("pr-file-0").is_none());
         assert!(cx.debug_bounds("pr-file-1").is_some());
         assert!(cx.debug_bounds("pr-file-2").is_none());
-        for (width, height) in [(320.0, 600.0), (900.0, 400.0)] {
+        for (width, height) in [(320.0, 600.0), (900.0, 400.0), (1200.0, 850.0)] {
             cx.simulate_resize(gpui::size(px(width), px(height)));
             cx.run_until_parked();
             let viewport = cx.debug_bounds("pr-code-viewport").unwrap();
@@ -1691,6 +1691,11 @@ mod tests {
             assert!(viewport.size.height >= px(60.0), "expanded picker: {viewport:?}");
             assert!(viewport.bottom() <= nav.top());
             let browser = cx.debug_bounds("pr-file-browser").unwrap();
+            let search = cx.debug_bounds("pr-file-search").unwrap();
+            assert_eq!(search.size.height, px(crate::surface_chrome::CONTROL_SIZE));
+            let files = cx.debug_bounds("pr-file-list").unwrap();
+            assert!(files.top() >= search.bottom());
+            assert!(files.size.height > px(40.0));
             if width >= 900.0 {
                 assert!(browser.right() < viewport.left(), "files stay beside the diff");
             } else {
