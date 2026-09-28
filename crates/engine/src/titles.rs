@@ -172,10 +172,11 @@ impl TitleGenerator {
                 return None;
             }
         };
-        let model = match settings.model {
-            Some(model) => Some(model),
-            None => cheapest_model(
-                &tokio::time::timeout(
+        let auto_model = settings.model.is_none();
+        let mut candidates: Vec<Option<String>> = match settings.model {
+            Some(model) => vec![Some(model)],
+            None => {
+                let catalog = tokio::time::timeout(
                     std::time::Duration::from_secs(10),
                     self.inner
                         .registry
@@ -183,20 +184,27 @@ impl TitleGenerator {
                 )
                 .await
                 .ok()?
-                .unwrap_or_default(),
-            ),
+                .unwrap_or_default();
+                let mut list = title_candidates(&catalog);
+                if list.is_empty() {
+                    // Empty catalog: harness picks its default.
+                    list.push(None);
+                }
+                list
+            }
         };
         let title_prompt = format!(
             "{}\n\nSession request (JSON string):\n{}",
             zeron_harness::TITLE_INSTRUCTIONS,
             serde_json::to_string(prompt).ok()?
         );
+        let mut candidate_idx = 0;
         for attempt in 0..=RETRY_DELAYS_MS.len() {
             let request = RunRequest {
                 mcp: None,
                 prompt: title_prompt.clone(),
                 harness: Some(harness_id),
-                model: model.clone(),
+                model: candidates[candidate_idx].clone(),
                 reasoning: Some(ReasoningLevel::Minimal),
                 model_options: serde_json::Map::new(),
                 cwd: scratch.path().to_string_lossy().into_owned(),
@@ -220,6 +228,22 @@ impl TitleGenerator {
                     }
                 }
                 Err(err) => {
+                    // Auto mode only: an unauthorized model (catalogs list
+                    // models the account can't call) fails fast and
+                    // deterministically. Credentials are per-provider, so a
+                    // whole provider is dead — jump to the next provider's
+                    // first candidate instead of burning retries on siblings.
+                    // Pinned models keep the old retry.
+                    if auto_model && is_auth_error(&err) {
+                        if let Some(next) = next_provider(&candidates, candidate_idx) {
+                            candidate_idx = next;
+                            tracing::info!(
+                                error = %err,
+                                "title model unauthorized, trying next provider"
+                            );
+                            continue;
+                        }
+                    }
                     tracing::warn!(attempt = attempt + 1, error = %err,
                         "automatic chat title generation attempt failed");
                 }
@@ -232,6 +256,58 @@ impl TitleGenerator {
     }
 }
 
+/// Ordered title candidates for auto mode: cheapest first (zeron's
+/// `cheapestModel` heuristic), then the rest in catalog order. Auth failures
+/// rotate through this list; anything else retries the same model.
+fn title_candidates(models: &[Model]) -> Vec<Option<String>> {
+    let first = cheapest_model(models);
+    let mut out = Vec::new();
+    if let Some(first) = first {
+        out.push(Some(first.clone()));
+        out.extend(
+            models
+                .iter()
+                .filter(|m| m.id != first)
+                .map(|m| Some(m.id.clone())),
+        );
+    }
+    out
+}
+
+/// First candidate index past `from` whose provider (`provider/model` id
+/// prefix) differs — credentials are per-provider, so after an auth failure
+/// the whole provider is skipped, not just the one model.
+fn next_provider(candidates: &[Option<String>], from: usize) -> Option<usize> {
+    let current = candidates.get(from)?.as_deref().map(provider_of);
+    candidates
+        .iter()
+        .enumerate()
+        .skip(from + 1)
+        .find(|(_, c)| c.as_deref().map(provider_of) != current)
+        .map(|(i, _)| i)
+}
+
+fn provider_of(id: &str) -> &str {
+    id.split_once('/').map(|(p, _)| p).unwrap_or(id)
+}
+
+/// Auth-class failures fail fast and deterministically per model — worth
+/// rotating candidates over. Everything else keeps the retry ladder.
+fn is_auth_error(err: &EngineError) -> bool {
+    let msg = err.to_string().to_lowercase();
+    [
+        "authentication",
+        "unauthenticated",
+        "unauthorized",
+        "invalid api key",
+        "invalid_api_key",
+        "api key",
+        "sign in",
+        "forbidden",
+    ]
+    .iter()
+    .any(|s| msg.contains(s))
+}
 /// The cheapest model a harness offers (zeron's `cheapestModel` heuristic):
 /// prefer a small-tier name (haiku/mini/nano/flash/small/lite), else the last
 /// listed model; `None` when the catalog is empty (harness picks its default).
@@ -438,8 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn cheapest_prefers_small_tier_then_last() {
-        let models = vec![
+    fn cheapest_prefers_small_tier_then_last() {        let models = vec![
             model("opus-4", "Opus"),
             model("haiku-3", "Haiku"),
             model("sonnet-4", "Sonnet"),
@@ -448,6 +523,51 @@ mod tests {
         let no_small = vec![model("opus-4", "Opus"), model("sonnet-4", "Sonnet")];
         assert_eq!(cheapest_model(&no_small).as_deref(), Some("sonnet-4"));
         assert_eq!(cheapest_model(&[]), None);
+    }
+
+    #[test]
+    fn title_candidates_try_cheapest_first_then_rest_in_order() {
+        let models = vec![
+            model("big-1", "Big"),
+            model("haiku-3", "Haiku"),
+            model("sonnet-4", "Sonnet"),
+        ];
+        let ids: Vec<_> = title_candidates(&models)
+            .into_iter()
+            .map(|o| o.unwrap())
+            .collect();
+        assert_eq!(ids, vec!["haiku-3", "big-1", "sonnet-4"]);
+        assert!(title_candidates(&[]).is_empty());
+    }
+
+    #[test]
+    fn auth_errors_are_detected_for_failover() {        assert!(is_auth_error(&EngineError::Other(
+            "titling run error: Authentication Failed".into()
+        )));
+        assert!(is_auth_error(&EngineError::Other(
+            "Authentication failed — sign in to Claude again.".into()
+        )));
+        assert!(!is_auth_error(&EngineError::Other(
+            "title generation timed out".into()
+        )));
+        assert!(!is_auth_error(&EngineError::Other(
+            "title stream ended without completion".into()
+        )));
+    }
+
+    #[test]
+    fn failover_skips_the_whole_unauthorized_provider() {
+        let c = |s: &str| Some(s.to_string());
+        let candidates = vec![
+            c("zai/a-flash"),
+            c("zai/b-turbo"),
+            c("opencode/c-free"),
+            c("opencode/d-free"),
+        ];
+        assert_eq!(next_provider(&candidates, 0), Some(2));
+        assert_eq!(next_provider(&candidates, 2), None);
+        assert_eq!(next_provider(&candidates, 3), None);
+        assert_eq!(next_provider(&[], 0), None);
     }
 
     #[tokio::test]
