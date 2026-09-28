@@ -438,8 +438,37 @@ impl Harness for OpencodeHarness {
 
     async fn run(
         &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_with_mode(request, controls, false).await
+    }
+
+    /// Title-only run: same session flow, but every tool permission is
+    /// rejected — a titling prompt must never execute code. The engine
+    /// additionally rejects any ToolCall event and falls back to the
+    /// prompt's first words, so a tool-happy model can only cost a call.
+    async fn run_title(
+        &self,
         mut request: RunRequest,
         controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        request.resume = None;
+        request.worktree = None;
+        request.attachments.clear();
+        request.mcp = None;
+        request.model_options.clear();
+        request.auto_approve = false;
+        self.run_with_mode(request, controls, true).await
+    }
+}
+
+impl OpencodeHarness {
+    async fn run_with_mode(
+        &self,
+        mut request: RunRequest,
+        controls: RunControls,
+        title_only: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         // The engine intentionally leaves OpenCode's canonical invocation
         // intact. Capture the selected identity before converting it to the
@@ -458,6 +487,7 @@ impl Harness for OpencodeHarness {
             kill_grace: self.kill_grace,
             known_commands: None, // Resolve the live session directory, never a global probe cache.
             initial_native_command_selected,
+            title_only,
         }));
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
             rx.recv().await.map(|ev| (ev, rx))
@@ -1310,6 +1340,8 @@ struct Session {
     /// True only when the composer supplied a canonical leading command or
     /// provider-backed skill. Raw slash text deliberately stays false.
     initial_native_command_selected: bool,
+    /// Title-only run: reject every tool permission instead of approving.
+    title_only: bool,
 }
 
 fn new_message_id() -> String {
@@ -1478,6 +1510,7 @@ async fn run_session(session: Session) {
         kill_grace,
         known_commands,
         initial_native_command_selected,
+        title_only,
     } = session;
     let RunControls {
         execution_lease: _execution_lease,
@@ -2163,6 +2196,7 @@ async fn run_session(session: Session) {
                             turn: &mut turn,
                             pending_usage: &mut pending_usage,
                             context_windows: &context_windows,
+                            title_only,
                         }).await;
                         match outcome {
                             BusOutcome::Continue => maybe_preempt!(),
@@ -2592,6 +2626,8 @@ struct BusCtx<'a> {
     turn: &'a mut TurnState,
     pending_usage: &'a mut Option<AgentEvent>,
     context_windows: &'a HashMap<String, u64>,
+    /// Title-only run: tool permissions are rejected, never approved.
+    title_only: bool,
 }
 
 /// Wrap an event as subagent-attributed traffic.
@@ -2643,6 +2679,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
         turn,
         pending_usage,
         context_windows,
+        title_only,
     } = ctx;
     // Envelope styles: /global/event wraps ({payload: {...}}); a bare
     // /event feed (tests) delivers the payload directly.
@@ -3001,8 +3038,11 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 // Like Claude and Codex, normal Zeron sessions run unattended,
                 // regardless of RunRequest.auto_approve. Approve each owned
                 // request without writing durable permission rules via "always".
+                // Title-only runs invert this: the titling prompt must never
+                // execute tools, so every permission is rejected ("reject" is
+                // opencode's Reply vocabulary alongside once/always).
                 // Genuine agent questions use the separate question.asked path.
-                let reply = "once";
+                let reply = if title_only { "reject" } else { "once" };
                 if server
                     .post_json(
                         &reply_path,
