@@ -9704,6 +9704,7 @@ impl Shell {
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                 this.capture_navigation_focus(false, false, window, cx);
             }))
+            .on_key_down(|event, _, cx| navigation_focus::copy_transcript_selection(event, cx))
             .relative()
             .flex_1()
             .min_w_0()
@@ -10295,6 +10296,7 @@ impl Shell {
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                 this.capture_navigation_focus(true, false, window, cx);
             }))
+            .on_key_down(|event, _, cx| navigation_focus::copy_transcript_selection(event, cx))
             .size_full()
             .flex()
             .flex_col()
