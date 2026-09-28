@@ -39,6 +39,7 @@ struct Preferences {
 
 #[derive(Clone, Copy)]
 enum LatestSource {
+    AntigravityAcp,
     Claude,
     Npm(&'static str),
     Opencode,
@@ -76,6 +77,7 @@ enum UpdatePlan {
         executable: PathBuf,
         args: &'static [&'static str],
     },
+    AntigravityArchive,
     CodexStandalone(CodexStandaloneInstall),
 }
 
@@ -237,11 +239,11 @@ fn provider(id: HarnessId) -> ProviderSpec {
         },
         HarnessId::Antigravity => ProviderSpec {
             version_args: &["--version"],
-            latest: LatestSource::Manual,
+            latest: LatestSource::AntigravityAcp,
             // Zeron installs a pinned ACP server archive. It has no registered
             // self-update command; custom binaries remain installer-managed.
             update_args: None,
-            manual_command: "Update Zeron or replace the configured Antigravity ACP server",
+            manual_command: "Update the configured Antigravity ACP server",
         },
         HarnessId::Mock => ProviderSpec {
             version_args: &["--version"],
@@ -267,11 +269,32 @@ fn update_plan(harness: HarnessId, executable: &Path) -> Result<UpdatePlan, Stri
     {
         return Ok(UpdatePlan::CodexStandalone(install));
     }
+    if harness == HarnessId::Antigravity
+        && zeron_harness::acp::is_managed_antigravity_server(executable)
+    {
+        return Ok(UpdatePlan::AntigravityArchive);
+    }
     Err("this provider requires a manual update".into())
 }
 
 fn can_apply_update(harness: HarnessId, executable: &Path) -> bool {
     update_plan(harness, executable).is_ok()
+}
+
+fn manual_update_command(harness: HarnessId, executable: &Path, can_apply: bool) -> Option<String> {
+    if can_apply {
+        return None;
+    }
+    if harness == HarnessId::Antigravity
+        && zeron_harness::acp::is_managed_antigravity_server(executable)
+    {
+        return Some("Update Zeron to install this release".into());
+    }
+    Some(
+        claude_package_manager_command_for(harness, executable)
+            .unwrap_or_else(|| provider(harness).manual_command.to_string()),
+    )
+    .filter(|command| !command.is_empty())
 }
 
 struct ActiveUpdate {
@@ -293,6 +316,9 @@ struct Inner {
     shutdown: CancellationToken,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     client: reqwest::Client,
+    /// the registry release the last check reported, installed verbatim by
+    /// apply so a registry change in between cannot swap what gets installed.
+    antigravity_release: Mutex<Option<zeron_harness::acp::AntigravityRelease>>,
 }
 
 /// Cloneable engine service exposed to RPC and the periodic worker.
@@ -406,6 +432,7 @@ impl HarnessUpdateCoordinator {
                 check_slots: tokio::sync::Semaphore::new(2),
                 shutdown: CancellationToken::new(),
                 worker: Mutex::new(None),
+                antigravity_release: Mutex::new(None),
                 client: reqwest::Client::builder()
                     .user_agent(concat!("zeron/", env!("CARGO_PKG_VERSION")))
                     .timeout(COMMAND_TIMEOUT)
@@ -566,7 +593,7 @@ impl HarnessUpdateCoordinator {
         };
         let spec = provider(harness);
         let version_lease = self.inner.registry.execution_lease(harness).await;
-        let installed = run_version_command(&executable, spec.version_args).await;
+        let installed = run_version_command(harness, &executable, spec.version_args).await;
         drop(version_lease);
         let installed = match installed {
             Ok(version) => version,
@@ -579,16 +606,14 @@ impl HarnessUpdateCoordinator {
         };
         let source = classify_source(&executable);
         let can_apply = can_apply_update(harness, &executable);
-        let manual_command = (!can_apply)
-            .then(|| {
-                claude_package_manager_command_for(harness, &executable)
-                    .unwrap_or_else(|| provider(harness).manual_command.to_string())
-            })
-            .filter(|command| !command.is_empty());
         if self.settle_if_unmonitored(harness) {
             return Ok(());
         }
         let latest = match spec.latest {
+            LatestSource::AntigravityAcp => self
+                .antigravity_acp_latest()
+                .await
+                .map(UpdateCheck::Version),
             LatestSource::Claude => {
                 let channel = if let Some(channel) = claude_cask_channel(&executable) {
                     Some(channel)
@@ -676,8 +701,8 @@ impl HarnessUpdateCoordinator {
                     status.channel = None;
                     status.source = source;
                     status.can_apply = can_apply;
-                    status.manual_command =
-                        manual_command.or_else(|| Some(spec.manual_command.into()));
+                    status.manual_command = manual_update_command(harness, &executable, can_apply)
+                        .or_else(|| Some(spec.manual_command.into()));
                     status.phase = if status.policy == HarnessUpdatePolicy::Off
                         || !registry.enabled_set().contains(&harness)
                     {
@@ -695,6 +720,14 @@ impl HarnessUpdateCoordinator {
                 return self.fail_check_with_installed(harness, installed, source, error);
             }
         };
+        // zeron can only install the archive it has pinned and verified; a
+        // newer registry release waits for a zeron update that pins it.
+        let can_apply = can_apply
+            && (harness != HarnessId::Antigravity
+                || lock(&self.inner.antigravity_release)
+                    .as_ref()
+                    .is_some_and(|release| release.installable()));
+        let manual_command = manual_update_command(harness, &executable, can_apply);
         let registry = self.inner.registry.clone();
         self.mutate(harness, |status| {
             status.installed_version = Some(installed);
@@ -756,6 +789,9 @@ impl HarnessUpdateCoordinator {
             HarnessUpdatePhase::Available | HarnessUpdatePhase::ManualActionRequired
         ) {
             return Err("no applicable harness update".into());
+        }
+        if !current.can_apply {
+            return Err("this provider requires a manual update".into());
         }
         let executable = self.executable(harness)?;
         let plan = update_plan(harness, &executable)?;
@@ -821,6 +857,21 @@ impl HarnessUpdateCoordinator {
                     Err(error) => Err(error),
                 }
             }
+            UpdatePlan::AntigravityArchive => {
+                let release = lock(&self.inner.antigravity_release)
+                    .clone()
+                    .filter(|release| current.latest_version.as_ref() == Some(&release.version));
+                match release {
+                    Some(release) => match self.begin_install(harness, &cancel) {
+                        Ok(()) => zeron_harness::acp::install_antigravity_release(&release)
+                            .await
+                            .map(drop)
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    },
+                    None => Err("the Antigravity release changed; check for updates again".into()),
+                }
+            }
             UpdatePlan::CodexStandalone(install) => {
                 self.install_codex_standalone(harness, &current, install, &cancel)
                     .await
@@ -840,7 +891,12 @@ impl HarnessUpdateCoordinator {
         self.mutate(harness, |status| {
             status.phase = HarnessUpdatePhase::Verifying
         });
-        let verified = run_version_command(&executable, provider(harness).version_args).await;
+        let verified = match self.executable(harness) {
+            Ok(executable) => {
+                run_version_command(harness, &executable, provider(harness).version_args).await
+            }
+            Err(error) => Err(error),
+        };
         let result = match verified {
             Ok(version) => {
                 let expected = current.latest_version.as_deref();
@@ -863,6 +919,14 @@ impl HarnessUpdateCoordinator {
             }
             Err(error) => Err(format!("post-update verification failed: {error}")),
         };
+        if harness == HarnessId::Antigravity && result.is_ok() {
+            // pruning runs under the update lease, so none of this engine's
+            // sessions can be launching the superseded server meanwhile.
+            let _ = tokio::task::spawn_blocking(
+                zeron_harness::acp::prune_superseded_antigravity_installs,
+            )
+            .await;
+        }
         drop(lease);
         lock(&self.inner.cancellations).remove(&harness);
         self.inner.registry.end_update(harness);
@@ -1125,6 +1189,27 @@ impl HarnessUpdateCoordinator {
 
     async fn npm_latest(&self, package: &str) -> Result<String, String> {
         self.npm_release(package, "latest").await
+    }
+
+    async fn antigravity_acp_latest(&self) -> Result<String, String> {
+        let response = self
+            .inner
+            .client
+            .get(zeron_harness::acp::ANTIGRAVITY_REGISTRY_URL)
+            .send()
+            .await
+            .map_err(|error| format!("Antigravity ACP release check failed: {error}"))?
+            .error_for_status()
+            .map_err(|error| format!("Antigravity ACP release check failed: {error}"))?;
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|error| format!("Antigravity ACP release response was invalid: {error}"))?;
+        let release = zeron_harness::acp::antigravity_release(&json)
+            .ok_or("Antigravity ACP release response contained no valid version")?;
+        let version = release.version.clone();
+        *lock(&self.inner.antigravity_release) = Some(release);
+        Ok(version)
     }
 
     async fn npm_release(&self, package: &str, channel: &str) -> Result<String, String> {
@@ -1705,9 +1790,14 @@ fn parse_hermes_update_check(output: &str) -> Result<UpdateCheck, String> {
     Err("Hermes update check returned no recognizable verdict".into())
 }
 
-async fn run_version_command(executable: &Path, args: &[&str]) -> Result<String, String> {
+async fn run_version_command(
+    harness: HarnessId,
+    executable: &Path,
+    args: &[&str],
+) -> Result<String, String> {
     let output = run_command_output(executable, args, COMMAND_TIMEOUT).await?;
-    extract_version(&output).ok_or_else(|| "command returned no recognizable version".into())
+    installed_version(harness, &output)
+        .ok_or_else(|| "command returned no recognizable version".into())
 }
 
 async fn run_command(executable: &Path, args: &[&str], timeout: Duration) -> Result<(), String> {
@@ -1815,6 +1905,14 @@ fn extract_version(text: &str) -> Option<String> {
     version_tokens(text).next()
 }
 
+fn installed_version(harness: HarnessId, output: &str) -> Option<String> {
+    if harness == HarnessId::Antigravity {
+        return zeron_harness::acp::antigravity_build_version(output)
+            .or_else(|| output.lines().next().and_then(extract_version));
+    }
+    extract_version(output)
+}
+
 /// Update checks name the installed release before the candidate
 /// (`available: 1.0.4 -> 1.0.41`), so the release is the final version.
 fn extract_latest_version(text: &str) -> Option<String> {
@@ -1862,8 +1960,8 @@ fn version_is_newer(latest: &str, installed: &str) -> bool {
 mod tests {
     use super::{
         LatestSource, activate_codex_release, codex_standalone_install, extract_latest_version,
-        extract_version, opencode_release_package, provider, validate_codex_package,
-        version_is_newer,
+        extract_version, installed_version, opencode_release_package, provider,
+        validate_codex_package, version_is_newer,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -2012,6 +2110,36 @@ mod tests {
             Some("1.4.0".into())
         );
         assert_eq!(extract_version("no release here"), None);
+    }
+
+    #[test]
+    fn antigravity_version_uses_the_build_label_instead_of_the_branch_revision() {
+        let output = "Built on Wed Sep  2 19:52:52 2026 (1788375172)\nBuilt from changelist 975248206 in a mint client based on //depot/branches/agy_acp_server_release_branch/973763860.1/google3\nBuild label: agy_acp_server_1.1.1\nBuild platform: darwin_arm64";
+        assert_eq!(
+            installed_version(HarnessId::Antigravity, output),
+            Some("1.1.1".into())
+        );
+        let output = "Built on Wed Sep 23 17:09:50 2026 (1790179790)\nBuilt from changelist 986799458 in a mint client based on //depot/branches/agy_acp_server_release_branch/982565062.1/google3\nBuild label: 1.2.1\nBuild platform: darwin_arm64";
+        assert_eq!(
+            installed_version(HarnessId::Antigravity, output),
+            Some("1.2.1".into())
+        );
+        assert_eq!(
+            installed_version(HarnessId::Antigravity, "agy_acp_server 1.2.3"),
+            Some("1.2.3".into())
+        );
+        assert_eq!(
+            installed_version(HarnessId::Antigravity, "Built on Sep 2"),
+            None
+        );
+    }
+
+    #[test]
+    fn antigravity_checks_the_acp_registry() {
+        assert!(matches!(
+            provider(HarnessId::Antigravity).latest,
+            LatestSource::AntigravityAcp
+        ));
     }
 
     #[test]

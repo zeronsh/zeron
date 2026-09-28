@@ -159,6 +159,7 @@ fn needs_cooldown(error: &str) -> bool {
         "unauthenticated",
         "unauthorized",
         "not authenticated",
+        "isn't signed in",
         "auth_required",
         "401",
         "api key",

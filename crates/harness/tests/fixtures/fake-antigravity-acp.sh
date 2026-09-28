@@ -19,11 +19,25 @@ SETS=""
 PROMPT_AUTH=0
 EMPTY=0
 while read -r line; do
+  if has "$line" '"method":"session/cancel"' && [ "${AUTH_AFTER_CANCEL:-0}" -eq 1 ]; then
+    printf 'Open the following link to authenticate the ACP server: https://accounts.google.com/o/oauth2/auth?client_id=fake\n' >&2
+    exec sleep 30
+  fi
   has "$line" '"id":' || continue
   id=$(rid "$line")
   if has "$line" '"method":"initialize"'; then
     emit "{\"id\":$id,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"loadSession\":true},\"authMethods\":[{\"id\":\"oauth-personal\",\"name\":\"Log in with Google\"}]}}"
   elif has "$line" '"method":"session/new"'; then
+    if [ -n "${FAKE_AGY_STALE_LOGIN:-}" ]; then
+      case "$BROWSER" in '/usr/bin/true %s'|'/bin/true %s') ;; *) exit 12 ;; esac
+      printf 'x' >> "$FAKE_AGY_STALE_LOGIN"
+      if [ "${FAKE_AGY_STALE_LOGIN_STREAM:-}" = 'stdout' ]; then
+        emit 'Open the following link to authenticate the ACP server: https://accounts.google.com/o/oauth2/auth?client_id=fake'
+      else
+        printf 'Open the following link to authenticate the ACP server: https://accounts.google.com/o/oauth2/auth?client_id=fake\n' >&2
+      fi
+      exec sleep 30
+    fi
     if has "$line" 'prompt-auth'; then PROMPT_AUTH=1; fi
     if has "$line" 'empty-reply'; then EMPTY=1; fi
     if has "$line" 'reject-model'; then
@@ -63,6 +77,15 @@ while read -r line; do
     exit 0
   elif has "$line" '"method":"session/prompt"'; then
     [ "$BROWSER" = '/usr/bin/true %s' ] || exit 12
+    if has "$line" 'auth-prompt-after-cancel'; then
+      AUTH_AFTER_CANCEL=1
+      emit '{"method":"session/update","params":{"sessionId":"agy-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Ready to cancel"}}}}'
+      continue
+    fi
+    if [ -n "${FAKE_AGY_STALE_TURN:-}" ]; then
+      printf 'Open the following link to authenticate the ACP server: https://accounts.google.com/o/oauth2/auth?client_id=fake\n' >&2
+      exec sleep 30
+    fi
     if [ "$PROMPT_AUTH" -eq 1 ]; then
       emit "{\"id\":$id,\"error\":{\"code\":-32000,\"message\":\"Authentication required\"}}"
       continue

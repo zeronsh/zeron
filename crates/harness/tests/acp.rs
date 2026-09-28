@@ -800,6 +800,142 @@ async fn antigravity_run_without_sign_in_points_to_settings_instead_of_a_browser
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_auth_prompt_after_cancel_emits_one_interrupted_done() {
+    let mut req = request("auth-prompt-after-cancel");
+    req.model = None;
+    let (controls, _steer, token) = controls();
+    let harness = antigravity_harness();
+    let mut stream = harness.run(req, controls).await.expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let event = event.expect("stream event");
+            if matches!(&event, AgentEvent::TextDelta { text } if text == "Ready to cancel") {
+                token.cancel();
+            }
+            events.push(event);
+        }
+        events
+    })
+    .await
+    .expect("cancelled run finishes");
+    assert!(token.is_cancelled(), "{events:?}");
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Interrupted, None)],
+        "{events:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_stale_login_stops_background_probes_and_runs() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let server = dir.path().join("stale-antigravity-acp");
+    let prompted = dir.path().join("prompted");
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-antigravity-acp.sh");
+    std::fs::write(
+        &server,
+        format!(
+            "#!/bin/sh\nFAKE_AGY_STALE_LOGIN='{}' exec '{}' \"$@\"\n",
+            prompted.display(),
+            fixture.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let harness = AcpHarness::antigravity().with_executable(&server);
+
+    tokio::time::timeout(Duration::from_secs(10), harness.models())
+        .await
+        .expect("model probe waited for the sign-in timeout")
+        .expect("static model fallback");
+    // each retry would relaunch the server into another sign-in prompt
+    assert_eq!(std::fs::read_to_string(&prompted).unwrap(), "x");
+
+    let commands = tokio::time::timeout(Duration::from_secs(10), harness.commands())
+        .await
+        .expect("command probe waited for the sign-in timeout");
+    if let Err(error) = commands {
+        assert!(error.to_string().contains("isn't signed in"));
+    }
+
+    let mut req = request("hi");
+    req.model = None;
+    let (initial_controls, _, _) = controls();
+    let events = tokio::time::timeout(
+        Duration::from_secs(10),
+        run_to_end(&harness, req, initial_controls),
+    )
+    .await
+    .expect("run waited for the handshake timeout");
+    let done = dones(&events);
+    assert_eq!(done.len(), 1, "{events:?}");
+    assert_eq!(done[0].0, DoneStatus::Errored);
+    assert!(
+        done[0]
+            .1
+            .as_deref()
+            .unwrap_or_default()
+            .contains("isn't signed in"),
+        "{events:?}"
+    );
+
+    let stdout_server = dir.path().join("stdout-antigravity-acp");
+    std::fs::write(
+        &stdout_server,
+        format!(
+            "#!/bin/sh\nFAKE_AGY_STALE_LOGIN='{}' FAKE_AGY_STALE_LOGIN_STREAM='stdout' exec '{}' \"$@\"\n",
+            prompted.display(),
+            fixture.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stdout_server, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let stdout_harness = AcpHarness::antigravity().with_executable(stdout_server);
+    tokio::time::timeout(Duration::from_secs(10), stdout_harness.models())
+        .await
+        .expect("stdout sign-in prompt waited for the discovery timeout")
+        .expect("static model fallback");
+
+    let turn_server = dir.path().join("turn-antigravity-acp");
+    std::fs::write(
+        &turn_server,
+        format!(
+            "#!/bin/sh\nFAKE_AGY_STALE_TURN='1' exec '{}' \"$@\"\n",
+            fixture.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&turn_server, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let turn_harness = AcpHarness::antigravity().with_executable(turn_server);
+    let mut req = request("hi");
+    req.model = None;
+    let (turn_controls, _, _) = controls();
+    let events = tokio::time::timeout(
+        Duration::from_secs(10),
+        run_to_end(&turn_harness, req, turn_controls),
+    )
+    .await
+    .expect("turn waited for the sign-in timeout");
+    let done = dones(&events);
+    assert_eq!(done.len(), 1, "{events:?}");
+    assert_eq!(done[0].0, DoneStatus::Errored);
+    assert!(
+        done[0]
+            .1
+            .as_deref()
+            .unwrap_or_default()
+            .contains("isn't signed in"),
+        "{events:?}"
+    );
+}
+
 #[test]
 fn antigravity_descriptor_surface_matches_registry_expectations() {
     let antigravity = AcpHarness::antigravity();
@@ -1963,7 +2099,7 @@ fn antigravity_detection_and_missing_server_never_install() {
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         let adapters = dir.path().join("adapters");
         if scenario == "partial" {
-            let partial = adapters.join("antigravity-acp/1.1.1");
+            let partial = adapters.join("antigravity-acp/1.2.1");
             std::fs::create_dir_all(&partial).unwrap();
             std::fs::write(partial.join("agy_acp_server.par"), "incomplete").unwrap();
         }
@@ -1989,7 +2125,7 @@ fn antigravity_detection_and_missing_server_never_install() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(!adapters.join(".tmp-antigravity-acp-1.1.1").exists());
+        assert!(!adapters.join(".tmp-antigravity-acp-1.2.1").exists());
     }
 }
 
