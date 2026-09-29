@@ -124,6 +124,8 @@ fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     if let Some(pid) = cli.wait_for_exit {
         zeron_update::windows::wait_for_exit(pid)?;
+    } else if matches!(&cli.command, None | Some(Command::Headless)) {
+        zeron_update::windows::cleanup_previous_image();
     }
     // Long-running modes log at info, one-shot CLI commands at warn (RUST_LOG
     // overrides either).

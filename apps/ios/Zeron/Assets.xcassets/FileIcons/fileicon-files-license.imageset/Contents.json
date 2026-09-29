@@ -1,0 +1,25 @@
+{
+  "images": [
+    {
+      "filename": "fileicon-files-license.svg",
+      "idiom": "universal"
+    },
+    {
+      "filename": "fileicon-files-license-dark.svg",
+      "idiom": "universal",
+      "appearances": [
+        {
+          "appearance": "luminosity",
+          "value": "dark"
+        }
+      ]
+    }
+  ],
+  "info": {
+    "author": "xcode",
+    "version": 1
+  },
+  "properties": {
+    "preserves-vector-representation": true
+  }
+}

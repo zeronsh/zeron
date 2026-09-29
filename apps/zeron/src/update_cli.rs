@@ -23,7 +23,11 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    match zeron_update::detect_install() {
+    let install = zeron_update::detect_install();
+    if let Some(blocker) = install.desktop_update_blocker() {
+        bail!("{blocker}");
+    }
+    match install {
         InstallKind::Managed { app_root } => {
             println!(
                 "downloading {}…",
@@ -68,9 +72,10 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
         InstallKind::Unmanaged => {
             bail!(
                 "this binary is not update-managed (source build or hand-copied).\n\
-                 Linux: curl -fsSL https://zeron.sh/install.sh | sh\n\
+                 Linux: curl -fsSL https://zeron.sh/install.sh | sh, or run install.sh from the release tarball\n\
                  macOS: download the new Zeron.app dmg, or rebuild from source.\n\
-                 Windows: use an update-enabled portable package, or rebuild from source."
+                 Windows: install with the Zeron setup .exe from {}, or rebuild from source.",
+                zeron_update::LATEST_RELEASE_PAGE
             )
         }
     }

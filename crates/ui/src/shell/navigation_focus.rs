@@ -49,6 +49,25 @@ fn focus_navigation_scope(scope: &FocusHandle, window: &mut Window, cx: &mut App
     });
 }
 
+/// Cmd/Ctrl+C for a transcript selection once the pane itself holds focus
+/// (clicking the transcript blurs the composer, whose `Copy` handles this
+/// otherwise). Bubble phase: focused inputs, editors and terminals see the
+/// keystroke first, so this only answers when none of them consumed it.
+pub(super) fn copy_transcript_selection(event: &gpui::KeyDownEvent, cx: &mut App) {
+    let keystroke = &event.keystroke;
+    if keystroke.key != "c"
+        || !(keystroke.modifiers.platform || keystroke.modifiers.control)
+        || keystroke.modifiers.shift
+        || keystroke.modifiers.alt
+    {
+        return;
+    }
+    if let Some(text) = crate::markdown::selection::selected_text() {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        cx.stop_propagation();
+    }
+}
+
 impl Shell {
     pub(super) fn capture_navigation_focus(
         &mut self,

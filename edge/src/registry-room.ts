@@ -20,7 +20,16 @@
  * auto-response pair; the daily alarm does tombstone GC + the R2 backup.
  */
 import { applyOp, validateOp, type Op, type Row } from "./registry-core";
-import { AUTH_USER_HEADER, type Env } from "./env";
+import { AUTH_USER_HEADER, apnsConfig, type Env } from "./env";
+import { isDeadToken, sendApns, type ApnsEnvironment } from "./apns";
+import {
+  apnsPayload,
+  chatForNotification,
+  notificationFor,
+  parsePrefs,
+  type Category,
+  type PushPrefs
+} from "./push-notify";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Tombstones older than this are purged; cursors from before the purge
@@ -47,6 +56,33 @@ interface PushOutcome {
   lastOkAt: number;
 }
 
+/** A phone that asked for notifications (APNs token + its choices). */
+interface PushTarget {
+  device: string;
+  token: string;
+  environment: ApnsEnvironment;
+  prefs: PushPrefs;
+}
+
+/** One notification decided by a push batch. */
+interface Notification {
+  chatId: string;
+  title: string;
+  category: Category;
+}
+
+/** Recent deliveries on /stats (the only place to see them). */
+interface PushLogEntry {
+  at: number;
+  chatId: string;
+  category: Category;
+  device: string;
+  result: string;
+}
+
+const TOKEN_RE = /^[0-9a-fA-F]{32,512}$/;
+const PUSH_LOG_MAX = 30;
+
 export class RegistryRoom implements DurableObject {
   private readonly ctx: DurableObjectState;
   private readonly env: Env;
@@ -62,6 +98,11 @@ export class RegistryRoom implements DurableObject {
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS rows_seq ON rows (seq)");
     ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    );
+    // Push targets are private to this room: never rows (those broadcast to
+    // every socket, sync to every device and back up to R2).
+    ctx.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS push_targets (device TEXT PRIMARY KEY, token TEXT NOT NULL, environment TEXT NOT NULL, prefs TEXT NOT NULL, updated_at INTEGER NOT NULL)"
     );
     // Same protocol-level keepalive as SessionRoom — and the same caveat: a
     // pong is runtime-answered and proves nothing about this DO's health.
@@ -180,8 +221,44 @@ export class RegistryRoom implements DurableObject {
         // incident tooling (SessionRoom's /stats pushOutcomes).
         pushOutcomes: JSON.parse(this.getMeta("pushOutcomes") ?? "{}") as Record<string, PushOutcome>,
         lastBackupSeq: Number(this.getMeta("backupSeq") ?? "0"),
-        lastGcAt: Number(this.getMeta("lastGcAt") ?? "0")
+        lastGcAt: Number(this.getMeta("lastGcAt") ?? "0"),
+        pushTargets: this.pushTargets().map((t) => ({ device: t.device, environment: t.environment, prefs: t.prefs })),
+        pushConfigured: apnsConfig(this.env) !== undefined,
+        pushLog: JSON.parse(this.getMeta("pushLog") ?? "[]") as PushLogEntry[]
       });
+    }
+
+    // A phone registering (or updating) its APNs token and choices; DELETE on
+    // sign-out or when the user turns notifications off.
+    if (url.pathname === "/push-target") {
+      const device = url.searchParams.get("device") ?? "";
+      if (device === "") return json({ error: "bad_request", message: "device required" }, 400);
+      if (request.method === "DELETE") {
+        this.ctx.storage.sql.exec("DELETE FROM push_targets WHERE device = ?", device);
+        return json({ ok: true });
+      }
+      if (request.method === "POST") {
+        let body: Record<string, unknown>;
+        try {
+          body = (await request.json()) as Record<string, unknown>;
+        } catch {
+          return json({ error: "bad_request", message: "malformed body" }, 400);
+        }
+        const token = typeof body.token === "string" ? body.token : "";
+        const environment = body.environment === "sandbox" ? "sandbox" : body.environment === "production" ? "production" : undefined;
+        if (!TOKEN_RE.test(token) || environment === undefined) {
+          return json({ error: "bad_request", message: "token and environment required" }, 400);
+        }
+        this.ctx.storage.sql.exec(
+          "INSERT INTO push_targets (device, token, environment, prefs, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(device) DO UPDATE SET token = excluded.token, environment = excluded.environment, prefs = excluded.prefs, updated_at = excluded.updated_at",
+          device,
+          token,
+          environment,
+          JSON.stringify(parsePrefs(body.prefs)),
+          Date.now()
+        );
+        return json({ ok: true });
+      }
     }
 
     if (url.pathname === "/rows" && request.method === "GET") {
@@ -375,10 +452,13 @@ export class RegistryRoom implements DurableObject {
     // event commit together, so a mid-batch crash never persists half a batch.
     const nextSeq = this.seq() + 1;
     const touched = new Map<string, Row>();
+    /** Each touched session row as it was before this batch. */
+    const sessionsBefore = new Map<string, Row | undefined>();
     let applied = 0;
     for (const op of ops) {
       const key = `${op.kind} ${op.id}`;
       const before = touched.get(key) ?? this.loadRow(op.kind, op.id);
+      if (op.kind === "sessions" && !sessionsBefore.has(op.id)) sessionsBefore.set(op.id, before);
       const { row, changed } = applyOp(before, op);
       if (!changed || row === undefined) continue;
       applied += 1;
@@ -404,8 +484,86 @@ export class RegistryRoom implements DurableObject {
         if (!socketState?.ready) continue;
         send(socket, { t: "rows", seq, rows });
       }
+      this.notifySessions(sessionsBefore, touched);
     }
     return { ok: true, batch, seq, applied };
+  }
+
+  // ── push notifications ───────────────────────────────────────────────────
+
+  private pushTargets(): PushTarget[] {
+    return [...this.ctx.storage.sql.exec("SELECT device, token, environment, prefs FROM push_targets")].map((raw) => ({
+      device: raw.device as string,
+      token: raw.token as string,
+      environment: (raw.environment as string) === "sandbox" ? "sandbox" : "production",
+      prefs: parsePrefs(JSON.parse(raw.prefs as string))
+    }));
+  }
+
+  /** Session rows that changed in a batch → the desktop's notifications
+   * (done / needs input / failed), sent to every registered phone after the
+   * batch commits. Best effort: a failed delivery is logged, never retried. */
+  private notifySessions(before: Map<string, Row | undefined>, touched: Map<string, Row>): void {
+    if (before.size === 0) return;
+    const now = Date.now();
+    const notes: Notification[] = [];
+    for (const [chatId, prev] of before) {
+      const next = touched.get(`sessions ${chatId}`);
+      if (!next) continue;
+      const category = notificationFor(prev, next, now);
+      if (category === null) continue;
+      const chat = chatForNotification(touched.get(`chats ${chatId}`) ?? this.loadRow("chats", chatId));
+      if (chat === null) continue;
+      notes.push({ chatId, title: chat.title, category });
+    }
+    if (notes.length === 0) return;
+    const targets = this.pushTargets();
+    const config = apnsConfig(this.env);
+    const log: PushLogEntry[] = [];
+    const sends: Array<() => Promise<void>> = [];
+    for (const note of notes) {
+      for (const target of targets) {
+        if (!target.prefs[note.category]) continue;
+        const entry: PushLogEntry = { at: now, chatId: note.chatId, category: note.category, device: target.device, result: "pending" };
+        log.push(entry);
+        if (config === undefined) {
+          entry.result = "not configured";
+          continue;
+        }
+        sends.push(async () => {
+          try {
+            const r = await sendApns(config, target.environment, target.token, apnsPayload(note.chatId, note.title, note.category), note.chatId);
+            entry.result = r.reason ? `${r.status} ${r.reason}` : String(r.status);
+            if (isDeadToken(r)) {
+              this.ctx.storage.sql.exec("DELETE FROM push_targets WHERE device = ? AND token = ?", target.device, target.token);
+            }
+          } catch (err) {
+            entry.result = `error ${(err as Error).message}`;
+          }
+        });
+      }
+    }
+    if (targets.length === 0) {
+      for (const note of notes) log.push({ at: now, chatId: note.chatId, category: note.category, device: "", result: "no targets" });
+    }
+    this.appendPushLog(log);
+    if (sends.length > 0) {
+      this.ctx.waitUntil(
+        Promise.all(sends.map((send) => send())).then(() => this.appendPushLog([], log))
+      );
+    }
+  }
+
+  /** Keep the last few deliveries; `updated` entries (same objects, results
+   * filled in after sending) replace their pending copies. */
+  private appendPushLog(entries: PushLogEntry[], updated: PushLogEntry[] = []): void {
+    let log = JSON.parse(this.getMeta("pushLog") ?? "[]") as PushLogEntry[];
+    for (const u of updated) {
+      const i = log.findIndex((e) => e.at === u.at && e.chatId === u.chatId && e.device === u.device && e.category === u.category);
+      if (i >= 0) log[i] = u;
+    }
+    log = [...log, ...entries].slice(-PUSH_LOG_MAX);
+    this.setMeta("pushLog", JSON.stringify(log));
   }
 
   private handlePresence(ws: WebSocket, state: SocketState, frame: Record<string, unknown>): void {

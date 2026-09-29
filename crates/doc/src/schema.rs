@@ -903,6 +903,14 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     Ok(())
 }
 
+/// Decode ONE `messages` entry map's deep JSON value (same strict-then-salvage
+/// policy as [`SessionDoc::read_entries`]). The per-entry seam for viewers
+/// that keep an incremental transcript mirror: they re-decode only the entry
+/// maps a commit touched instead of materializing the whole list.
+pub fn decode_entry_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError> {
+    entry_from_json(v)
+}
+
 fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]

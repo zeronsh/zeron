@@ -6,29 +6,61 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-/// Loading is independent of route motion. A cold result may arrive late, but
-/// it must not suddenly appear at the route clock's already-advanced opacity.
+/// Hold the displayed artwork during loading, then crossfade to the ready image.
+/// Finish each blend before adopting another image to keep rapid changes smooth.
 #[derive(Default)]
 pub(crate) struct Readiness {
-    image: Option<(gpui::ImageId, Instant)>,
+    current: Option<Arc<gpui::RenderImage>>,
+    previous: Option<Arc<gpui::RenderImage>>,
+    started: Option<Instant>,
+}
+
+pub(crate) struct ArtworkFrame {
+    pub current: Option<Arc<gpui::RenderImage>>,
+    pub previous: Option<Arc<gpui::RenderImage>>,
+    pub mix: f32,
+    pub active: bool,
+}
+
+fn crossfade_mix(start: Instant, now: Instant) -> f32 {
+    let spec = crate::motion::WALLPAPER_CROSSFADE;
+    let duration = spec.total().mul_f32(crate::motion::speed_scale());
+    spec.progress(now.saturating_duration_since(start).as_secs_f32() / duration.as_secs_f32())
 }
 
 impl Readiness {
-    pub fn opacity(&mut self, image: Option<gpui::ImageId>, reduced: bool, now: Instant) -> f32 {
-        let Some(image) = image else {
-            self.image = None;
-            return 0.0;
-        };
-        if self.image.is_none_or(|(previous, _)| previous != image) {
-            self.image = Some((image, now));
+    pub fn frame(
+        &mut self,
+        image: Option<Arc<gpui::RenderImage>>,
+        enabled: bool,
+        reduced: bool,
+        now: Instant,
+    ) -> ArtworkFrame {
+        let progress = self.started.map_or(1.0, |start| crossfade_mix(start, now));
+        if reduced || progress >= 1.0 {
+            self.previous = None;
+            self.started = None;
         }
-        if reduced {
-            return 1.0;
+        // None while enabled means "still loading", not "remove artwork".
+        if self.started.is_none() && (!enabled || image.is_some()) {
+            let target = if enabled { image } else { None };
+            if self.current.as_ref().map(|image| image.id) != target.as_ref().map(|image| image.id)
+            {
+                self.previous = self.current.take();
+                self.current = target;
+                if reduced {
+                    self.previous = None;
+                } else {
+                    self.started = Some(now);
+                }
+            }
         }
-        let elapsed = now
-            .saturating_duration_since(self.image.unwrap().1)
-            .as_secs_f32();
-        crate::composer_dock::stage(elapsed / (0.120 * crate::motion::speed_scale()), 0.0, 1.0)
+        ArtworkFrame {
+            current: self.current.clone(),
+            previous: self.previous.clone(),
+            mix: self.started.map_or(1.0, |start| crossfade_mix(start, now)),
+            active: self.started.is_some(),
+        }
     }
 }
 type EffectEntry = (
@@ -70,25 +102,7 @@ impl BackgroundLuminance {
             let worker = source.clone();
             let image = cx
                 .background_executor()
-                .spawn(async move {
-                    let pixels = match effect {
-                        NewThreadBackgroundEffect::None => {
-                            image::RgbaImage::from_fn(worker.width, worker.height, |x, y| {
-                                let [r, g, b, a] = worker.colors[(y * worker.width + x) as usize];
-                                image::Rgba([b, g, r, a])
-                            })
-                        }
-                        NewThreadBackgroundEffect::Dither => {
-                            worker.dither_pixels(worker.width, worker.height)
-                        }
-                        NewThreadBackgroundEffect::Halftone => {
-                            worker.halftone_pixels(worker.width, worker.height, light)
-                        }
-                        NewThreadBackgroundEffect::Ascii => worker.ascii_pixels(light),
-                        _ => worker.scanline_pixels(light),
-                    };
-                    Arc::new(gpui::RenderImage::new([image::Frame::new(pixels)]))
-                })
+                .spawn(async move { worker.render_image(effect, light) })
                 .await;
             cx.update(|cx| {
                 if let Some((_, ready)) = source
@@ -105,6 +119,27 @@ impl BackgroundLuminance {
         })
         .detach();
         None
+    }
+    fn render_image(
+        &self,
+        effect: NewThreadBackgroundEffect,
+        light: bool,
+    ) -> Arc<gpui::RenderImage> {
+        let pixels = match effect {
+            NewThreadBackgroundEffect::None => {
+                image::RgbaImage::from_fn(self.width, self.height, |x, y| {
+                    let [r, g, b, a] = self.colors[(y * self.width + x) as usize];
+                    image::Rgba([b, g, r, a])
+                })
+            }
+            NewThreadBackgroundEffect::Dither => self.dither_pixels(self.width, self.height),
+            NewThreadBackgroundEffect::Halftone => {
+                self.halftone_pixels(self.width, self.height, light)
+            }
+            NewThreadBackgroundEffect::Ascii => self.ascii_pixels(light),
+            _ => self.scanline_pixels(light),
+        };
+        Arc::new(gpui::RenderImage::new([image::Frame::new(pixels)]))
     }
     fn scanline_pixels(&self, light: bool) -> image::RgbaImage {
         image::RgbaImage::from_fn(self.width, self.height, |x, y| {
@@ -240,10 +275,70 @@ impl BackgroundLuminance {
     }
 }
 
+type Source = Arc<Mutex<Option<Arc<BackgroundLuminance>>>>;
+type Cache = Vec<(PathBuf, Source)>;
+static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+
+fn decode_source(bytes: &[u8]) -> Option<Arc<BackgroundLuminance>> {
+    Some(source_from_image(
+        &crate::new_thread_background_image::decode(bytes).ok()?,
+    ))
+}
+
+fn source_from_image(image: &image::DynamicImage) -> Arc<BackgroundLuminance> {
+    let proxy = image.thumbnail(2048, 2048);
+    let gray = proxy.to_luma8();
+    Arc::new(BackgroundLuminance {
+        width: gray.width(),
+        height: gray.height(),
+        pixels: gray.into_raw().into_boxed_slice(),
+        colors: proxy.to_rgba8().pixels().map(|pixel| pixel.0).collect(),
+        effects: Mutex::new(Vec::new()),
+    })
+}
+
+/// Fully decoded source and selected effect, built on the background executor.
+pub(crate) struct PreloadedArtwork(Arc<BackgroundLuminance>);
+
+impl PreloadedArtwork {
+    /// Takes the image the caller already decoded to validate the candidate,
+    /// so a full-resolution wallpaper is decoded once per preload.
+    pub fn load(
+        image: &image::DynamicImage,
+        effect: NewThreadBackgroundEffect,
+        light: bool,
+    ) -> Self {
+        let source = source_from_image(image);
+        let light = light
+            && !matches!(
+                effect,
+                NewThreadBackgroundEffect::None | NewThreadBackgroundEffect::Dither
+            );
+        let image = source.render_image(effect, light);
+        source
+            .effects
+            .lock()
+            .unwrap()
+            .push(((effect, light), Some(image)));
+        Self(source)
+    }
+
+    pub fn color(&self) -> Option<zeron_theme::Color> {
+        let stride = (self.0.colors.len() / 4096).max(1);
+        crate::settings::wallpaper_colors::extract(self.0.colors.iter().step_by(stride).copied())
+    }
+
+    pub fn install(self, path: &Path) {
+        let mut cache = CACHE.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap();
+        cache.retain(|(key, _)| key != path);
+        cache.push((path.to_path_buf(), Arc::new(Mutex::new(Some(self.0)))));
+        if cache.len() > 4 {
+            cache.remove(0);
+        }
+    }
+}
+
 fn background_luminance(path: &Path, cx: &mut gpui::App) -> Option<Arc<BackgroundLuminance>> {
-    type Source = Arc<Mutex<Option<Arc<BackgroundLuminance>>>>;
-    type Cache = Vec<(PathBuf, Source)>;
-    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
     if let Some(source) = cache
         .lock()
@@ -267,17 +362,7 @@ fn background_luminance(path: &Path, cx: &mut gpui::App) -> Option<Arc<Backgroun
             .background_executor()
             .spawn(async move {
                 let bytes = std::fs::read(path).ok()?;
-                let proxy = crate::new_thread_background_image::decode(&bytes)
-                    .ok()?
-                    .thumbnail(2048, 2048);
-                let gray = proxy.to_luma8();
-                Some(Arc::new(BackgroundLuminance {
-                    width: gray.width(),
-                    height: gray.height(),
-                    pixels: gray.into_raw().into_boxed_slice(),
-                    colors: proxy.to_rgba8().pixels().map(|pixel| pixel.0).collect(),
-                    effects: Mutex::new(Vec::new()),
-                }))
+                decode_source(&bytes)
             })
             .await;
         cx.update(|cx| {
@@ -316,23 +401,46 @@ fn dither_color([r, g, b, a]: [u8; 4], threshold: u8) -> [u8; 4] {
 mod tests {
     use super::*;
 
+    fn artwork() -> Arc<gpui::RenderImage> {
+        Arc::new(gpui::RenderImage::new([image::Frame::new(
+            image::RgbaImage::new(1, 1),
+        )]))
+    }
+
     #[test]
-    fn cold_artwork_fades_in_once_and_warm_navigation_does_not_restart_it() {
-        let image = gpui::RenderImage::new([image::Frame::new(image::RgbaImage::new(1, 1))]);
-        let next = gpui::RenderImage::new([image::Frame::new(image::RgbaImage::new(1, 1))]);
+    fn wallpaper_crossfade_holds_while_loading_and_handles_rapid_changes() {
+        let first = artwork();
+        let next = artwork();
+        let latest = artwork();
         let mut ready = Readiness::default();
         let now = Instant::now();
-        assert_eq!(ready.opacity(None, false, now), 0.0);
-        let loaded = now + std::time::Duration::from_secs(30);
-        assert_eq!(ready.opacity(Some(image.id), false, loaded), 0.0);
-        let halfway =
-            loaded + std::time::Duration::from_secs_f32(0.060 * crate::motion::speed_scale());
-        assert!((ready.opacity(Some(image.id), false, halfway) - 0.5).abs() < 0.001);
-        let later = loaded + std::time::Duration::from_secs(30);
-        assert_eq!(ready.opacity(Some(image.id), false, later), 1.0);
-        assert_eq!(ready.opacity(Some(image.id), false, later), 1.0);
-        assert_eq!(ready.opacity(Some(next.id), false, later), 0.0);
-        assert_eq!(ready.opacity(Some(next.id), true, later), 1.0);
+        ready.frame(Some(first.clone()), true, true, now);
+        let loading = ready.frame(None, true, false, now);
+        assert_eq!(loading.current.unwrap().id, first.id);
+        assert!(!loading.active);
+        let start = ready.frame(Some(next.clone()), true, false, now);
+        assert_eq!(start.mix, 0.0);
+        assert_eq!(start.previous.unwrap().id, first.id);
+        let halfway = now
+            + std::time::Duration::from_secs_f32(
+                crate::motion::WALLPAPER_CROSSFADE.total().as_secs_f32()
+                    * crate::motion::speed_scale()
+                    * 0.5,
+            );
+        let frame = ready.frame(Some(latest.clone()), true, false, halfway);
+        assert!((frame.mix - 0.875).abs() < 0.001);
+        assert_eq!(frame.current.unwrap().id, next.id);
+        let done = now + std::time::Duration::from_secs(1);
+        let frame = ready.frame(Some(latest.clone()), true, false, done);
+        assert_eq!(frame.previous.unwrap().id, next.id);
+        assert_eq!(frame.current.unwrap().id, latest.id);
+        assert_eq!(frame.mix, 0.0);
+        let frame = ready.frame(Some(latest), true, true, done);
+        assert!(!frame.active);
+        assert!(frame.previous.is_none());
+        assert_eq!(frame.mix, 1.0);
+        let removed = ready.frame(None, false, true, done);
+        assert!(removed.current.is_none() && removed.previous.is_none());
     }
 
     #[gpui::test]

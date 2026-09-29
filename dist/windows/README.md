@@ -6,4 +6,6 @@ resampling. It preserves the artwork's transparency.
 
 `apps/zeron/build.rs` compiles `zeron.rc` into the Windows executable for
 both debug and release builds. Resource ID 1 is required by GPUI's Windows
-icon loader. No installer or adjacent image file is needed at runtime.
+icon loader. No adjacent image file is needed at runtime; the installer
+(`zeron.iss`) uses the same `zeron.ico` for its own window and the uninstall
+entry.

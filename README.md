@@ -53,7 +53,13 @@ zeron daemon start
 
 On macOS: use the desktop release, or build `zeron` from source and run `zeron daemon install` to install the launchd service.
 
-On Windows: extract the portable release ZIP and run `zeron.exe`. Keep `zeron-update.json` beside it for in-app updates. See the [development notes](docs/reference/windows-development.md) for source builds.
+On Windows: run the `zeron-<version>-windows-x86_64-setup.exe` installer from the [latest release](https://github.com/zeronsh/zeron/releases/latest). It installs for your user without administrator rights, adds Zeron to the Start menu, and appears in Settings → Apps for uninstalling. A portable ZIP is also published; keep `zeron-update.json` beside `zeron.exe` for in-app updates. See the [development notes](docs/reference/windows-development.md) for source builds.
+
+## Updates
+
+The desktop app checks for a new release when it starts, every hour while it runs, and when you come back to it after the machine slept. A new version downloads in the background; the sidebar then offers **Update ready — restart to apply**, and if you don't restart, it installs the next time you quit Zeron. Check by hand with **Zeron → Check for Updates…** on macOS, or **Check for updates** in the account menu (bottom of the sidebar) on Windows and Linux. Set `ZERON_AUTO_UPDATE=0` to be notified without the background download.
+
+Linux desktop installs from the release tarball's `install.sh` use the same `~/.zeron/app` layout as the curl installer, so they update in place too. A daemon installed as a service restarts into a newer installed version once no agent run or terminal is active; `zeron update` updates headless installs on demand.
 
 ## Sponsors
 

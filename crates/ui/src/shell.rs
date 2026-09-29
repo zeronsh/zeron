@@ -57,12 +57,15 @@ use crate::state::{
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
 use crate::theme::Theme;
 use crate::transcript::{self, Transcript, TranscriptEvent};
-use crate::workspace_links::resolve_workspace_file_link;
 
 mod actions_ui;
+mod chat_dropzone;
+#[cfg(test)]
+mod chat_dropzone_tests;
 mod command_palette;
 mod file_mutations;
 mod files_panel;
+mod harness_updates;
 mod navigation_focus;
 #[cfg(test)]
 mod navigation_tests;
@@ -94,6 +97,7 @@ actions!(
     shell,
     [
         SaveFile,
+        RandomWallpaper,
         ToggleSidebar,
         ToggleChanges,
         ToggleFiles,
@@ -419,6 +423,11 @@ pub fn apply_keymap(
     // key equivalents and must survive keymap re-application.
     crate::app_menus::bind_keys(cx);
     cx.bind_keys([
+        KeyBinding::new(
+            &valid_or_default(&keymap.random_wallpaper, "mod-u"),
+            RandomWallpaper,
+            None,
+        ),
         KeyBinding::new(
             &valid_or_default(&keymap.save_file, "mod-s"),
             SaveFile,
@@ -994,6 +1003,9 @@ pub(crate) fn sidebar_faded_label(
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
 const SIDEBAR_GLASS_FADE_BAND: f32 = 24.0;
 
+/// Target of the sidebar's "Star on GitHub" banner (same as the landing page).
+const GITHUB_REPO_URL: &str = "https://github.com/zeronsh/comet";
+
 /// New-thread controls float over the tail of a top-anchored image hero. The
 /// hero reaches below the composer, giving its lower mask room to dissolve
 /// gradually into the otherwise empty lower canvas.
@@ -1334,15 +1346,6 @@ struct RenameChatDialog {
     /// Focus the input on the dialog's first paint (opened without window access).
     focus_pending: bool,
     _events: Subscription,
-}
-
-/// In-app update lifecycle (macOS bundle installs; see `render_update_strip`).
-enum UpdateFlow {
-    Idle,
-    Downloading,
-    /// Staged bundle ready to swap in — one click restarts into it.
-    Ready(PathBuf),
-    Failed(SharedString),
 }
 
 /// Account lifecycle owned by this process. Sign-in on a local workspace
@@ -1721,6 +1724,16 @@ impl Render for SidebarPane {
     }
 }
 
+/// A button in the "Check for Updates…" dialog.
+#[derive(Debug, Clone, Copy)]
+enum UpdatePromptButton {
+    Close(&'static str),
+    CheckAgain,
+    Download,
+    Restart,
+    OpenDownloads,
+}
+
 #[derive(Debug, Clone)]
 enum PendingExit {
     CloseWindow,
@@ -1766,6 +1779,8 @@ pub struct Shell {
     pub(super) jump_hints: bool,
     /// Lazy panes: no entity (and no RPC) until first opened.
     terminal: Option<Entity<TerminalPanel>>,
+    /// Last resolved layout, for drag anchors and matching transcript clearance.
+    terminal_geometry: crate::terminal::dock::SharedGeometry,
     /// Embedded terminal host for right-pane Terminal surfaces — a SEPARATE
     /// entity from the bottom drawer's (own PTYs, own grid geometry; one
     /// panel can only size one visible grid at a time).
@@ -1878,6 +1893,11 @@ pub struct Shell {
         std::cell::RefCell<std::collections::HashMap<String, Entity<project_icon::ProjectIcon>>>,
     /// Hovered row whose status is replaced by the archive control.
     chat_status_hover: Option<String>,
+    /// Set by an archive-pill click until the pointer next moves. gpui only
+    /// re-evaluates `on_hover` on mouse movement, so the row that slides up
+    /// under a still pointer would otherwise never show its archive pill;
+    /// while set, rows adopt the hover from a paint-time hit test instead.
+    chat_hover_resync: bool,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
     /// In-flight reorder for the pinned section only.
@@ -1899,20 +1919,25 @@ pub struct Shell {
     /// Persistent across AppState observer callbacks so simultaneous session
     /// failures and connectivity degradation produce one attention sound.
     attention_sound_gate: crate::sound::AttentionSoundGate,
+    /// `{device,harness,latest}` discoveries already delivered as a desktop
+    /// banner during this viewport lifetime.
+    harness_update_seen: std::collections::HashSet<String>,
+    /// Short debounce that aggregates providers finishing the same check at
+    /// slightly different times into one banner.
+    harness_update_banner_task: Option<Task<()>>,
+    /// Independent watches retain device identity across selection changes.
+    harness_update_devices: std::collections::BTreeMap<String, harness_updates::DeviceUpdates>,
+    harness_update_expanded: bool,
+    harness_update_transition: Option<WidthTween>,
+    harness_update_geometry: [Option<WidthTween>; 2],
+    harness_update_scroll: settings::widgets::PageScroll,
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
-    /// Local lifecycle of an in-app update (macOS bundle swap) — the engine's
-    /// UpdateStatus stream says WHETHER one exists; this says how far the
-    /// download/stage of it has come in this process.
-    update_flow: UpdateFlow,
-    update_task: Option<Task<()>>,
-    /// Version whose update strip the user dismissed (advisory installs only —
-    /// a newer release shows the strip again).
-    update_dismissed: Option<String>,
-    /// How this binary was installed — decides the strip's click behavior.
-    /// Cached: `detect_install` stats `current_exe` and this renders per frame.
-    install: zeron_update::InstallKind,
+    /// Repaints the update strip and dialog as the app-level update
+    /// lifecycle ([`crate::app_update`]) moves. `None` when the app runs
+    /// without a desktop checker (tests).
+    _app_update_observation: Option<Subscription>,
     org: Option<OrgGateUi>,
     sync_flow: SyncFlow,
     mutate_task: Option<Task<()>>,
@@ -2298,6 +2323,7 @@ impl Shell {
             sidebar_pinned_heights: Vec::new(),
             project_icons: Default::default(),
             chat_status_hover: None,
+            chat_hover_resync: false,
             sidebar_scroll: gpui::ScrollHandle::new(),
             pinned_session_drag: None,
             pinned_session_drag_generation: 0,
@@ -2310,12 +2336,17 @@ impl Shell {
             sound_prev: std::collections::HashMap::new(),
             connectivity_notifications: Default::default(),
             attention_sound_gate: Default::default(),
+            harness_update_seen: std::collections::HashSet::new(),
+            harness_update_banner_task: None,
+            harness_update_devices: Default::default(),
+            harness_update_expanded: false,
+            harness_update_transition: None,
+            harness_update_geometry: [None; 2],
+            harness_update_scroll: settings::widgets::PageScroll::default(),
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
-            update_flow: UpdateFlow::Idle,
-            update_task: None,
-            update_dismissed: None,
-            install: zeron_update::detect_install(),
+            _app_update_observation: crate::app_update::AppUpdate::global(cx)
+                .map(|update| cx.observe(&update, |_, _, cx| cx.notify())),
             org: None,
             sync_flow: SyncFlow::Idle,
             mutate_task: None,
@@ -2353,6 +2384,7 @@ impl Shell {
             viewport_width: 1280.0,
             viewport_height: 880.0,
             terminal_tween: None,
+            terminal_geometry: Default::default(),
             fullscreen: None,
             titlebar_tween: None,
             titlebar_island: None,
@@ -2436,6 +2468,7 @@ impl Shell {
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         self.prune_file_explorers(cx);
+        self.refresh_harness_update_watch(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
             self.side_chat_creating = false;
@@ -2637,6 +2670,75 @@ impl Shell {
                     crate::notify::post("Connection unavailable", body, None);
                 }
             }
+        }
+        // Agent release discoveries finish independently (bounded provider
+        // concurrency), so debounce the transition and deliver one aggregate
+        // banner. Versioned releases deduplicate by version. Versionless
+        // availability deduplicates until a confirmed Current/Updated status;
+        // transient checks, disconnections and cancellation do not reset it.
+        let has_unseen_harness_update = {
+            let state = state.read(cx);
+            let device = state.local_device_id.as_deref().unwrap_or("local");
+            for status in &state.harness_updates {
+                if matches!(
+                    status.phase,
+                    zeron_proto::HarnessUpdatePhase::Current
+                        | zeron_proto::HarnessUpdatePhase::Updated
+                ) {
+                    self.harness_update_seen.remove(
+                        &harness_updates::versionless_notification_key(device, status.harness),
+                    );
+                }
+            }
+            state.harness_updates.iter().any(|status| {
+                harness_updates::notification_key(device, status)
+                    .is_some_and(|key| !self.harness_update_seen.contains(&key))
+            })
+        };
+        if has_unseen_harness_update && self.harness_update_banner_task.is_none() {
+            self.harness_update_banner_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                this.update(cx, |this, cx| {
+                    this.harness_update_banner_task = None;
+                    let new: Vec<String> = {
+                        let state = this.state.read(cx);
+                        let device = state.local_device_id.as_deref().unwrap_or("local");
+                        state
+                            .harness_updates
+                            .iter()
+                            .filter_map(|status| harness_updates::notification_key(device, status))
+                            .filter(|key| !this.harness_update_seen.contains(key))
+                            .collect()
+                    };
+                    if new.is_empty() {
+                        return;
+                    }
+                    let count = new.len();
+                    for key in &new {
+                        this.harness_update_seen.insert(key.clone());
+                    }
+                    let focused = cx.active_window().is_some();
+                    if this.settings.notifications_enabled
+                        && this.settings.agent_update_notifications
+                        && !(this.settings.notifications_background_only && focused)
+                    {
+                        let body = if count == 1 {
+                            "A coding agent update is ready"
+                        } else {
+                            "Coding agent updates are ready"
+                        };
+                        crate::notify::post(
+                            &format!(
+                                "{count} agent update{} available",
+                                if count == 1 { "" } else { "s" }
+                            ),
+                            body,
+                            Some(crate::notify::AGENT_UPDATES_TARGET),
+                        );
+                    }
+                })
+                .ok();
+            }));
         }
         // An explicit projectless canvas must be visible in the sidebar:
         // retaining a project filter would hide the session on its first send.
@@ -3252,6 +3354,8 @@ impl Shell {
         let shell = cx.weak_entity();
         crate::markdown::render::LinkUi {
             source_session,
+            source_local: false,
+            file_roots: None,
             handler: std::rc::Rc::new(move |activation, window, cx| {
                 shell
                     .update(cx, |shell, cx| {
@@ -3558,6 +3662,11 @@ impl Shell {
 
     /// Open a transcript's file link in the linking chat's own checkout: a
     /// side chat's link resolves against, and edits, the side chat's files.
+    /// An absolute path the linking checkout cannot own falls through the
+    /// chat's parent and this device's project roots before it is treated
+    /// as a host file; the first known root that owns the path wins. A chat
+    /// root opens the file in that chat's context; a project root and a host
+    /// file open by absolute path through the linking chat.
     fn open_workspace_file_link(
         &mut self,
         chat_id: &str,
@@ -3565,20 +3674,40 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(owner) = self.link_owner(chat_id, cx) else {
-            return false;
+        let owner_state = self
+            .link_owner(chat_id, cx)
+            .map(|(_, state)| state)
+            .unwrap_or_else(|| self.state.clone());
+        let roots = owner_state.read(cx).file_link_roots(chat_id);
+        let root_refs: Vec<&str> = roots.iter().map(|root| root.root.as_str()).collect();
+        use crate::workspace_links::FileLinkResolution;
+        let (owner_chat, link) = match crate::workspace_links::first_root_owning(target, root_refs)
+        {
+            Some(FileLinkResolution::Owned { root, link }) => match roots[root].chat.as_deref() {
+                Some(owner) => (owner.to_owned(), link),
+                // A linking chat without a checkout of its own resolves in
+                // its own file context, as before.
+                None if root == 0 => (chat_id.to_owned(), link),
+                // A project root past the linking chat's own has no chat of
+                // its own, and its relative path would name a different file
+                // under the linking chat's checkout: read it by absolute path
+                // through the linking chat, which keeps it editable only
+                // inside that checkout.
+                None => (
+                    chat_id.to_owned(),
+                    crate::workspace_links::WorkspaceFileLink {
+                        path: roots[root].absolute(&link).to_string_lossy().into_owned(),
+                        outside: true,
+                        ..link
+                    },
+                ),
+            },
+            // An absolute path no known root owns is still a file link: it
+            // opens read-only through the linking chat's own file context.
+            Some(FileLinkResolution::Outside(link)) => (chat_id.to_owned(), link),
+            None => return false,
         };
-        let Some(root) = owner
-            .1
-            .read(cx)
-            .chats
-            .iter()
-            .find(|chat| chat.id == chat_id)
-            .and_then(|chat| chat.cwd.clone())
-        else {
-            return false;
-        };
-        let Some(link) = resolve_workspace_file_link(target, &root) else {
+        let Some(owner) = self.link_owner(&owner_chat, cx) else {
             return false;
         };
 
@@ -4140,7 +4269,7 @@ impl Shell {
     /// animates 200 ms; closing detaches (PTYs stay alive), opening restores.
     /// The flag is per chat (zeron `sessionPanels`).
     fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let from = self.terminal_target(cx);
+        let from = self.terminal_geometry.get().height;
         let key = self.panel_key(cx);
         let open = self.panels.toggle_terminal(&key);
         self.terminal_tween = Some(WidthTween::new(from, self.terminal_target(cx)));
@@ -4189,11 +4318,16 @@ impl Shell {
         let dy = anchor_y - f32::from(event.event.position.y);
         let viewport_h = f32::from(window.viewport_size().height);
         let requested = anchor_h + dy;
-        let max = (viewport_h * TERMINAL_MAX_VH).max(TERMINAL_MIN_HEIGHT);
-        self.settings.terminal_height = clamp_terminal_height(requested, viewport_h);
+        let max = self
+            .terminal_geometry
+            .get()
+            .limit
+            .min(viewport_h * TERMINAL_MAX_VH);
+        let min = TERMINAL_MIN_HEIGHT.min(max);
+        self.settings.terminal_height = clamp_terminal_height(requested.min(max), viewport_h);
         self.pane_resize_dragging = Some(PaneResizeKind::Terminal);
-        self.pane_resize_active = (requested > TERMINAL_MIN_HEIGHT && requested < max)
-            .then_some(PaneResizeKind::Terminal);
+        self.pane_resize_active =
+            (requested > min && requested < max).then_some(PaneResizeKind::Terminal);
         self.terminal_tween = None; // live drag tracks the pointer
         self.schedule_save(cx);
         cx.notify();
@@ -4326,6 +4460,11 @@ impl Shell {
         self.settings.window_geometry = current.window_geometry;
         self.settings.new_thread_composer_background = current.new_thread_composer_background;
         self.settings.new_thread_background_effect = current.new_thread_background_effect;
+        self.settings.wallpaper_folder = current.wallpaper_folder;
+        self.settings.wallpaper_source = current.wallpaper_source;
+        self.settings.wallpaper_history = current.wallpaper_history;
+        self.settings.wallpaper_theme_colors = current.wallpaper_theme_colors;
+        self.settings.wallpaper_color = current.wallpaper_color;
         self.settings.open_web_links_in_zeron = current.open_web_links_in_zeron;
         self.settings.ui_font_family = current.ui_font_family;
         self.settings.ui_font_size = current.ui_font_size;
@@ -4436,7 +4575,45 @@ impl Shell {
         cx.notify();
     }
 
-    fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+    fn ensure_appearance_page(&mut self, cx: &mut Context<Self>) {
+        if self.appearance_page.is_none() {
+            let page = cx.new(AppearancePage::new);
+            self.appearance_settings_sub = Some(cx.subscribe(
+                &page,
+                |this: &mut Shell, _, event: &AppearanceSettingsEvent, cx| match *event {
+                    AppearanceSettingsEvent::CodeFontSizeChanged(size) => {
+                        this.set_code_font_size(size, cx);
+                    }
+                },
+            ));
+            self.appearance_page = Some(page);
+        }
+    }
+
+    fn random_wallpaper(&mut self, cx: &mut Context<Self>) {
+        self.ensure_appearance_page(cx);
+        if settings::current(cx).wallpaper_folder.is_none() {
+            self.open_settings(SettingsSection::Appearance, cx);
+            if let Some(page) = &self.appearance_page {
+                page.update(cx, |page, cx| page.choose_wallpaper_folder(cx));
+            }
+            return;
+        }
+        let task = settings::wallpaper::randomize(cx);
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = task.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.open_settings(SettingsSection::Appearance, cx);
+                    if let Some(page) = &this.appearance_page {
+                        page.update(cx, |page, cx| page.show_wallpaper_error(error, cx));
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         let section = section.canonical();
         self.command_palette = None;
         // Recreate per visit: the page's ListHarnesses load re-probes which
@@ -4600,18 +4777,7 @@ impl Shell {
                 }
             }
             SettingsSection::Appearance => {
-                if self.appearance_page.is_none() {
-                    let page = cx.new(AppearancePage::new);
-                    self.appearance_settings_sub = Some(cx.subscribe(
-                        &page,
-                        |this: &mut Shell, _, event: &AppearanceSettingsEvent, cx| match *event {
-                            AppearanceSettingsEvent::CodeFontSizeChanged(size) => {
-                                this.set_code_font_size(size, cx);
-                            }
-                        },
-                    ));
-                    self.appearance_page = Some(page);
-                }
+                self.ensure_appearance_page(cx);
                 match &self.appearance_page {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
@@ -4681,6 +4847,7 @@ impl Shell {
                             self.settings.sound_attention_enabled,
                             self.settings.notifications_enabled,
                             self.settings.notifications_background_only,
+                            self.settings.agent_update_notifications,
                             cx,
                         )
                     });
@@ -4695,6 +4862,7 @@ impl Shell {
                                 attention_sound,
                                 desktop,
                                 background_only,
+                                agent_updates,
                             } = *event;
                             this.settings.sound_enabled = sound;
                             this.settings.sound_completion_enabled = completion_sound;
@@ -4702,6 +4870,7 @@ impl Shell {
                             this.settings.sound_attention_enabled = attention_sound;
                             this.settings.notifications_enabled = desktop;
                             this.settings.notifications_background_only = background_only;
+                            this.settings.agent_update_notifications = agent_updates;
                             this.schedule_save(cx);
                             cx.notify();
                         },
@@ -4863,6 +5032,26 @@ impl Shell {
 
     fn archive_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.set_chat_archived(chat_id, true, cx);
+    }
+
+    /// Move the row hover (wash + archive pill) onto or off `row_id` to match a
+    /// pointer that has not moved since the last archive-pill click. Releasing
+    /// matters as much as adopting: an archived row keeps its hover key when it
+    /// lands in the Archived section, and would otherwise stay lit there.
+    fn sync_chat_row_hover(&mut self, row_id: String, hovered: bool, cx: &mut Context<Self>) {
+        let current = self.chat_status_hover.as_deref() == Some(row_id.as_str());
+        if !self.chat_hover_resync || current == hovered {
+            return;
+        }
+        if hovered {
+            if let Some(previous) = self.chat_status_hover.replace(row_id.clone()) {
+                motion::set_hover(&format!("{previous}-hover"), false, self.reduced_motion);
+            }
+        } else {
+            self.chat_status_hover = None;
+        }
+        motion::set_hover(&format!("{row_id}-hover"), hovered, self.reduced_motion);
+        cx.notify();
     }
 
     fn reconcile_sidebar_pins(&mut self, cx: &mut Context<Self>) {
@@ -7017,6 +7206,10 @@ impl Shell {
             let archive_id = id.clone();
             div()
                 .id(SharedString::from(format!("{row_id}-corner")))
+                .debug_selector({
+                    let row_id = row_id.clone();
+                    move || format!("{row_id}-corner")
+                })
                 .aria_label(if corner_hovered {
                     if archived { "Unarchive" } else { "Archive" }
                 } else {
@@ -7048,6 +7241,7 @@ impl Shell {
                     el.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
+                            this.chat_hover_resync = true;
                             this.set_chat_archived(archive_id.clone(), !archived, cx);
                         }))
                 })
@@ -7120,6 +7314,7 @@ impl Shell {
                     let hover_id = row_id.clone();
                     cx.listener(move |this, hovered: &bool, window, cx| {
                         fade_hover(hovered, window, cx);
+                        this.chat_hover_resync = false;
                         if *hovered {
                             if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
                                 this.chat_status_hover = Some(hover_id.clone());
@@ -7157,6 +7352,34 @@ impl Shell {
                     cx.stop_propagation();
                     cx.new(|_| DragGhost)
                 })
+            })
+            .when(self.chat_hover_resync && !preview, |el| {
+                let shell = cx.weak_entity();
+                let row_id = row_id.clone();
+                el.child(
+                    gpui::canvas(
+                        |bounds, window, _| {
+                            window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)
+                        },
+                        move |_, hitbox, window, cx| {
+                            // The hit test is final by paint, so popovers
+                            // over the row still occlude it.
+                            let hovered = hitbox.is_hovered(window) && !cx.has_active_drag();
+                            if hovered == corner_hovered {
+                                return;
+                            }
+                            window.defer(cx, move |_, cx| {
+                                shell
+                                    .update(cx, |this, cx| {
+                                        this.sync_chat_row_hover(row_id, hovered, cx)
+                                    })
+                                    .ok();
+                            });
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
             })
             // Line 1: "project @ device", status word / time-ago right.
             .when(!compact && show_label, |el| {
@@ -7870,6 +8093,11 @@ impl Shell {
         )
         .fade_overflow_y(&self.sidebar_scroll);
 
+        let update_strip = self.render_update_strip(theme, cx);
+        // Stacked above the update strip, the banner needs its own gap; alone
+        // it leans on the user-menu block's padding like the strip does.
+        let github_star_banner = self.render_github_star_banner(update_strip.is_some(), theme, cx);
+
         div()
             .w(px(self.settings.sidebar_width))
             .h_full()
@@ -7885,10 +8113,10 @@ impl Shell {
             .when_some(self.render_connection_pill(theme, cx), |el, pill| {
                 el.child(pill)
             })
-            // Update strip (above the user menu; below the lists).
-            .when_some(self.render_update_strip(theme, cx), |el, strip| {
-                el.child(strip)
-            })
+            // "Star on GitHub" banner until dismissed (persisted), then the
+            // update strip — both above the user menu, below the lists.
+            .when_some(github_star_banner, |el, banner| el.child(banner))
+            .when_some(update_strip, |el, strip| el.child(strip))
             // Inline mutation-failure notice.
             .when_some(self.sidebar_notice.clone(), |el, notice| {
                 el.child(
@@ -7920,25 +8148,95 @@ impl Shell {
             .into_any_element()
     }
 
-    /// Update strip: shown above the user menu whenever the engine's
-    /// UpdateStatus stream reports a newer release. On desktop-update installs
-    /// (macOS bundles, Windows portable packages) it drives the whole flow —
-    /// click to download, then click to restart into the staged replacement.
-    /// Managed installs are advisory (`zeron update`); unmanaged installs link
-    /// to the GitHub releases page. Clicking an advisory dismisses it for that
-    /// version.
+    /// "Star on GitHub" banner, styled like the update strip. Clicking it
+    /// opens the repository; either that or the close button dismisses it for
+    /// good — the choice is persisted so it never returns on the next launch.
+    fn render_github_star_banner(
+        &self,
+        above_update_strip: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.settings.github_star_banner_dismissed {
+            return None;
+        }
+        let tone = theme.accent;
+        let chip_bg_hover = theme.accent.opacity(0.16);
+        let close_bg_hover = theme.accent.opacity(0.22);
+        Some(
+            div()
+                .id("github-star-banner")
+                .mx(px(Theme::SPACE_SM))
+                .when(above_update_strip, |el| el.mb(px(Theme::SPACE_XS)))
+                .pl(px(Theme::SPACE_SM))
+                .pr(px(Theme::SPACE_XS))
+                .py(px(4.0))
+                .rounded(px(Theme::CONTROL_RADIUS))
+                .bg(theme.accent_wash)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(crate::typography::ui_rems(11.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(tone)
+                .cursor_pointer()
+                .hover(move |s| s.bg(chip_bg_hover))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.open_url(GITHUB_REPO_URL);
+                    this.dismiss_github_star_banner(cx);
+                }))
+                // Glyphs sit below the line box's optical center: nudge the
+                // star half a pixel down so it centers on the cap height.
+                .child(
+                    icon(icons::STAR_BOLD)
+                        .flex_none()
+                        .relative()
+                        .top(px(0.5))
+                        .size(px(12.0))
+                        .text_color(tone),
+                )
+                .child(div().flex_1().min_w_0().truncate().child("Star on GitHub"))
+                .child(
+                    div()
+                        .id("github-star-banner-dismiss")
+                        .flex_none()
+                        .size(px(18.0))
+                        .rounded(px(4.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(close_bg_hover))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.dismiss_github_star_banner(cx);
+                        }))
+                        .child(icon(icons::CLOSE).size(px(10.0)).text_color(tone)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn dismiss_github_star_banner(&mut self, cx: &mut Context<Self>) {
+        self.settings.github_star_banner_dismissed = true;
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// Update strip: shown above the user menu whenever this app's release
+    /// checker ([`crate::app_update`]) has found a newer version. Self-updating
+    /// installs (macOS bundles, Windows installs, Linux managed installs) show
+    /// the background download and then "restart to apply"; installs that
+    /// can't replace themselves explain why; advisory installs point at
+    /// `zeron update` or the GitHub releases page and dismiss per version.
     fn render_update_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let status = self.state.read(cx).update.clone()?;
-        if !status.update_available {
-            return None;
-        }
-        let latest = status.latest_version.clone()?;
-        if self.update_dismissed.as_deref() == Some(latest.as_str()) {
-            return None;
-        }
-        let (label, clickable) =
-            Self::update_strip_label(&self.install, &self.update_flow, &latest);
-        let failed = matches!(self.update_flow, UpdateFlow::Failed(_));
+        let update = crate::app_update::AppUpdate::global(cx)?;
+        let (label, action) = update.read(cx).strip()?;
+        let failed = matches!(
+            update.read(cx).flow(),
+            crate::app_update::Flow::Failed { .. }
+        );
         let tone = if failed { theme.danger } else { theme.accent };
         // Follow the selected spectrum with a low-emphasis glass tint rather
         // than painting the bright text accent as a solid slab.
@@ -7964,118 +8262,228 @@ impl Shell {
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(tone)
             .child(div().flex_1().min_w_0().child(label));
-        if clickable {
+        if action != crate::app_update::StripAction::None {
             strip = strip
                 .cursor_pointer()
                 .hover(move |s| s.bg(chip_bg_hover))
-                .on_click(cx.listener(move |this, _, _, cx| this.on_update_strip_click(cx)));
+                .on_click(
+                    cx.listener(move |this, _, _, cx| this.on_update_strip_click(action, cx)),
+                );
         }
         Some(strip.into_any_element())
     }
 
-    /// The update strip's label and click affordance per install kind. Desktop
-    /// update installs (macOS bundles, Windows portable packages) drive their
-    /// flow from the strip; managed installs get the `zeron update` hint;
-    /// unmanaged installs (source builds, hand-copied binaries) are pointed at
-    /// the GitHub releases page.
-    fn update_strip_label(
-        install: &zeron_update::InstallKind,
-        flow: &UpdateFlow,
-        latest: &str,
-    ) -> (SharedString, bool) {
-        if install.supports_desktop_update() {
-            match flow {
-                UpdateFlow::Idle => (format!("Update available — v{latest}").into(), true),
-                UpdateFlow::Downloading => (format!("Downloading v{latest}…").into(), false),
-                UpdateFlow::Ready(_) => ("Update ready — restart to apply".into(), true),
-                UpdateFlow::Failed(message) => (format!("Update failed: {message}").into(), true),
-            }
-        } else if matches!(install, zeron_update::InstallKind::Managed { .. }) {
-            (
-                format!("Update available — v{latest} · run `zeron update`").into(),
-                true,
-            )
-        } else {
-            (
-                format!("Update available — v{latest} · download from GitHub").into(),
-                true,
-            )
-        }
-    }
-
-    /// Idle → download; Ready → swap + relaunch; Failed → retry; advisory
-    /// installs (managed: `zeron update`, unmanaged: the GitHub releases page)
-    /// → open the destination if there is one, then dismiss for this version.
-    fn on_update_strip_click(&mut self, cx: &mut Context<Self>) {
-        if !self.install.supports_desktop_update() {
-            if matches!(self.install, zeron_update::InstallKind::Unmanaged) {
-                cx.open_url(zeron_update::RELEASES_PAGE);
-            }
-            self.update_dismissed = self
-                .state
-                .read(cx)
-                .update
-                .as_ref()
-                .and_then(|s| s.latest_version.clone());
-            cx.notify();
+    /// Download → the background stage; Restart → swap + relaunch; Explain →
+    /// the update dialog; advisory installs open their destination (if any),
+    /// then dismiss for this version.
+    fn on_update_strip_click(
+        &mut self,
+        action: crate::app_update::StripAction,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::app_update::{AppUpdate, StripAction};
+        let Some(update) = AppUpdate::global(cx) else {
             return;
-        }
-        match std::mem::replace(&mut self.update_flow, UpdateFlow::Idle) {
-            UpdateFlow::Idle | UpdateFlow::Failed(_) => self.begin_update_download(cx),
-            UpdateFlow::Downloading => self.update_flow = UpdateFlow::Downloading,
-            UpdateFlow::Ready(staged) => self.apply_staged_update(staged, cx),
+        };
+        match action {
+            StripAction::None => {}
+            StripAction::Download => update.update(cx, |update, cx| update.start_download(cx)),
+            StripAction::Restart => {
+                if let Some(staged) = update.read(cx).staged() {
+                    self.apply_staged_update(staged, cx);
+                }
+            }
+            StripAction::Explain => update.update(cx, |update, cx| update.show_result(cx)),
+            StripAction::Advise { open_releases } => {
+                if open_releases {
+                    cx.open_url(zeron_update::RELEASES_PAGE);
+                }
+                update.update(cx, |update, cx| update.dismiss_advisory(cx));
+            }
         }
     }
 
-    /// Fetch the manifest and stage the new Zeron desktop bundle under the data dir
-    /// (tokio — reqwest); the strip flips to "restart to apply" when done.
-    fn begin_update_download(&mut self, cx: &mut Context<Self>) {
-        let edge_url = self.boot.edge_url.clone();
-        let data_dir = self.data_dir.clone();
-        let install = self.install.clone();
-        self.update_flow = UpdateFlow::Downloading;
-        let download = Tokio::spawn(cx, async move {
-            let manifest = zeron_update::fetch_latest(&edge_url).await?;
-            install.stage_desktop(&edge_url, &manifest, &data_dir).await
-        });
-        self.update_task = Some(cx.spawn(async move |this, cx| {
-            let outcome = match download.await {
-                Ok(Ok(staged)) => Ok(staged),
-                Ok(Err(err)) => Err(format!("{err:#}")),
-                Err(join_err) => Err(join_err.to_string()),
-            };
-            this.update(cx, |shell, cx| {
-                shell.update_flow = match outcome {
-                    Ok(staged) => UpdateFlow::Ready(staged),
-                    Err(message) => {
-                        tracing::warn!(%message, "update download failed");
-                        UpdateFlow::Failed(message.into())
-                    }
-                };
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
-    /// Swap the staged bundle over the installed one, arm the detached
-    /// relauncher, and quit — the relauncher `open`s the new bundle once this
+    /// Swap the staged update over the installed one, arm the detached
+    /// relauncher, and quit — the relauncher starts the new version once this
     /// process (and its engine lock / IPC port) is gone.
     fn apply_staged_update(&mut self, staged: PathBuf, cx: &mut Context<Self>) {
         if !self.prepare_exit(PendingExit::InstallUpdate(staged.clone()), cx) {
             return;
         }
-        match self.install.apply_desktop(&staged) {
-            Ok(()) => {
-                crate::app_menus::quit_after_save(cx);
-            }
-            Err(err) => {
-                tracing::error!(error = %err, "update apply failed");
-                self.update_flow = UpdateFlow::Failed(format!("{err:#}").into());
-                cx.notify();
-            }
+        let Some(update) = crate::app_update::AppUpdate::global(cx) else {
+            return;
+        };
+        if update
+            .update(cx, |update, cx| update.install_for_restart(&staged, cx))
+            .is_ok()
+        {
+            crate::app_menus::quit_after_save(cx);
         }
+    }
+
+    /// The "Check for Updates…" dialog: checking, then the outcome, which
+    /// stays live (download progress, ready to restart) while it is open.
+    fn render_update_prompt(
+        &mut self,
+        viewport: gpui::Size<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use crate::app_update::{AppUpdate, Flow, Prompt};
+        let update = AppUpdate::global(cx)?;
+        let theme = Theme::of(cx).for_popup();
+        let current = zeron_update::current_version();
+        let (title, body, buttons): (SharedString, SharedString, Vec<UpdatePromptButton>) = {
+            let update = update.read(cx);
+            match update.prompt()? {
+                Prompt::Checking => (
+                    "Checking for updates…".into(),
+                    format!("You're on Zeron {current}.").into(),
+                    vec![UpdatePromptButton::Close("Cancel")],
+                ),
+                Prompt::CheckFailed(message) => (
+                    "Couldn't check for updates".into(),
+                    message.clone(),
+                    vec![
+                        UpdatePromptButton::Close("Close"),
+                        UpdatePromptButton::CheckAgain,
+                    ],
+                ),
+                Prompt::Result => match update.available() {
+                    None => (
+                        "Zeron is up to date".into(),
+                        format!("Version {current} is the newest release.").into(),
+                        vec![UpdatePromptButton::Close("OK")],
+                    ),
+                    Some(latest) => {
+                        let title: SharedString = format!("Zeron {latest} is available").into();
+                        if let Some(blocker) = update.blocker() {
+                            (
+                                title,
+                                blocker.to_string().into(),
+                                vec![
+                                    UpdatePromptButton::Close("Later"),
+                                    UpdatePromptButton::OpenDownloads,
+                                ],
+                            )
+                        } else if update.install().supports_desktop_update() {
+                            match update.flow() {
+                                Flow::Idle => (
+                                    title,
+                                    format!("You're on {current}.").into(),
+                                    vec![
+                                        UpdatePromptButton::Close("Later"),
+                                        UpdatePromptButton::Download,
+                                    ],
+                                ),
+                                Flow::Downloading { .. } | Flow::Installed => (
+                                    title,
+                                    "Downloading the update in the background — you can keep working."
+                                        .into(),
+                                    vec![UpdatePromptButton::Close("Hide")],
+                                ),
+                                Flow::Ready { version, .. } => (
+                                    format!("Zeron {version} is ready").into(),
+                                    "Restart to finish updating. If you don't, it installs the next time you quit Zeron."
+                                        .into(),
+                                    vec![
+                                        UpdatePromptButton::Close("Later"),
+                                        UpdatePromptButton::Restart,
+                                    ],
+                                ),
+                                Flow::Failed { message, .. } => (
+                                    title,
+                                    format!("The download failed: {message}").into(),
+                                    vec![
+                                        UpdatePromptButton::Close("Later"),
+                                        UpdatePromptButton::Download,
+                                    ],
+                                ),
+                            }
+                        } else if matches!(
+                            update.install(),
+                            zeron_update::InstallKind::Managed { .. }
+                        ) {
+                            (
+                                title,
+                                "Run `zeron update` in a terminal to install it.".into(),
+                                vec![UpdatePromptButton::Close("OK")],
+                            )
+                        } else {
+                            (
+                                title,
+                                "This copy of Zeron wasn't set up by an installer (for example, a source build), so it can't update itself."
+                                    .into(),
+                                vec![
+                                    UpdatePromptButton::Close("Later"),
+                                    UpdatePromptButton::OpenDownloads,
+                                ],
+                            )
+                        }
+                    }
+                },
+            }
+        };
+        let mut row = div()
+            .mt(px(16.0))
+            .flex()
+            .flex_row()
+            .justify_end()
+            .gap(px(8.0));
+        for button in buttons {
+            row = row.child(match button {
+                UpdatePromptButton::Close(label) => {
+                    popover::btn_ghost(&theme, label, "update-prompt-close")
+                        .id("update-prompt-close")
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                                update.update(cx, |update, cx| update.dismiss_prompt(cx));
+                            }
+                        }))
+                }
+                UpdatePromptButton::CheckAgain => popover::btn_primary(&theme, "Try again")
+                    .id("update-prompt-check")
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                            update.update(cx, |update, cx| update.check_for_updates(cx));
+                        }
+                    })),
+                UpdatePromptButton::Download => popover::btn_primary(&theme, "Download")
+                    .id("update-prompt-download")
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                            update.update(cx, |update, cx| update.start_download(cx));
+                        }
+                    })),
+                UpdatePromptButton::Restart => popover::btn_primary(&theme, "Restart to update")
+                    .id("update-prompt-restart")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let Some(update) = crate::app_update::AppUpdate::global(cx) else {
+                            return;
+                        };
+                        let staged = update.read(cx).staged();
+                        update.update(cx, |update, cx| update.dismiss_prompt(cx));
+                        if let Some(staged) = staged {
+                            this.apply_staged_update(staged, cx);
+                        }
+                    })),
+                UpdatePromptButton::OpenDownloads => {
+                    popover::btn_primary(&theme, "Open download page")
+                        .id("update-prompt-downloads")
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.open_url(zeron_update::LATEST_RELEASE_PAGE);
+                            if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                                update.update(cx, |update, cx| update.dismiss_prompt(cx));
+                            }
+                        }))
+                }
+            });
+        }
+        let card = popover::dialog_card(&theme)
+            .child(popover::dialog_title(&theme, &title))
+            .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, body)))
+            .child(row)
+            .into_any_element();
+        Some(popover::modal("update-prompt-dialog", viewport, card))
     }
 
     /// The sidebar's bottom row: account menu on the left, settings toggle on
@@ -8256,6 +8664,24 @@ impl Shell {
                         }
                     };
                     menu.child(row)
+                })
+                // macOS keeps "Check for Updates…" in the app menu under
+                // About; elsewhere there is no app menu, so it lives here.
+                .when(!cfg!(target_os = "macos"), |menu| {
+                    menu.child(
+                        popover::menu_row(theme, false, "user-menu-check-updates")
+                            .id("user-menu-check-updates")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.close_user_menu(cx);
+                                crate::app_update::check_for_updates(cx);
+                            }))
+                            .child(
+                                icon(icons::REFRESH)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from("Check for updates")),
+                    )
                 })
                 .into_any_element();
             // Opens upward, left-aligned with the pill: the card is as wide as
@@ -8741,6 +9167,10 @@ impl Shell {
         {
             return true;
         }
+        if self.harness_update_expanded {
+            self.set_harness_updates_expanded(false, cx);
+            return true;
+        }
         if self.rename_dialog.is_some() {
             self.rename_dialog = None;
             cx.notify();
@@ -8754,6 +9184,12 @@ impl Shell {
         if self.discard_working_tree.is_some() {
             self.discard_working_tree = None;
             cx.notify();
+            return true;
+        }
+        if let Some(update) = crate::app_update::AppUpdate::global(cx)
+            && update.read(cx).prompt().is_some()
+        {
+            update.update(cx, |update, cx| update.dismiss_prompt(cx));
             return true;
         }
         // The folded-breadcrumbs menu floats over the palette; it closes first.
@@ -9296,6 +9732,9 @@ impl Shell {
         if let Some(sync) = self.render_sync_overlay(viewport, cx) {
             overlays.push(sync);
         }
+        if let Some(update) = self.render_update_prompt(viewport, cx) {
+            overlays.push(update);
+        }
 
         overlays
     }
@@ -9434,8 +9873,9 @@ impl Shell {
                     cx,
                 )
             });
-        let artwork_opacity = self.new_thread_artwork_ready.opacity(
-            artwork.as_ref().map(|image| image.id),
+        let artwork_frame = self.new_thread_artwork_ready.frame(
+            artwork,
+            new_thread_background_setting.is_some(),
             self.reduced_motion,
             frame_time,
         );
@@ -9460,19 +9900,43 @@ impl Shell {
         self.composer.update(cx, |composer, cx| {
             composer.set_available_width(composer_width, cx)
         });
-        let term_h = self.eval_tween(self.terminal_tween, self.terminal_target(cx));
+        let terminal_geometry =
+            std::rc::Rc::new(std::cell::Cell::new(crate::terminal::dock::Geometry::new(
+                self.eval_tween(self.terminal_tween, self.terminal_target(cx)),
+                self.settings.terminal_height,
+                (self.viewport_height * TERMINAL_MAX_VH).min(
+                    (self.viewport_height - Theme::TITLEBAR_HEIGHT - Theme::STATUS_STRIP_HEIGHT)
+                        .max(0.0),
+                ),
+            )));
+        let term_h = self.terminal_geometry.get().height;
         let new_thread_background_layer = (!has_selection || dock_frame.active).then(|| {
-            if artwork.is_some() && artwork_opacity < 1.0 {
+            if artwork_frame.active {
                 window.request_animation_frame();
             }
-            new_thread_background(
-                artwork,
-                self.viewport_height,
-                (self.viewport_width - self.sidebar_now()).max(0.0),
-                self.composer.read(cx).surface_bounds(),
-                dock_frame.dissolve(),
-                artwork_opacity * new_thread_background_opacity(theme.is_frost()),
-            )
+            let width = (self.viewport_width - self.sidebar_now()).max(0.0);
+            let bounds = self.composer.read(cx).surface_bounds();
+            let opacity = new_thread_background_opacity(theme.is_frost());
+            div()
+                .absolute()
+                .inset_0()
+                .child(new_thread_background(
+                    artwork_frame.previous,
+                    self.viewport_height,
+                    width,
+                    bounds.clone(),
+                    dock_frame.dissolve(),
+                    (1.0 - artwork_frame.mix) * opacity,
+                ))
+                .child(new_thread_background(
+                    artwork_frame.current,
+                    self.viewport_height,
+                    width,
+                    bounds,
+                    dock_frame.dissolve(),
+                    artwork_frame.mix * opacity,
+                ))
+                .into_any_element()
         });
 
         // Content outlet: selected chat → transcript; nothing selected → the
@@ -9558,6 +10022,22 @@ impl Shell {
             Empty.into_any_element()
         };
 
+        // Share the dock's choreography: release the bottom chip early on
+        // departure, reveal it with the Home selectors on return. Absolute
+        // mounting keeps it out of composer measurements and centering.
+        let chip_opacity = if has_selection {
+            1.0 - crate::composer_dock::stage(dock_frame.dissolve(), 0.0, 0.22)
+        } else {
+            dock_frame.selectors()
+        } * self.composer_dock.borrow().opacity();
+        if has_selection {
+            self.set_harness_updates_expanded(false, cx);
+        }
+        let harness_update_card = if chip_opacity > 0.001 && (!has_selection || dock_frame.active) {
+            self.render_harness_update_card(window, main_content_width, cx)
+        } else {
+            None
+        };
         let status = self.render_status_strip(composer_width, cx);
         // Attachment dropzone over the ENTIRE conversation column (transcript
         // + composer, not just the pill). OS images keep using the upload
@@ -9575,6 +10055,7 @@ impl Shell {
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                 this.capture_navigation_focus(false, false, window, cx);
             }))
+            .on_key_down(|event, _, cx| navigation_focus::copy_transcript_selection(event, cx))
             .relative()
             .flex_1()
             .min_w_0()
@@ -9629,22 +10110,56 @@ impl Shell {
                     // status strip above it is empty air), zero at the
                     // underlay's bottom edge.
                     let bottom_band = (stack_h - Theme::STATUS_STRIP_HEIGHT).max(1.0);
-                    div().absolute().inset_0().bottom(px(term_h)).child(
-                        crate::edge_fade::edge_faded(
-                            Theme::TRANSCRIPT_FADE_BAND,
-                            true,
-                            true,
-                            div().size_full().child(outlet),
-                        )
-                        // Fully faded BY the titlebar's bottom edge (the
-                        // title text is opaque — overlap read as collision),
-                        // ramping in the band just below it.
-                        .inset_top(Theme::TITLEBAR_HEIGHT)
-                        .band_top(Theme::TRANSCRIPT_FADE_BAND)
-                        .band_bottom(bottom_band),
-                    )
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .child(crate::terminal::dock::above_terminal(
+                            crate::edge_fade::edge_faded(
+                                Theme::TRANSCRIPT_FADE_BAND,
+                                true,
+                                true,
+                                div().size_full().child(outlet),
+                            )
+                            // Fully faded BY the titlebar's bottom edge (the
+                            // title text is opaque — overlap read as collision),
+                            // ramping in the band just below it.
+                            .inset_top(Theme::TITLEBAR_HEIGHT)
+                            .band_top(Theme::TRANSCRIPT_FADE_BAND)
+                            .band_bottom(bottom_band),
+                            terminal_geometry.clone(),
+                        ))
                 },
             )
+            .when_some(harness_update_card, |column, chip| {
+                // Home notices stay anchored to the window bottom, behind the
+                // dock. Clip paint and hitboxes at the same measured terminal
+                // edge as the transcript, including during open/close motion;
+                // draw order alone would show them through the terminal glass.
+                column.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .child(crate::terminal::dock::above_terminal(
+                            div().size_full().overflow_hidden().child(
+                                div().relative().w_full().h(px(self.viewport_height)).child(
+                                    div()
+                                        .absolute()
+                                        .left_0()
+                                        .right_0()
+                                        .bottom(px(24.0 - 8.0 * (1.0 - chip_opacity)))
+                                        .opacity(chip_opacity)
+                                        .flex()
+                                        .justify_center()
+                                        .child(chip)
+                                        .when(has_selection, |el| {
+                                            el.child(div().absolute().inset_0().occlude())
+                                        }),
+                                ),
+                            ),
+                            terminal_geometry.clone(),
+                        )),
+                )
+            })
             // The glass chrome stack, floating over the transcript's bottom:
             // reserved status strip (h-6, the WorkingIndicator — the composer
             // below never shifts), composer, terminal dock. A paint-time
@@ -9684,54 +10199,31 @@ impl Shell {
                     .child(status)
                     .when(has_spaces || no_project || has_appshots, |el| {
                         let composer_opacity = self.composer_dock.borrow().opacity();
-                        el.child(crate::composer_dock::docked_composer(
-                            div()
-                                .id("persistent-composer")
-                                .relative()
-                                .w(px(composer_width))
-                                .opacity(composer_opacity)
-                                .mx_auto()
-                                .child(self.composer.clone())
-                                .children(if has_selection {
-                                    self.render_jump_to_bottom(cx)
-                                } else {
-                                    None
-                                }),
-                            self.composer_dock.clone(),
-                            self.viewport_height,
-                            self.reduced_motion,
-                            frame_time,
-                        ))
+                        el.child(
+                            crate::composer_dock::docked_composer(
+                                div()
+                                    .id("persistent-composer")
+                                    .relative()
+                                    .w(px(composer_width))
+                                    .opacity(composer_opacity)
+                                    .mx_auto()
+                                    .child(self.composer.clone())
+                                    .children(if has_selection {
+                                        self.render_jump_to_bottom(cx)
+                                    } else {
+                                        None
+                                    }),
+                                self.composer_dock.clone(),
+                                self.viewport_height,
+                                self.reduced_motion,
+                                frame_time,
+                            )
+                            .reserve_terminal(terminal_geometry.clone()),
+                        )
                     })
-                    .child(self.render_terminal_container(window, cx))
+                    .child(self.render_terminal_container(terminal_geometry, window, cx))
             })
-            .child(
-                div()
-                    .id("attachment-drop-overlay")
-                    .absolute()
-                    .inset_0()
-                    .opacity(0.0)
-                    .bg(theme.scrim().opacity(0.4 / 0.6))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .text_color(theme.text)
-                    // GPUI matches these styles against the active payload's
-                    // concrete TypeId. Resize markers therefore cannot reveal
-                    // this overlay, even after an external drag exits without
-                    // another move event.
-                    .drag_over::<gpui::ExternalPaths>(|style, _, _, _| style.opacity(1.0))
-                    .drag_over::<WorkspacePathDrag>(|style, _, _, _| style.opacity(1.0))
-                    .drag_over::<RightTabDrag>(|style, tab, _, _| {
-                        if tab.workspace_path.is_some() {
-                            style.opacity(1.0)
-                        } else {
-                            style
-                        }
-                    })
-                    .child("Drop to attach"),
-            )
+            .child(Self::attachment_drop_overlay(theme))
             .into_any_element()
     }
 
@@ -9838,10 +10330,17 @@ impl Shell {
 
     /// Terminal panel dock at the main-column bottom: a 5px height-drag handle
     /// over the panel, the whole container height-animated 200 ms on toggle.
-    fn render_terminal_container(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_terminal_container(
+        &mut self,
+        geometry: crate::terminal::dock::SharedGeometry,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let target = self.terminal_target(cx);
         let tween = self.terminal_tween;
         if target <= 0.0 && tween.is_none() {
+            self.terminal_geometry
+                .set(crate::terminal::dock::Geometry::default());
             return gpui::Empty.into_any_element();
         }
         // Defensive: an open flag needs its entity (and set_open) even if
@@ -9880,8 +10379,6 @@ impl Shell {
         } else {
             handle_hover
         };
-        let height = self.settings.terminal_height;
-
         let handle = div()
             .id("terminal-resize")
             .h(px(TERMINAL_RESIZE_HITBOX_HEIGHT))
@@ -9901,8 +10398,10 @@ impl Shell {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
-                    this.terminal_drag_anchor =
-                        Some((f32::from(event.position.y), this.settings.terminal_height));
+                    this.terminal_drag_anchor = Some((
+                        f32::from(event.position.y),
+                        this.terminal_geometry.get().height,
+                    ));
                     this.pane_resize_dragging = Some(PaneResizeKind::Terminal);
                     this.pane_resize_active = Some(PaneResizeKind::Terminal);
                     cx.notify();
@@ -9939,24 +10438,27 @@ impl Shell {
         // FLOATS over the panel's top edge (painted after, so it wins hit
         // testing) instead of stacking above it — stacked, its hitbox would read as
         // dead air between the seam and the tab bar (user report).
-        let inner = div()
-            .h(px(height))
-            .w_full()
-            .relative()
-            .flex()
-            .flex_col()
-            .child(div().flex_1().min_h_0().child(panel))
-            .child(handle.absolute().top_0().left_0().right_0());
+        crate::terminal::dock::terminal(geometry, self.terminal_geometry.clone(), move |geometry| {
+            let inner = div()
+                .h(px(geometry.content_height))
+                .w_full()
+                .relative()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().min_h_0().child(panel))
+                .child(handle.absolute().top_0().left_0().right_0());
 
-        div()
-            .w_full()
-            .flex_none()
-            .overflow_hidden()
-            .border_t_1()
-            .border_color(border)
-            .h(px(self.eval_tween(tween, target)))
-            .child(inner)
-            .into_any_element()
+            div()
+                .w_full()
+                .flex_none()
+                .overflow_hidden()
+                .when(geometry.height > 0.0, |el| el.border_t_1())
+                .border_color(border)
+                .h(px(geometry.height))
+                .child(inner)
+                .into_any_element()
+        })
+        .into_any_element()
     }
 
     /// Working indicator strip: gradient spinner + rotating flavour word (7s,
@@ -10146,6 +10648,7 @@ impl Shell {
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                 this.capture_navigation_focus(true, false, window, cx);
             }))
+            .on_key_down(|event, _, cx| navigation_focus::copy_transcript_selection(event, cx))
             .size_full()
             .flex()
             .flex_col()
@@ -11630,6 +12133,7 @@ impl Render for Shell {
         for files in hidden_explorers {
             files.update(cx, |files, cx| files.suspend_tree_interactions(cx));
         }
+        settings::wallpaper::preload(cx);
         self.navigation_focus
             .remember(&self.shortcut_focus, window, cx);
         if let Some(command) = self.pending_workspace_command.take() {
@@ -11805,6 +12309,13 @@ impl Render for Shell {
             self.activation_sub = Some(cx.observe_window_activation(
                 window,
                 |this: &mut Shell, window, cx| {
+                    if window.is_window_active()
+                        && let Some(update) = crate::app_update::AppUpdate::global(cx)
+                    {
+                        // Coming back to the app (often after sleep) checks
+                        // at once when a check is due by the wall clock.
+                        update.read(cx).poke();
+                    }
                     if !window.is_window_active() {
                         this.reset_command_palette_key_state();
                         this.set_jump_hints(false, cx);
@@ -11922,6 +12433,9 @@ impl Render for Shell {
                 if !matches!(this.route, Route::Settings(_)) {
                     this.toggle_sidebar(cx)
                 }
+            }))
+            .on_action(cx.listener(|this, _: &RandomWallpaper, _, cx| {
+                this.random_wallpaper(cx);
             }))
             // New session works from anywhere — `open_new_session` routes back
             // to chat itself, so Settings is not a dead spot.
@@ -12110,7 +12624,7 @@ impl Render for Shell {
                 // Clearance excludes the terminal dock: the transcript
                 // viewport ends at the dock's top (see the underlay in
                 // `render_main`), so only the chrome above it overlaps.
-                let term_h = self.eval_tween(self.terminal_tween, self.terminal_target(cx));
+                let term_h = self.terminal_geometry.get().height;
                 let stack_h = (self.bottom_stack.get() - term_h).max(0.0);
                 let expected_has_composer = {
                     let state = self.state.read(cx);
@@ -12355,7 +12869,10 @@ impl Render for Shell {
 mod tests {
     use super::*;
 
-    fn chat_with_path(cwd: Option<&str>, source: Option<(&str, &str)>) -> zeron_proto::Chat {
+    pub(super) fn chat_with_path(
+        cwd: Option<&str>,
+        source: Option<(&str, &str)>,
+    ) -> zeron_proto::Chat {
         zeron_proto::Chat {
             id: "chat".into(),
             device_id: "remote-device".into(),
@@ -12465,57 +12982,6 @@ mod tests {
         assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
         chat.sync_state = S::Connecting;
         assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
-    }
-
-    #[test]
-    fn update_strip_labels_cover_every_install_kind() {
-        // Managed (curl|sh daemon layout): the CLI hint.
-        let managed = zeron_update::InstallKind::Managed {
-            app_root: PathBuf::from("/home/u/.zeron/app"),
-        };
-        assert_eq!(
-            Shell::update_strip_label(&managed, &UpdateFlow::Idle, "0.2.86").0,
-            SharedString::from("Update available — v0.2.86 · run `zeron update`")
-        );
-        // Unmanaged (source builds, hand-copied binaries — bare Windows
-        // release exes): the GitHub releases page, clickable to open it.
-        let unmanaged = Shell::update_strip_label(
-            &zeron_update::InstallKind::Unmanaged,
-            &UpdateFlow::Idle,
-            "0.2.86",
-        );
-        assert_eq!(
-            unmanaged.0,
-            SharedString::from("Update available — v0.2.86 · download from GitHub")
-        );
-        assert!(unmanaged.1);
-        // Downloading is not clickable (desktop flow) and the flow labels stay
-        // untouched for the installs that own them.
-        let mac_app = zeron_update::InstallKind::MacApp {
-            bundle: PathBuf::from("/Applications/Zeron.app"),
-        };
-        assert_eq!(
-            Shell::update_strip_label(&mac_app, &UpdateFlow::Downloading, "0.2.86").0,
-            SharedString::from("Downloading v0.2.86…")
-        );
-        assert!(!Shell::update_strip_label(&mac_app, &UpdateFlow::Downloading, "0.2.86").1);
-        assert_eq!(
-            Shell::update_strip_label(&mac_app, &UpdateFlow::Idle, "0.2.86").0,
-            SharedString::from("Update available — v0.2.86")
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_portable_strip_drives_the_desktop_flow() {
-        let portable = zeron_update::InstallKind::WindowsPortable {
-            directory: PathBuf::from(r"C:\Users\u\AppData\Local\Programs\Zeron"),
-        };
-        assert_eq!(
-            Shell::update_strip_label(&portable, &UpdateFlow::Idle, "0.2.86").0,
-            SharedString::from("Update available — v0.2.86")
-        );
-        assert!(Shell::update_strip_label(&portable, &UpdateFlow::Idle, "0.2.86").1);
     }
 
     #[test]
@@ -14009,6 +14475,9 @@ mod exit_regressions {
                     shell.schedule_save(cx);
                     settings::set_new_thread_background_effect(effect, cx);
                     settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                        settings.wallpaper_folder = Some(dir.path().join("wallpapers"));
+                        settings.wallpaper_source = Some(dir.path().join("wallpapers/current.png"));
+                        settings.wallpaper_history = vec![dir.path().join("wallpapers/current.png")];
                         settings.window_geometry = geometry;
                         settings.open_web_links_in_zeron = open_links_in_zeron;
                         settings.terminal_font_family = terminal_family.clone();
@@ -14030,6 +14499,12 @@ mod exit_regressions {
                         shell.settings.terminal_height = 300.0 + step as f32;
                         shell.schedule_save(cx);
                         let current = settings::current(cx);
+                        assert_eq!(current.wallpaper_history, vec![dir.path().join("wallpapers/current.png")]);
+                        assert_eq!(current.wallpaper_folder, Some(dir.path().join("wallpapers")));
+                        assert_eq!(
+                            current.wallpaper_source,
+                            Some(dir.path().join("wallpapers/current.png"))
+                        );
                         assert_eq!(current.window_geometry, geometry);
                         assert_eq!(current.new_thread_background_effect, effect);
                         assert_eq!(current.open_web_links_in_zeron, open_links_in_zeron);
@@ -14053,6 +14528,12 @@ mod exit_regressions {
                     settings::flush(cx);
                     let loaded = settings::UiSettings::load(dir.path());
                     assert_eq!(loaded.window_geometry, geometry);
+                    assert_eq!(loaded.wallpaper_history, vec![dir.path().join("wallpapers/current.png")]);
+                    assert_eq!(loaded.wallpaper_folder, Some(dir.path().join("wallpapers")));
+                    assert_eq!(
+                        loaded.wallpaper_source,
+                        Some(dir.path().join("wallpapers/current.png"))
+                    );
                     assert_eq!(loaded.new_thread_background_effect, effect);
                     assert_eq!(loaded.open_web_links_in_zeron, open_links_in_zeron);
                     assert_eq!(loaded.terminal_font_family, terminal_family);
@@ -14547,7 +15028,9 @@ mod exit_regressions {
                     .unwrap()
                     .transcript
                     .clone();
-                let ui = child.read(cx).link_ui().unwrap();
+                let ui = child
+                    .update(cx, |transcript, cx| transcript.link_ui(cx))
+                    .unwrap();
                 assert_eq!(ui.source_session.as_deref(), Some("first-session"));
                 activation.action = LinkAction::Internal;
                 activation.source_session = ui.source_session;
@@ -14563,6 +15046,144 @@ mod exit_regressions {
             .unwrap();
         cx.run_until_parked();
         assert!(weak.upgrade().is_none());
+    }
+
+    /// Encoded destinations open the decoded path, and an absolute
+    /// destination no root owns opens through the linking chat's own file
+    /// context with its absolute path intact.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn encoded_and_outside_file_links_open_in_the_linking_chats_context(cx: &mut TestAppContext) {
+        use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("2026-09-26/Some Folder")).unwrap();
+        std::fs::write(
+            root.join("2026-09-26/Some Folder/it's here.txt"),
+            "encoded\n",
+        )
+        .unwrap();
+        let outside = dir.path().join("outside/INFORME.md");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        std::fs::write(&outside, "# Informe\n").unwrap();
+        cx.update(|cx| {
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                let mut owner = super::tests::chat_with_path(Some(&root.to_string_lossy()), None);
+                owner.id = "owner".into();
+                owner.device_id = "local".into();
+                shell.active_chat = "owner".into();
+                shell.state.update(cx, |state, _| {
+                    state.local_device_id = Some("local".into());
+                    state.apply_chats(vec![owner]);
+                    state.selected_chat = Some("owner".into());
+                });
+
+                let mut activation = LinkActivation {
+                    target: LinkTarget::new("enc", "2026-09-26/Some%20Folder/it%27s%20here.txt"),
+                    action: LinkAction::Primary,
+                    source_session: Some("owner".into()),
+                };
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Internal
+                );
+                let id = shell.file_surface_seq;
+                assert_eq!(
+                    shell.file_surface_paths.get(&id).map(String::as_str),
+                    Some("2026-09-26/Some Folder/it's here.txt")
+                );
+
+                // The absolute spelling of the same file resolves in-root.
+                let absolute = format!(
+                    "{}/2026-09-26/Some%20Folder/it%27s%20here.txt",
+                    root.display()
+                );
+                activation.target = LinkTarget::new("abs", &absolute);
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Internal
+                );
+                let id = shell.file_surface_seq;
+                assert_eq!(
+                    shell.file_surface_paths.get(&id).map(String::as_str),
+                    Some("2026-09-26/Some Folder/it's here.txt")
+                );
+                assert_eq!(shell.file_surfaces[&id].read(cx).chat_id(), "owner");
+
+                // Outside every known root the absolute path still opens,
+                // through the linking chat.
+                let outside_target = outside.to_string_lossy().into_owned();
+                activation.target = LinkTarget::new("outside", &outside_target);
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Internal
+                );
+                let id = shell.file_surface_seq;
+                assert_eq!(
+                    shell.file_surface_paths.get(&id).map(String::as_str),
+                    Some(outside_target.as_str())
+                );
+                assert_eq!(shell.file_surfaces[&id].read(cx).chat_id(), "owner");
+
+                // A path under another project root on this device keeps its
+                // absolute spelling: its root-relative tail would name a
+                // different file under the linking chat's checkout.
+                let project = dir.path().join("other-project");
+                shell.state.update(cx, |state, _| {
+                    state.apply_spaces(vec![zeron_proto::Space {
+                        id: "other".into(),
+                        device_id: "local".into(),
+                        path: project.to_string_lossy().into_owned(),
+                        name: None,
+                        git_detected: false,
+                        git_checked_at: None,
+                        checkout_id: None,
+                        created_at: Utc::now(),
+                    }]);
+                });
+                let project_target = project.join("notes.md").to_string_lossy().into_owned();
+                activation.target = LinkTarget::new("project", &project_target);
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Internal
+                );
+                let id = shell.file_surface_seq;
+                assert_eq!(
+                    shell.file_surface_paths.get(&id).map(String::as_str),
+                    Some(project_target.as_str())
+                );
+                assert_eq!(shell.file_surfaces[&id].read(cx).chat_id(), "owner");
+            })
+            .unwrap();
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -14915,7 +15536,6 @@ mod exit_regressions {
                         shell.pending_exit,
                         Some(PendingExit::InstallUpdate(_))
                     ));
-                    assert!(matches!(shell.update_flow, UpdateFlow::Idle));
                     shell.cancel_file_close(RightSurface::File(0), cx);
                     assert!(shell.pending_exit.is_none());
                 })
@@ -15059,6 +15679,72 @@ mod right_tab_mouse_regressions {
     }
 
     #[gpui::test]
+    fn update_banner_fires_during_continuous_state_changes(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.settings.notifications_enabled = false;
+            shell.state.update(cx, |state, _| {
+                state.harness_updates = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "harness": "codex", "phase": "available", "latestVersion": "2.0.0",
+                        "policy": "notify", "source": "unknown", "canApply": true
+                    }))
+                    .unwrap(),
+                    serde_json::from_value(serde_json::json!({
+                        "harness": "hermes", "phase": "available",
+                        "policy": "notify", "source": "unknown", "canApply": true
+                    }))
+                    .unwrap(),
+                ];
+            });
+        });
+        for _ in 0..12 {
+            shell.update(cx, |shell, cx| {
+                shell.on_state_changed(&shell.state.clone(), cx)
+            });
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(100));
+        }
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.harness_update_seen.len(), 2);
+            assert!(shell.harness_update_banner_task.is_none());
+        });
+        // Rechecks and repeated versionless availability remain deduplicated.
+        for phase in [
+            zeron_proto::HarnessUpdatePhase::Checking,
+            zeron_proto::HarnessUpdatePhase::Available,
+        ] {
+            shell.update(cx, |shell, cx| {
+                shell
+                    .state
+                    .update(cx, |state, _| state.harness_updates[1].phase = phase);
+                shell.on_state_changed(&shell.state.clone(), cx);
+                assert!(shell.harness_update_banner_task.is_none());
+            });
+        }
+        // A confirmed current state ends the availability episode, permitting
+        // another commit-only update to notify even if the version is unchanged.
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.harness_updates[1].phase = zeron_proto::HarnessUpdatePhase::Current
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.harness_update_seen.len(), 1);
+            shell.state.update(cx, |state, _| {
+                state.harness_updates[1].phase = zeron_proto::HarnessUpdatePhase::Available
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.harness_update_seen.len(), 2)
+        });
+    }
+
+    #[gpui::test]
     fn subagent_close_press_does_not_start_parent_drag(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
         let start = cx.debug_bounds("right-surface-close-0").unwrap().center();
@@ -15117,9 +15803,7 @@ mod right_tab_mouse_regressions {
             Some(MouseButton::Left),
             gpui::Modifiers::default(),
         );
-        cx.update(|_, cx| {
-            assert!(cx.has_active_drag(), "tab drag did not start")
-        });
+        cx.update(|_, cx| assert!(cx.has_active_drag(), "tab drag did not start"));
         cx.simulate_mouse_up(start, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_down(start, MouseButton::Middle, gpui::Modifiers::default());
         cx.simulate_mouse_up(start, MouseButton::Middle, gpui::Modifiers::default());

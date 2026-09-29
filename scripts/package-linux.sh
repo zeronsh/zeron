@@ -2,7 +2,8 @@
 # Linux packaging: build the release binary and produce
 #   target/package/zeron-<version>-linux-<arch>.tar.gz
 # containing the binary, the .desktop entry, and the icon, plus an install.sh
-# that drops them into ~/.local (XDG) paths.
+# that installs them into the self-updating ~/.zeron/app layout and links
+# ~/.local (XDG) paths to it.
 #
 # Usage: scripts/package-linux.sh
 # Env:   PROFILE=debug for a fast unoptimized package (CI smoke); default release.
@@ -37,16 +38,38 @@ cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$STAGE/licenses/fonts/"
 
 cat >"$STAGE/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
-# Install Zeron into ~/.local (no root needed).
+# Install Zeron for this user (no root needed), in the layout the in-app
+# updater manages: ~/.zeron/app/<version> behind a `current` symlink — the
+# same layout `curl -fsSL https://zeron.sh/install.sh | sh` uses — with
+# ~/.local/bin/zeron and the desktop entry pointing through it.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-install -Dm755 "$HERE/zeron" "$HOME/.local/bin/zeron"
+VERSION="__VERSION__"
+APP_ROOT="$HOME/.zeron/app"
+DEST="$APP_ROOT/$VERSION"
+mkdir -p "$APP_ROOT"
+if [ ! -x "$DEST/zeron" ]; then
+  # Copy beside the final name, then rename: an interrupted install never
+  # leaves a half-copied version the updater would trust.
+  STAGE="$(mktemp -d "$APP_ROOT/.install-$VERSION-XXXXXX")"
+  cp -R "$HERE/." "$STAGE/"
+  rm -rf "$DEST"
+  mv "$STAGE" "$DEST"
+fi
+ln -sfn "$DEST" "$APP_ROOT/current"
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$APP_ROOT/current/zeron" "$HOME/.local/bin/zeron"
 install -Dm644 "$HERE/zeron.desktop" "$HOME/.local/share/applications/zeron.desktop"
 install -Dm644 "$HERE/zeron.png" "$HOME/.local/share/icons/hicolor/1024x1024/apps/zeron.png"
 command -v update-desktop-database >/dev/null 2>&1 \
   && update-desktop-database "$HOME/.local/share/applications" || true
-echo "Installed. Make sure ~/.local/bin is on your PATH."
+echo "Installed Zeron $VERSION. It updates itself from now on."
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) echo "Add ~/.local/bin to your PATH to run \`zeron\` from a terminal." ;;
+esac
 INSTALL
+sed -i "s/__VERSION__/$VERSION/" "$STAGE/install.sh"
 chmod 755 "$STAGE/install.sh"
 
 tar -czf "$TARBALL" -C "$OUT_DIR" "$(basename "$STAGE")"

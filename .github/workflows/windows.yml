@@ -75,8 +75,10 @@ jobs:
           if ($nativeResult -ne 0 -or $headlessResult -ne 0) { exit 1 }
       - name: Build application
         run: cargo build --release --locked -p zeron
-      - name: Verify portable packaging
+      - name: Verify portable and installer packaging
         run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
+      - name: Installer install/uninstall
+        run: ./scripts/test-windows-installer.ps1
       - name: Shader layout tests
         run: cargo test --release --locked -p gpui_windows --lib layout
       - name: Application and updater tests

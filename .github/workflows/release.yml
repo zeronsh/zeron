@@ -3,7 +3,8 @@ name: release
 # Build release artifacts and publish them:
 #   - Linux headless tarballs (x86_64 + aarch64) via scripts/package-linux.sh
 #   - macOS dmg (Apple silicon) via scripts/package-macos.sh
-#   - Windows portable zip (x86_64) via scripts/package-windows.ps1
+#   - Windows per-user installer, portable zip, and updater exe (x86_64) via
+#     scripts/package-windows.ps1
 # then create a GitHub Release AND upload everything to the
 # `comet-native-releases` R2 bucket (served at zeron.sh/releases/* for
 # `curl -fsSL https://zeron.sh/install.sh | sh`), bumping latest.txt.
@@ -131,7 +132,7 @@ jobs:
           if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
           "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
-      - name: package portable app
+      - name: package installer and portable app
         run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
       - uses: actions/upload-artifact@v4
         with:
@@ -161,7 +162,7 @@ jobs:
           ls dist/
           for platform in linux-x86_64.tar.gz linux-aarch64.tar.gz \
               macos-arm64.dmg macos-arm64-app.tar.gz \
-              windows-x86_64.zip windows-x86_64.exe; do
+              windows-x86_64.zip windows-x86_64.exe windows-x86_64-setup.exe; do
             test -f "dist/zeron-$ver-$platform" \
               || { echo "missing artifact for tag v$ver: $platform — check builds and Cargo.toml version"; exit 1; }
           done

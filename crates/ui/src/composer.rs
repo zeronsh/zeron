@@ -6306,62 +6306,57 @@ impl Composer {
         self.sync_mention_controls(cx);
     }
 
-    fn file_search_params(&self, query: &str, cx: &App) -> Option<serde_json::Value> {
-        let selected_worktree = match self.pickers.read(cx).checkout_plan() {
-            crate::pickers::CheckoutPlan::ReuseWorktree { path, .. } => Some(path),
-            _ => None,
-        };
-        let (params, target) = {
-            let state = self.state.read(cx);
-            let mut params = serde_json::Map::new();
-            params.insert("query".into(), query.into());
-            let target = if let Some(chat) = state.selected_chat_row() {
-                params.insert("chatId".into(), chat.id.clone().into());
-                params.insert("cwd".into(), chat.cwd.clone().into());
-                Some(chat.device_id.clone())
-            } else if let Some(space) = state.selected_space_row() {
-                params.insert("spaceId".into(), space.id.clone().into());
-                params.insert("cwd".into(), space.path.clone().into());
-                if let Some(path) = selected_worktree {
-                    params.insert("path".into(), path.into());
-                }
-                Some(space.device_id.clone())
-            } else {
-                None
-            };
-            if let Some(target) = &target {
-                params.insert("targetDeviceId".into(), target.clone().into());
+    /// File mentions and provider catalogs share a workspace target. A new
+    /// side chat inherits its parent's checkout but has no persisted row until
+    /// its first send, so discovery must address the parent in the meantime.
+    fn completion_workspace_params(&self, cx: &App) -> Option<serde_json::Value> {
+        let state = self.state.read(cx);
+        if let Some(chat) = state.selected_chat_row() {
+            let chat_id = chat
+                .parent_chat_id
+                .as_deref()
+                .filter(|_| state.side_chat_unsaved())
+                .unwrap_or(&chat.id);
+            Some(serde_json::json!({
+                "chatId": chat_id,
+                "targetDeviceId": chat.device_id,
+                // Include the inherited cwd in the cache identity, too.
+                "cwd": chat.cwd,
+            }))
+        } else if let Some(space) = state.selected_space_row() {
+            let mut params = serde_json::json!({
+                "spaceId": space.id,
+                "targetDeviceId": space.device_id,
+                "cwd": space.path,
+            });
+            if let crate::pickers::CheckoutPlan::ReuseWorktree { path, .. } =
+                self.pickers.read(cx).checkout_plan()
+            {
+                params["path"] = path.into();
             }
-            (serde_json::Value::Object(params), target)
-        };
-        target.map(|_| params)
+            Some(params)
+        } else {
+            None
+        }
+    }
+
+    fn file_search_params(&self, query: &str, cx: &App) -> Option<serde_json::Value> {
+        let mut params = self.completion_workspace_params(cx)?;
+        params["query"] = query.into();
+        Some(params)
     }
 
     fn catalog_params(&self, cx: &App) -> serde_json::Value {
-        let harness = self.pickers.read(cx).resolved(cx).harness;
-        let selected_worktree = match self.pickers.read(cx).checkout_plan() {
-            crate::pickers::CheckoutPlan::ReuseWorktree { path, .. } => Some(path),
-            _ => None,
-        };
-        let mut params = serde_json::json!({ "harness": harness });
-        {
-            let state = self.state.read(cx);
-            if let Some(chat) = state.selected_chat_row() {
-                params["chatId"] = chat.id.clone().into();
-                params["targetDeviceId"] = chat.device_id.clone().into();
-                // Include the resolved cwd in the cache identity, too.
-                params["cwd"] = chat.cwd.clone().into();
-            } else if let Some(space) = state.selected_space_row() {
-                params["spaceId"] = space.id.clone().into();
-                params["targetDeviceId"] = space.device_id.clone().into();
-                params["cwd"] = space.path.clone().into();
-                if let Some(path) = selected_worktree {
-                    params["path"] = path.into();
-                }
-            } else if let Some(device) = state.effective_device_id() {
+        let mut params = self.completion_workspace_params(cx).unwrap_or_else(|| {
+            let mut params = serde_json::json!({});
+            if let Some(device) = self.state.read(cx).effective_device_id() {
                 params["targetDeviceId"] = device.into();
             }
-        }
+            params
+        });
+        // The workspace can come from the parent; the agent always comes from
+        // this composer's selection, including changes before the first send.
+        params["harness"] = serde_json::json!(self.pickers.read(cx).resolved(cx).harness);
         params
     }
 
@@ -7619,7 +7614,19 @@ impl Composer {
         };
         let space_id = space.as_ref().map(|s| s.id.clone());
         let space_path = space.as_ref().map(|s| s.path.clone());
-        let create_side_chat = self.state.read(cx).unsaved_side_chat_create(&chat_id);
+        let create_side_chat = self.state.update(cx, |state, _| {
+            if state.side_chat_unsaved()
+                && let Some(mut config) = resolved.chat_config()
+            {
+                // Freeze the same resolved provider settings in createChat and
+                // Run, including defaults learned since the harness was picked.
+                if let Some(existing) = state.selected_chat_row().and_then(|c| c.config.as_ref()) {
+                    config.sandbox = existing.sandbox;
+                }
+                state.apply_chat_config(&chat_id, config);
+            }
+            state.unsaved_side_chat_create(&chat_id)
+        });
         if queue && !is_new {
             let capability = if self.staged().is_empty() && self.staged_appshots().is_empty() {
                 capabilities::MESSAGE_QUEUE_V1
@@ -11050,9 +11057,9 @@ mod tests {
         }
     }
 
-    /// A hand-started side chat writes nothing until its first send, which
-    /// mints it (with its parent link) before the run and only then opens
-    /// its doc.
+    /// A hand-started side chat discovers commands, skills and files through
+    /// its parent without writing a row. Its first send creates it before the
+    /// run and switches subsequent discovery to its own persisted identity.
     #[gpui::test]
     fn unsaved_side_chat_is_created_by_its_first_send(cx: &mut gpui::TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -11067,6 +11074,14 @@ mod tests {
         let parent = cx.new(|_| AppState::new());
         parent.update(cx, |state, _| {
             state.data_dir = Some(directory.path().to_path_buf());
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "main", "deviceId": "local", "cwd": "/tmp/main",
+                    "archived": false, "createdAt": chrono::Utc::now(),
+                    "config": { "harness": "codex", "sandbox": "workspace-write" },
+                }))
+                .unwrap(),
+            ];
             state.set_test_engine(crate::state::EngineHandle::from_test_client(
                 zeron_rpc::RpcClient::new(out, inbound),
             ));
@@ -11074,6 +11089,8 @@ mod tests {
         let chat: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
             "id": "side", "parentChatId": "main", "deviceId": "local", "cwd": "/tmp/main",
             "archived": false, "createdAt": chrono::Utc::now(),
+            "config": { "harness": "codex", "model": "child-model", "reasoning": "low",
+                "sandbox": "workspace-write" },
         }))
         .unwrap();
         let side = cx.new(|cx| AppState::side_chat_state(&parent, chat, true, cx));
@@ -11089,6 +11106,102 @@ mod tests {
         assert!(!drain().iter().any(touches_side));
 
         let composer = cx.new(|cx| Composer::new(side.clone(), cx));
+        // Discovery must work before createChat, including a different agent
+        // from the parent's. Opening any completion must remain read-only.
+        // Ends on the inherited harness, so the first send below mints the
+        // fixture's config.
+        let inherited = side
+            .read_with(cx, |state, _| {
+                state.selected_chat_row().and_then(|c| c.config.clone())
+            })
+            .unwrap();
+        for harness in [HarnessId::ClaudeCode, HarnessId::Codex] {
+            side.update(cx, |state, cx| {
+                let mut config = inherited.clone();
+                config.harness = harness;
+                state.apply_chat_config("side", config);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            for trigger in ["/", "$", "@"] {
+                if trigger == "$" && harness != HarnessId::Codex {
+                    continue;
+                }
+                composer.update(cx, |composer, cx| {
+                    composer
+                        .input
+                        .update(cx, |input, cx| input.set_text(trigger, cx));
+                });
+                cx.run_until_parked();
+                cx.executor().advance_clock(Duration::from_millis(100));
+                cx.run_until_parked();
+                let mut discovery = Vec::new();
+                for frame in drain() {
+                    assert_ne!(frame.method.as_deref(), Some(methods::MUTATE));
+                    assert!(
+                        !touches_side(&frame),
+                        "unsaved chat must not be queried: {frame:?}"
+                    );
+                    let value = match frame.method.as_deref() {
+                        Some(methods::LIST_COMMANDS) => serde_json::json!([
+                            { "name": "compact", "description": "Compact" }
+                        ]),
+                        Some(methods::LIST_SKILLS) => serde_json::json!([
+                            { "name": "review", "path": "/skills/SKILL.md",
+                              "description": "Review", "enabled": true }
+                        ]),
+                        Some(methods::SEARCH_FILES) => serde_json::json!([
+                            { "path": "README.md", "isDir": false }
+                        ]),
+                        _ => continue,
+                    };
+                    assert_eq!(frame.params["chatId"], "main");
+                    assert_eq!(frame.params["targetDeviceId"], "local");
+                    assert_eq!(frame.params["cwd"], "/tmp/main");
+                    if frame.method.as_deref() != Some(methods::SEARCH_FILES) {
+                        assert_eq!(frame.params["harness"], serde_json::json!(harness));
+                    }
+                    discovery.push(frame.method.clone().unwrap());
+                    replies
+                        .try_send(
+                            serde_json::to_string(&zeron_rpc::ServerFrame {
+                                id: frame.id,
+                                ok: Some(value),
+                                ..Default::default()
+                            })
+                            .unwrap(),
+                        )
+                        .unwrap();
+                }
+                let expected = match trigger {
+                    "/" => vec![methods::LIST_COMMANDS, methods::LIST_SKILLS],
+                    "$" => vec![methods::LIST_SKILLS],
+                    _ => vec![methods::SEARCH_FILES],
+                };
+                discovery.sort();
+                assert_eq!(discovery, expected);
+                runtime.block_on(async { tokio::task::yield_now().await });
+                cx.run_until_parked();
+                composer.read_with(cx, |composer, _| {
+                    if trigger == "@" {
+                        assert!(!composer.mention.loading);
+                        assert!(composer.mention.error.is_none());
+                        assert_eq!(composer.mention.results[0].path, "README.md");
+                    } else {
+                        assert!(!composer.slash.loading);
+                        assert!(composer.slash.error.is_none());
+                        let expected = if trigger == "$" { "review" } else { "compact" };
+                        assert!(
+                            composer.slash_cache[&composer.slash.context]
+                                .iter()
+                                .any(|row| row.name == expected)
+                        );
+                    }
+                });
+                assert!(side.read_with(cx, |state, _| state.side_chat_unsaved()));
+                assert_eq!(parent.read_with(cx, |state, _| state.chats.len()), 1);
+            }
+        }
         composer.update(cx, |composer, cx| {
             composer
                 .input
@@ -11104,6 +11217,8 @@ mod tests {
         assert_eq!(create.params["op"], "createChat");
         assert_eq!(create.params["parentChatId"], "main");
         assert_eq!(create.params["cwd"], "/tmp/main");
+        assert_eq!(create.params["config"]["harness"], "codex");
+        assert_eq!(create.params["config"]["model"], "child-model");
         replies
             .try_send(
                 serde_json::to_string(&zeron_rpc::ServerFrame {
@@ -11120,8 +11235,40 @@ mod tests {
         let called = |method: &str| after.iter().any(|f| f.method.as_deref() == Some(method));
         assert!(called(methods::WATCH_DOC_MESSAGES), "{after:?}");
         assert!(called(methods::QUEUE_COMMAND), "{after:?}");
+        let run = after
+            .iter()
+            .find(|f| f.method.as_deref() == Some(methods::QUEUE_COMMAND))
+            .unwrap();
+        let request = &run.params["command"]["request"];
+        for field in ["harness", "model", "reasoning", "modelOptions"] {
+            assert_eq!(request[field], create.params["config"][field], "{field}");
+        }
+        assert_eq!(request["cwd"], "/tmp/main");
+        assert_eq!(request["resume"], serde_json::Value::Null);
         assert!(!after.iter().any(|f| f.params["op"] == "createChat"));
         assert!(!side.read_with(cx, |state, _| state.side_chat_unsaved()));
+        composer.update(cx, |composer, cx| {
+            assert_eq!(
+                composer.file_search_params("src", cx).unwrap()["chatId"],
+                "side"
+            );
+            assert_eq!(composer.catalog_params(cx)["chatId"], "side");
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("/", cx));
+        });
+        cx.run_until_parked();
+        let catalogs: Vec<_> = drain()
+            .into_iter()
+            .filter(|frame| {
+                matches!(
+                    frame.method.as_deref(),
+                    Some(methods::LIST_COMMANDS | methods::LIST_SKILLS)
+                )
+            })
+            .collect();
+        assert_eq!(catalogs.len(), 2);
+        assert!(catalogs.iter().all(touches_side));
     }
 
     #[gpui::test]

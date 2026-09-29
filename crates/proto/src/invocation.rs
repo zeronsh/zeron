@@ -100,7 +100,7 @@ impl Invocation {
             Self::Command { name } => format!("/{name}"),
             Self::Skill { name, path, .. } => {
                 if native_skill_identity(path) {
-                    return format!("{name}");
+                    return name.clone();
                 }
                 let path: String = path
                     .bytes()
@@ -159,14 +159,13 @@ pub fn invocation_links(text: &str) -> Vec<(Range<usize>, Invocation)> {
         if !valid_invocation_name(invocation.name()) {
             continue;
         }
-        if let Invocation::Skill { path, command, .. } = &invocation {
-            if !valid_skill_path(path)
+        if let Invocation::Skill { path, command, .. } = &invocation
+            && (!valid_skill_path(path)
                 || command
                     .as_ref()
-                    .is_some_and(|command| !valid_skill_command_name(&command.name))
-            {
-                continue;
-            }
+                    .is_some_and(|command| !valid_skill_command_name(&command.name)))
+        {
+            continue;
         }
         let canonical = invocation.link();
         // Older transcripts did not escape label backticks. Accept an old

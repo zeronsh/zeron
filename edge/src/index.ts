@@ -336,6 +336,11 @@ export default {
       if (parts[2] === "push" && request.method === "POST") {
         return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/push", url.search);
       }
+      // A phone's APNs token + notification choices (POST), or removal on
+      // sign-out / turning notifications off (DELETE). `?device=` required.
+      if (parts[2] === "push-target" && (request.method === "POST" || request.method === "DELETE")) {
+        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/push-target", url.search);
+      }
       // Operator wipe. Unlike the CRDT rooms this needs no recipe: clients
       // detect the seq regression on their next hello and re-seed the table
       // from local rows with original clocks, automatically.

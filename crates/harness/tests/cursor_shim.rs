@@ -543,11 +543,26 @@ async fn mcp_injection_reaches_sdk_on_create_and_resume_with_fresh_identity() {
             &std::fs::read(fixture.dir.path().join("mcp-options.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(options["zeron"]["type"], "stdio");
-        assert_eq!(options["zeron"]["command"], "/path with spaces/zeron");
-        assert_eq!(options["zeron"]["args"], serde_json::json!(["mcp"]));
-        assert_eq!(options["zeron"]["env"]["ZERON_CHAT_ID"], chat);
-        assert_eq!(options["zeron"]["env"]["ZERON_IPC_PORT"], "27699");
+        assert_eq!(options["mcpServers"]["zeron"]["type"], "stdio");
+        assert_eq!(
+            options["mcpServers"]["zeron"]["command"],
+            "/path with spaces/zeron"
+        );
+        assert_eq!(
+            options["mcpServers"]["zeron"]["args"],
+            serde_json::json!(["mcp"])
+        );
+        assert_eq!(options["mcpServers"]["zeron"]["env"]["ZERON_CHAT_ID"], chat);
+        assert_eq!(
+            options["mcpServers"]["zeron"]["env"]["ZERON_IPC_PORT"],
+            "27699"
+        );
+        // Never "project"/"all": the SDK skips MCP approvals, so a repo's
+        // .cursor/mcp.json would run unprompted.
+        assert_eq!(
+            options["settingSources"],
+            serde_json::json!(["user", "team", "mdm", "plugins"])
+        );
     }
 }
 

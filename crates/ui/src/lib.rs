@@ -14,6 +14,7 @@
 
 mod account_usage;
 pub mod app_menus;
+pub mod app_update;
 pub mod appearance;
 pub mod appshots;
 pub mod attachments;
@@ -184,6 +185,7 @@ pub fn run_app(config: UiConfig) {
         appshots::set_enabled(ui_settings.appshots_enabled);
         terminal::panel::init(cx);
         app_menus::init(cx);
+        app_update::AppUpdate::init(config.boot().edge_url, data_dir.clone(), cx);
         cx.register_url_scheme("zeron").detach();
 
         let state = cx.new(|_| state::AppState::new());
@@ -202,8 +204,8 @@ pub fn run_app(config: UiConfig) {
         });
         let click_state = state.clone();
         cx.spawn(async move |cx| {
-            while let Some(chat_id) = click_rx.next().await {
-                let _ = cx.update(|cx| open_notified_chat(chat_id, &click_state, cx));
+            while let Some(target) = click_rx.next().await {
+                let _ = cx.update(|cx| open_notification_target(target, &click_state, cx));
             }
         })
         .detach();
@@ -214,6 +216,7 @@ pub fn run_app(config: UiConfig) {
         let quit_state = state.clone();
         cx.on_app_quit(move |cx| {
             settings::flush(cx);
+            app_update::install_on_quit(cx);
             let shutdown =
                 quit_state.read(cx).engine().cloned().map(|handle| {
                     gpui_tokio::Tokio::spawn(cx, async move { handle.shutdown().await })
@@ -245,10 +248,8 @@ pub fn run_app(config: UiConfig) {
     });
 }
 
-/// A clicked banner: bring Zeron forward on that chat through the sidebar's
-/// own path (chat route + composer focus), reopening the main window first if
-/// ⌘W closed it.
-fn open_notified_chat(chat_id: String, state: &gpui::Entity<state::AppState>, cx: &mut App) {
+/// Bring Zeron forward, reopening the main window first if ⌘W closed it.
+pub(crate) fn activate_main_window(cx: &mut App) {
     cx.activate(true);
     if cx.windows().is_empty()
         && let Some(reopen) = cx.try_global::<ReopenState>()
@@ -256,6 +257,12 @@ fn open_notified_chat(chat_id: String, state: &gpui::Entity<state::AppState>, cx
         let (state, boot) = (reopen.state.clone(), reopen.boot.clone());
         open_main_window(state, boot, cx);
     }
+}
+
+/// A clicked banner: bring Zeron forward on its chat or settings destination,
+/// reopening the main window first if ⌘W closed it.
+fn open_notification_target(target: String, state: &gpui::Entity<state::AppState>, cx: &mut App) {
+    activate_main_window(cx);
     let shell = cx
         .windows()
         .into_iter()
@@ -264,10 +271,17 @@ fn open_notified_chat(chat_id: String, state: &gpui::Entity<state::AppState>, cx
         Some(shell) => {
             let _ = shell.update(cx, |shell, window, cx| {
                 window.activate_window();
-                shell.open_chat(chat_id, cx);
+                if target == notify::AGENT_UPDATES_TARGET {
+                    shell.open_settings(shell::SettingsSection::Harnesses, cx);
+                } else {
+                    shell.open_chat(target, cx);
+                }
             });
         }
-        None => state.update(cx, |state, cx| state.select_chat(Some(chat_id), cx)),
+        None if target != notify::AGENT_UPDATES_TARGET => {
+            state.update(cx, |state, cx| state.select_chat(Some(target), cx))
+        }
+        None => {}
     }
 }
 
@@ -301,6 +315,15 @@ fn restored_main_window_bounds(cx: &App) -> (Bounds<gpui::Pixels>, Option<gpui::
 }
 
 fn save_main_window_geometry(window: &gpui::Window, cx: &mut App) {
+    save_window_geometry(window, true, cx);
+}
+
+/// `query_display: false` keeps the display recorded by the last bounds
+/// change. The close path must not query displays: on X11 the should-close
+/// callback runs while the platform client is mutably borrowed, and the
+/// display lookup panicked — killing the app before its quit hooks (engine
+/// drain, install-on-quit) could run.
+fn save_window_geometry(window: &gpui::Window, query_display: bool, cx: &mut App) {
     if window.is_fullscreen() {
         return;
     }
@@ -310,7 +333,13 @@ fn save_main_window_geometry(window: &gpui::Window, cx: &mut App) {
         return;
     };
     let mut geometry = settings::WindowGeometry::from_bounds(bounds);
-    geometry.display_uuid = window.display(cx).and_then(|display| display.uuid().ok());
+    geometry.display_uuid = if query_display {
+        window.display(cx).and_then(|display| display.uuid().ok())
+    } else {
+        settings::current(cx)
+            .window_geometry
+            .and_then(|saved| saved.display_uuid)
+    };
     if geometry.is_valid() {
         settings::update(settings::SavePolicy::Debounced, cx, |settings| {
             settings.window_geometry = Some(geometry);
@@ -402,7 +431,7 @@ fn open_main_window(
                         .update(cx, |shell, cx| shell.prepare_window_close(cx))
                         .unwrap_or(true);
                     if should_close {
-                        save_main_window_geometry(window, cx);
+                        save_window_geometry(window, false, cx);
                         settings::flush(cx);
                     }
                     should_close

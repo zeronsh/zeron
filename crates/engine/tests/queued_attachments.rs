@@ -238,3 +238,99 @@ async fn run_defers_until_attachment_bytes_land_then_executes_rewritten() {
 
     core.shutdown().await;
 }
+
+/// Mobile sends made while a turn runs park on the shared queue with
+/// `pending://` refs (the bytes chase them over the peer link). The queue
+/// drain must wait for those bytes and hand the harness the committed local
+/// files, exactly like a Run command — never the raw refs.
+#[tokio::test(flavor = "multi_thread")]
+async fn queued_row_waits_for_attachment_bytes_then_sends_resolved_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(AckHarness));
+    let core = EngineCore::assemble(
+        &tmp.path().join("data"),
+        Arc::new(registry),
+        HarnessId::Mock,
+        None,
+    )
+    .expect("engine core assembles");
+
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "createChat", "chatId": CHAT, "deviceId": core.device_id }),
+        )
+        .await
+        .expect("createChat");
+    core.workspace
+        .rename_chat(CHAT, "Pre-titled")
+        .expect("rename chat");
+    core.workspace
+        .set_chat_cwd(CHAT, "~")
+        .expect("set chat cwd");
+
+    // A clean-text row (attachments ride the row, not the text) whose bytes
+    // have not landed yet: the idle chat must NOT send it.
+    let pending_ref = "pending://att-q1/queued shot.png";
+    core.doc_host
+        .queue_message_with_behavior(CHAT, "what is this", vec![pending_ref.into()], false)
+        .expect("queue row");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        complete_assistant_count(&core),
+        0,
+        "a queued row must wait while its attachment bytes are in transit"
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    assert_eq!(
+        handle.doc().read_queue().unwrap().len(),
+        1,
+        "row stays queued"
+    );
+
+    client
+        .call(
+            zeron_rpc::methods::UPLOAD_CHUNK,
+            serde_json::json!({
+                "uploadId": "att-q1", "seq": 0, "data": BASE64.encode(b"png-bytes"),
+            }),
+        )
+        .await
+        .expect("upload chunk");
+    client
+        .call(
+            zeron_rpc::methods::UPLOAD_COMMIT,
+            serde_json::json!({ "uploadId": "att-q1", "fileName": "queued shot.png" }),
+        )
+        .await
+        .expect("upload commit");
+
+    wait_for(
+        || complete_assistant_count(&core) == 1,
+        "queued row to send once its bytes land",
+    )
+    .await;
+    assert!(handle.doc().read_queue().unwrap().is_empty());
+    let user_text = entries(&core)
+        .iter()
+        .find(|e| e.role == MessageRole::User)
+        .and_then(|e| {
+            e.parts.iter().find_map(|p| match p {
+                zeron_doc::MessagePart::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+        })
+        .expect("user entry persisted");
+    assert!(
+        !user_text.contains("pending://"),
+        "persisted text must not leak pending refs: {user_text}"
+    );
+    assert!(
+        user_text.contains("att-q1-queued_shot.png"),
+        "persisted text names the committed file: {user_text}"
+    );
+
+    core.shutdown().await;
+}

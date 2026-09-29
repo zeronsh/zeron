@@ -79,6 +79,10 @@
     // set the real client id before deploying. Set AUTH_MODE=dev locally to
     // accept bearer==userId. WORKOS_API_KEY is a wrangler secret
     // (`wrangler secret put WORKOS_API_KEY`) powering the /auth/* routes.
+    // Session push notifications (registry-room.ts) need two more secrets:
+    // `wrangler secret put APNS_KEY_P8` (the AuthKey_XXXX.p8 file's contents)
+    // and `wrangler secret put APNS_KEY_ID`. Unset ⇒ decided and logged on
+    // /registry/:org/stats, not sent.
     "WORKOS_CLIENT_ID": "client_01KWD0EAKZKD50YCQJNYSRE4BY",
     "AUTH_MODE": "workos"
   },

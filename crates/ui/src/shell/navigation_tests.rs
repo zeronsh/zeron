@@ -446,3 +446,90 @@ fn each_session_cycles_only_its_own_tabs(cx: &mut TestAppContext) {
     press(cx, true);
     assert_surface(&shell, cx, RightSurface::Subagent(1));
 }
+
+/// Settles a transcript selection and seeds the clipboard with a sentinel, so
+/// a keystroke that copies nothing is distinguishable from one that does.
+fn select_transcript_text(cx: &mut VisualTestContext) {
+    crate::markdown::selection::begin_with_span("transcript-row:0", "selected reply", 0..8);
+    crate::markdown::selection::end_active_drag();
+    cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("sentinel".into())));
+}
+
+fn clipboard_text(cx: &mut VisualTestContext) -> Option<String> {
+    cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+}
+
+fn clear_transcript_selection() {
+    crate::markdown::selection::clear_if_owner("transcript-row:0");
+}
+
+#[gpui::test]
+fn copy_shortcut_copies_transcript_selection_after_clicking_the_transcript(
+    cx: &mut TestAppContext,
+) {
+    let _selection = crate::markdown::selection::test_state_lock();
+    let (shell, cx) = setup(cx);
+    cx.update(|window, cx| window.focus(&shell.read(cx).composer.focus_handle(cx), cx));
+    let main = cx.debug_bounds("navigation-main").unwrap();
+    cx.simulate_click(
+        main.origin + gpui::point(px(100.), px(150.)),
+        gpui::Modifiers::default(),
+    );
+    cx.update(|window, cx| window.draw(cx).clear());
+    cx.update(|window, cx| {
+        let shell = shell.read(cx);
+        assert!(!shell.composer.focus_handle(cx).is_focused(window));
+        assert!(shell.navigation_focus.main.is_focused(window));
+    });
+    select_transcript_text(cx);
+    cx.simulate_keystrokes("ctrl-c");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("selected"));
+    clear_transcript_selection();
+}
+
+#[gpui::test]
+fn copy_shortcut_copies_side_chat_selection_from_the_right_pane(cx: &mut TestAppContext) {
+    let _selection = crate::markdown::selection::test_state_lock();
+    let (shell, cx) = setup(cx);
+    cx.update(|window, cx| {
+        let right = shell.read(cx).navigation_focus.right.clone();
+        window.focus(&right, cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    select_transcript_text(cx);
+    cx.simulate_keystrokes("ctrl-c");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("selected"));
+    clear_transcript_selection();
+}
+
+#[gpui::test]
+fn copy_shortcut_prefers_the_focused_composer_selection(cx: &mut TestAppContext) {
+    let _selection = crate::markdown::selection::test_state_lock();
+    let (shell, cx) = setup(cx);
+    cx.update(|window, cx| window.focus(&shell.read(cx).composer.focus_handle(cx), cx));
+    cx.update(|window, cx| window.draw(cx).clear());
+    cx.simulate_input("draft text");
+    select_transcript_text(cx);
+    cx.simulate_keystrokes("ctrl-a ctrl-c");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("draft text"));
+    clear_transcript_selection();
+}
+
+#[gpui::test]
+fn ctrl_c_in_a_terminal_is_not_taken_by_a_transcript_selection(cx: &mut TestAppContext) {
+    let _selection = crate::markdown::selection::test_state_lock();
+    let (shell, cx) = setup(cx);
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.terminal_panel(cx).update(cx, |panel, cx| {
+                panel.reserve_tab_for_chat("parent".into(), "Test terminal", cx);
+            });
+            shell.toggle_terminal(window, cx);
+        })
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    select_transcript_text(cx);
+    cx.simulate_keystrokes("ctrl-c");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("sentinel"));
+    clear_transcript_selection();
+}

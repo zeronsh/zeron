@@ -889,6 +889,48 @@ impl AppearancePage {
         .detach();
     }
 
+    pub(crate) fn show_wallpaper_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.background_error = Some(error.into());
+        cx.notify();
+    }
+
+    fn random_wallpaper(&mut self, cx: &mut Context<Self>) {
+        self.background_error = None;
+        let task = crate::settings::wallpaper::randomize(cx);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |page, cx| {
+                page.background_error = result.err().map(SharedString::from);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn choose_wallpaper_folder(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose Wallpaper Folder".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = receiver.await else {
+                return;
+            };
+            let Some(path) = paths.pop() else {
+                return;
+            };
+            let _ = this.update(cx, |page, cx| {
+                crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+                    settings.wallpaper_folder = Some(path);
+                });
+                page.random_wallpaper(cx);
+            });
+        })
+        .detach();
+    }
+
     fn choose_new_thread_background(&mut self, cx: &mut Context<Self>) {
         self.background_error = None;
         let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
@@ -2673,7 +2715,9 @@ impl Render for AppearancePage {
                             &theme,
                             vec![
                                 div()
-                                    .child(SharedString::from(accent_helper(current_accent)))
+                                    .child(SharedString::from(if crate::settings::current(cx).wallpaper_theme_colors {
+                                        "Wallpaper colors are enabled; this accent is used when they are off.".to_string()
+                                    } else { accent_helper(current_accent) }))
                                     .into_any_element(),
                             ],
                         )),
@@ -2687,6 +2731,28 @@ impl Render for AppearancePage {
                         .gap(px(8.0))
                         .children(accent_controls),
                 )
+                .into_any_element(),
+        );
+        let match_wallpaper = crate::settings::current(cx).wallpaper_theme_colors;
+        settings_rows.push(
+            widgets::card_row(&theme, false)
+                .child(div().flex_1().min_w_0()
+                    .child(widgets::row_title(&theme, "Match wallpaper colors"))
+                    .child(widgets::meta_line(&theme, vec![div()
+                        .child("Use wallpaper colors for accents, highlights, and subtle surface tints.")
+                        .into_any_element()])))
+                .child(widgets::toggle_switch(&theme, match_wallpaper, "wallpaper-theme-colors")
+                    .id("wallpaper-theme-colors-toggle")
+                    .tab_index(0)
+                    .role(gpui::Role::Switch)
+                    .aria_label("Match wallpaper colors")
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .cursor_pointer()
+                    .aria_toggled(if match_wallpaper { gpui::Toggled::True } else { gpui::Toggled::False })
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        crate::settings::wallpaper_colors::set_enabled(!match_wallpaper, cx);
+                        cx.notify();
+                    })))
                 .into_any_element(),
         );
         let color_rows = settings_rows;
@@ -2816,6 +2882,58 @@ impl Render for AppearancePage {
                                 .on_click(cx.listener(
                                     |this, _, _, cx| this.choose_new_thread_background(cx),
                                 )),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        );
+        let wallpaper_settings = crate::settings::current(cx);
+        let folder_label = wallpaper_settings
+            .wallpaper_folder
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "Choose a folder of wallpaper images.".into());
+        let shortcut = crate::settings::display_combo(&wallpaper_settings.keymap.random_wallpaper);
+        settings_rows.push(
+            widgets::card_row(&theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(160.0))
+                        .child(widgets::row_title(&theme, "Wallpaper folder"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child(SharedString::from(format!(
+                                        "{folder_label} · {shortcut} picks a random image"
+                                    )))
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .child(
+                            compact_action(&theme, "Choose folder", "wallpaper-folder-choose")
+                                .tab_index(0)
+                                .role(gpui::Role::Button)
+                                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.choose_wallpaper_folder(cx)),
+                                ),
+                        )
+                        .when(wallpaper_settings.wallpaper_folder.is_some(), |row| {
+                            row.child(
+                                compact_action(&theme, "Shuffle", "wallpaper-shuffle")
+                                    .tab_index(0)
+                                    .role(gpui::Role::Button)
+                                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.random_wallpaper(cx)),
+                                    ),
                             )
                         }),
                 )

@@ -370,6 +370,9 @@ impl MotionSpec {
 pub const FADE_IN: MotionSpec = MotionSpec::new(500, EASE_OUT_EXPO);
 /// Quick fade: 0.15s.
 pub const FADE_QUICK: MotionSpec = MotionSpec::new(150, EASE);
+/// Wallpaper replacement: immediate attack with a short, soft landing.
+pub const WALLPAPER_CROSSFADE: MotionSpec =
+    MotionSpec::new(180, CubicBezier::new(1.0 / 3.0, 1.0, 2.0 / 3.0, 1.0));
 /// Popover-in: 0.14s (scale 0.96 approximated, translateY −2).
 pub const MENU_IN: MotionSpec = MotionSpec::new(140, EASE);
 /// Popover-out: 0.1s — quicker than the entrance (exits should get out of the

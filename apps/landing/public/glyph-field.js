@@ -6,6 +6,9 @@
 // glyphs sit barely above the obsidian, a slow violet light shaft sweeps through them
 // (the canyon beam), and the pointer leaves a violet afterglow instead of ink.
 //
+// Cells are scattered by a hash (no clouds), and fade to `clearOpacity` behind the
+// text and elements they're told to keep legible, so copy sits on clean ground.
+//
 // mountGlyphField(host, opts) → { destroy }
 
 const DEFAULT_LINES = [
@@ -41,16 +44,29 @@ export function mountGlyphField(host, opts = {}) {
     glow: [167, 139, 250], // #a78bfa
     glowAlpha: 0.75,
     // which fraction of cells are kept (lower = more gaps)
-    density: 0.5,
+    density: 0.62,
     parallax: 0.88,
     // light shaft: angle in degrees, width as fraction of the diagonal, sweep seconds (0 = static)
     beam: { angle: -38, width: 0.14, sweep: 26, alpha: 0.22, offset: 0.5 },
-    // clear hole (ellipse, fractions of viewport) so the headline stays legible
+    // clear hole (ellipse, fractions of the field) thinning the cells under it
     clear: null, // e.g. { x: 0.5, y: 0.45, rx: 0.3, ry: 0.18 }
+    // elements whose box, and text elements whose rendered lines, keep glyphs
+    // at `clearOpacity`, feathered out over `clearFeather` px
+    clearElements: null,
+    clearTextElements: null,
+    clearPadding: 4,
+    clearFeather: 24,
+    clearOpacity: 0.2,
+    // end the field partway down this element instead of at the host's bottom
+    endElement: null,
+    endFraction: 1,
+    pointerTarget: window,
     ...opts,
   };
   const BEAM = { angle: -38, width: 0.14, sweep: 26, alpha: 0.22, offset: 0.5 };
   o.beam = opts.beam === null || opts.beam === false ? null : { ...BEAM, ...opts.beam };
+  const clearEls = o.clearElements || [];
+  const clearTextEls = o.clearTextElements || [];
   const text = o.lines.join('     ') + '     ';
   const coarse = matchMedia('(hover: none), (max-width: 767px)').matches;
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -63,6 +79,7 @@ export function mountGlyphField(host, opts = {}) {
     maskImage: 'linear-gradient(to bottom, transparent 0%, #000 8%, #000 80%, transparent 100%)',
     WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, #000 8%, #000 80%, transparent 100%)',
   });
+  if (o.endElement) wrap.style.bottom = 'auto';
   const inner = document.createElement('div');
   Object.assign(inner.style, { position: 'absolute', left: 0, top: 0, width: '100%', willChange: 'transform' });
   const base = document.createElement('canvas');
@@ -75,27 +92,38 @@ export function mountGlyphField(host, opts = {}) {
   const lx = lit.getContext('2d');
 
   let cols = 0, rows = 0, W = 0, H = 0, extra = 0;
+  let clears = [];
   let heat = new Float32Array(0);
   let hot = new Set();
   const trail = [];
   const charAt = (r, c) => text[((r * 41) % text.length + c) % text.length];
 
-  // 0..1 visibility of a cell, or -1 if it's a gap
+  // 0.3..0.7 intensity of a kept cell, or -1 if it's a gap
   const field = (r, c) => {
-    const n = Math.sin(c * 0.045 + 0.4) * Math.cos(r * 0.06)
-      + 0.7 * Math.sin((c + r) * 0.023 + 1.1)
-      + 0.5 * Math.sin((c - r) * 0.037 + 2.2)
-      + 0.35 * Math.cos(c * 0.017 - r * 0.02);
-    const hash = ((r * 374761393) ^ (c * 668265263)) >>> 0;
-    let v = (n + 2.55) / 5.1 + ((hash % 100) / 100 - 0.5) * 0.38;
+    let h = Math.imul(r + 1, 374761393) ^ Math.imul(c + 1, 668265263);
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    h = (h ^ (h >>> 16)) >>> 0;
+    let v = h / 4294967296;
     if (o.clear) {
       const x = c / cols, y = (r * o.cellH - extra) / (H - 2 * extra || 1);
       const d = Math.hypot((x - o.clear.x) / o.clear.rx, (y - o.clear.y) / o.clear.ry);
       v -= Math.max(0, 1 - d) * 0.6;
     }
     if (v <= 1 - o.density) return -1;
-    const t = Math.sin(c * 0.02) * Math.cos(r * 0.03) + 0.5 * Math.sin((c + r) * 0.015);
-    return Math.min(1, Math.max(0, (t + 1.5) / 3));
+    return 0.3 + 0.4 * ((h >>> 8) % 256) / 255;
+  };
+
+  // 1 away from cleared text/elements, easing down to clearOpacity inside them
+  const clearFactor = (r, c) => {
+    if (!clears.length) return 1;
+    const x = (c + 0.5) * o.cellW, y = (r + 0.5) * o.cellH - extra;
+    let a = 1;
+    for (const b of clears) {
+      const dx = Math.max(b.left - x, 0, x - b.right), dy = Math.max(b.top - y, 0, y - b.bottom);
+      const s = Math.min(1, Math.hypot(dx, dy) / o.clearFeather);
+      a = Math.min(a, o.clearOpacity + (1 - o.clearOpacity) * s * s * (3 - 2 * s));
+    }
+    return a;
   };
 
   const rgba = (rgb, a) => `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a.toFixed(3)})`;
@@ -107,26 +135,47 @@ export function mountGlyphField(host, opts = {}) {
     if (ch === ' ') return;
     const f = cache[r * cols + c];
     const h = heat[r * cols + c];
-    if (f < 0 && h <= 0) return;
+    const k = clearFactor(r, c);
+    if ((f < 0 && h <= 0) || k < 0.001) return;
     const a = f < 0 ? 0 : o.baseAlpha[0] + (o.baseAlpha[1] - o.baseAlpha[0]) * f;
     if (h > 0) {
       // mix toward glow
-      const m = h;
-      const col = o.base.map((v, i) => Math.round(v + (o.glow[i] - v) * m));
-      bx.fillStyle = rgba(col, a + (o.glowAlpha - a) * m);
-    } else bx.fillStyle = rgba(o.base, a);
+      const col = o.base.map((v, i) => Math.round(v + (o.glow[i] - v) * h));
+      bx.fillStyle = rgba(col, (a + (o.glowAlpha - a) * h) * k);
+    } else bx.fillStyle = rgba(o.base, a * k);
     bx.fillText(ch, c * o.cellW, r * o.cellH);
   };
 
   const setup = () => {
     const dpr = Math.min(devicePixelRatio || 1, 2);
+    if (o.endElement) {
+      const hr = host.getBoundingClientRect(), er = o.endElement.getBoundingClientRect();
+      wrap.style.height = `${Math.max(0, er.top - hr.top + er.height * o.endFraction)}px`;
+    }
     W = host.clientWidth;
     extra = 60;
-    H = host.clientHeight + extra * 2;
+    H = wrap.clientHeight + extra * 2;
+    // cleared boxes, in field coordinates
+    const hr = host.getBoundingClientRect();
+    const local = (b) => ({
+      left: b.left - hr.left - o.clearPadding, right: b.right - hr.left + o.clearPadding,
+      top: b.top - hr.top - o.clearPadding, bottom: b.bottom - hr.top + o.clearPadding,
+    });
+    clears = clearEls.map((el) => local(el.getBoundingClientRect()));
+    for (const el of clearTextEls) {
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      for (let node; (node = walker.nextNode());) {
+        if (!node.textContent.trim()) continue;
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        for (const b of range.getClientRects()) if (b.width && b.height) clears.push(local(b));
+      }
+    }
     inner.style.top = `${-extra}px`;
     inner.style.height = `${H}px`;
     cols = Math.ceil(W / o.cellW) + 1;
     rows = Math.ceil(H / o.cellH) + 1;
+    trail.length = 0;
     heat = new Float32Array(cols * rows);
     cache = new Float32Array(cols * rows);
     for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) cache[r * cols + c] = field(r, c);
@@ -144,8 +193,9 @@ export function mountGlyphField(host, opts = {}) {
     for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
       const ch = charAt(r, c);
       if (ch === ' ') continue;
-      const f = cache[r * cols + c];
-      lx.fillStyle = rgba(o.glow, f < 0 ? 0.05 : 0.18 + 0.5 * f);
+      const f = cache[r * cols + c], k = clearFactor(r, c);
+      if (k < 0.001) continue;
+      lx.fillStyle = rgba(o.glow, (f < 0 ? 0.05 : 0.18 + 0.5 * f) * k);
       lx.fillText(ch, c * o.cellW, r * o.cellH);
     }
     applyBeam(performance.now());
@@ -171,8 +221,8 @@ export function mountGlyphField(host, opts = {}) {
   };
   const onScroll = () => { sraf ||= requestAnimationFrame(applyScroll); };
 
-  // pointer afterglow (Anara's trail, longer + softer)
-  const LIFE = 900, SPACING = 12;
+  // pointer afterglow (Anara's trail, softer)
+  const LIFE = 650, SPACING = 12;
   let lx0 = -1e9, ly0 = -1e9, traf = 0;
   const loop = () => {
     const now = performance.now();
@@ -182,7 +232,7 @@ export function mountGlyphField(host, opts = {}) {
     for (const p of trail) {
       const life = 1 - (now - p.born) / LIFE;
       if (life <= 0) continue;
-      const rad = 10 + 70 * life, r2 = rad * rad;
+      const rad = 10 + 48 * life, r2 = rad * rad;
       const c0 = Math.max(0, Math.floor((p.x - rad) / o.cellW)), c1 = Math.min(cols - 1, Math.ceil((p.x + rad) / o.cellW));
       const r0 = Math.max(0, Math.floor((p.y - rad) / o.cellH)), r1 = Math.min(rows - 1, Math.ceil((p.y + rad) / o.cellH));
       for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
@@ -203,7 +253,7 @@ export function mountGlyphField(host, opts = {}) {
   const onMove = (e) => {
     const rect = base.getBoundingClientRect();
     const x = e.clientX - rect.left, y = e.clientY - rect.top, now = performance.now();
-    if (y < -50 || y > H + 50) return;
+    if (x < 0 || x > W || y < 0 || y > H) { lx0 = ly0 = -1e9; return; }
     if (lx0 < -9000) { lx0 = x; ly0 = y; }
     let dx = x - lx0, dy = y - ly0, d = Math.hypot(dx, dy);
     while (d >= SPACING) {
@@ -216,23 +266,39 @@ export function mountGlyphField(host, opts = {}) {
     lx0 = x; ly0 = y;
     traf ||= requestAnimationFrame(loop);
   };
+  const onLeave = () => { lx0 = ly0 = -1e9; };
 
   let braf = 0;
   const beamLoop = (t) => { applyBeam(t); braf = requestAnimationFrame(beamLoop); };
 
   document.fonts.ready.then(() => { setup(); applyScroll(); });
   setup();
-  if (!coarse && !reduced) addEventListener('pointermove', onMove, { passive: true });
-  if (!reduced) addEventListener('scroll', onScroll, { passive: true });
+  if (!coarse && !reduced) {
+    o.pointerTarget.addEventListener('pointermove', onMove, { passive: true });
+    o.pointerTarget.addEventListener('pointerleave', onLeave);
+  }
+  if (!reduced && o.parallax !== 1) addEventListener('scroll', onScroll, { passive: true });
   if (o.beam && o.beam.sweep && !reduced) braf = requestAnimationFrame(beamLoop);
-  let rw = 0;
-  const ro = new ResizeObserver(() => { if (host.clientWidth !== rw) { rw = host.clientWidth; setup(); } });
+  // re-lay out when the host, the end element or anything cleared resizes
+  let sizes = '';
+  const ro = new ResizeObserver(() => {
+    const hr = host.getBoundingClientRect();
+    const endTop = o.endElement ? o.endElement.getBoundingClientRect().top - hr.top : 0;
+    const next = [host.clientWidth, host.clientHeight,
+      ...(o.endElement ? [endTop, o.endElement.clientHeight] : []),
+      ...[...clearEls, ...clearTextEls].flatMap((el) => [el.clientWidth, el.clientHeight])].join('/');
+    if (next !== sizes) { sizes = next; setup(); }
+  });
   ro.observe(host);
+  if (o.endElement) ro.observe(o.endElement);
+  for (const el of [...clearEls, ...clearTextEls]) ro.observe(el);
 
   return {
     destroy() {
       cancelAnimationFrame(traf); cancelAnimationFrame(sraf); cancelAnimationFrame(braf);
-      removeEventListener('pointermove', onMove); removeEventListener('scroll', onScroll);
+      o.pointerTarget.removeEventListener('pointerleave', onLeave);
+      o.pointerTarget.removeEventListener('pointermove', onMove);
+      removeEventListener('scroll', onScroll);
       ro.disconnect(); wrap.remove();
     },
   };

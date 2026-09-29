@@ -2,7 +2,8 @@
   const base = "https://zeron.sh/releases/";
   const releases = {
     macos: ["macos-arm64.dmg", "Download for macOS", "Apple silicon"],
-    windows: ["windows-x86_64.zip", "Download for Windows", "Windows x64 · Portable ZIP"],
+    windows: ["windows-x86_64-setup.exe", "Download for Windows", "Windows x64 · Installer"],
+    "windows-portable": ["windows-x86_64.zip", "Download for Windows", "Windows x64 · Portable ZIP"],
     linux: ["linux-x86_64.tar.gz", "Download for Linux", "Linux x64"],
     "linux-arm": ["linux-aarch64.tar.gz", "Download for Linux", "Linux ARM64"],
   };
@@ -24,13 +25,14 @@
       const [file, label, detail] = releases[os];
       link.href = `${base}zeron-${version}-${file}`;
       link.textContent = id === "nav-download" ? "Download" : label;
+      link.setAttribute("data-download-os", os);
       link.setAttribute("aria-label", `${label} (${detail})`);
       link.title = detail;
     }
-    document.getElementById("ver").textContent = `v${version}`;
   };
   // A published fallback keeps downloads usable without the version endpoint.
-  const fallback = "0.2.66";
+  // 0.2.97 is the first release with the Windows installer.
+  const fallback = "0.2.97";
   apply(fallback);
   fetch(`${base}latest.txt`, { credentials: "omit" })
     .then((r) => r.ok ? r.text() : Promise.reject())

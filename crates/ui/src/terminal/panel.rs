@@ -262,6 +262,8 @@ struct TerminalTab {
     terminal_id: Option<String>,
     target_device_id: Option<String>,
     emulator: Emulator,
+    /// Fractional wheel movement in rows, retained across trackpad events.
+    scroll_remainder: f32,
     exited: Option<i32>,
     last_seq: u64,
     coalescer: InputCoalescer,
@@ -490,6 +492,7 @@ impl TerminalPanel {
             terminal_id: None,
             target_device_id: None,
             emulator: Emulator::new(80, 24),
+            scroll_remainder: 0.0,
             exited: None,
             last_seq: 0,
             coalescer: InputCoalescer::default(),
@@ -1790,8 +1793,21 @@ impl Render for TerminalPanel {
                                 f32::from(delta.y) / line_h
                             }
                         };
-                        let step = lines.round() as i32;
+                        let chat = this.selected_chat(cx);
+                        let Some(tabs) = this.chats.get_mut(&chat) else {
+                            return;
+                        };
+                        let Some(tab) = tabs.tabs.get_mut(tabs.active) else {
+                            return;
+                        };
+                        if event.touch_phase == gpui::TouchPhase::Started {
+                            tab.scroll_remainder = 0.0;
+                        }
+                        tab.scroll_remainder += lines;
+                        let step = tab.scroll_remainder.trunc() as i32;
+                        tab.scroll_remainder -= step as f32;
                         this.scroll_active(step, cx);
+                        cx.stop_propagation();
                     }))
                     .child(TerminalElement::new(cx.entity(), focused))
                     .children(scrollbar),
@@ -1803,6 +1819,95 @@ impl Render for TerminalPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn slow_trackpad_scroll_accumulates_per_terminal(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext, Modifiers, ScrollWheelEvent, TouchPhase, point};
+
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let (panel, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.selected_chat = Some("chat".into());
+                state
+            });
+            let mut panel = TerminalPanel::new(state, cx);
+            for title in ["First", "Second"] {
+                let key = panel.reserve_tab_for_chat("chat".into(), title, cx);
+                let tab = panel.tab_mut("chat", key).unwrap();
+                for _ in 0..200 {
+                    tab.emulator.feed(b"scrollback\r\n");
+                }
+            }
+            panel
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let geometry = panel.read_with(cx, |panel, _| panel.geometry.unwrap());
+        let mut scroll = |delta, phase| {
+            cx.simulate_event(ScrollWheelEvent {
+                position: geometry.bounds.center(),
+                delta,
+                modifiers: Modifiers::default(),
+                touch_phase: phase,
+            })
+        };
+        // Every event is smaller than half a row: rounding each one loses all movement.
+        for _ in 0..40 {
+            scroll(
+                ScrollDelta::Pixels(point(px(0.0), px(geometry.line_h / 4.0))),
+                TouchPhase::Moved,
+            );
+        }
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(panel.active_tab(cx).unwrap().emulator.display_offset(), 10);
+        });
+        // Signed fractions work in reverse too; mouse-wheel rows stay exact.
+        let mut scroll = |delta, phase| {
+            cx.simulate_event(ScrollWheelEvent {
+                position: geometry.bounds.center(),
+                delta,
+                modifiers: Modifiers::default(),
+                touch_phase: phase,
+            })
+        };
+        for _ in 0..8 {
+            scroll(
+                ScrollDelta::Pixels(point(px(0.0), px(-geometry.line_h / 4.0))),
+                TouchPhase::Moved,
+            );
+        }
+        scroll(ScrollDelta::Lines(point(0.0, 3.0)), TouchPhase::Moved);
+        scroll(ScrollDelta::Lines(point(0.0, 0.75)), TouchPhase::Moved);
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(panel.active_tab(cx).unwrap().emulator.display_offset(), 11);
+        });
+        // A fresh gesture does not inherit the previous gesture's partial row.
+        cx.simulate_event(ScrollWheelEvent {
+            position: geometry.bounds.center(),
+            delta: ScrollDelta::Lines(point(0.0, 0.25)),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Started,
+        });
+        panel.update(cx, |panel, cx| {
+            assert_eq!(panel.active_tab(cx).unwrap().emulator.display_offset(), 11);
+            assert_eq!(panel.active_tab(cx).unwrap().scroll_remainder, 0.25);
+            panel.select_tab_by_key(1, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.simulate_event(ScrollWheelEvent {
+            position: geometry.bounds.center(),
+            delta: ScrollDelta::Lines(point(0.0, 0.75)),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(panel.active_tab(cx).unwrap().emulator.display_offset(), 0);
+            assert_eq!(panel.active_tab(cx).unwrap().scroll_remainder, 0.75);
+        });
+    }
 
     #[test]
     fn height_clamps_between_160_and_55vh() {

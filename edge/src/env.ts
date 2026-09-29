@@ -22,7 +22,25 @@ export interface Env {
    * routes (code exchange, refresh, orgs). Unset ⇒ those routes answer 501,
    * matching the old apps/server dev-mode behavior. */
   WORKOS_API_KEY?: string;
+  /** APNs auth key (contents of AuthKey_XXXX.p8, wrangler secret) and its
+   * key id. Unset ⇒ session notifications are decided and logged, not sent. */
+  APNS_KEY_P8?: string;
+  APNS_KEY_ID?: string;
+  /** Apple team id and the app's bundle id (defaults: the Zeron iOS app). */
+  APNS_TEAM_ID?: string;
+  APNS_TOPIC?: string;
 }
+
+/** APNs settings, when push is set up for this deployment. */
+export const apnsConfig = (env: Env) =>
+  env.APNS_KEY_P8 && env.APNS_KEY_ID
+    ? {
+        keyP8: env.APNS_KEY_P8,
+        keyId: env.APNS_KEY_ID,
+        teamId: env.APNS_TEAM_ID ?? "5XY3M483YQ",
+        topic: env.APNS_TOPIC ?? "sh.zeron.ios"
+      }
+    : undefined;
 
 /** Header the Worker stamps on requests it forwards into DOs after verifying
  * the caller's JWT. DOs trust it blindly — they are only reachable through

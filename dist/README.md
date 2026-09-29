@@ -12,7 +12,9 @@ Produces `target/package/zeron-<version>-linux-<arch>.tar.gz` containing:
 - `zeron` — the binary (headed by default; `zeron headless` runs the engine alone)
 - `zeron.desktop` — XDG desktop entry
 - `zeron.png` — 1024×1024 Zeron app icon
-- `install.sh` — installs into `~/.local/{bin,share/applications,share/icons}`
+- `install.sh` — installs into `~/.zeron/app/<version>` behind a `current`
+  symlink (the curl installer's layout, which the in-app updater manages) and
+  links `~/.local/bin/zeron`, the desktop entry, and the icon to it
 
 The release profile in the root `Cargo.toml` sets `lto = "thin"` and
 `strip = "symbols"` for distribution builds.
@@ -60,3 +62,21 @@ installed builds can update into Zeron. CI runs this on tags
    xcrun stapler staple Zeron.app
    ```
 5. Ship as a `.dmg` (`hdiutil create -volname Zeron -srcfolder Zeron.app -ov -format UDZO Zeron.dmg`).
+
+## Windows
+
+```powershell
+./scripts/package-windows.ps1 -ReleasesUrl https://github.com/zeronsh/zeron/releases/latest/download
+```
+
+Produces, under `target/package/`:
+
+- `zeron-<version>-windows-<arch>-setup.exe` — the per-user installer built
+  from `dist/windows/zeron.iss` with Inno Setup 6
+- `zeron-<version>-windows-<arch>.zip` — the portable package
+- `zeron-<version>-windows-<arch>.exe` — the bare executable the in-app
+  updater downloads
+
+The installer and the zip both carry `zeron-update.json`, the marker that lets
+the app update itself in place. CI runs `scripts/test-windows-installer.ps1`
+against the setup on every Windows build.

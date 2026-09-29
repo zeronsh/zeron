@@ -5,6 +5,20 @@ $ErrorActionPreference = 'Stop'
 if (-not $ReleasesUrl.StartsWith('https://')) { throw 'Release feed must use HTTPS' }
 $root = Split-Path $PSScriptRoot -Parent
 
+function Find-InnoSetupCompiler {
+    # Inno Setup 6 ships on GitHub's Windows runners; locally, install it with
+    # `winget install JRSoftware.InnoSetup`.
+    $command = Get-Command 'ISCC.exe' -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    $bases = @(${env:ProgramFiles(x86)}, $env:ProgramFiles, "$env:LOCALAPPDATA/Programs") |
+        Where-Object { $_ }
+    foreach ($base in $bases) {
+        $candidate = Join-Path $base 'Inno Setup 6/ISCC.exe'
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    throw 'Inno Setup 6 (ISCC.exe) is required to build the installer: winget install JRSoftware.InnoSetup'
+}
+
 function Get-WindowsPackageArch([string]$Path) {
     # Match zeron-update's `std::env::consts::ARCH` so the standalone .exe
     # name agrees with crates/update/src/windows.rs::artifact. Read the built
@@ -65,9 +79,19 @@ try {
     Copy-Item -Path 'crates/ui/assets/fonts/licenses/*' -Destination $licenses
     Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip" -Force
     Copy-Item -LiteralPath './target/release/zeron.exe' -Destination "$stage.exe"
+    # The per-user installer wraps the same staged directory (zeron-update.json
+    # included), so installed copies update in place like the portable zip.
+    $iscc = Find-InnoSetupCompiler
+    & $iscc /Qp "/DAppVersion=$version" "/DArch=$arch" `
+        "/DPackageDir=$([IO.Path]::GetFullPath($stage))" `
+        "/DOutputDir=$([IO.Path]::GetFullPath($out))" `
+        ([IO.Path]::GetFullPath((Join-Path $root 'dist/windows/zeron.iss')))
+    if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
+    $setup = Join-Path $out "zeron-$version-windows-$arch-setup.exe"
+    if (-not (Test-Path -LiteralPath $setup)) { throw "Installer not produced: $setup" }
     $file = Split-Path "$stage.exe" -Leaf
     $hash = (Get-FileHash -LiteralPath "$stage.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
     @{ version = $version; files = @{ $file = @{ sha256 = $hash } } } |
         ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $out 'manifest.json')
-    Write-Host "Packaged $stage.zip"
+    Write-Host "Packaged $stage.zip and $setup"
 } finally { Pop-Location }

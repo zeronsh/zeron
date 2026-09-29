@@ -611,7 +611,7 @@ fn build_watchers(
         let tx = kick_tx.clone();
         let watcher =
             notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
-                if event.is_ok() {
+                if event.as_ref().is_ok_and(is_checkout_change) {
                     let _ = tx.send(());
                 }
             });
@@ -629,6 +629,14 @@ fn build_watchers(
         }
     }
     watchers
+}
+
+/// Whether a watch event can change the checkout's diff. Opens and reads are
+/// not changes — and the sync's own git runs open files under both watched
+/// roots, so kicking on them would re-sync every checkout forever. A write
+/// still arrives as a modify event before its close.
+fn is_checkout_change(event: &notify::Event) -> bool {
+    !matches!(event.kind, notify::EventKind::Access(_))
 }
 
 /// Per-checkout task: trailing-debounce fs kicks, then compute + publish. Runs
@@ -1868,8 +1876,56 @@ pub async fn capture_turn_diff(
 mod watch_budget_tests {
     use super::{
         CheckoutIdentity, MAX_WATCH_DIRS, exceeds_watch_budget, has_non_utf8_status_path,
-        path_batches, watch_targets,
+        is_checkout_change, path_batches, watch_targets,
     };
+
+    /// End to end through a real watcher: opening a file under a watched
+    /// checkout raises access events on Linux, and before the filter each one
+    /// kicked a sync whose own git reads raised more. A read must stay quiet;
+    /// a write must still kick.
+    #[tokio::test]
+    async fn watcher_stays_quiet_on_reads_and_kicks_on_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let _watchers = super::build_watchers(&identity(&root, &root.join(".git")), &tx);
+        // Let registration settle and drop anything it raised.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        while rx.try_recv().is_ok() {}
+
+        let _ = std::fs::read(root.join("a.txt")).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(rx.try_recv().is_err(), "a read must not kick a sync");
+
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a write kicks a sync")
+            .expect("kick channel open");
+    }
+
+    #[test]
+    fn reads_do_not_kick_a_sync_but_writes_do() {
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, EventKind, ModifyKind, RemoveKind,
+        };
+        for kind in [
+            EventKind::Access(AccessKind::Open(AccessMode::Any)),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+        ] {
+            assert!(!is_checkout_change(&notify::Event::new(kind)), "{kind:?}");
+        }
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            EventKind::Remove(RemoveKind::File),
+            EventKind::Any,
+        ] {
+            assert!(is_checkout_change(&notify::Event::new(kind)), "{kind:?}");
+        }
+    }
 
     #[test]
     fn path_batches_split_on_budget_and_keep_every_path() {
