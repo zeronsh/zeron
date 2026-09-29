@@ -1,28 +1,95 @@
 //! Public HTTP image transport for GPUI. Uses the app's Tokio runtime even when
 //! GPUI requests an asset from its own executor; no GitHub credentials are sent.
+//! Images come from untrusted PR text, so only public HTTPS hosts are reached,
+//! redirects included: never plain HTTP, this machine, or the local network.
 use futures::{FutureExt, StreamExt};
 use gpui::http_client::{AsyncBody, HttpClient, Request, Response, http::HeaderValue};
 use std::{sync::Arc, time::Duration};
 
 const MAX_ASSET_BYTES: usize = 16 * 1024 * 1024;
+const MAX_REDIRECTS: usize = 5;
+
+/// An HTTPS URL on a public host: no credentials, no loopback, private,
+/// link-local, or shared (CGNAT/Tailscale) addresses, and no local names.
+/// Names that resolve to private addresses are not detected.
+pub(crate) fn public_https(url: &url::Url) -> bool {
+    use std::net::{IpAddr, Ipv4Addr};
+    fn public_v4(ip: Ipv4Addr) -> bool {
+        let [a, b, ..] = ip.octets();
+        !(ip.is_loopback()
+            || ip.is_private()
+            || ip.is_link_local()
+            || ip.is_unspecified()
+            || ip.is_broadcast()
+            || ip.is_documentation()
+            || a == 0
+            || (a == 100 && (64..128).contains(&b)))
+    }
+    fn public_ip(ip: IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(ip) => public_v4(ip),
+            IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
+                Some(ip) => public_v4(ip),
+                None => {
+                    let first = ip.segments()[0];
+                    !(ip.is_loopback()
+                        || ip.is_unspecified()
+                        || (first & 0xfe00) == 0xfc00
+                        || (first & 0xffc0) == 0xfe80)
+                }
+            },
+        }
+    }
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && match url.host() {
+            Some(url::Host::Domain(name)) => {
+                let name = name.trim_end_matches('.').to_ascii_lowercase();
+                name.contains('.')
+                    && !name.ends_with(".localhost")
+                    && !name.ends_with(".local")
+                    && !name.ends_with(".internal")
+            }
+            Some(url::Host::Ipv4(ip)) => public_ip(ip.into()),
+            Some(url::Host::Ipv6(ip)) => public_ip(ip.into()),
+            None => false,
+        }
+}
 
 #[derive(Clone)]
 pub(crate) struct AssetHttpClient {
     client: reqwest::Client,
     runtime: tokio::runtime::Handle,
+    public_only: bool,
 }
 
 impl AssetHttpClient {
     pub(crate) fn new(runtime: tokio::runtime::Handle) -> Arc<Self> {
+        Self::with_policy(runtime, true)
+    }
+
+    /// `public_only: false` lets tests reach a loopback server.
+    fn with_policy(runtime: tokio::runtime::Handle, public_only: bool) -> Arc<Self> {
+        let redirects = reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= MAX_REDIRECTS {
+                attempt.error("too many redirects")
+            } else if public_only && !public_https(attempt.url()) {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        });
         Arc::new(Self {
             client: reqwest::Client::builder()
                 .user_agent("Zeron/desktop")
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(30))
-                .redirect(reqwest::redirect::Policy::limited(5))
+                .redirect(redirects)
                 .build()
                 .expect("image HTTP client"),
             runtime,
+            public_only,
         })
     }
 }
@@ -33,13 +100,19 @@ impl HttpClient for AssetHttpClient {
         request: Request<AsyncBody>,
     ) -> futures::future::BoxFuture<'static, anyhow::Result<Response<AsyncBody>>> {
         let client = self.client.clone();
+        let public_only = self.public_only;
         let task = self.runtime.spawn(async move {
             anyhow::ensure!(
                 request.method() == "GET",
                 "Asset transport only supports GET"
             );
+            let url = url::Url::parse(&request.uri().to_string())?;
+            anyhow::ensure!(
+                !public_only || public_https(&url),
+                "Images load only from public HTTPS hosts"
+            );
             let response = client
-                .get(request.uri().to_string())
+                .get(url)
                 .headers(request.headers().clone())
                 .send()
                 .await?;
@@ -107,7 +180,7 @@ mod tests {
                 socket.write_all(response.as_bytes()).await.unwrap();
             }
         });
-        let client = AssetHttpClient::new(tokio::runtime::Handle::current());
+        let client = AssetHttpClient::with_policy(tokio::runtime::Handle::current(), false);
         let mut response = client
             .get(&format!("{origin}/redirect"), ().into(), true)
             .await
@@ -124,5 +197,40 @@ mod tests {
                 .is_err()
         );
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pull_request_asset_transport_refuses_local_and_plain_http_targets() {
+        for (url, public) in [
+            ("https://github.com/a.png", true),
+            ("https://user-images.githubusercontent.com/1/a.png", true),
+            ("https://8.8.8.8/a.png", true),
+            ("http://example.com/a.png", false),
+            ("https://user:pass@example.com/a.png", false),
+            ("https://localhost/a.png", false),
+            ("https://printer.local/a.png", false),
+            ("https://127.0.0.1/a.png", false),
+            ("https://10.0.0.1/a.png", false),
+            ("https://192.168.1.1/a.png", false),
+            ("https://169.254.169.254/a.png", false),
+            ("https://100.100.1.1/a.png", false),
+            ("https://[::1]/a.png", false),
+            ("https://[fd00::1]/a.png", false),
+            ("https://[::ffff:127.0.0.1]/a.png", false),
+        ] {
+            assert_eq!(
+                public_https(&url::Url::parse(url).unwrap()),
+                public,
+                "{url}"
+            );
+        }
+        // Enforced by the transport too, before any connection is made.
+        let client = AssetHttpClient::new(tokio::runtime::Handle::current());
+        assert!(
+            client
+                .get("http://127.0.0.1:9/a.png", ().into(), true)
+                .await
+                .is_err()
+        );
     }
 }

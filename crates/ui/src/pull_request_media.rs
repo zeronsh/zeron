@@ -101,11 +101,7 @@ fn image_url(source: &str, pr_url: &str) -> Option<String> {
     } else {
         url::Url::parse(source).ok()?
     };
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
+    if !crate::asset_http::public_https(&url) {
         return None;
     }
     // GitHub's file viewer serves HTML; load its raw image instead.
@@ -505,6 +501,8 @@ mod tests {
             "javascript:alert(1)",
             "data:image/svg+xml,test",
             "https://name:pass@example.com/a",
+            "http://example.com/a.png",
+            "https://192.168.1.10/a.png",
             "relative.png",
         ] {
             assert!(image_url(source, pr).is_none(), "{source}");
