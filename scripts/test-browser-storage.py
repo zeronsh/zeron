@@ -185,7 +185,7 @@ def main():
                            ZERON_BROWSER_STORAGE_URL=origin + '/' + mode)
                 command = [str(Path(args.fixture).resolve()), str(root / 'captures')]
                 if os.uname().sysname == 'Darwin':
-                    command.insert(0, str(Path(__file__).resolve().parent / 'run-macos-browser-fixture.sh'))
+                    command[:0] = ['bash', str(Path(__file__).resolve().parent / 'run-macos-browser-fixture.sh')]
                 subprocess.run(command, env=env, check=True, timeout=60)
             print(f'PASS {profile}: {mode}', flush=True)
 
@@ -212,7 +212,7 @@ def main():
                     env = dict(os.environ, ZERON_BROWSER_STORAGE_ROOT=str(root),
                                ZERON_BROWSER_STORAGE_PROFILE=profile,
                                ZERON_BROWSER_STORAGE_URL='cleanup')
-                    subprocess.run([str(Path(__file__).resolve().parent / 'run-macos-browser-fixture.sh'),
+                    subprocess.run(['bash', str(Path(__file__).resolve().parent / 'run-macos-browser-fixture.sh'),
                                     str(Path(args.fixture).resolve()), str(root / 'captures')],
                                    env=env, check=True, timeout=60)
     server.shutdown()
