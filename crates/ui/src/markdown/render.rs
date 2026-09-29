@@ -24,7 +24,7 @@ use zeron_syntax::{HighlightKind, HighlightSpan, HighlightedDocument};
 
 use crate::theme::Theme;
 
-use super::parser::{Block, BlockTree, InlineRun, TableAlign};
+use super::parser::{Block, BlockTree, InlineRun, InlineStyle, TableAlign};
 use super::veil::{RowVeil, apply_veil, slice_spans};
 
 /// Gap between markdown blocks inside one message (zeron mdBlockGap).
@@ -1005,12 +1005,25 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
     let mut code_ranges: Vec<Range<usize>> = Vec::new();
+    // A run may stand for a longer source text than it shows (a file link
+    // labeled by its file name). The source is only kept when some run does.
+    let relabeled = runs.iter().any(|run| run.style.file_label.is_some());
+    let mut source = String::new();
+    let mut omissions: Vec<(Range<usize>, Range<usize>)> = Vec::new();
     for run in runs {
         if run.text.is_empty() {
             continue;
         }
+        let shown = run.style.file_label.as_deref().unwrap_or(&run.text);
         let start = text.len();
-        text.push_str(&run.text);
+        let source_start = source.len();
+        text.push_str(shown);
+        if relabeled {
+            source.push_str(&run.text);
+            if shown != run.text.as_str() {
+                omissions.push((source_start..source.len(), start..text.len()));
+            }
+        }
         let mut f = if run.style.code {
             font(theme.font_mono.clone())
         } else {
@@ -1059,7 +1072,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
             }
         }
         out.push(TextRun {
-            len: run.text.len(),
+            len: shown.len(),
             font: f,
             color,
             // Inline code's wash is painted as ROUNDED quads by the canvas
@@ -1078,7 +1091,15 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         });
     }
     FlatText {
-        original: None,
+        // The rewritten source survives for copy and selection only where a
+        // label actually replaced text.
+        original: (!omissions.is_empty()).then(|| super::link_presentation::OriginalText {
+            text: source.into(),
+            offsets: super::link_presentation::OffsetMap {
+                omissions,
+                prior: None,
+            },
+        }),
         text: text.into(),
         runs: out,
         links,
@@ -1768,16 +1789,12 @@ fn text_element(
         .as_deref()
         .and_then(|root| plain_file_reference_lines(runs, root))
     {
-        let style = runs[0].style.clone();
         return div()
             .flex()
             .flex_col()
-            .children(lines.into_iter().enumerate().map(|(line_ix, text)| {
+            .children(lines.into_iter().enumerate().map(|(line_ix, run)| {
                 text_element(
-                    &[InlineRun {
-                        text,
-                        style: style.clone(),
-                    }],
+                    &[run],
                     size,
                     line_height,
                     bold_default,
@@ -1794,13 +1811,19 @@ fn text_element(
     } else {
         FontWeight::NORMAL
     };
-    let flat = flatten_cached(runs, weight, top_ix, ix, opts, theme);
-    let inner = flat_text_element(&flat, ix, opts, theme);
     let direct_file = opts
         .workspace_root
         .as_deref()
         .and_then(|root| sole_file_reference(runs, root));
-    let content = if let Some(path) = direct_file {
+    // A whole-paragraph link keeps the label the author gave it; a bare path
+    // shows the file name, with the path kept as the copy source.
+    let flat = if matches!(&direct_file, Some((_, true))) {
+        flatten_cached(&labeled_file_runs(runs), weight, top_ix, ix, opts, theme)
+    } else {
+        flatten_cached(runs, weight, top_ix, ix, opts, theme)
+    };
+    let inner = flat_text_element(&flat, ix, opts, theme);
+    let content = if let Some((path, _)) = &direct_file {
         div()
             .min_w_0()
             .flex()
@@ -1817,7 +1840,7 @@ fn text_element(
                     .bg(crate::file_icons::well_bg(theme))
                     .child(
                         crate::file_icons::icon(
-                            crate::file_icons::FileIconIdentity::file(&path),
+                            crate::file_icons::FileIconIdentity::file(path),
                             theme.appearance,
                         )
                         .size(px(14.0)),
@@ -1884,10 +1907,24 @@ fn sole_plain_file_reference(runs: &[InlineRun], workspace_root: &str) -> Option
     crate::file_icons::has_specific_file_icon(&path).then_some(path)
 }
 
+/// A whole-paragraph bare path shows its file name while the run's text
+/// stays the path, so copy and selection keep the source. A path split
+/// across runs (emphasis) keeps its own text.
+fn labeled_file_runs(runs: &[InlineRun]) -> Vec<InlineRun> {
+    let mut labeled = runs.to_vec();
+    let mut named = labeled.iter_mut().filter(|run| !run.text.is_empty());
+    if let (Some(run), None) = (named.next(), named.next()) {
+        run.style.file_label = Some(crate::workspace_links::file_name(&run.text).to_owned());
+    }
+    labeled
+}
+
 /// Preserve hard-break file lists as one compact paragraph while giving each
 /// line its own icon. Limiting this path to one uniformly styled run avoids
-/// rewriting mixed inline formatting or ordinary wrapped prose.
-fn plain_file_reference_lines(runs: &[InlineRun], workspace_root: &str) -> Option<Vec<String>> {
+/// rewriting mixed inline formatting or ordinary wrapped prose. Each line
+/// shows its file name; the resolved path stays the run's text for copy and
+/// selection.
+fn plain_file_reference_lines(runs: &[InlineRun], workspace_root: &str) -> Option<Vec<InlineRun>> {
     let [run] = runs else { return None };
     if run.style.link.is_some()
         || run.style.image.is_some()
@@ -1908,15 +1945,26 @@ fn plain_file_reference_lines(runs: &[InlineRun], workspace_root: &str) -> Optio
             let path =
                 crate::workspace_links::resolve_workspace_file_link(candidate, workspace_root)?
                     .path;
-            crate::file_icons::has_specific_file_icon(&path).then(|| candidate.to_owned())
+            crate::file_icons::has_specific_file_icon(&path).then(|| InlineRun {
+                text: candidate.to_owned(),
+                style: InlineStyle {
+                    file_label: Some(crate::workspace_links::file_name(candidate).to_owned()),
+                    ..run.style.clone()
+                },
+            })
         })
         .collect::<Option<Vec<_>>>()?;
     (lines.len() > 1).then_some(lines)
 }
 
-fn sole_file_reference(runs: &[InlineRun], workspace_root: &str) -> Option<String> {
-    sole_workspace_file_link(runs, workspace_root)
-        .or_else(|| sole_plain_file_reference(runs, workspace_root))
+/// A whole-paragraph file reference: its resolved path, and whether that
+/// identity came from a bare path (whose label is derived) rather than an
+/// author-written link label.
+fn sole_file_reference(runs: &[InlineRun], workspace_root: &str) -> Option<(String, bool)> {
+    if let Some(path) = sole_workspace_file_link(runs, workspace_root) {
+        return Some((path, false));
+    }
+    sole_plain_file_reference(runs, workspace_root).map(|path| (path, true))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2670,6 +2718,26 @@ mod tests {
     }
 
     #[test]
+    fn the_hover_card_shows_the_whole_workspace_path() {
+        use crate::workspace_links::FileLinkRoot;
+        use std::rc::Rc;
+        let ui = LinkUi {
+            source_session: Some("chat".into()),
+            source_local: true,
+            file_roots: Some(Rc::new(vec![FileLinkRoot {
+                chat: Some("chat".into()),
+                root: "/work/comet".into(),
+                local: true,
+            }])),
+            handler: Rc::new(|_, _, _| LinkOutcome::Rejected),
+        };
+        let file = ui
+            .file_link("2026-09-29/Some Long Folder Name/SOURCES.md")
+            .expect("the link resolves inside the root");
+        assert_eq!(file.path, "2026-09-29/Some Long Folder Name/SOURCES.md");
+    }
+
+    #[test]
     fn direct_file_decoration_excludes_mixed_and_external_links() {
         let linked = InlineRun {
             text: "slides.ts".into(),
@@ -2705,7 +2773,7 @@ mod tests {
         }];
         assert_eq!(
             sole_file_reference(&plain, "/work/comet"),
-            Some("AudienceView.tsx".into())
+            Some(("AudienceView.tsx".into(), true))
         );
 
         let linked_unknown = vec![InlineRun {
@@ -2717,8 +2785,24 @@ mod tests {
         }];
         assert_eq!(
             sole_file_reference(&linked_unknown, "/work/comet"),
-            Some("build/artifact.unknown".into())
+            Some(("build/artifact.unknown".into(), false))
         );
+    }
+
+    #[test]
+    fn a_bare_path_shows_its_file_name_and_keeps_the_path_for_copy() {
+        let path = vec![InlineRun {
+            text: "dir/one/AudienceView.tsx".into(),
+            style: InlineStyle::default(),
+        }];
+        assert_eq!(
+            sole_file_reference(&path, "/work/comet"),
+            Some(("dir/one/AudienceView.tsx".into(), true))
+        );
+        let flat = flatten_runs(&labeled_file_runs(&path), &Theme::dark(), false);
+        assert_eq!(flat.text, "AudienceView.tsx");
+        let original = flat.original.expect("the path stays the copy source");
+        assert_eq!(original.text.as_ref(), "dir/one/AudienceView.tsx");
     }
 
     #[test]
@@ -2749,19 +2833,45 @@ mod tests {
     }
 
     #[test]
-    fn hard_break_file_list_resolves_every_recognized_line() {
+    fn hard_break_file_list_names_every_recognized_line() {
         let runs = vec![InlineRun {
-            text: "slides.ts\ncourseDecks.ts\nAudienceView.tsx\nglobals.css".into(),
+            text: "dir/one/slides.ts\ndir/two/courseDecks.ts\nAudienceView.tsx\nglobals.css".into(),
             style: InlineStyle::default(),
         }];
+        let lines = plain_file_reference_lines(&runs, "/work/comet").expect("resolved lines");
         assert_eq!(
-            plain_file_reference_lines(&runs, "/work/comet"),
-            Some(vec![
-                "slides.ts".into(),
-                "courseDecks.ts".into(),
-                "AudienceView.tsx".into(),
-                "globals.css".into(),
-            ])
+            lines
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "dir/one/slides.ts",
+                "dir/two/courseDecks.ts",
+                "AudienceView.tsx",
+                "globals.css",
+            ]
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .map(|run| run.style.file_label.as_deref())
+                .collect::<Vec<_>>(),
+            [
+                Some("slides.ts"),
+                Some("courseDecks.ts"),
+                Some("AudienceView.tsx"),
+                Some("globals.css"),
+            ]
+        );
+        // The display label replaces the path, but the path survives as the
+        // copy source.
+        let flat = flatten_runs(&lines[..1], &Theme::dark(), false);
+        assert_eq!(flat.text, "slides.ts");
+        let original = flat.original.expect("the path is kept for copy");
+        assert_eq!(original.text.as_ref(), "dir/one/slides.ts");
+        assert_eq!(
+            original.offsets.original(flat.text.len()),
+            original.text.len()
         );
 
         let mixed = vec![InlineRun {
@@ -2769,6 +2879,54 @@ mod tests {
             style: InlineStyle::default(),
         }];
         assert_eq!(plain_file_reference_lines(&mixed, "/work/comet"), None);
+    }
+
+    #[test]
+    fn a_whole_line_file_link_is_a_row_and_an_inline_one_stays_in_prose() {
+        let path = "2026-09-29/Some Long Folder Name/SOURCES.md";
+        let linked = InlineRun {
+            text: path.into(),
+            style: InlineStyle {
+                link: Some(path.into()),
+                file_label: Some("SOURCES.md".into()),
+                ..Default::default()
+            },
+        };
+        // A whole line or list item gets the file row's icon identity...
+        assert_eq!(
+            sole_file_reference(std::slice::from_ref(&linked), "/work/comet"),
+            Some((path.into(), false))
+        );
+        // ...while a sentence around the link keeps the in-prose shape.
+        let sentence = vec![
+            InlineRun {
+                text: "The entry point is ".into(),
+                style: InlineStyle::default(),
+            },
+            linked.clone(),
+        ];
+        assert_eq!(sole_file_reference(&sentence, "/work/comet"), None);
+
+        // Both cases show the file name; the path stays the copy source.
+        let flat = flatten_runs(&[linked], &Theme::dark(), false);
+        assert_eq!(flat.text, "SOURCES.md");
+        assert_eq!(flat.links[0].0, 0.."SOURCES.md".len());
+        let original = flat.original.expect("the path is kept for copy");
+        assert_eq!(original.text.as_ref(), path);
+    }
+
+    #[test]
+    fn an_authored_file_link_label_is_never_replaced_by_the_file_name() {
+        let tree = parse_full("[docs/a.md](docs/a.md)");
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("expected a paragraph");
+        };
+        let flat = flatten_runs(runs, &Theme::dark(), false);
+        assert_eq!(flat.text, "docs/a.md");
+        assert!(
+            flat.original.is_none(),
+            "an authored label is already what is shown"
+        );
     }
 
     /// Model GPUI's upstream affinity at a soft-wrap boundary: byte 5 is

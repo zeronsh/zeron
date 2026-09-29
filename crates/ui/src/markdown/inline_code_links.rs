@@ -3,9 +3,9 @@
 //! Agents name files in code spans — "all under `dir/`:" followed by bare
 //! `SOURCES.md`, `DESCRIPTION.txt` — which the block parser has no link for.
 //! A span whose text resolves to an existing file on this device is rewritten
-//! into the Markdown link it stands for, so it renders, opens and menus
-//! exactly like `[SOURCES.md](path)`; spans with nothing behind them keep the
-//! inline-code look.
+//! into the Markdown link it stands for, shown under its file name because
+//! the span's text was the path rather than a label the author wrote; spans
+//! with nothing behind them keep the inline-code look.
 //!
 //! The rewrite walks a whole text part in document order, once per
 //! (link-roots revision, part): every probe is memoized for the revision, and
@@ -229,6 +229,10 @@ fn link_runs(
                 let linked = linked.get_or_insert_with(|| runs.to_vec());
                 linked[ix].style.code = false;
                 linked[ix].style.link = Some(target);
+                // The span's text is the path, not a label the author wrote:
+                // show the file name while the text stays the copy source.
+                linked[ix].style.file_label =
+                    Some(crate::workspace_links::file_name(&run.text).to_owned());
             }
             Some(InlineCodePath::Directory(dir)) => dirs.push(dir),
             None => {}
@@ -457,6 +461,39 @@ mod tests {
         assert_eq!(from_code.links, from_link.links);
         assert_eq!(from_code.code_ranges, from_link.code_ranges);
         assert_eq!(from_code.runs, from_link.runs);
+    }
+
+    #[test]
+    fn a_nested_path_span_shows_its_file_name_and_keeps_the_path_for_copy() {
+        use crate::markdown::render::flatten_runs;
+        use crate::theme::Theme;
+        let fixture = Fixture::new();
+        for (source, shown) in [
+            ("`2026-09-28/Some Title/SOURCES.md`", "SOURCES.md"),
+            ("`top.md:12`", "top.md:12"),
+        ] {
+            let linked = fixture.linked(&fixture.tree(source), &fixture.roots(true), true);
+            let flat = flatten_runs(&runs(&linked), &Theme::dark(), false);
+            assert_eq!(flat.text, shown);
+            if shown != source.trim_matches('`') {
+                // The display name stands in for the path; the raw span stays
+                // the copy source.
+                let original = flat
+                    .original
+                    .as_ref()
+                    .expect("the raw span stays the copy source");
+                assert_eq!(original.text.as_ref(), source.trim_matches('`'));
+                assert_eq!(original.offsets.original(0), 0);
+                assert_eq!(
+                    original.offsets.original(flat.text.len()),
+                    original.text.len()
+                );
+            } else {
+                // Already the file name: what shows IS the source text.
+                assert!(flat.original.is_none());
+            }
+            assert_eq!(&flat.text[flat.links[0].0.clone()], shown);
+        }
     }
 
     #[test]

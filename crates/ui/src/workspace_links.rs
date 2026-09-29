@@ -583,7 +583,9 @@ fn clean_path(path: &str) -> bool {
             .all(|(index, part)| !(part.is_empty() && index != 0) && !matches!(part, "." | ".."))
 }
 
-fn file_name(path: &str) -> &str {
+/// The final path component — the label a file link shows when its text is
+/// the path itself; any `:line`/`#L` suffix rides along in the text.
+pub(crate) fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
