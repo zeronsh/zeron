@@ -145,16 +145,17 @@ system allocator. Purge knobs (`MIMALLOC_PURGE_DELAY=0`,
 (default cap 8 × cores = 128 on the 16-core host) and trims only the top of a
 heap, so threads that come and go — harness readers, the tokio blocking pool —
 leave freed pages resident: the headless engine reached 7.2GB RSS after a day,
-6.6GB of it in 129 anonymous ~64MB mappings. `apps/zeron/src/main.rs` now
-calls `mallopt` at startup on Linux/glibc, before any thread exists:
-`M_ARENA_MAX=2`, `M_TRIM_THRESHOLD=128KB`, `M_MMAP_THRESHOLD=128KB`; an
-explicit `GLIBC_TUNABLES`/`MALLOC_*` setting still wins. Same bench (8 chats ×
-6 rounds of a 250KB reply replay through the real claude-code driver, RSS MB
-after 60s idle): glibc default 226, arena_max=2 186, mimalloc v2 235, jemalloc
-172, arena_max=2 + trim/mmap 128KB **159**. Production: 7.2GB → 373MB after a
-restart with those settings via `GLIBC_TUNABLES`. Re-run on this checkout (same
-bench driven over the engine's MCP surface): 278MB → **191MB**, anonymous
-mappings ≥16MB dropping 31 → 4.
+6.6GB of it in 129 anonymous ~64MB mappings. Long-running modes on
+Linux/glibc (`apps/zeron/src/main.rs`) now run a `malloc-trim` thread that calls
+`malloc_trim(0)` once a minute; unlike the automatic top-of-heap trim it
+returns the free pages inside every arena. Capping arenas was measured first
+and rejected. Bench: 8 chats × 6 rounds of a 250KB reply through the
+claude-code replay driver, 8-core sprite, RSS MB after 60s idle / engine CPU
+seconds. glibc default ~390 / 18. `M_ARENA_MAX=2` plus 128KB trim/mmap
+thresholds ~316 / **110**: futex calls went from 166k to 1.6M as threads
+queued on the two arena locks, and `M_ARENA_MAX` 4 or 8 still cost 58 or 35s.
+Thresholds alone ~354 / 20. Periodic `malloc_trim` **~265 / 18**, each pass
+~25ms. An explicit `MALLOC_*`/`GLIBC_TUNABLES` setting still applies on top.
 
 Known follow-ups: GPU atlas tiles for raw-bytes images still free only on
 window close (needs a small gpui-fork patch exposing a drop path for

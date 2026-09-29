@@ -117,35 +117,34 @@ fn workos_client_id_from_env(edge_token: &Option<String>) -> Option<String> {
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// glibc hands every thread a 64MB arena (default cap 8 × cores) and trims
-/// only the top of a heap, so threads that come and go — harness readers, the
-/// tokio blocking pool — leave freed pages resident: a headless engine held
-/// 6.6GB in 129 of them after a day. Fewer arenas and eager trim/mmap
-/// thresholds bound that; an explicit environment setting still wins.
+/// glibc gives threads their own arenas (up to 8 × cores) and on free returns
+/// only the top of each heap, so churn freed mid-heap stays resident: a
+/// headless engine held 6.6GB in 129 arenas after a day. `malloc_trim` also
+/// releases the free pages inside every arena, so long-running modes call it
+/// once a minute. Capping arenas instead (`M_ARENA_MAX=2`) reclaimed less and
+/// cost ~6x the engine's CPU in arena-lock contention while chats streamed
+/// (docs/memory-plan.md).
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn configure_glibc_allocator() {
-    let tunables = std::env::var("GLIBC_TUNABLES").unwrap_or_default();
-    let leave_to_env = |env_key: &str, tunable: &str| {
-        std::env::var_os(env_key).is_some() || tunables.contains(tunable)
-    };
-    // SAFETY: mallopt only writes the process-global malloc parameters, and
-    // this runs before any other thread exists.
-    unsafe {
-        if !leave_to_env("MALLOC_ARENA_MAX", "malloc.arena_max") {
-            libc::mallopt(libc::M_ARENA_MAX, 2);
-        }
-        if !leave_to_env("MALLOC_TRIM_THRESHOLD_", "malloc.trim_threshold") {
-            libc::mallopt(libc::M_TRIM_THRESHOLD, 128 * 1024);
-        }
-        if !leave_to_env("MALLOC_MMAP_THRESHOLD_", "malloc.mmap_threshold") {
-            libc::mallopt(libc::M_MMAP_THRESHOLD, 128 * 1024);
-        }
+fn spawn_malloc_trimmer() {
+    const PERIOD: std::time::Duration = std::time::Duration::from_secs(60);
+    let spawned = std::thread::Builder::new()
+        .name("malloc-trim".into())
+        .spawn(|| {
+            loop {
+                std::thread::sleep(PERIOD);
+                let started = std::time::Instant::now();
+                // SAFETY: malloc_trim takes no pointers and locks each arena
+                // itself, so it is safe to call from any thread at any time.
+                let released = unsafe { libc::malloc_trim(0) } != 0;
+                tracing::debug!(released, elapsed = ?started.elapsed(), "malloc_trim");
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "malloc trimmer not started");
     }
 }
 
 fn main() -> anyhow::Result<()> {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    configure_glibc_allocator();
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--noop-browser")) {
         return Ok(());
     }
@@ -228,6 +227,8 @@ fn main() -> anyhow::Result<()> {
                 "application panic");
             default_hook(info);
         }));
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        spawn_malloc_trimmer();
     }
 
     match cli.command {
