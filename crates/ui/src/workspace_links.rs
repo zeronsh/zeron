@@ -190,10 +190,13 @@ pub(crate) fn resolve_inline_code_path(
         None => String::new(),
     };
     let file = |path: &Path| {
-        Some(InlineCodePath::File(format!(
-            "file://{}{anchor}",
-            percent_encode_path(&path.to_string_lossy())
-        )))
+        // File links are POSIX-only: a drive path (Windows) would become a
+        // target the link grammar rejects, turning the span into a dead link,
+        // so it keeps its inline-code look instead.
+        let path = path.to_string_lossy();
+        path.starts_with('/').then(|| {
+            InlineCodePath::File(format!("file://{}{anchor}", percent_encode_path(&path)))
+        })
     };
     if let Some(rest) = decoded.strip_prefix("~/") {
         let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
@@ -922,6 +925,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn inline_code_spans_probe_only_paths_that_exist() {
         let dir = tempfile::tempdir().unwrap();

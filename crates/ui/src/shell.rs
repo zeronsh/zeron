@@ -14877,6 +14877,7 @@ mod exit_regressions {
     /// Encoded destinations open the decoded path, and an absolute
     /// destination no root owns opens through the linking chat's own file
     /// context with its absolute path intact.
+    #[cfg(unix)]
     #[gpui::test]
     fn encoded_and_outside_file_links_open_in_the_linking_chats_context(cx: &mut TestAppContext) {
         use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};

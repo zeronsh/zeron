@@ -2457,6 +2457,8 @@ mod tests {
         );
     }
 
+    // Absolute reads take POSIX paths — the only shape a UI sends.
+    #[cfg(unix)]
     fn resolved_workspace(root: &Path) -> ResolvedWorkspace {
         ResolvedWorkspace {
             checkout_id: "checkout-test".into(),
@@ -2464,6 +2466,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn absolute_read_inside_the_workspace_is_editable() {
         let root = tempfile::tempdir().unwrap();
@@ -2483,6 +2486,7 @@ mod tests {
         assert!(file.read_only_reason.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn absolute_read_outside_the_workspace_is_read_only() {
         let workspace_dir = tempfile::tempdir().unwrap();
@@ -2512,6 +2516,7 @@ mod tests {
         assert_eq!(file.read_only_reason, Some(WorkspaceReadOnlyReason::Binary));
     }
 
+    #[cfg(unix)]
     #[test]
     fn absolute_read_reports_missing_and_non_regular_files() {
         let workspace_dir = tempfile::tempdir().unwrap();
@@ -2536,6 +2541,7 @@ mod tests {
         assert!(file.text.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn absolute_read_rejects_unsafe_wire_shapes() {
         let workspace_dir = tempfile::tempdir().unwrap();
@@ -2603,6 +2609,7 @@ mod tests {
         assert_eq!(file.checkout_id, "checkout-test");
     }
 
+    #[cfg(unix)]
     #[test]
     fn absolute_image_read_outside_the_workspace_works() {
         let workspace_dir = tempfile::tempdir().unwrap();

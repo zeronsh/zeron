@@ -330,6 +330,8 @@ mod tests {
         out
     }
 
+    // File links are POSIX paths; Windows spans keep their code look.
+    #[cfg(unix)]
     #[test]
     fn a_context_directory_resolves_bare_names_that_follow_it() {
         let fixture = Fixture::new();
@@ -386,6 +388,7 @@ mod tests {
         assert_eq!(fixture.target(&linked, "SOURCES.md"), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn absolute_and_root_relative_and_location_spans_link() {
         let fixture = Fixture::new();
@@ -435,6 +438,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_linked_span_flattens_exactly_like_the_markdown_link_it_stands_for() {
         use crate::markdown::render::flatten_runs;
@@ -493,7 +497,7 @@ mod tests {
 
     /// The linked span reaches the same hit testing a Markdown file link
     /// does: a left click activates it, a right click opens the file menu.
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(target_os = "linux")]
     mod rendered {
         use super::*;
         use crate::markdown::render::{self, LinkActivation, LinkOutcome, LinkUi};

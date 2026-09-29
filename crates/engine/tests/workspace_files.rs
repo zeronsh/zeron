@@ -657,6 +657,8 @@ async fn write_rejects_changed_checkout_even_when_contents_match() {
     );
 }
 
+// Absolute reads take POSIX paths — the only shape a UI sends.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn absolute_paths_read_inside_normally_and_outside_read_only() {
     let temp = tempfile::tempdir().expect("tempdir");

@@ -1194,6 +1194,7 @@ mod rendered_tests {
     /// rows — the system-level ones only when the owning root is on this
     /// device — which act on the resolved absolute path, and "Open in
     /// Zeron" routes the file to the viewer.
+    #[cfg(unix)]
     #[gpui::test]
     fn file_link_menu_offers_local_rows_and_acts_on_the_absolute_path(
         cx: &mut gpui::TestAppContext,
@@ -1280,6 +1281,7 @@ mod rendered_tests {
     /// An absolute destination no root owns is still a file: its menu keeps
     /// "Open in Zeron" and, when the linking chat is on this device, the
     /// system-level rows that act on the absolute path.
+    #[cfg(unix)]
     #[gpui::test]
     fn outside_file_link_menu_keeps_open_in_zeron_and_local_rows(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
