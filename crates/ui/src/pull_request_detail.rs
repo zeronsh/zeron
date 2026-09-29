@@ -95,6 +95,9 @@ fn tab_slot(tab: Tab) -> f32 {
 
 const NAV_PADDING: f32 = 4.0;
 const NAV_SEGMENT_HEIGHT: f32 = 36.0;
+/// Room above the window edge for the floating section navigation: its 16px
+/// inset, its height, and 16px of air. The diff and the comment dock end here.
+const NAV_CLEARANCE: f32 = 16.0 + NAV_SEGMENT_HEIGHT + 2.0 * NAV_PADDING + 16.0;
 
 /// What a patch row stands for in the review stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1274,7 +1277,8 @@ impl Render for PullRequestDetailPage {
                 })
                 .pt(px(24.0))
                 .pb(px(match self.tab {
-                    Tab::Activity => 248.0,
+                    // The comment dock sits below the scroll, not over it.
+                    Tab::Activity => 32.0,
                     // The workspace reserves its own room for the navigation.
                     Tab::Code => 0.0,
                     Tab::Summary => 76.0,
@@ -1703,8 +1707,8 @@ impl Render for PullRequestDetailPage {
                     .flex_1()
                     .min_h_0()
                     .child(content)
-                    .child(navigation)
-                    .children(composer),
+                    .children(composer)
+                    .child(navigation),
             );
         if let Some(preview) = &self.image_preview {
             let weak = cx.weak_entity();
@@ -2567,6 +2571,19 @@ mod tests {
             assert_eq!(composer.left(), column.left() + px(40.0));
             assert_eq!(composer.right(), column.right() - px(40.0));
             assert_eq!(nav.center().x, composer.center().x);
+            assert_eq!(nav.top() - composer.bottom(), px(16.0), "docked above the navigation");
+            let scroll = cx.debug_bounds("pr-detail-scroll").unwrap();
+            assert!(scroll.bottom() <= composer.top(), "the thread never scrolls behind it");
+            if width >= 900.0 {
+                assert_eq!(
+                    composer.size.height,
+                    px(crate::composer::COMPACT_TOTAL_HEIGHT),
+                    "one line matches the chat composer's compact pill"
+                );
+                let send = cx.debug_bounds("pr-send-comment").unwrap();
+                assert_eq!(send.center().y, composer.center().y);
+                assert_eq!(composer.right() - send.right(), px(9.0));
+            }
             assert_eq!(mine.right(), composer.right());
             assert_eq!(other.left(), composer.left());
             assert!(mine.left() > other.left());

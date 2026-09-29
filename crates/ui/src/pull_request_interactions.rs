@@ -186,23 +186,34 @@ impl PullRequestDetailPage {
                 None,
             ));
         }
-        // Same shape as the chat composer: the input with the send circle
-        // trailing on its last line.
+        // The chat composer's compact pill: same surface, radius, height and
+        // insets, with the send circle on the last line's centerline.
+        let row_height = crate::composer::COMPACT_TOTAL_HEIGHT - crate::composer::PILL_BORDER_V;
         let mut surface = div()
             .id("pr-comment-surface")
             .debug_selector(|| "pr-comment-surface".into())
-            .p(px(12.0))
-            .rounded(px(18.0))
+            .min_h(px(crate::composer::COMPACT_TOTAL_HEIGHT))
+            .rounded(px(crate::composer::COMPOSER_RADIUS))
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.input_glass_bg())
+            .border_color(theme.composer_surface_border())
+            .bg(theme.composer_surface_bg())
+            .when(!theme.is_frost(), |el| el.shadow_lg())
             .flex()
             .flex_col()
-            .gap(px(8.0));
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|page, _, window, cx| {
+                    window.focus(&page.comment_input.read(cx).focus_handle(cx), cx)
+                }),
+            );
         if let Some(error) = &self.comment_error {
             surface = surface.child(
                 div()
-                    .text_size(px(12.0))
+                    .id("pr-comment-error")
+                    .debug_selector(|| "pr-comment-error".into())
+                    .px(px(16.0))
+                    .pt(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.danger)
                     .child(error.clone()),
             );
@@ -211,41 +222,61 @@ impl PullRequestDetailPage {
             div()
                 .flex()
                 .items_end()
-                .gap(px(8.0))
+                .pl(px(16.0))
+                .pr(px(8.0))
+                .gap(px(crate::composer::ACTION_PRIMARY_GAP))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .max_h(px(120.0))
+                        .min_h(px(row_height))
+                        .max_h(px(140.0))
+                        .py(px(12.0))
+                        .flex()
+                        .items_center()
                         .overflow_hidden()
-                        .child(self.comment_input.clone()),
+                        .child(div().w_full().child(self.comment_input.clone())),
                 )
                 .child(
-                    crate::composer::send_circle("pr-send-comment", !can_send, theme)
-                        .debug_selector(|| "pr-send-comment".into())
-                        .role(gpui::Role::Button)
-                        .aria_label(if sending { "Sending PR comment" } else { "Send PR comment" })
-                        .tab_index(0)
-                        .on_click(cx.listener(move |page, _, _, cx| {
-                            if can_send {
-                                page.send_comment(cx);
-                            }
-                        })),
+                    div()
+                        .h(px(row_height))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .child(
+                            crate::composer::send_circle("pr-send-comment", !can_send, theme)
+                                .debug_selector(|| "pr-send-comment".into())
+                                .role(gpui::Role::Button)
+                                .aria_label(if sending {
+                                    "Sending PR comment"
+                                } else {
+                                    "Send PR comment"
+                                })
+                                .tab_index(0)
+                                .on_click(cx.listener(move |page, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if can_send {
+                                        page.send_comment(cx);
+                                    }
+                                })),
+                        ),
                 ),
         );
         stack = stack.child(crate::frost::frosted(
-            18.0,
-            crate::frost::MENU_BLUR,
+            crate::composer::COMPOSER_RADIUS,
+            16.0,
             surface,
         ));
+        // Docked in the flow between the thread and the section navigation:
+        // the thread ends above it instead of scrolling behind two stacked
+        // floating layers. Same column as the thread, so their edges align.
         div()
-            .absolute()
-            .bottom(px(72.0))
-            .left_0()
-            .right_0()
-            .flex()
-            .justify_center()
-            .child(div().w_full().max_w(px(760.0)).px(px(40.0)).child(stack))
+            .id("pr-comment-dock")
+            .debug_selector(|| "pr-comment-dock".into())
+            .flex_none()
+            .w_full()
+            .pb(px(NAV_CLEARANCE))
+            .child(widgets::page_column().pt_0().pb_0().child(stack))
             .into_any_element()
     }
 
