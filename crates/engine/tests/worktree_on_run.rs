@@ -109,6 +109,7 @@ fn run_payload(message_id: &str, repo_path: &str, space_id: Option<&str>) -> Ses
     SessionCommandPayload::Run {
         request: RunRequest {
             mcp: None,
+            agent: None,
             prompt: "isolated please".into(),
             harness: None,
             model: None,

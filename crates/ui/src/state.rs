@@ -1241,8 +1241,7 @@ impl AppState {
         if Some(chat.device_id.as_str()) == self.local_device_id.as_deref() {
             return false;
         }
-        if self.connectivity.state == S::Offline
-            || !self.device_online(&chat.device_id, Utc::now())
+        if self.connectivity.state == S::Offline || !self.device_online(&chat.device_id, Utc::now())
         {
             return true;
         }
@@ -2574,7 +2573,10 @@ impl AppState {
         cx.spawn(async move |_, _| {
             if let Err(error) = handle
                 .client()
-                .call(methods::FOCUS_CHAT, serde_json::json!({ "chatId": chat_id }))
+                .call(
+                    methods::FOCUS_CHAT,
+                    serde_json::json!({ "chatId": chat_id }),
+                )
                 .await
             {
                 tracing::debug!(%chat_id, %error, "chat focus sync hint unavailable");
@@ -4549,6 +4551,7 @@ mod tests {
         let config = zeron_proto::ChatConfig {
             harness: HarnessId::ClaudeCode,
             model: Some("claude-fable-5".into()),
+            agent: None,
             reasoning: Some(zeron_proto::ReasoningLevel::XHigh),
             model_options: serde_json::Map::new(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
@@ -4573,6 +4576,7 @@ mod tests {
             zeron_proto::ChatConfig {
                 harness: HarnessId::ClaudeCode,
                 model: None,
+                agent: None,
                 reasoning: None,
                 model_options: serde_json::Map::new(),
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
@@ -4712,6 +4716,8 @@ mod tests {
             duration_ms: None,
         };
         let row = |id: &str| zeron_doc::QueuedMessage {
+            agent: None,
+            agent_snapshot: false,
             id: id.into(),
             text: "held".into(),
             attachments: vec![],

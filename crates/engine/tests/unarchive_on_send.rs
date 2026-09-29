@@ -101,6 +101,7 @@ fn run_payload(message_id: &str) -> SessionCommandPayload {
     SessionCommandPayload::Run {
         request: RunRequest {
             mcp: None,
+            agent: None,
             prompt: "back from the archive".into(),
             harness: None,
             model: None,

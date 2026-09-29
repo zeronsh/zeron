@@ -119,6 +119,7 @@ fn run_payload(message_id: &str, pending_ref: &str) -> SessionCommandPayload {
     SessionCommandPayload::Run {
         request: RunRequest {
             mcp: None,
+            agent: None,
             prompt: format!(
                 "look at this\n\nAttached images (local files — open them to view):\n- {pending_ref}"
             ),

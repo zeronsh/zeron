@@ -8,6 +8,7 @@ fn run_request_attachments_survive_command_round_trip() {
     let doc = SessionDoc::init("chat-1").unwrap();
     let request = zeron_proto::RunRequest {
         mcp: None,
+        agent: None,
         prompt: "p".into(),
         harness: None,
         model: None,

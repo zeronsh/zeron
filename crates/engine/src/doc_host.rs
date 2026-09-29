@@ -409,9 +409,7 @@ impl ChatConnectionSnapshot {
             sync_requested,
             stats: client.as_ref().map(|client| client.stats()),
             delivery_live: sync_started
-                && client
-                    .as_ref()
-                    .is_some_and(|client| client.delivery_live()),
+                && client.as_ref().is_some_and(|client| client.delivery_live()),
         }
     }
 
@@ -3401,12 +3399,26 @@ impl DocHost {
         attachments: Vec<String>,
         hold_for_turn_end: bool,
     ) -> Result<String, EngineError> {
+        self.queue_message_with_agent(chat_id, text, attachments, hold_for_turn_end, None, false)
+    }
+
+    pub fn queue_message_with_agent(
+        &self,
+        chat_id: &str,
+        text: &str,
+        attachments: Vec<String>,
+        hold_for_turn_end: bool,
+        agent: Option<String>,
+        agent_snapshot: bool,
+    ) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
         let id = new_id();
         handle.doc.push_queued(&QueuedMessage {
             id: id.clone(),
             text: text.to_string(),
             attachments,
+            agent,
+            agent_snapshot,
             hold_for_turn_end,
             issued_by: self.inner.config.device_id.clone(),
             issued_at: now_ms(),
@@ -4117,6 +4129,9 @@ impl DocHost {
         request.resume = None; // dispatch re-derives the harness session
         request.attachments = attachments;
         let harness = self.harness_for_request(chat_id, &request);
+        if harness == zeron_proto::HarnessId::Opencode && item.agent_snapshot {
+            request.agent = item.agent.clone();
+        }
         self.dispatch_with_source_context(&sessions, chat_id, harness, request, Some(message_id))
             .await?;
         Ok(())
@@ -5205,6 +5220,7 @@ impl DocHost {
                     let config = zeron_proto::ChatConfig {
                         harness,
                         model: request.model.clone(),
+                        agent: request.agent.clone(),
                         reasoning: request.reasoning,
                         model_options: request.model_options.clone(),
                         sandbox: request.sandbox,
@@ -5220,6 +5236,7 @@ impl DocHost {
                         &request.prompt,
                         entry.issued_at,
                         false,
+                        Some(&request),
                     )?;
                     return Ok((
                         SessionCommandStatus::Applied,
@@ -5347,8 +5364,14 @@ impl DocHost {
         prompt: &str,
         issued_at: i64,
         steer: bool,
+        request: Option<&zeron_proto::RunRequest>,
     ) -> Result<(), EngineError> {
+        let agent_request = request.filter(|request| {
+            self.harness_for_request(&handle.chat_id, request) == zeron_proto::HarnessId::Opencode
+        });
         let item = QueuedMessage {
+            agent: agent_request.and_then(|request| request.agent.clone()),
+            agent_snapshot: agent_request.is_some(),
             id: message_id.to_string(),
             text: prompt.to_string(),
             attachments: Vec::new(),
@@ -5405,7 +5428,7 @@ impl DocHost {
             && (unsteerable_turn || sessions.defers_to_turn_end(chat_id, None))
         {
             let id = message_id.unwrap_or_else(new_id);
-            self.hold_until_turn_end(handle, &id, &prompt, issued_at, true)?;
+            self.hold_until_turn_end(handle, &id, &prompt, issued_at, true, None)?;
             return Ok((
                 SessionCommandStatus::Applied,
                 Some("held until the turn ends".into()),
@@ -5458,7 +5481,7 @@ impl DocHost {
             }
             SteerOutcome::DeferredByUpdate => {
                 let id = message_id.unwrap_or_else(new_id);
-                self.hold_until_turn_end(handle, &id, &prompt, issued_at, true)?;
+                self.hold_until_turn_end(handle, &id, &prompt, issued_at, true, None)?;
                 // The completed turn's status publication normally re-drains
                 // this queue. Also cover completion racing the enqueue itself.
                 self.drain_queue(handle).await;
@@ -5649,6 +5672,7 @@ impl DocHost {
             prompt: prompt.to_string(),
             harness: config.as_ref().map(|c| c.harness),
             model: config.as_ref().and_then(|c| c.model.clone()),
+            agent: config.as_ref().and_then(|c| c.agent.clone()),
             reasoning: config.as_ref().and_then(|c| c.reasoning),
             model_options: config
                 .as_ref()

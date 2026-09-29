@@ -978,6 +978,21 @@ impl SessionHandle {
         if request.text.trim().is_empty() && request.attachments.is_empty() {
             return Err(ClientError::InvalidArgument("empty message".into()));
         }
+        if chat
+            .config
+            .as_ref()
+            .is_some_and(|c| c.harness == zeron_proto::HarnessId::Opencode && c.agent.is_some())
+            && !client.workspace.snapshot().devices.iter().any(|d| {
+                d.id == chat.device_id
+                    && d.capabilities
+                        .iter()
+                        .any(|c| c == zeron_proto::capabilities::OPENCODE_AGENT_SELECTION_V1)
+            })
+        {
+            return Err(ClientError::Unsupported(
+                "update this device's engine to select OpenCode agents".into(),
+            ));
+        }
         let composer = self.composer();
         // A turn is running, or a Run of ours is about to start one on a
         // reachable host (don't double-start in that ~RTT window).
@@ -1047,6 +1062,9 @@ impl SessionHandle {
                     prompt: content,
                     harness: config.map(|c| c.harness),
                     model: config.and_then(|c| c.model.clone()),
+                    agent: config
+                        .filter(|c| c.harness == zeron_proto::HarnessId::Opencode)
+                        .and_then(|c| c.agent.clone()),
                     reasoning: config.and_then(|c| c.reasoning),
                     model_options: config.map(|c| c.model_options.clone()).unwrap_or_default(),
                     cwd: chat.cwd.clone().unwrap_or_else(|| "~".into()),
@@ -1109,6 +1127,16 @@ impl SessionHandle {
         hold_for_turn_end: bool,
     ) -> Result<String> {
         let mut item = QueuedMessage::new(crate::new_id(), text, device_id);
+        let client = self.core.client()?;
+        if let Some(config) = client
+            .workspace
+            .chat(&self.core.chat_id)
+            .and_then(|c| c.config)
+            && config.harness == zeron_proto::HarnessId::Opencode
+        {
+            item.agent = config.agent;
+            item.agent_snapshot = true;
+        }
         item.attachments = attachments;
         item.hold_for_turn_end = hold_for_turn_end;
         item.issued_at = now_ms();
@@ -1445,5 +1473,49 @@ impl SessionHandle {
         client.after_command(&self.core, true);
         client.kick_room(&self.core.chat_id);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod opencode_tests {
+    use super::*;
+
+    #[test]
+    fn queued_agents_survive_later_config_changes_including_server_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = crate::Client::new(
+            crate::ClientConfig::new("https://edge.invalid", dir.path()),
+            crate::Credentials::Demo(Default::default()),
+            Arc::new(crate::events::NullListener),
+        )
+        .unwrap();
+        let chat = "chat-picker";
+        let session = client.open_session(chat).unwrap();
+        let mut config = client.session_config(chat).unwrap();
+        config.harness = zeron_proto::HarnessId::Opencode;
+        config.agent = Some("custom/plan".into());
+        client.set_session_config(chat, &config).unwrap();
+        session
+            .enqueue_inner(client.device_id(), "plan", vec![], true)
+            .unwrap();
+        let selected = client.workspace().session(chat).unwrap().clone();
+        assert_eq!(selected.agent.as_deref(), Some("custom/plan"));
+        config.agent = None;
+        client.set_session_config(chat, &config).unwrap();
+        let cleared = client.workspace().session(chat).unwrap().clone();
+        assert_eq!(cleared.agent, None);
+        assert_ne!(selected.revision, cleared.revision);
+        session
+            .enqueue_inner(client.device_id(), "default", vec![], true)
+            .unwrap();
+        config.agent = Some("build".into());
+        client.set_session_config(chat, &config).unwrap();
+        let queue = session.core.doc().read_queue().unwrap();
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0].agent.as_deref(), Some("custom/plan"));
+        assert!(queue[0].agent_snapshot);
+        assert_eq!(queue[1].agent, None);
+        assert!(queue[1].agent_snapshot);
+        client.shutdown();
     }
 }

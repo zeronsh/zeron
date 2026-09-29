@@ -44,6 +44,7 @@ fn request(prompt: &str) -> RunRequest {
         mcp: None,
         prompt: prompt.into(),
         harness: None,
+        agent: None,
         model: Some("grok-4.5".into()),
         reasoning: None,
         model_options: serde_json::Map::new(),

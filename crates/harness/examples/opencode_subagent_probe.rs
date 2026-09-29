@@ -53,6 +53,7 @@ async fn main() {
         mcp: None,
         prompt,
         harness: None,
+        agent: None,
         model: None,
         reasoning: None,
         model_options: serde_json::Map::new(),

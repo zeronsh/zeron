@@ -50,6 +50,7 @@ async fn silent_agent_errors_via_the_prompt_stall_watchdog() {
         mcp: None,
         prompt: "scenario:prompt-stall".into(),
         harness: None,
+        agent: None,
         model: None,
         reasoning: None,
         model_options: serde_json::Map::new(),

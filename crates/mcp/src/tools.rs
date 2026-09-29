@@ -643,6 +643,7 @@ impl Tools {
         let config = ChatConfig {
             harness,
             model: args.model.clone(),
+            agent: None,
             reasoning,
             model_options: Default::default(),
             sandbox,
@@ -980,6 +981,7 @@ impl Tools {
                     prompt: text,
                     harness: Some(harness),
                     model: config.as_ref().and_then(|c| c.model.clone()),
+                    agent: config.as_ref().and_then(|c| c.agent.clone()),
                     reasoning: config.as_ref().and_then(|c| c.reasoning),
                     model_options: config
                         .as_ref()

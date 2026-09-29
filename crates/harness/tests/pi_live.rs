@@ -38,6 +38,7 @@ async fn real_pi_mock_lifecycle() {
             .into(),
             harness: None,
             model: Some("mock/mock".into()),
+            agent: None,
             reasoning: None,
             model_options: Default::default(),
             cwd: cwd.display().to_string(),

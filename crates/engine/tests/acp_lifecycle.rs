@@ -54,6 +54,7 @@ async fn quiet_acp_prompt_stays_working_until_response() {
             message_id: "first-user".into(),
             request: RunRequest {
                 mcp: None,
+                agent: None,
                 prompt: "tools".into(),
                 harness: None,
                 model: None,

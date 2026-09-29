@@ -236,29 +236,7 @@ pub fn fallback_models(harness: &str) -> Vec<ModelInfo> {
             &["minimal", "low", "medium", "high", "xhigh", "max"],
             vec![],
         )],
-        "opencode" => vec![
-            model(
-                "opencode/big-pickle",
-                "Big Pickle",
-                "OpenCode Zen's flagship coding model",
-                &[],
-                vec![],
-            ),
-            model(
-                "opencode/mimo-v2.5-free",
-                "MiMo V2.5 Free",
-                "Free tier on OpenCode Zen",
-                &[],
-                vec![],
-            ),
-            model(
-                "opencode/hy3-free",
-                "Hy3 Free",
-                "Free tier on OpenCode Zen",
-                &["low", "medium", "high"],
-                vec![],
-            ),
-        ],
+        "opencode" => vec![],
         "antigravity" => vec![
             model(
                 "gemini-3.7-flash",

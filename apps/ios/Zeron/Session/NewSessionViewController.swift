@@ -9,6 +9,7 @@ struct NewSessionDraft: Equatable, Codable {
     var worktree = false
     var harness = "claude-code"
     var model: String?
+    var agent: String?
     var effort: String?
 }
 
@@ -50,6 +51,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private let mark = UIImageView()
     private var draft: NewSessionDraft
     private var models: [ModelChoice] = []
+    private var catalogError: String?
 
     /// Embedded in the iPad split's main column (no sheet chrome).
     private let embedded: Bool
@@ -184,19 +186,32 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     /// Models for the draft's host: cached (or the built-in catalog) at once,
     /// then the host's own list.
-    private func loadModels() {
+    private var catalogCwd: String? { app.catalogDirectory(projectId: draft.projectId) }
+    private var catalogScope: String { "\(deviceId)/\(catalogCwd ?? "~")/\(app.opencodeConnectionGeneration[deviceId, default: 0])" }
+
+    private func loadModels(force: Bool = false) {
         let device = deviceId
-        guard device != modelsDevice else { return refreshChips() }
-        modelsDevice = device
-        models = Self.modelCache[device] ?? Self.catalogModels()
+        let scope = catalogScope
+        guard force || scope != modelsDevice else { return refreshChips() }
+        if modelsDevice != nil, modelsDevice != scope {
+            draft.agent = nil
+            if draft.harness == "opencode" { draft.model = nil; draft.effort = nil }
+        }
+        modelsDevice = scope
+        models = Self.modelCache[scope] ?? Self.catalogModels()
+        catalogError = nil
         refreshChips()
-        Task { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self else { return }
-            let fresh = await self.app.models(for: device)
-            guard !fresh.isEmpty else { return }
-            Self.modelCache[device] = fresh
-            guard self.modelsDevice == device else { return }
-            self.models = fresh
+            do {
+                let fresh = try await self.app.models(for: device, cwd: self.catalogCwd)
+                guard self.catalogScope == scope else { return }
+                Self.modelCache[scope] = fresh
+                self.models = fresh
+            } catch {
+                guard self.catalogScope == scope else { return }
+                self.catalogError = error.localizedDescription
+            }
             self.refreshChips()
         }
     }
@@ -209,6 +224,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        loadModels()
         if focusOnAppear { composer.becomeFirstResponder() }
     }
 
@@ -251,12 +267,16 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         if let efforts = model?.efforts, !efforts.isEmpty {
             chips.append(ComposerChip(id: "effort", title: (draft.effort ?? efforts[efforts.count / 2]).capitalized, symbol: "gauge.with.dots.needle.67percent"))
         }
+        if draft.harness == "opencode", app.supportsOpenCodeAgents(deviceId) {
+            chips.append(ComposerChip(id: "agent", title: draft.agent ?? "Server default / current", symbol: "person.crop.circle"))
+        }
         composer.chips = chips
         composer.chipMenus = [
             "project": { [weak self] in self?.projectMenu() },
             "host": { [weak self] in self?.hostMenu() },
             "branch": { [weak self] in self?.branchMenu() },
             "model": { [weak self] in self?.modelMenu() },
+            "agent": { [weak self] in self?.agentMenu() },
             "effort": { [weak self] in self?.effortMenu() },
         ]
         mark.image = BrandMarks.image(for: draft.harness, side: 34)
@@ -330,16 +350,46 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     private func modelMenu() -> UIMenu {
         let byHarness = Dictionary(grouping: models, by: \.harness)
-        return UIMenu(title: "Model", children: byHarness.keys.sorted().map { h in
+        var sections: [UIMenuElement] = byHarness.keys.sorted().map { h in
             UIMenu(title: byHarness[h]!.first!.harnessLabel, image: BrandMarks.image(for: h, side: 16), options: .displayInline, children: byHarness[h]!.map { m in
                 UIAction(title: m.label, state: m.harness == draft.harness && m.id == draft.model ? .on : .off) { [weak self] _ in
+                    if self?.draft.harness != m.harness { self?.draft.agent = nil }
                     self?.draft.harness = m.harness
                     self?.draft.model = m.id
                     self?.draft.effort = nil
                     self?.refreshChips()
                 }
             })
-        })
+        }
+        if let catalogError {
+            sections.append(UIAction(title: catalogError, attributes: .disabled) { _ in })
+        }
+        sections.append(UIAction(title: "Refresh models", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in self?.loadModels(force: true) })
+        return UIMenu(title: "Model", children: sections)
+    }
+
+    private func agentMenu() -> UIMenu {
+        UIMenu(title: "OpenCode agent", children: [UIDeferredMenuElement.uncached { [weak self] done in
+            guard let self, let client = self.app.client else { return done([]) }
+            let scope = self.catalogScope
+            Task { @MainActor in
+                do {
+                    let agents = try await client.listAgents(deviceId: self.deviceId, cwd: self.catalogCwd)
+                    guard self.catalogScope == scope else { return done([]) }
+                    let current = UIAction(title: "Server default / current", state: self.draft.agent == nil ? .on : .off) { [weak self] _ in
+                        self?.draft.agent = nil; self?.refreshChips()
+                    }
+                    done([current] + agents.map { agent in
+                        UIAction(title: agent.label, subtitle: agent.description, state: self.draft.agent == agent.id ? .on : .off) { [weak self] _ in
+                            self?.draft.agent = agent.id; self?.refreshChips()
+                        }
+                    })
+                } catch {
+                    done([UIAction(title: error.localizedDescription, attributes: .disabled) { _ in },
+                          UIAction(title: "Reopen to retry") { _ in }])
+                }
+            }
+        }])
     }
 
     private func effortMenu() -> UIMenu {

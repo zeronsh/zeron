@@ -77,6 +77,7 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
             observed_at: now,
         }),
         config: Some(ChatConfig {
+            agent: None,
             harness: HarnessId::ClaudeCode,
             model: Some("claude-opus-5".into()),
             reasoning: None,
@@ -529,6 +530,30 @@ impl zeron_rpc::RpcService for HostService {
                 {"id": "mock", "name": "Mock", "supportsSteering": false,
                  "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": true, "canInstall": false},
             ]),
+            m::LIST_MODELS if params["harness"] == "opencode" => {
+                assert_eq!(params["cwd"], "/Users/dev/project-a");
+                assert_eq!(params["force"], true);
+                json!([{"id": "custom/model", "label": "Custom model", "reasoningLevels": [], "options": []}])
+            }
+            m::LIST_AGENTS => {
+                assert_eq!(params["cwd"], "/Users/dev/project-a");
+                assert_eq!(params["harness"], "opencode");
+                json!([{"id": "custom/plan", "label": "Plan", "description": "Project agent"}])
+            }
+            m::GET_OPENCODE_CONNECTION => {
+                json!({"baseUrl": "http://localhost:49374", "username": "opencode", "hasPassword": true})
+            }
+            m::SET_OPENCODE_CONNECTION | m::TEST_OPENCODE_CONNECTION => {
+                assert_eq!(params["baseUrl"], "http://localhost:49374");
+                assert_eq!(params["username"], "opencode");
+                assert!(params["password"].is_null());
+                assert_eq!(params["clearPassword"], false);
+                if method == m::TEST_OPENCODE_CONNECTION {
+                    json!({"version": "2.0.7"})
+                } else {
+                    json!({"baseUrl": "http://localhost:49374", "username": "opencode", "hasPassword": true})
+                }
+            }
             m::LIST_MODELS => json!([
                 {"id": "claude-opus-5", "label": "claude-opus-5", "reasoningLevels": ["high"], "options": []},
                 {"id": "claude-opus-5[1m]", "label": "Opus 5 (1M)", "reasoningLevels": ["high"], "options": []},
@@ -643,6 +668,44 @@ async fn host_rpcs_ride_the_device_relay() {
             .unwrap();
     assert_eq!(models.len(), 1, "[1m] variant folded: {models:?}");
     assert_eq!(models[0].label, "Opus 5");
+
+    zeron_client::runtime::run({
+        let client = client.clone();
+        async move {
+            let models = client
+                .list_models_for_directory(HOST, "opencode", Some("/Users/dev/project-a"))
+                .await?;
+            assert_eq!(models[0].id, "custom/model");
+            let agents = client
+                .list_agents(HOST, Some("/Users/dev/project-a"))
+                .await?;
+            assert_eq!(agents[0].id, "custom/plan");
+            let settings = client.get_opencode_connection(HOST).await?;
+            assert!(settings.has_password);
+            let update = zeron_proto::OpencodeConnectionUpdate {
+                base_url: settings.base_url,
+                username: settings.username,
+                password: None,
+                clear_password: false,
+            };
+            assert_eq!(
+                client
+                    .test_opencode_connection(HOST, update.clone())
+                    .await?
+                    .version,
+                "2.0.7"
+            );
+            assert!(
+                client
+                    .set_opencode_connection(HOST, update)
+                    .await?
+                    .has_password
+            );
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
 
     let c = client.clone();
     let refs =

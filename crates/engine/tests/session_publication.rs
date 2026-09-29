@@ -247,6 +247,7 @@ async fn turn(core: &EngineCore, cwd: &std::path::Path, live: bool, second: bool
             HarnessId::Codex,
             RunRequest {
                 mcp: None,
+                agent: None,
                 prompt: prompt.into(),
                 harness: None,
                 model: live

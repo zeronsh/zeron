@@ -151,6 +151,7 @@ fn request(prompt: &str) -> RunRequest {
         prompt: prompt.into(),
         harness: None,
         model: None,
+        agent: None,
         reasoning: None,
         model_options: Default::default(),
         cwd: "/tmp".into(),

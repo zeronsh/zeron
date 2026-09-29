@@ -28,6 +28,7 @@ const VIEWER: &str = "viewer-device";
 fn run_request(prompt: &str) -> RunRequest {
     RunRequest {
         mcp: None,
+        agent: None,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -2268,6 +2269,7 @@ async fn real_claude_sees_uploaded_image_inline() {
     );
     let request = RunRequest {
         mcp: None,
+        agent: None,
         prompt,
         harness: None,
         model: Some("haiku".into()),

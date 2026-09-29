@@ -1167,6 +1167,95 @@ impl Client {
         }
     }
 
+    /// OpenCode discovery uses the execution directory and surfaces errors instead
+    /// of substituting models from another project or a static catalog.
+    pub async fn list_models_for_directory(
+        &self,
+        device_id: &str,
+        harness: &str,
+        cwd: Option<&str>,
+    ) -> Result<Vec<ModelInfo>> {
+        if harness != "opencode" {
+            return Ok(self.list_models(device_id, harness).await);
+        }
+        let value = self
+            .inner
+            .host_rpc(
+                device_id,
+                zeron_rpc::methods::LIST_MODELS,
+                serde_json::json!({ "harness": harness, "cwd": cwd, "force": true }),
+            )
+            .await?;
+        let models =
+            serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))?;
+        Ok(catalog::normalize_models(harness, models))
+    }
+
+    pub async fn list_agents(
+        &self,
+        device_id: &str,
+        cwd: Option<&str>,
+    ) -> Result<Vec<zeron_proto::HarnessAgent>> {
+        let value = self
+            .inner
+            .host_rpc(
+                device_id,
+                zeron_rpc::methods::LIST_AGENTS,
+                serde_json::json!({ "harness": "opencode", "cwd": cwd }),
+            )
+            .await?;
+        serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+    }
+
+    pub async fn get_opencode_connection(
+        &self,
+        device_id: &str,
+    ) -> Result<zeron_proto::OpencodeConnectionSettings> {
+        let value = self
+            .inner
+            .host_rpc(
+                device_id,
+                zeron_rpc::methods::GET_OPENCODE_CONNECTION,
+                serde_json::json!({}),
+            )
+            .await?;
+        serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+    }
+
+    pub async fn set_opencode_connection(
+        &self,
+        device_id: &str,
+        update: zeron_proto::OpencodeConnectionUpdate,
+    ) -> Result<zeron_proto::OpencodeConnectionSettings> {
+        let value = self
+            .inner
+            .host_rpc(
+                device_id,
+                zeron_rpc::methods::SET_OPENCODE_CONNECTION,
+                serde_json::to_value(update)
+                    .map_err(|e| ClientError::InvalidArgument(e.to_string()))?,
+            )
+            .await?;
+        serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+    }
+
+    pub async fn test_opencode_connection(
+        &self,
+        device_id: &str,
+        update: zeron_proto::OpencodeConnectionUpdate,
+    ) -> Result<zeron_proto::OpencodeConnectionTestResult> {
+        let value = self
+            .inner
+            .host_rpc(
+                device_id,
+                zeron_rpc::methods::TEST_OPENCODE_CONNECTION,
+                serde_json::to_value(update)
+                    .map_err(|e| ClientError::InvalidArgument(e.to_string()))?,
+            )
+            .await?;
+        serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+    }
+
     // ── push notifications ────────────────────────────────────────────────
 
     /// Ask for session notifications on this device: its APNs `token` (hex),
@@ -1178,7 +1267,9 @@ impl Client {
         environment: &str,
         prefs: PushPrefs,
     ) -> Result<()> {
-        let Some(live) = self.inner.live() else { return Ok(()) };
+        let Some(live) = self.inner.live() else {
+            return Ok(());
+        };
         let url = crate::live::urls::registry_push_target(
             &live.edge,
             self.inner.credentials.org_id(),
@@ -1198,14 +1289,19 @@ impl Client {
             .await
             .map_err(|e| ClientError::Network(e.to_string()))?;
         if !response.status().is_success() {
-            return Err(ClientError::HostError(format!("push registration http {}", response.status())));
+            return Err(ClientError::HostError(format!(
+                "push registration http {}",
+                response.status()
+            )));
         }
         Ok(())
     }
 
     /// Stop notifications to this device (sign-out, turned off).
     pub async fn unregister_push_target(&self) -> Result<()> {
-        let Some(live) = self.inner.live() else { return Ok(()) };
+        let Some(live) = self.inner.live() else {
+            return Ok(());
+        };
         let url = crate::live::urls::registry_push_target(
             &live.edge,
             self.inner.credentials.org_id(),
@@ -1219,7 +1315,10 @@ impl Client {
             .await
             .map_err(|e| ClientError::Network(e.to_string()))?;
         if !response.status().is_success() {
-            return Err(ClientError::HostError(format!("push removal http {}", response.status())));
+            return Err(ClientError::HostError(format!(
+                "push removal http {}",
+                response.status()
+            )));
         }
         Ok(())
     }

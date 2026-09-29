@@ -51,6 +51,9 @@ final class CoreSessionSource: SessionSource {
         if let model = row?.modelLabel ?? row?.harnessLabel {
             chips.append(ComposerChip(id: "model", title: model, symbol: nil, icon: BrandMarks.image(for: row?.harness ?? "claude-code", side: 13)))
         }
+        if row?.harness == "opencode", app?.supportsOpenCodeAgents(hostDevice) == true {
+            chips.append(ComposerChip(id: "agent", title: client.sessionConfig(chatId: chatId)?.agent ?? "Server default / current", symbol: "person.crop.circle"))
+        }
         if let r = row?.reasoning, !r.isEmpty {
             chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: r), symbol: "gauge.with.dots.needle.67percent"))
         }
@@ -199,11 +202,32 @@ final class CoreSessionSource: SessionSource {
         guard let row = app?.row(chatId) else { return nil }
         let harness = row.harness ?? "claude-code"
         switch id {
-        case "model":
-            return UIMenu(title: "Model", children: [UIDeferredMenuElement { [weak self] done in
+        case "agent":
+            return UIMenu(title: "OpenCode agent", children: [UIDeferredMenuElement.uncached { [weak self] done in
                 guard let self else { return done([]) }
                 Task { @MainActor in
-                    let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: harness)) ?? fallbackModels(harness: harness)
+                    do {
+                        let agents = try await self.client.listAgents(deviceId: self.hostDevice, cwd: self.client.sessionRow(chatId: self.chatId)?.cwd)
+                        let selected = self.client.sessionConfig(chatId: self.chatId)?.agent
+                        let current = UIAction(title: "Server default / current", state: selected == nil ? .on : .off) { [weak self] _ in self?.setConfig { $0.agent = nil } }
+                        done([current] + agents.map { agent in
+                            UIAction(title: agent.label, subtitle: agent.description, state: agent.id == selected ? .on : .off) { [weak self] _ in self?.setConfig { $0.agent = agent.id } }
+                        })
+                    } catch {
+                        done([UIAction(title: error.localizedDescription, attributes: .disabled) { _ in }, UIAction(title: "Reopen to retry") { _ in }])
+                    }
+                }
+            }])
+        case "model":
+            return UIMenu(title: "Model", children: [UIDeferredMenuElement.uncached { [weak self] done in
+                guard let self else { return done([]) }
+                Task { @MainActor in
+                    let models: [ModelInfo]
+                    do {
+                        models = try await self.client.listModelsForDirectory(deviceId: self.hostDevice, harness: harness, cwd: self.client.sessionRow(chatId: self.chatId)?.cwd)
+                    } catch {
+                        return done([UIAction(title: error.localizedDescription, attributes: .disabled) { _ in }, UIAction(title: "Reopen to retry") { _ in }])
+                    }
                     done(models.map { m in
                         UIAction(title: m.label, subtitle: m.description, state: m.id == row.model ? .on : .off) { [weak self] _ in
                             self?.setConfig { $0.model = m.id }
@@ -212,10 +236,15 @@ final class CoreSessionSource: SessionSource {
                 }
             }])
         case "effort":
-            return UIMenu(title: "Reasoning effort", children: [UIDeferredMenuElement { [weak self] done in
+            return UIMenu(title: "Reasoning effort", children: [UIDeferredMenuElement.uncached { [weak self] done in
                 guard let self else { return done([]) }
                 Task { @MainActor in
-                    let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: harness)) ?? fallbackModels(harness: harness)
+                    let models: [ModelInfo]
+                    do {
+                        models = try await self.client.listModelsForDirectory(deviceId: self.hostDevice, harness: harness, cwd: self.client.sessionRow(chatId: self.chatId)?.cwd)
+                    } catch {
+                        return done([UIAction(title: error.localizedDescription, attributes: .disabled) { _ in }, UIAction(title: "Reopen to retry") { _ in }])
+                    }
                     let levels = models.first { $0.id == row.model }?.reasoningLevels ?? models.first?.reasoningLevels ?? []
                     done(levels.map { l in
                         UIAction(title: reasoningLabel(level: l), state: l == row.reasoning ? .on : .off) { [weak self] _ in
@@ -236,7 +265,7 @@ final class CoreSessionSource: SessionSource {
     }
 
     private func setConfig(_ change: (inout ChatConfig) -> Void) {
-        var config = client.sessionConfig(chatId: chatId) ?? ChatConfig(harness: app?.row(chatId)?.harness ?? "claude-code", model: nil, reasoning: nil, modelOptions: [:], sandbox: .workspaceWrite)
+        var config = client.sessionConfig(chatId: chatId) ?? ChatConfig(harness: app?.row(chatId)?.harness ?? "claude-code", model: nil, agent: nil, reasoning: nil, modelOptions: [:], sandbox: .workspaceWrite)
         change(&config)
         try? client.setSessionConfig(chatId: chatId, config: config)
     }

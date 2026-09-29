@@ -483,6 +483,7 @@ pub struct SessionRow {
     pub harness_label: Option<String>,
     pub model: Option<String>,
     pub model_label: Option<String>,
+    pub agent: Option<String>,
     /// Wire effort (`xhigh`).
     pub reasoning: Option<String>,
     pub branch: Option<String>,
@@ -529,6 +530,7 @@ impl From<&zc::SessionRow> for SessionRow {
             harness_label: r.harness_label.clone(),
             model: r.model.clone(),
             model_label: r.model_label.clone(),
+            agent: r.agent.clone(),
             reasoning: r.reasoning.clone(),
             branch: r.branch.clone(),
             cwd: r.cwd.clone(),
@@ -761,6 +763,7 @@ pub struct ChatConfig {
     /// `claude-code`, `codex`, …
     pub harness: String,
     pub model: Option<String>,
+    pub agent: Option<String>,
     /// `low` … `ultrathink`.
     pub reasoning: Option<String>,
     /// Model option id → choice id (`contextWindow` → `1m`).
@@ -788,6 +791,7 @@ impl From<&zc::ChatConfig> for ChatConfig {
         Self {
             harness: wire(&c.harness),
             model: c.model.clone(),
+            agent: c.agent.clone(),
             reasoning: c.reasoning.as_ref().map(wire),
             model_options: c
                 .model_options
@@ -813,6 +817,7 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
         Ok(zc::ChatConfig {
             harness: from_wire(&c.harness, "harness")?,
             model: c.model,
+            agent: c.agent,
             reasoning: c
                 .reasoning
                 .as_deref()
@@ -1083,4 +1088,57 @@ pub struct PushPrefs {
     pub done: bool,
     pub input: bool,
     pub failed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct HarnessAgent {
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
+}
+
+impl From<zeron_proto::HarnessAgent> for HarnessAgent {
+    fn from(a: zeron_proto::HarnessAgent) -> Self {
+        Self {
+            id: a.id,
+            label: a.label,
+            description: a.description,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct OpencodeConnectionSettings {
+    pub base_url: Option<String>,
+    pub username: String,
+    pub has_password: bool,
+}
+
+impl From<zeron_proto::OpencodeConnectionSettings> for OpencodeConnectionSettings {
+    fn from(c: zeron_proto::OpencodeConnectionSettings) -> Self {
+        Self {
+            base_url: c.base_url,
+            username: c.username,
+            has_password: c.has_password,
+        }
+    }
+}
+
+#[derive(Clone, uniffi::Record)]
+pub struct OpencodeConnectionUpdate {
+    pub base_url: Option<String>,
+    pub username: String,
+    pub password: Option<String>,
+    pub clear_password: bool,
+}
+
+impl From<OpencodeConnectionUpdate> for zeron_proto::OpencodeConnectionUpdate {
+    fn from(c: OpencodeConnectionUpdate) -> Self {
+        Self {
+            base_url: c.base_url,
+            username: c.username,
+            password: c.password,
+            clear_password: c.clear_password,
+        }
+    }
 }

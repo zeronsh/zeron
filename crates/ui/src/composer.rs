@@ -7584,6 +7584,12 @@ impl Composer {
         // Fully-resolved model/reasoning/options — concrete values (chat config
         // or defaults), so the engine never has to guess a "default".
         let resolved = self.pickers.read(cx).resolved(cx);
+        if let Some(error) = self.pickers.read(cx).selected_agent_error(cx) {
+            self.failure = Some(error.into());
+            self.failure_key = None;
+            cx.notify();
+            return;
+        }
         let existing_cwd = self
             .state
             .read(cx)
@@ -8147,6 +8153,7 @@ impl Composer {
                         "text": queue_text,
                         "attachments": attachment_paths,
                         "holdForTurnEnd": true,
+                        "agent": resolved.agent,
                     });
                     let reply = engine
                         .client()
@@ -8171,6 +8178,7 @@ impl Composer {
                         prompt: content.clone(),
                         harness: resolved.harness,
                         model: resolved.model.clone(),
+                        agent: resolved.agent.clone(),
                         reasoning: resolved.reasoning,
                         model_options: resolved.model_options.clone(),
                         cwd,

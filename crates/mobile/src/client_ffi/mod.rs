@@ -344,6 +344,81 @@ impl CoreClient {
             .collect()
     }
 
+    pub async fn list_models_for_directory(
+        &self,
+        device_id: String,
+        harness: String,
+        cwd: Option<String>,
+    ) -> CoreResult<Vec<ModelInfo>> {
+        let client = self.client.clone();
+        Ok(on_runtime(async move {
+            client
+                .list_models_for_directory(&device_id, &harness, cwd.as_deref())
+                .await
+        })
+        .await?
+        .into_iter()
+        .map(Into::into)
+        .collect())
+    }
+
+    pub async fn list_agents(
+        &self,
+        device_id: String,
+        cwd: Option<String>,
+    ) -> CoreResult<Vec<HarnessAgent>> {
+        let client = self.client.clone();
+        Ok(
+            on_runtime(async move { client.list_agents(&device_id, cwd.as_deref()).await })
+                .await?
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        )
+    }
+
+    pub async fn get_opencode_connection(
+        &self,
+        device_id: String,
+    ) -> CoreResult<OpencodeConnectionSettings> {
+        let client = self.client.clone();
+        Ok(
+            on_runtime(async move { client.get_opencode_connection(&device_id).await })
+                .await?
+                .into(),
+        )
+    }
+
+    pub async fn set_opencode_connection(
+        &self,
+        device_id: String,
+        update: OpencodeConnectionUpdate,
+    ) -> CoreResult<OpencodeConnectionSettings> {
+        let client = self.client.clone();
+        Ok(on_runtime(async move {
+            client
+                .set_opencode_connection(&device_id, update.into())
+                .await
+        })
+        .await?
+        .into())
+    }
+
+    pub async fn test_opencode_connection(
+        &self,
+        device_id: String,
+        update: OpencodeConnectionUpdate,
+    ) -> CoreResult<String> {
+        let client = self.client.clone();
+        Ok(on_runtime(async move {
+            client
+                .test_opencode_connection(&device_id, update.into())
+                .await
+        })
+        .await?
+        .version)
+    }
+
     /// Model catalog for `harness` on `device_id` (normalized; static fallback).
     pub async fn list_models(&self, device_id: String, harness: String) -> Vec<ModelInfo> {
         let client = self.client.clone();
@@ -370,7 +445,11 @@ impl CoreClient {
                 .register_push_target(
                     &token,
                     &environment,
-                    zc::PushPrefs { done: prefs.done, input: prefs.input, failed: prefs.failed },
+                    zc::PushPrefs {
+                        done: prefs.done,
+                        input: prefs.input,
+                        failed: prefs.failed,
+                    },
                 )
                 .await
         })
@@ -404,7 +483,12 @@ impl CoreClient {
         query: String,
     ) -> CoreResult<Vec<FileMatch>> {
         let client = self.client.clone();
-        let files = on_runtime(async move { client.search_files(&device_id, chat_id, space_id, &query).await }).await?;
+        let files = on_runtime(async move {
+            client
+                .search_files(&device_id, chat_id, space_id, &query)
+                .await
+        })
+        .await?;
         Ok(files
             .into_iter()
             .map(|f| FileMatch {

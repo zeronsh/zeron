@@ -834,6 +834,7 @@ async fn target_device_id_routes_over_the_relay() {
     let command = serde_json::to_value(SessionCommandPayload::Run {
         request: RunRequest {
             mcp: None,
+            agent: None,
             prompt: "run remotely".into(),
             harness: None,
             model: None,

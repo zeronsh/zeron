@@ -45,6 +45,7 @@ async fn main() {
         mcp: None,
         prompt,
         harness: None,
+        agent: None,
         model,
         reasoning: None,
         model_options,

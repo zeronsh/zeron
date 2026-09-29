@@ -1,4 +1,5 @@
 import UIKit
+import SwiftUI
 import UserNotifications
 
 /// Settings & utilities: account, devices, appearance, archive, diagnostics.
@@ -184,6 +185,8 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         ])
         s.appendSections(["Devices"])
         s.appendItems(app.hostOptions.map { Row(id: "device:\($0.id)", title: $0.name, subtitle: $0.online ? "Online" : "Offline", symbol: "desktopcomputer", accessory: .dot($0.online)) })
+        s.appendSections(["Providers"])
+        s.appendItems([Row(id: "opencode", title: "OpenCode connection", symbol: "network")])
         s.appendSections(["Notifications"])
         s.appendItems(notificationRows())
         s.appendSections(["Appearance"])
@@ -212,6 +215,8 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         collectionView.deselectItem(at: path, animated: true)
         guard let row = dataSource.itemIdentifier(for: path) else { return }
         switch row.id {
+        case "opencode":
+            present(UIHostingController(rootView: OpenCodeConnectionSheet(model: app)), animated: true)
         case let id where id.hasPrefix("appearance:"):
             let style = Int(id.dropFirst(11)) ?? 0
             UserDefaults.standard.set(style, forKey: "appearance")

@@ -77,6 +77,7 @@ fn start(core: &EngineCore, cwd: &std::path::Path, prompt: String) {
                     prompt,
                     harness: Some(HarnessId::Cursor),
                     model: Some("muse-spark-1.3".into()),
+                    agent: None,
                     reasoning: None,
                     model_options: Default::default(),
                     cwd: cwd.to_str().unwrap().into(),

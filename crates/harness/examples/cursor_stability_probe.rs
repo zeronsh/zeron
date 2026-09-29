@@ -36,6 +36,7 @@ async fn turn(
         model: Some(
             std::env::var("ZERON_CURSOR_TEST_MODEL").unwrap_or_else(|_| "composer-2.5".into()),
         ),
+        agent: None,
         reasoning: None,
         model_options: Default::default(),
         cwd: cwd.into(),
@@ -157,6 +158,7 @@ async fn parked(harness: &CursorHarness, count: usize) {
         model: Some(
             std::env::var("ZERON_CURSOR_TEST_MODEL").unwrap_or_else(|_| "composer-2.5".into()),
         ),
+        agent: None,
         reasoning: None,
         model_options: Default::default(),
         cwd: workspace.path().to_str().unwrap().into(),
@@ -272,6 +274,7 @@ async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
         model: Some(
             std::env::var("ZERON_CURSOR_TEST_MODEL").unwrap_or_else(|_| "composer-2.5".into()),
         ),
+        agent: None,
         reasoning: None,
         model_options: Default::default(),
         cwd: workspace.path().to_str().unwrap().into(),
@@ -406,6 +409,7 @@ async fn history(harness: &CursorHarness, count: usize) {
         model: Some(
             std::env::var("ZERON_CURSOR_TEST_MODEL").unwrap_or_else(|_| "muse-spark-1.3".into()),
         ),
+        agent: None,
         reasoning: None,
         model_options: Default::default(),
         cwd: workspace.path().to_str().unwrap().into(),

@@ -19,6 +19,8 @@ The installer starts the daemon immediately and keeps it running across reboots.
 
 The desktop sidebar browser also needs the [Linux browser runtime](docs/reference/linux-browser.md).
 
+To use an existing OpenCode v2 server, see [OpenCode connection](docs/reference/opencode.md).
+
 Day-to-day:
 
 ```bash

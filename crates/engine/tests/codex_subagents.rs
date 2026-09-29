@@ -54,6 +54,7 @@ async fn check_persistence(
     let (core, profile) = assemble(dir.path());
     let request = RunRequest {
         mcp: None,
+        agent: None,
         prompt: format!("scenario:{scenario}"),
         harness: None,
         model: None,

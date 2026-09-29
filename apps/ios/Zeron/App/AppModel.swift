@@ -17,6 +17,7 @@ final class AppModel {
         var awaiting = 0
     }
 
+    var opencodeConnectionGeneration: [String: Int] = [:]
     private(set) var client: CoreClient?
     private(set) var frontPage = FrontPage()
     private(set) var archived: [SessionRowVM] = []
@@ -488,12 +489,20 @@ final class AppModel {
         client?.devices().first { $0.id == id }?.name ?? "Unknown device"
     }
 
-    func models(for deviceId: String) async -> [ModelChoice] {
+    func supportsOpenCodeAgents(_ deviceId: String) -> Bool {
+        client?.devices().first { $0.id == deviceId }?.capabilities.contains("opencode-agent-selection-v1") == true
+    }
+
+    func catalogDirectory(projectId: String?) -> String? {
+        rawProjects.first { $0.id == projectId }?.path
+    }
+
+    func models(for deviceId: String, cwd: String? = nil) async throws -> [ModelChoice] {
         guard let client else { return [] }
         let harnesses = (try? await client.listHarnesses(deviceId: deviceId)) ?? fallbackHarnesses()
         var out: [ModelChoice] = []
         for h in harnesses where h.offered {
-            let models = (try? await client.listModels(deviceId: deviceId, harness: h.id)) ?? fallbackModels(harness: h.id)
+            let models = try await client.listModelsForDirectory(deviceId: deviceId, harness: h.id, cwd: cwd)
             out += models.map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels) }
         }
         return out
@@ -538,7 +547,7 @@ final class AppModel {
         } else {
             return nil
         }
-        let config = ChatConfig(harness: draft.harness, model: draft.model, reasoning: draft.effort, modelOptions: [:], sandbox: .workspaceWrite)
+        let config = ChatConfig(harness: draft.harness, model: draft.model, agent: draft.harness == "opencode" ? draft.agent : nil, reasoning: draft.effort, modelOptions: [:], sandbox: .workspaceWrite)
         do {
             let chatId = try client.createSession(newSession: NewSession(target: target, config: config, branch: draft.worktree ? nil : draft.branch, cwd: nil, title: nil))
             let handle = try client.openSession(chatId: chatId)

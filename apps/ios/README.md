@@ -131,3 +131,5 @@ archives (device, Release — the Rust core builds in the archive) with
 automatic signing, and uploads a TestFlight build (internal, or external with
 beta review). Secrets: `AC_API_KEY_P8`, `AC_API_KEY_ID`,
 `AC_API_ISSUER_ID`.
+
+Open **Settings → OpenCode connection** to configure the execution device. Models and agents are discovered for the selected project. See the [OpenCode reference](../../docs/reference/opencode.md).

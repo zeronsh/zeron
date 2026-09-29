@@ -1,5 +1,6 @@
 //! Persist only successful live catalogs, partitioned by credential/binary context.
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -73,6 +74,24 @@ fn unchanged(harness: &dyn Harness, context: &ModelContext) -> bool {
         .is_some_and(|now| now.hash == context.hash)
 }
 
+/// A directory-scoped request (OpenCode project config differs per directory)
+/// gets its own cache file under the same identity context.
+fn scoped_context(context: &ModelContext, cwd: Option<&str>) -> ModelContext {
+    match cwd {
+        Some(cwd) => {
+            let mut hash = Sha256::new();
+            hash.update(context.hash.as_bytes());
+            hash.update([0]);
+            hash.update(cwd.as_bytes());
+            ModelContext {
+                hash: format!("{:x}", hash.finalize()),
+                ..context.clone()
+            }
+        }
+        None => context.clone(),
+    }
+}
+
 // Both the request and any background refresh retain the execution lease so
 // cancellation or an early disk-cache response cannot race a binary update.
 pub(crate) async fn list_with_lease(
@@ -80,11 +99,13 @@ pub(crate) async fn list_with_lease(
     harness: Arc<dyn Harness>,
     force: bool,
     lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
+    cwd: Option<&str>,
 ) -> Result<Vec<Model>, HarnessError> {
     let root = root.to_path_buf();
+    let cwd = cwd.map(str::to_owned);
     tokio::spawn(async move {
         let _lease = lease.clone();
-        list_inner(&root, harness, force, lease).await
+        list_inner(&root, harness, force, lease, cwd.as_deref()).await
     })
     .await
     .map_err(|error| HarnessError::Protocol(format!("model discovery task failed: {error}")))?
@@ -95,8 +116,9 @@ async fn list(
     root: &Path,
     harness: Arc<dyn Harness>,
     force: bool,
+    cwd: Option<&str>,
 ) -> Result<Vec<Model>, HarnessError> {
-    list_with_lease(root, harness, force, None).await
+    list_with_lease(root, harness, force, None, cwd).await
 }
 
 async fn list_inner(
@@ -104,55 +126,72 @@ async fn list_inner(
     harness: Arc<dyn Harness>,
     force: bool,
     lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
+    cwd: Option<&str>,
 ) -> Result<Vec<Model>, HarnessError> {
     let Some(context) = harness.model_context().map_err(|error| {
         let failure = CatalogFailure::from(error);
         tracing::warn!(code = %failure.code, error = %failure, "Model discovery context unavailable");
         HarnessError::from(failure)
     })? else {
-        return harness
-            .model_catalog(force)
-            .await
-            .map(|catalog| catalog.models);
+        return match cwd {
+            Some(cwd) => harness.models_for_directory(Some(cwd)).await,
+            None => harness
+                .model_catalog(force)
+                .await
+                .map(|catalog| catalog.models),
+        };
     };
-    let path = location(root, harness.as_ref(), &context);
-    let disk = read(&path, &context);
+    let scoped = scoped_context(&context, cwd);
+    let path = location(root, harness.as_ref(), &scoped);
+    let disk = read(&path, &scoped);
     // The refresh owns its lifetime; returning disk early must not cancel it.
-    let mut refresh = tokio::spawn({
-        let harness = harness.clone();
-        let context = context.clone();
-        let path = path.clone();
-        async move {
-            let _lease = lease;
-            let result = harness.model_catalog(force).await;
-            if !unchanged(harness.as_ref(), &context) {
-                return Err(HarnessError::Protocol(
-                    "model discovery context changed; retry".into(),
-                ));
-            }
-            if let Err(error) = &result {
-                let code = CatalogFailure::classify(error);
-                tracing::warn!(%code, %error, "Model discovery failed");
-                if !code.allows_stale() {
-                    // A revoked credential must not be resurrected from disk on
-                    // the next outage, even if its file contents did not change.
-                    if let Err(error) = std::fs::remove_file(&path)
-                        && error.kind() != std::io::ErrorKind::NotFound
-                    {
-                        tracing::warn!(%error, "Could not retire model catalog");
+    let mut refresh =
+        tokio::spawn({
+            let harness = harness.clone();
+            let context = context.clone();
+            let scoped = scoped.clone();
+            let path = path.clone();
+            let cwd = cwd.map(str::to_owned);
+            async move {
+                let _lease = lease;
+                let result =
+                    match cwd.as_deref() {
+                        Some(cwd) => harness.models_for_directory(Some(cwd)).await.map(|models| {
+                            ModelCatalog {
+                                models,
+                                source: "live",
+                            }
+                        }),
+                        None => harness.model_catalog(force).await,
+                    };
+                if !unchanged(harness.as_ref(), &context) {
+                    return Err(HarnessError::Protocol(
+                        "model discovery context changed; retry".into(),
+                    ));
+                }
+                if let Err(error) = &result {
+                    let code = CatalogFailure::classify(error);
+                    tracing::warn!(%code, %error, "Model discovery failed");
+                    if !code.allows_stale() {
+                        // A revoked credential must not be resurrected from disk on
+                        // the next outage, even if its file contents did not change.
+                        if let Err(error) = std::fs::remove_file(&path)
+                            && error.kind() != std::io::ErrorKind::NotFound
+                        {
+                            tracing::warn!(%error, "Could not retire model catalog");
+                        }
                     }
                 }
+                if let Ok(catalog) = &result
+                    && (catalog.source == "live"
+                        || (catalog.source == "cache" && read(&path, &scoped).is_none()))
+                    && let Err(error) = save(&path, &scoped, &catalog.models)
+                {
+                    tracing::warn!(%error, "Could not persist model catalog");
+                }
+                result
             }
-            if let Ok(catalog) = &result
-                && (catalog.source == "live"
-                    || (catalog.source == "cache" && read(&path, &context).is_none()))
-                && let Err(error) = save(&path, &context, &catalog.models)
-            {
-                tracing::warn!(%error, "Could not persist model catalog");
-            }
-            result
-        }
-    });
+        });
     let result = if disk.is_some() {
         tokio::time::timeout(Duration::from_millis(100), &mut refresh)
             .await
@@ -308,11 +347,11 @@ mod tests {
     async fn background_refresh_holds_lease_after_cached_reply() {
         let dir = tempfile::tempdir().unwrap();
         let probe = Probe::new();
-        list(dir.path(), probe.clone(), false).await.unwrap();
+        list(dir.path(), probe.clone(), false, None).await.unwrap();
         probe.delay.store(true, SeqCst);
         let gate = Arc::new(tokio::sync::RwLock::new(()));
         let lease = Arc::new(gate.clone().read_owned().await);
-        list_with_lease(dir.path(), probe, true, Some(lease))
+        list_with_lease(dir.path(), probe, true, Some(lease), None)
             .await
             .unwrap();
         assert!(
@@ -334,7 +373,7 @@ mod tests {
         let lease = Arc::new(gate.clone().read_owned().await);
         let task = tokio::spawn({
             let probe = probe.clone();
-            async move { list_with_lease(&root, probe, true, Some(lease)).await }
+            async move { list_with_lease(&root, probe, true, Some(lease), None).await }
         });
         tokio::time::timeout(Duration::from_secs(2), async {
             while !probe.forced.load(SeqCst) {
@@ -359,10 +398,12 @@ mod tests {
         for message in ["not logged in", "spawn ENOENT"] {
             let dir = tempfile::tempdir().unwrap();
             let probe = Probe::new();
-            list(dir.path(), probe.clone(), false).await.unwrap();
+            list(dir.path(), probe.clone(), false, None).await.unwrap();
             probe.fail.store(true, SeqCst);
             *probe.failure.lock().unwrap() = message.into();
-            let error = list(dir.path(), probe.clone(), true).await.unwrap_err();
+            let error = list(dir.path(), probe.clone(), true, None)
+                .await
+                .unwrap_err();
             assert!(!CatalogFailure::classify(&error).allows_stale());
             let context = probe.model_context().unwrap().unwrap();
             assert!(!location(dir.path(), probe.as_ref(), &context).exists());
@@ -373,10 +414,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut probe = Probe::new();
         Arc::get_mut(&mut probe).unwrap().harness = zeron_proto::HarnessId::ClaudeCode;
-        list(dir.path(), probe.clone(), false).await.unwrap();
+        list(dir.path(), probe.clone(), false, None).await.unwrap();
         probe.fail.store(true, SeqCst);
         *probe.failure.lock().unwrap() = "authentication required".into();
-        assert_eq!(list(dir.path(), probe, true).await.unwrap()[0].id, "static");
+        assert_eq!(
+            list(dir.path(), probe, true, None).await.unwrap()[0].id,
+            "static"
+        );
     }
 
     #[tokio::test]
@@ -385,7 +429,7 @@ mod tests {
         let probe = Probe::new();
         probe.cached.store(true, SeqCst);
         assert_eq!(
-            list(dir.path(), probe.clone(), false).await.unwrap(),
+            list(dir.path(), probe.clone(), false, None).await.unwrap(),
             models()
         );
         let context = probe.model_context().unwrap().unwrap();
@@ -400,7 +444,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let probe = Probe::new();
         assert_eq!(
-            list(dir.path(), probe.clone(), true).await.unwrap(),
+            list(dir.path(), probe.clone(), true, None).await.unwrap(),
             models()
         );
         assert!(probe.forced.load(SeqCst));
@@ -408,12 +452,14 @@ mod tests {
         let restarted = Probe::new();
         restarted.fail.store(true, SeqCst);
         assert_eq!(
-            list(dir.path(), restarted.clone(), false).await.unwrap(),
+            list(dir.path(), restarted.clone(), false, None)
+                .await
+                .unwrap(),
             models()
         );
         restarted.account.store(2, SeqCst);
         assert_eq!(
-            list(dir.path(), restarted, false).await.unwrap()[0].id,
+            list(dir.path(), restarted, false, None).await.unwrap()[0].id,
             "static"
         );
         assert!(!dir.path().join("model-catalogs/codex/2.json").exists());
@@ -428,7 +474,7 @@ mod tests {
         old[0].id = "old-live".into();
         save(&path, &context, &old).unwrap();
         probe.delay.store(true, SeqCst);
-        assert_eq!(list(dir.path(), probe, false).await.unwrap(), old);
+        assert_eq!(list(dir.path(), probe, false, None).await.unwrap(), old);
         tokio::time::sleep(Duration::from_millis(250)).await;
         assert_eq!(read(&path, &context), Some(models()));
     }
@@ -441,7 +487,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
             probe.account.store(2, SeqCst);
         };
-        let (result, _) = tokio::join!(list(dir.path(), probe.clone(), false), swap);
+        let (result, _) = tokio::join!(list(dir.path(), probe.clone(), false, None), swap);
         assert!(result.is_err());
         assert!(!dir.path().join("model-catalogs").exists());
     }

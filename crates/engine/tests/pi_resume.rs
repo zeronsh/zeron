@@ -24,6 +24,7 @@ async fn pi_idle_crash_next_dispatch_loads_stored_session() {
             prompt: prompt.into(),
             harness: None,
             model: None,
+            agent: None,
             reasoning: None,
             model_options: Default::default(),
             cwd: dir.path().display().to_string(),

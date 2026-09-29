@@ -944,7 +944,11 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func frontPage()  -> FrontPage
     
+    func getOpencodeConnection(deviceId: String) async throws  -> OpencodeConnectionSettings
+    
     func isDemo()  -> Bool
+    
+    func listAgents(deviceId: String, cwd: String?) async throws  -> [HarnessAgent]
     
     /**
      * Browse folders on a device (`None` = its home folder).
@@ -961,6 +965,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      * Model catalog for `harness` on `device_id` (normalized; static fallback).
      */
     func listModels(deviceId: String, harness: String) async  -> [ModelInfo]
+    
+    func listModelsForDirectory(deviceId: String, harness: String, cwd: String?) async throws  -> [ModelInfo]
     
     func listRefs(deviceId: String, repoPath: String) async throws  -> [RepoRef]
     
@@ -1048,6 +1054,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func setNetworkOnline(online: Bool) 
     
+    func setOpencodeConnection(deviceId: String, update: OpencodeConnectionUpdate) async throws  -> OpencodeConnectionSettings
+    
     func setSectionCollapsed(sectionId: String, collapsed: Bool) throws 
     
     func setSessionConfig(chatId: String, config: ChatConfig) throws 
@@ -1066,6 +1074,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      * Mid-session ref switch (worktree retarget or `git checkout`).
      */
     func switchSessionRef(chatId: String, reference: RepoRef) async throws 
+    
+    func testOpencodeConnection(deviceId: String, update: OpencodeConnectionUpdate) async throws  -> String
     
     func unarchiveSession(chatId: String) throws 
     
@@ -1369,6 +1379,22 @@ open func frontPage() -> FrontPage  {
 })
 }
     
+open func getOpencodeConnection(deviceId: String)async throws  -> OpencodeConnectionSettings  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_get_opencode_connection(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeOpencodeConnectionSettings_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
 open func isDemo() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
         uniffiCallStatus in
@@ -1376,6 +1402,22 @@ open func isDemo() -> Bool  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+open func listAgents(deviceId: String, cwd: String?)async throws  -> [HarnessAgent]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_list_agents(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterOptionString.lower(cwd)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeHarnessAgent.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -1435,6 +1477,22 @@ open func listModels(deviceId: String, harness: String)async  -> [ModelInfo]  {
             liftFunc: FfiConverterSequenceTypeModelInfo.lift,
             errorHandler: nil
             
+        )
+}
+    
+open func listModelsForDirectory(deviceId: String, harness: String, cwd: String?)async throws  -> [ModelInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_list_models_for_directory(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(harness),FfiConverterOptionString.lower(cwd)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeModelInfo.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
         )
 }
     
@@ -1729,6 +1787,22 @@ open func setNetworkOnline(online: Bool)  {try! rustCall() {
 }
 }
     
+open func setOpencodeConnection(deviceId: String, update: OpencodeConnectionUpdate)async throws  -> OpencodeConnectionSettings  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_set_opencode_connection(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterTypeOpencodeConnectionUpdate_lower(update)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeOpencodeConnectionSettings_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
 open func setSectionCollapsed(sectionId: String, collapsed: Bool)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_method_coreclient_set_section_collapsed(
@@ -1794,6 +1868,22 @@ open func switchSessionRef(chatId: String, reference: RepoRef)async throws   {
             completeFunc: ffi_zeron_mobile_rust_future_complete_void,
             freeFunc: ffi_zeron_mobile_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func testOpencodeConnection(deviceId: String, update: OpencodeConnectionUpdate)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_test_opencode_connection(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterTypeOpencodeConnectionUpdate_lower(update)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
             errorHandler: FfiConverterTypeCoreError_lift
         )
 }
@@ -4128,6 +4218,7 @@ public struct ChatConfig: Equatable, Hashable {
      */
     public var harness: String
     public var model: String?
+    public var agent: String?
     /**
      * `low` … `ultrathink`.
      */
@@ -4143,7 +4234,7 @@ public struct ChatConfig: Equatable, Hashable {
     public init(
         /**
          * `claude-code`, `codex`, …
-         */harness: String, model: String?, 
+         */harness: String, model: String?, agent: String?, 
         /**
          * `low` … `ultrathink`.
          */reasoning: String?, 
@@ -4152,6 +4243,7 @@ public struct ChatConfig: Equatable, Hashable {
          */modelOptions: [String: String], sandbox: SandboxLevel) {
         self.harness = harness
         self.model = model
+        self.agent = agent
         self.reasoning = reasoning
         self.modelOptions = modelOptions
         self.sandbox = sandbox
@@ -4175,6 +4267,7 @@ public struct FfiConverterTypeChatConfig: FfiConverterRustBuffer {
             try ChatConfig(
                 harness: FfiConverterString.read(from: &buf), 
                 model: FfiConverterOptionString.read(from: &buf), 
+                agent: FfiConverterOptionString.read(from: &buf), 
                 reasoning: FfiConverterOptionString.read(from: &buf), 
                 modelOptions: FfiConverterDictionaryStringString.read(from: &buf), 
                 sandbox: FfiConverterTypeSandboxLevel.read(from: &buf)
@@ -4184,6 +4277,7 @@ public struct FfiConverterTypeChatConfig: FfiConverterRustBuffer {
     public static func write(_ value: ChatConfig, into buf: inout [UInt8]) {
         FfiConverterString.write(value.harness, into: &buf)
         FfiConverterOptionString.write(value.model, into: &buf)
+        FfiConverterOptionString.write(value.agent, into: &buf)
         FfiConverterOptionString.write(value.reasoning, into: &buf)
         FfiConverterDictionaryStringString.write(value.modelOptions, into: &buf)
         FfiConverterTypeSandboxLevel.write(value.sandbox, into: &buf)
@@ -5214,6 +5308,64 @@ public func FfiConverterTypeFrontPage_lower(_ value: FrontPage) -> RustBuffer {
 }
 
 
+public struct HarnessAgent: Equatable, Hashable {
+    public var id: String
+    public var label: String
+    public var description: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, label: String, description: String?) {
+        self.id = id
+        self.label = label
+        self.description = description
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension HarnessAgent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHarnessAgent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HarnessAgent {
+        return
+            try HarnessAgent(
+                id: FfiConverterString.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                description: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HarnessAgent, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHarnessAgent_lift(_ buf: RustBuffer) throws -> HarnessAgent {
+    return try FfiConverterTypeHarnessAgent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHarnessAgent_lower(_ value: HarnessAgent) -> RustBuffer {
+    return FfiConverterTypeHarnessAgent.lower(value)
+}
+
+
 public struct HarnessInfo: Equatable, Hashable {
     public var id: String
     public var label: String
@@ -5956,6 +6108,126 @@ public func FfiConverterTypeNewSession_lift(_ buf: RustBuffer) throws -> NewSess
 #endif
 public func FfiConverterTypeNewSession_lower(_ value: NewSession) -> RustBuffer {
     return FfiConverterTypeNewSession.lower(value)
+}
+
+
+public struct OpencodeConnectionSettings: Equatable, Hashable {
+    public var baseUrl: String?
+    public var username: String
+    public var hasPassword: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(baseUrl: String?, username: String, hasPassword: Bool) {
+        self.baseUrl = baseUrl
+        self.username = username
+        self.hasPassword = hasPassword
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension OpencodeConnectionSettings: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOpencodeConnectionSettings: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OpencodeConnectionSettings {
+        return
+            try OpencodeConnectionSettings(
+                baseUrl: FfiConverterOptionString.read(from: &buf), 
+                username: FfiConverterString.read(from: &buf), 
+                hasPassword: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: OpencodeConnectionSettings, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.baseUrl, into: &buf)
+        FfiConverterString.write(value.username, into: &buf)
+        FfiConverterBool.write(value.hasPassword, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOpencodeConnectionSettings_lift(_ buf: RustBuffer) throws -> OpencodeConnectionSettings {
+    return try FfiConverterTypeOpencodeConnectionSettings.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOpencodeConnectionSettings_lower(_ value: OpencodeConnectionSettings) -> RustBuffer {
+    return FfiConverterTypeOpencodeConnectionSettings.lower(value)
+}
+
+
+public struct OpencodeConnectionUpdate: Equatable, Hashable {
+    public var baseUrl: String?
+    public var username: String
+    public var password: String?
+    public var clearPassword: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(baseUrl: String?, username: String, password: String?, clearPassword: Bool) {
+        self.baseUrl = baseUrl
+        self.username = username
+        self.password = password
+        self.clearPassword = clearPassword
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension OpencodeConnectionUpdate: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOpencodeConnectionUpdate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OpencodeConnectionUpdate {
+        return
+            try OpencodeConnectionUpdate(
+                baseUrl: FfiConverterOptionString.read(from: &buf), 
+                username: FfiConverterString.read(from: &buf), 
+                password: FfiConverterOptionString.read(from: &buf), 
+                clearPassword: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: OpencodeConnectionUpdate, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.baseUrl, into: &buf)
+        FfiConverterString.write(value.username, into: &buf)
+        FfiConverterOptionString.write(value.password, into: &buf)
+        FfiConverterBool.write(value.clearPassword, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOpencodeConnectionUpdate_lift(_ buf: RustBuffer) throws -> OpencodeConnectionUpdate {
+    return try FfiConverterTypeOpencodeConnectionUpdate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOpencodeConnectionUpdate_lower(_ value: OpencodeConnectionUpdate) -> RustBuffer {
+    return FfiConverterTypeOpencodeConnectionUpdate.lower(value)
 }
 
 
@@ -7322,6 +7594,7 @@ public struct SessionRow: Equatable, Hashable {
     public var harnessLabel: String?
     public var model: String?
     public var modelLabel: String?
+    public var agent: String?
     /**
      * Wire effort (`xhigh`).
      */
@@ -7375,7 +7648,7 @@ public struct SessionRow: Equatable, Hashable {
          */project: ProjectRef?, deviceId: String, deviceName: String?, deviceOnline: Bool, 
         /**
          * Wire harness id (`claude-code`).
-         */harness: String?, harnessLabel: String?, model: String?, modelLabel: String?, 
+         */harness: String?, harnessLabel: String?, model: String?, modelLabel: String?, agent: String?, 
         /**
          * Wire effort (`xhigh`).
          */reasoning: String?, branch: String?, cwd: String?, 
@@ -7410,6 +7683,7 @@ public struct SessionRow: Equatable, Hashable {
         self.harnessLabel = harnessLabel
         self.model = model
         self.modelLabel = modelLabel
+        self.agent = agent
         self.reasoning = reasoning
         self.branch = branch
         self.cwd = cwd
@@ -7458,6 +7732,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 harnessLabel: FfiConverterOptionString.read(from: &buf), 
                 model: FfiConverterOptionString.read(from: &buf), 
                 modelLabel: FfiConverterOptionString.read(from: &buf), 
+                agent: FfiConverterOptionString.read(from: &buf), 
                 reasoning: FfiConverterOptionString.read(from: &buf), 
                 branch: FfiConverterOptionString.read(from: &buf), 
                 cwd: FfiConverterOptionString.read(from: &buf), 
@@ -7492,6 +7767,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.harnessLabel, into: &buf)
         FfiConverterOptionString.write(value.model, into: &buf)
         FfiConverterOptionString.write(value.modelLabel, into: &buf)
+        FfiConverterOptionString.write(value.agent, into: &buf)
         FfiConverterOptionString.write(value.reasoning, into: &buf)
         FfiConverterOptionString.write(value.branch, into: &buf)
         FfiConverterOptionString.write(value.cwd, into: &buf)
@@ -12126,6 +12402,31 @@ fileprivate struct FfiConverterSequenceTypeFolderEntry: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeHarnessAgent: FfiConverterRustBuffer {
+    typealias SwiftType = [HarnessAgent]
+
+    public static func write(_ value: [HarnessAgent], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeHarnessAgent.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [HarnessAgent] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [HarnessAgent]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeHarnessAgent.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeHarnessInfo: FfiConverterRustBuffer {
     typealias SwiftType = [HarnessInfo]
 
@@ -13154,7 +13455,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_front_page() != 3792) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_get_opencode_connection() != 14804) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_is_demo() != 28119) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_list_agents() != 30506) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_list_folders() != 2324) {
@@ -13164,6 +13471,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_list_models() != 23103) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_list_models_for_directory() != 29921) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_list_refs() != 27606) {
@@ -13238,6 +13548,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_network_online() != 33835) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_set_opencode_connection() != 60091) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_section_collapsed() != 55017) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13251,6 +13564,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_switch_session_ref() != 42409) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_test_opencode_connection() != 3762) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_unarchive_session() != 9932) {
