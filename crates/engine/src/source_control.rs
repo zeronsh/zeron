@@ -50,13 +50,14 @@ pub fn valid_pr_repository(repository: &str) -> bool {
         })
 }
 
+type PrResult = Result<serde_json::Value, ChangeRequestError>;
+type PrFetch = futures::future::Shared<futures::future::BoxFuture<'static, PrResult>>;
+
 #[derive(Default)]
 struct PrRequestCache {
-    entries: Vec<(
-        String,
-        Instant,
-        Result<serde_json::Value, ChangeRequestError>,
-    )>,
+    entries: Vec<(String, Instant, PrResult)>,
+    /// Reads awaiting GitHub, joined by identical requests.
+    in_flight: std::collections::HashMap<String, PrFetch>,
     rate_limited_at: Option<Instant>,
 }
 
@@ -298,17 +299,14 @@ pub struct GitHubCli {
 }
 
 impl GitHubCli {
-    /// Shared across RPC clients on this engine. The lock also serializes distinct
-    /// provider reads and coalesces simultaneous identical reads. Never retry here.
-    async fn cached_pr_request<F>(
-        &self,
-        key: String,
-        refresh: bool,
-        fetch: F,
-    ) -> Result<serde_json::Value, ChangeRequestError>
+    /// Shared across RPC clients on this engine. Simultaneous identical reads
+    /// share one provider call; distinct reads run side by side, so a slow
+    /// diff never queues the board behind it. Never retry here.
+    async fn cached_pr_request<F>(&self, key: String, refresh: bool, fetch: F) -> PrResult
     where
-        F: std::future::Future<Output = Result<serde_json::Value, ChangeRequestError>> + Send,
+        F: std::future::Future<Output = PrResult> + Send + 'static,
     {
+        use futures::FutureExt;
         let mut cache = self.pr_cache.lock().await;
         if let Some(index) = cache.entries.iter().position(|entry| entry.0 == key) {
             let entry = cache.entries.remove(index);
@@ -331,10 +329,30 @@ impl GitHubCli {
         {
             return Err(ChangeRequestError::RateLimited);
         }
-        let result = fetch.await;
+        let pending = match cache.in_flight.get(&key) {
+            Some(pending) => pending.clone(),
+            None => {
+                let pending = fetch.boxed().shared();
+                cache.in_flight.insert(key.clone(), pending.clone());
+                pending
+            }
+        };
+        drop(cache);
+        let result = pending.clone().await;
+        let mut cache = self.pr_cache.lock().await;
         if matches!(result, Err(ChangeRequestError::RateLimited)) {
             cache.rate_limited_at = Some(Instant::now());
         }
+        // The first waiter to finish records the result. A write that
+        // invalidated this read meanwhile has already dropped it.
+        if !cache
+            .in_flight
+            .get(&key)
+            .is_some_and(|current| current.ptr_eq(&pending))
+        {
+            return result;
+        }
+        cache.in_flight.remove(&key);
         cache.entries.retain(|entry| entry.0 != key);
         cache.entries.push((key, Instant::now(), result.clone()));
         if cache.entries.len() > 24 {
@@ -350,11 +368,11 @@ impl GitHubCli {
         refresh: bool,
     ) -> Result<serde_json::Value, ChangeRequestError> {
         let url = validated_pull_request_url(url)?;
-        self.cached_pr_request(
-            format!("{diff}:{url}"),
-            refresh,
-            self.fetch_detail(&url, diff),
-        )
+        let github = self.clone();
+        let key = format!("{diff}:{url}");
+        self.cached_pr_request(key, refresh, async move {
+            github.fetch_detail(&url, diff).await
+        })
         .await
     }
 
@@ -399,12 +417,13 @@ impl GitHubCli {
         if !output.success {
             return Err(classify_github_failure(&output.stderr));
         }
-        // Evict after the server accepted the write, even if its reply cannot be decoded.
-        self.pr_cache
-            .lock()
-            .await
-            .entries
-            .retain(|entry| entry.0 != format!("false:{url}"));
+        // Evict after the server accepted the write, even if its reply cannot
+        // be decoded. A read already in flight may predate it: keep it out too.
+        let key = format!("false:{url}");
+        let mut cache = self.pr_cache.lock().await;
+        cache.entries.retain(|entry| entry.0 != key);
+        cache.in_flight.remove(&key);
+        drop(cache);
         if output.stdout_truncated {
             return Err(ChangeRequestError::Decode);
         }
@@ -548,10 +567,14 @@ impl GitHubCli {
         }
         let repository = repository.to_ascii_lowercase();
         let key = format!("list:{repository}:{filter:?}:{}", after.unwrap_or_default());
+        let github = self.clone();
+        let after = after.map(str::to_owned);
         let result = self
-            .cached_pr_request(key, refresh, async {
-                serde_json::to_value(self.fetch_filtered_page(&repository, filter, after).await?)
-                    .map_err(|_| ChangeRequestError::Decode)
+            .cached_pr_request(key, refresh, async move {
+                let page = github
+                    .fetch_filtered_page(&repository, filter, after.as_deref())
+                    .await?;
+                serde_json::to_value(page).map_err(|_| ChangeRequestError::Decode)
             })
             .await?;
         serde_json::from_value(result).map_err(|_| ChangeRequestError::Decode)
@@ -645,6 +668,7 @@ impl GitHubCli {
             .search
             .nodes
             .into_iter()
+            .flatten()
             .map(to_list_item)
             .collect::<Result<Vec<_>, _>>()?;
         // GitHub can return the canonical name of a renamed repository.
@@ -1179,7 +1203,9 @@ struct GhSearchData {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GhSearchConnection {
-    nodes: Vec<GhSearchPullRequest>,
+    /// GitHub returns `null` for results the viewer cannot read (for
+    /// example SAML-restricted repositories); those are skipped.
+    nodes: Vec<Option<GhSearchPullRequest>>,
     #[serde(default)]
     issue_count: Option<u64>,
     #[serde(default)]
@@ -2150,6 +2176,50 @@ mod tests {
         assert_eq!(runner.requests().len(), 3);
     }
 
+    /// Answers only once `parties` requests are running at the same time.
+    struct GatedProcessRunner {
+        gate: tokio::sync::Barrier,
+        runs: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ProcessRunner for GatedProcessRunner {
+        async fn run(&self, request: ProcessRequest) -> Result<ProcessOutput, ProcessRunError> {
+            self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.gate.wait().await;
+            if request.args[0] == "pr" {
+                command_success("diff --git a/a b/a\n")
+            } else {
+                command_success(search_response(vec![]))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pr_distinct_reads_run_side_by_side_and_identical_reads_share_one_call() {
+        let runner = Arc::new(GatedProcessRunner {
+            gate: tokio::sync::Barrier::new(2),
+            runs: Default::default(),
+        });
+        let github = GitHubCli::with_runner(runner.clone());
+        let (diff, same_diff, list) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                github.detail("https://github.com/a/b/pull/1", true, false),
+                github.detail("https://github.com/a/b/pull/1", true, false),
+                github.list_authored_open("a/b", false),
+            )
+        })
+        .await
+        .expect("a slow read must not hold up a different one");
+        assert_eq!(diff.unwrap(), "diff --git a/a b/a\n");
+        assert_eq!(same_diff.unwrap(), "diff --git a/a b/a\n");
+        assert!(list.unwrap().is_empty());
+        assert_eq!(runner.runs.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let cache = github.pr_cache.lock().await;
+        assert_eq!(cache.entries.len(), 2);
+        assert!(cache.in_flight.is_empty());
+    }
+
     #[tokio::test]
     async fn pr_rate_limit_cooldown_covers_other_repositories_and_details() {
         let runner =
@@ -2350,6 +2420,29 @@ mod tests {
             let (result, _) = list_with(command_success(json)).await;
             assert_eq!(result.unwrap_err(), ChangeRequestError::Decode);
         }
+    }
+
+    #[tokio::test]
+    async fn github_search_skips_results_the_viewer_cannot_read() {
+        let json = serde_json::to_vec(&serde_json::json!({"data": {"search": {"nodes": [
+            null,
+            search_pull_request(
+                "acme/zeron",
+                3,
+                "Readable",
+                "OPEN",
+                "MERGEABLE",
+                "2026-08-01T08:00:00Z",
+                "2026-08-19T12:00:00Z",
+                false,
+                None,
+            ),
+        ]}}}))
+        .unwrap();
+        let (result, _) = list_with(command_success(json)).await;
+        let items = result.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].number, 3);
     }
 
     #[tokio::test]
