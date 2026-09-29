@@ -200,7 +200,7 @@ impl TurnWire {
                             "/api/session" => ("200 OK", r#"{"data":{"id":"fixture"}}"#),
                             "/api/command" => ("200 OK", r#"{"data":[]}"#),
                             // Non-empty: the catalog-sync retry loop must not stall tests.
-                            "/api/model" => ("200 OK", r#"{"data":[{"providerID":"opencode","id":"muse","name":"Muse","limit":{"context":1000},"variants":[{"id":"low"}],"enabled":true}]}"#),
+                            "/api/model" => ("200 OK", r#"{"data":[{"providerID":"opencode","id":"muse","name":"Muse","limit":{"context":1000},"variants":[{"id":"low"}],"enabled":true},{"providerID":"opencode","id":"long-context","name":"Long Context","limit":{"context":2000},"enabled":true}]}"#),
                             _ => ("200 OK", "{}"),
                         }
                     } else {
@@ -569,32 +569,72 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
         }),
     );
     wire.v2(
+        "session.step.started",
+        json!({
+            "sessionID": "fixture",
+            "assistantMessageID": "msg_b",
+            "model": {"id": "long-context", "providerID": "opencode"},
+        }),
+    );
+    wire.v2(
+        "session.usage.updated",
+        json!({
+            "sessionID": "fixture", "cost": 0,
+            "tokens": {"input": 20, "output": 3, "reasoning": 0,
+                       "cache": {"read": 5, "write": 0}}
+        }),
+    );
+    // A reported zero after compaction is real usage, not an empty placeholder.
+    wire.v2(
+        "session.usage.updated",
+        json!({
+            "sessionID": "fixture", "cost": 0,
+            "tokens": {"input": 0, "output": 0, "reasoning": 0,
+                       "cache": {"read": 0, "write": 0}}
+        }),
+    );
+    wire.v2(
         "session.execution.succeeded",
         json!({"sessionID": "fixture"}),
     );
 
-    let (status, text, usage) = tokio::time::timeout(Duration::from_secs(5), async {
-        let mut text = String::new();
-        let mut usage = None;
-        loop {
-            match wire.events.recv().await.unwrap().unwrap() {
-                AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
-                AgentEvent::Usage {
-                    input_tokens,
-                    output_tokens,
-                } => {
-                    usage = Some((input_tokens, output_tokens));
+    let (status, text, usage, context_usage) =
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut text = String::new();
+            let mut usage = None;
+            let mut context_usage = Vec::new();
+            loop {
+                match wire.events.recv().await.unwrap().unwrap() {
+                    AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
+                    AgentEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                    } => {
+                        usage = Some((input_tokens, output_tokens));
+                    }
+                    AgentEvent::ContextUsage { tokens, window } => {
+                        context_usage.push((tokens, window));
+                    }
+                    AgentEvent::Done { status, .. } => {
+                        return (status, text, usage, context_usage);
+                    }
+                    _ => {}
                 }
-                AgentEvent::Done { status, .. } => return (status, text, usage),
-                _ => {}
             }
-        }
-    })
-    .await
-    .unwrap();
+        })
+        .await
+        .unwrap();
     assert_eq!(status, DoneStatus::Completed);
     assert_eq!(text, "PONG");
-    assert_eq!(usage, Some((10, 2)));
+    assert_eq!(usage, Some((20, 3)));
+    assert_eq!(
+        context_usage,
+        vec![
+            (Some(12), Some(1000)),
+            (Some(28), Some(2000)),
+            (Some(0), Some(2000)),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -1430,7 +1470,8 @@ fn v2_frames_normalize_to_v1_payloads() {
             "type":"tool","tool":"read",
             "state":{"status":"running","input":{"path":"/tmp/x"}}}}})]
     );
-    // Usage totals reach the engine as an assistant message.updated.
+    // Usage totals reach the engine as an assistant message.updated and an
+    // explicit zero is distinguishable from an empty assistant placeholder.
     let out = normalize_v2_frame(
         json!({"id":"evt_9","type":"session.usage.updated","data":{
             "sessionID":"ses_1","cost":0,
@@ -1441,8 +1482,34 @@ fn v2_frames_normalize_to_v1_payloads() {
         out,
         vec![json!({"type":"message.updated","properties":{
             "info":{"sessionID":"ses_1","id":"usage","role":"assistant",
+                    "contextUsageUpdated":true,
                     "tokens":{"input":10,"output":2,"reasoning":0,
                               "cache":{"read":0,"write":0}}}}})]
+    );
+    // The usage frame omits model identity; the session's latest step
+    // supplies it so the context window resolves downstream.
+    let mut session_models = HashMap::new();
+    let step = normalize_v2_frame_with_session_models(
+        json!({"id":"evt_12","type":"session.step.started","data":{
+            "sessionID":"ses_2","assistantMessageID":"msg_b",
+            "model":{"id":"long-context","providerID":"opencode"}}}),
+        &mut tools,
+        &mut session_models,
+    );
+    assert_eq!(step.len(), 1);
+    let out = normalize_v2_frame_with_session_models(
+        json!({"id":"evt_13","type":"session.usage.updated","data":{
+            "sessionID":"ses_2","cost":0,"tokens":{"input":1,"output":2}}}),
+        &mut tools,
+        &mut session_models,
+    );
+    assert_eq!(
+        out,
+        vec![json!({"type":"message.updated","properties":{
+            "info":{"sessionID":"ses_2","id":"usage","role":"assistant",
+                    "contextUsageUpdated":true,
+                    "tokens":{"input":1,"output":2},
+                    "providerID":"opencode","modelID":"long-context"}}})]
     );
     // The permission ask keeps its 1.x name on 2.x (observed live when a
     // tool reaches outside the workspace); the auto-approver replies.
@@ -1770,6 +1837,29 @@ async fn v2_pending_tool_overflow_fails_the_run_instead_of_growing_forever() {
         wire.v2("session.tool.input.started",json!({"sessionID":"other","assistantMessageID":"m","id":format!("c{i}"),"name":"read"}));
     }
     assert_eq!(wire.done().await.0, DoneStatus::Errored);
+}
+
+#[tokio::test]
+async fn v2_session_model_overflow_drops_the_cache_instead_of_failing_the_run() {
+    let mut wire = TurnWire::start_proto(false, true).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
+    for i in 0..=MAX_V2_SESSION_MODELS {
+        wire.v2(
+            "session.step.started",
+            json!({
+                "sessionID": format!("other-{i}"),
+                "assistantMessageID": "m",
+                "model": {"id": "muse", "providerID": "opencode"},
+            }),
+        );
+    }
+    wire.v2(
+        "session.execution.succeeded",
+        json!({"sessionID": "fixture"}),
+    );
+    assert_eq!(wire.done().await.0, DoneStatus::Completed);
 }
 
 #[tokio::test]

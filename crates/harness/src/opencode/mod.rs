@@ -1586,23 +1586,7 @@ async fn run_session(session: Session) {
     let variant = model.as_ref().and_then(|(provider, model_id)| {
         pick_variant(&providers, provider, model_id, request.reasoning)
     });
-    let context_windows: HashMap<String, u64> = providers
-        .all
-        .iter()
-        .flatten()
-        .flat_map(|provider| {
-            provider
-                .models
-                .iter()
-                .flat_map(|models| models.iter())
-                .filter_map(|(id, model)| {
-                    Some((
-                        format!("{}/{}", provider.id.as_deref()?, id),
-                        model.limit.context.filter(|n| *n > 0)?,
-                    ))
-                })
-        })
-        .collect();
+    let context_catalog = ContextCatalog::from_providers(&providers);
     drop(providers);
 
     let mut assistant_message_id = new_message_id();
@@ -2162,7 +2146,7 @@ async fn run_session(session: Session) {
                             unbound_children: &mut unbound_children,
                             turn: &mut turn,
                             pending_usage: &mut pending_usage,
-                            context_windows: &context_windows,
+                            context_catalog: &context_catalog,
                         }).await;
                         match outcome {
                             BusOutcome::Continue => maybe_preempt!(),
@@ -2255,7 +2239,47 @@ async fn create_session(
     unreachable!("create_session retry loop returns from every path")
 }
 
-fn context_usage_event(info: &Value, context_windows: &HashMap<String, u64>) -> Option<AgentEvent> {
+/// Context limits as advertised by this run's provider catalog.
+///
+/// Presence and capacity are distinct facts: a model advertised WITHOUT a
+/// `limit.context` clears a stale window (`Some(0)`), while a model absent
+/// from the catalog — fetch failed, V2 sync race, unknown provider — leaves
+/// the previous window untouched (`None`). Collapsing both into "not in the
+/// map" is what made one transient catalog failure wipe a known capacity.
+#[derive(Debug, Default)]
+struct ContextCatalog {
+    /// `{provider}/{model}` -> advertised limit (`None` = none advertised).
+    models: HashMap<String, Option<u64>>,
+}
+
+impl ContextCatalog {
+    fn from_providers(providers: &ProviderCatalog) -> Self {
+        let mut models = HashMap::new();
+        for provider in providers.all.iter().flatten() {
+            let Some(provider_id) = provider.id.as_deref() else {
+                continue;
+            };
+            for (model_id, model) in provider.models.iter().flatten() {
+                models.insert(
+                    format!("{provider_id}/{model_id}"),
+                    model.limit.context.filter(|n| *n > 0),
+                );
+            }
+        }
+        Self { models }
+    }
+
+    /// `None` = unknown model (preserve the previous window), `Some(0)` =
+    /// advertised without a limit (clear it), `Some(n)` = advertised capacity.
+    fn window(&self, provider: &str, model: &str) -> Option<u64> {
+        self.models
+            .get(&format!("{provider}/{model}"))
+            .copied()
+            .map(|limit| limit.unwrap_or(0))
+    }
+}
+
+fn context_usage_event(info: &Value, context_catalog: &ContextCatalog) -> Option<AgentEvent> {
     let tokens = info.get("tokens")?;
     let counts: Vec<u64> = [
         tokens.get("input"),
@@ -2267,22 +2291,24 @@ fn context_usage_event(info: &Value, context_windows: &HashMap<String, u64>) -> 
     .flatten()
     .filter_map(Value::as_u64)
     .collect();
-    let tokens = tokens
-        .get("total")
-        .and_then(Value::as_u64)
+    let reported_total = tokens.get("total").and_then(Value::as_u64);
+    let tokens = reported_total
         .filter(|n| *n > 0)
         .or_else(|| {
             (!counts.is_empty()).then(|| counts.into_iter().fold(0u64, u64::saturating_add))
-        });
+        })
+        .or(reported_total);
     // New assistant placeholders carry zero counters before the request runs.
-    if tokens == Some(0) && info.pointer("/time/completed").is_none() {
+    let explicit_usage_update =
+        info.get("contextUsageUpdated").and_then(Value::as_bool) == Some(true);
+    if tokens == Some(0) && !explicit_usage_update && info.pointer("/time/completed").is_none() {
         return None;
     }
     let window = info
         .get("providerID")
         .and_then(Value::as_str)
         .zip(info.get("modelID").and_then(Value::as_str))
-        .and_then(|(provider, model)| context_windows.get(&format!("{provider}/{model}")).copied());
+        .and_then(|(provider, model)| context_catalog.window(provider, model));
     (tokens.is_some() || window.is_some()).then_some(AgentEvent::ContextUsage { tokens, window })
 }
 
@@ -2591,7 +2617,7 @@ struct BusCtx<'a> {
     unbound_children: &'a mut HashMap<String, String>,
     turn: &'a mut TurnState,
     pending_usage: &'a mut Option<AgentEvent>,
-    context_windows: &'a HashMap<String, u64>,
+    context_catalog: &'a ContextCatalog,
 }
 
 /// Wrap an event as subagent-attributed traffic.
@@ -2642,7 +2668,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
         unbound_children,
         turn,
         pending_usage,
-        context_windows,
+        context_catalog,
     } = ctx;
     // Envelope styles: /global/event wraps ({payload: {...}}); a bare
     // /event feed (tests) delivers the payload directly.
@@ -2818,7 +2844,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 if role == "assistant"
                     && let Some(tokens) = info.get("tokens")
                 {
-                    if let Some(usage) = context_usage_event(info, context_windows)
+                    if let Some(usage) = context_usage_event(info, context_catalog)
                         && !send(event_tx, usage).await
                     {
                         return BusOutcome::ConsumerGone;
@@ -3660,10 +3686,37 @@ fn oc_tool_call(name: &str, input: &Value) -> ToolCall {
 /// - usage: `session.usage.updated` with the cumulative token totals.
 ///
 /// `tool_names` tracks pending calls by session, message, and provider call id.
+/// `session_models` remembers the latest model for usage frames, which omit it.
 type V2ToolKey = (String, String, String);
 const MAX_PENDING_V2_TOOLS: usize = 4096;
+/// Cache cap; overflow clears the cache instead of failing the run.
+const MAX_V2_SESSION_MODELS: usize = 4096;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct V2ModelIdentity {
+    provider_id: String,
+    model_id: String,
+}
+
+fn v2_model_identity(model: &Value) -> Option<V2ModelIdentity> {
+    let provider_id = model.get("providerID")?.as_str()?;
+    let model_id = model.get("id")?.as_str()?;
+    (!provider_id.is_empty() && !model_id.is_empty()).then(|| V2ModelIdentity {
+        provider_id: provider_id.to_owned(),
+        model_id: model_id.to_owned(),
+    })
+}
+
+#[cfg(test)]
 fn normalize_v2_frame(event: Value, tool_names: &mut HashMap<V2ToolKey, String>) -> Vec<Value> {
+    normalize_v2_frame_with_session_models(event, tool_names, &mut HashMap::new())
+}
+
+fn normalize_v2_frame_with_session_models(
+    event: Value,
+    tool_names: &mut HashMap<V2ToolKey, String>,
+    session_models: &mut HashMap<String, V2ModelIdentity>,
+) -> Vec<Value> {
     let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
     let data = event.get("data").cloned().unwrap_or(Value::Null);
     if data
@@ -3761,12 +3814,20 @@ fn normalize_v2_frame(event: Value, tool_names: &mut HashMap<V2ToolKey, String>)
             warning["type"] = json!("session.warning");
             vec![warning]
         }
-        "session.step.started" => vec![json!({
-            "type": "message.updated",
-            "properties": {
-                "info": { "sessionID": session(), "id": message(), "role": "assistant" }
+        "session.step.started" => {
+            if let (Some(session_id), Some(model)) = (
+                data.get("sessionID").and_then(Value::as_str),
+                data.get("model").and_then(v2_model_identity),
+            ) {
+                session_models.insert(session_id.to_owned(), model);
             }
-        })],
+            vec![json!({
+                "type": "message.updated",
+                "properties": {
+                    "info": { "sessionID": session(), "id": message(), "role": "assistant" }
+                }
+            })]
+        }
         "session.text.started" | "session.text.ended" => {
             vec![v2_stream_part(
                 &data,
@@ -3855,20 +3916,28 @@ fn normalize_v2_frame(event: Value, tool_names: &mut HashMap<V2ToolKey, String>)
             if tokens.is_null() {
                 return Vec::new();
             }
-            // Cumulative totals keyed to a synthetic message: registers
-            // Usage + ContextUsage exactly like the 1.x assistant
-            // message.updated did. (No providerID/modelID on this frame —
-            // the context window is dropped.)
+            // The usage frame omits model identity; use the latest step's
+            // model for this session so its advertised context limit resolves.
+            let mut info = json!({
+                "sessionID": session(),
+                "id": "usage",
+                "role": "assistant",
+                "tokens": tokens,
+                // Unlike an empty message placeholder, this is an explicit
+                // usage update and a reported zero must clear prior occupancy.
+                "contextUsageUpdated": true,
+            });
+            if let Some(model) = data
+                .get("sessionID")
+                .and_then(Value::as_str)
+                .and_then(|id| session_models.get(id))
+            {
+                info["providerID"] = json!(model.provider_id);
+                info["modelID"] = json!(model.model_id);
+            }
             vec![json!({
                 "type": "message.updated",
-                "properties": {
-                    "info": {
-                        "sessionID": session(),
-                        "id": "usage",
-                        "role": "assistant",
-                        "tokens": tokens,
-                    }
-                }
+                "properties": { "info": info }
             })]
         }
         "session.created" => {
@@ -4000,6 +4069,8 @@ async fn bus_task(
         Protocol::V2 => format!("{base}/api/event"),
     };
     let mut failures: u32 = 0;
+    let mut v2_tool_names: HashMap<V2ToolKey, String> = HashMap::new();
+    let mut v2_session_models: HashMap<String, V2ModelIdentity> = HashMap::new();
     loop {
         if tx.is_closed() {
             return;
@@ -4013,7 +4084,14 @@ async fn bus_task(
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
                 failures = 0;
-                stream_bus(&tx, resp, protocol).await;
+                stream_bus(
+                    &tx,
+                    resp,
+                    protocol,
+                    &mut v2_tool_names,
+                    &mut v2_session_models,
+                )
+                .await;
                 if tx.is_closed() {
                     return;
                 }
@@ -4031,13 +4109,16 @@ async fn bus_task(
     }
 }
 
-async fn stream_bus(tx: &mpsc::Sender<BusMsg>, resp: reqwest::Response, protocol: Protocol) {
+async fn stream_bus(
+    tx: &mpsc::Sender<BusMsg>,
+    resp: reqwest::Response,
+    protocol: Protocol,
+    v2_tool_names: &mut HashMap<V2ToolKey, String>,
+    v2_session_models: &mut HashMap<String, V2ModelIdentity>,
+) {
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     let mut announced = false;
-    // 2.x names a tool only when its input starts streaming; the later
-    // called/success frames carry the call id alone.
-    let mut v2_tool_names: HashMap<V2ToolKey, String> = HashMap::new();
     while let Some(chunk) = stream.next().await {
         let Ok(bytes) = chunk else {
             return;
@@ -4066,10 +4147,22 @@ async fn stream_bus(tx: &mpsc::Sender<BusMsg>, resp: reqwest::Response, protocol
                     continue;
                 };
                 if protocol == Protocol::V2 {
-                    let payloads = normalize_v2_frame(event, &mut v2_tool_names);
+                    let payloads = normalize_v2_frame_with_session_models(
+                        event,
+                        v2_tool_names,
+                        v2_session_models,
+                    );
                     if v2_tool_names.len() > MAX_PENDING_V2_TOOLS {
                         let _ = tx.send(BusMsg::Disconnected).await;
                         return;
+                    }
+                    // Model identity only feeds usage frames. Dropping the
+                    // cache degrades to "window preserved" and refills on the
+                    // next step.started, so — unlike leaked pending tools — it
+                    // must not fail the run, especially now that the cache
+                    // survives reconnects.
+                    if v2_session_models.len() > MAX_V2_SESSION_MODELS {
+                        v2_session_models.clear();
                     }
                     for payload in payloads {
                         if tx.send(BusMsg::Event(payload)).await.is_err() {
@@ -4090,9 +4183,19 @@ mod tests;
 #[cfg(test)]
 mod context_tests {
     use super::*;
+
+    fn catalog(entries: &[(&str, Option<u64>)]) -> ContextCatalog {
+        ContextCatalog {
+            models: entries
+                .iter()
+                .map(|(key, limit)| ((*key).to_owned(), *limit))
+                .collect(),
+        }
+    }
+
     #[test]
     fn context_includes_cache_and_uses_reported_model_limit() {
-        let windows = HashMap::from([("provider/model".into(), 200000)]);
+        let windows = catalog(&[("provider/model", Some(200_000))]);
         let info = json!({"providerID":"provider","modelID":"model", "tokens": {
             "input": 200, "output": 100, "reasoning": 50, "cache": {"read":40000,"write":1800}
         }});
@@ -4114,6 +4217,46 @@ mod context_tests {
             ),
             Some(AgentEvent::ContextUsage {
                 tokens: Some(0),
+                window: None
+            })
+        );
+        assert_eq!(
+            context_usage_event(
+                &json!({"providerID":"provider","modelID":"model",
+                       "contextUsageUpdated":true,"tokens":{"total":0}}),
+                &windows
+            ),
+            Some(AgentEvent::ContextUsage {
+                tokens: Some(0),
+                window: Some(200000)
+            })
+        );
+    }
+
+    #[test]
+    fn known_model_without_a_context_limit_clears_the_previous_window() {
+        let windows = catalog(&[("provider/unknown", None)]);
+        let info = json!({"providerID":"provider","modelID":"unknown",
+                          "tokens":{"input":10,"output":2}});
+        assert_eq!(
+            context_usage_event(&info, &windows),
+            Some(AgentEvent::ContextUsage {
+                tokens: Some(12),
+                window: Some(0)
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_model_preserves_the_previous_window() {
+        // A catalog that failed to load (or lags the 2.x model sync)
+        // advertises nothing; an absent model must not read as "no limit".
+        let info = json!({"providerID":"provider","modelID":"unknown",
+                          "tokens":{"input":10,"output":2}});
+        assert_eq!(
+            context_usage_event(&info, &ContextCatalog::default()),
+            Some(AgentEvent::ContextUsage {
+                tokens: Some(12),
                 window: None
             })
         );
