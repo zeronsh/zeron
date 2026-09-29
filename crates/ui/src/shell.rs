@@ -9091,13 +9091,7 @@ impl Shell {
                 this.open_pull_requests(cx);
                 cx.notify();
             }))
-            .tooltip(|_, cx| {
-                cx.new(|_| WindowControlTooltip {
-                    label: "Pull requests",
-                })
-                .into()
-            })
-            .tooltip_show_delay(Duration::from_millis(350))
+            .tooltip(crate::settings::widgets::text_tooltip("Pull requests"))
             .child(icon(icons::PULL_REQUEST).size(px(15.0)).text_color(
                 if matches!(self.route, Route::PullRequests) {
                     theme.text
@@ -12615,27 +12609,6 @@ fn window_control_button_with_options(
         .when_some(options.tooltip, |button, label| {
             button.tooltip(crate::settings::widgets::text_tooltip(label))
         })
-}
-
-struct WindowControlTooltip {
-    label: &'static str,
-}
-
-impl Render for WindowControlTooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        div()
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(5.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .shadow_md()
-            .text_size(px(11.0))
-            .text_color(theme.text_muted)
-            .child(self.label)
-    }
 }
 
 const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;

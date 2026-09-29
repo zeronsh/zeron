@@ -189,7 +189,7 @@ impl PullRequestDetailPage {
                         .text_color(theme.text_muted),
                 )
                 .child(kind.label())
-                .tooltip(move |_, cx| cx.new(|_| PrActionTooltip(summary)).into())
+                .tooltip(widgets::text_tooltip(summary))
                 .on_click(move |_, window, cx| {
                     window.dispatch_action(Box::new(StartPullRequestSession(prompt.clone())), cx)
                 })

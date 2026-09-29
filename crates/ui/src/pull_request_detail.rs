@@ -915,23 +915,6 @@ fn activity_time(raw: &str) -> String {
         .unwrap_or_else(|_| raw.to_owned())
 }
 
-struct PrActionTooltip(&'static str);
-
-impl Render for PrActionTooltip {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        div()
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(5.0))
-            .bg(theme.surface_raised)
-            .text_color(theme.text)
-            .shadow_md()
-            .text_size(crate::typography::ui_rems(11.0))
-            .child(self.0)
-    }
-}
-
 fn action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let icon_only = matches!(
         id,
@@ -987,7 +970,7 @@ fn action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Statefu
                 .px_0()
                 .py_0()
                 .justify_center()
-                .tooltip(move |_, cx| cx.new(|_| PrActionTooltip(label)).into())
+                .tooltip(widgets::text_tooltip(label))
         })
         .children(glyph.map(|glyph| {
             crate::icons::icon(glyph)
