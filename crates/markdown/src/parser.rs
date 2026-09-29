@@ -31,9 +31,9 @@ pub struct InlineStyle {
     /// Destination URL when inside a link.
     pub link: Option<String>,
     /// The label to show instead of `text` for a file link whose text is the
-    /// path itself (an inline-code span or a bare path) rather than a label
-    /// the author wrote. `None` shows `text`; set, copy and selection still
-    /// map back to `text`.
+    /// path itself (an inline-code span) rather than a label the author
+    /// wrote. Never set by the parser; `None` shows `text`. When set, copy
+    /// and selection still map back to `text`.
     pub file_label: Option<String>,
     pub image: Option<InlineImage>,
     pub task: Option<TaskMarker>,

@@ -34,10 +34,6 @@ name = "appshots-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
-name = "link-basename-fixture"
-required-features = ["appshots-fixture"]
-
-[[example]]
 name = "new-project-fixture"
 required-features = ["project-palette-fixture"]
 
