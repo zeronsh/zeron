@@ -11,7 +11,7 @@ use gpui::{
     Subscription, Task, Window, div, prelude::*, px,
 };
 use zeron_proto::{
-    ChangeRequestFilter, ChangeRequestListItem, ChangeRequestMergeability,
+    ChangeRequestFilter, ChangeRequestListItem, ChangeRequestMergeability, ChangeRequestPage,
     ChangeRequestReviewDecision, Device,
 };
 use zeron_rpc::{RpcError, capability_errors, methods};
@@ -27,6 +27,13 @@ const PR_PAGE_MAX_WIDTH: f32 = 760.0;
 const PR_PAGE_HORIZONTAL_PADDING: f32 = 40.0;
 const PR_TABLE_ROW_HEIGHT: f32 = 64.0;
 const PR_SCROLL_FADE_BAND: f32 = 24.0;
+
+/// Where the loaded listing stands relative to everything GitHub matched.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Paging {
+    next_cursor: Option<String>,
+    total: Option<u64>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PullRequestsPageError {
@@ -201,7 +208,12 @@ pub struct PullRequestsPage {
         (Option<String>, String, ChangeRequestFilter),
         Vec<ChangeRequestListItem>,
         Instant,
+        Paging,
     )>,
+    paging: Paging,
+    /// The next page, while it loads; `None` when idle.
+    more_task: Option<Task<()>>,
+    more_error: Option<PullRequestsPageError>,
     selected_url: Option<String>,
     collapsed_groups: HashSet<PullRequestGroup>,
     group_motions: HashMap<PullRequestGroup, crate::motion::DisclosureMotion>,
@@ -286,6 +298,9 @@ impl PullRequestsPage {
             initial_scope_task: None,
             _repository_events: repository_events,
             snapshots: Vec::new(),
+            paging: Paging::default(),
+            more_task: None,
+            more_error: None,
             selected_url: None,
             collapsed_groups: HashSet::new(),
             group_motions: HashMap::new(),
@@ -457,6 +472,9 @@ impl PullRequestsPage {
         self.collapsed_groups.clear();
         self.group_motions.clear();
         self.items.clear();
+        self.paging = Paging::default();
+        self.more_task = None;
+        self.more_error = None;
         self.view_items = None;
         self.load_state = PullRequestsLoadState::Idle;
         self.last_loaded_at = None;
@@ -471,13 +489,14 @@ impl PullRequestsPage {
         if let Some(index) = self
             .snapshots
             .iter()
-            .position(|((target, repo, filter), _, _)| {
+            .position(|((target, repo, filter), ..)| {
                 target == &self.target_device && repo == repository && filter == &self.filter
             })
         {
             let snapshot = self.snapshots.remove(index);
             self.items = snapshot.1.clone();
             self.last_loaded_at = Some(snapshot.2);
+            self.paging = snapshot.3.clone();
             self.load_state = PullRequestsLoadState::Ready;
             self.snapshots.push(snapshot);
         }
@@ -693,8 +712,8 @@ impl PullRequestsPage {
                 .snapshots
                 .iter()
                 .rev()
-                .filter(|((target, _, _), _, _)| target == &self.target_device)
-                .map(|((_, repo, _), _, _)| repo.clone())
+                .filter(|((target, _, _), ..)| target == &self.target_device)
+                .map(|((_, repo, _), ..)| repo.clone())
                 .collect();
             let mut seen = HashSet::new();
             recent.retain(|repo| seen.insert(repo.clone()));
@@ -963,25 +982,28 @@ impl PullRequestsPage {
         params["refresh"] = refresh.into();
         params["filter"] = serde_json::to_value(self.filter).unwrap();
         self.load_state = PullRequestsLoadState::Loading;
+        // A reload starts over from the first page.
+        self.more_task = None;
+        self.more_error = None;
         self.request_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::LIST_FILTERED_CHANGE_REQUESTS, params)
-                .await;
+            let result = fetch_page(&engine, params).await;
             this.update(cx, |page, cx| {
                 if !response_is_current(page.generation, generation) {
                     return;
                 }
 
                 page.request_task = None;
-                let loaded = match result {
-                    Ok(value) => serde_json::from_value::<Vec<ChangeRequestListItem>>(value)
-                        .map_err(|_| PullRequestsPageError::Network),
-                    Err(error) => Err(map_rpc_error(&error, &target_name)),
-                };
+                let loaded = result.map_err(|error| map_rpc_error(&error, &target_name));
+                let paging = loaded.as_ref().ok().map(|page| Paging {
+                    next_cursor: page.next_cursor.clone(),
+                    total: page.total_count,
+                });
                 let succeeded = loaded.is_ok();
-                page.load_state = settle_snapshot(&mut page.items, loaded);
+                page.load_state = settle_snapshot(&mut page.items, loaded.map(|page| page.items));
                 page.view_items = None;
+                if let Some(paging) = paging {
+                    page.paging = paging;
+                }
                 if succeeded {
                     if let Some(first) = page.items.first()
                         && valid_repository_filter(&first.repository)
@@ -1012,17 +1034,145 @@ impl PullRequestsPage {
                         page.repository.clone().unwrap(),
                         page.filter,
                     );
-                    page.snapshots.retain(|(existing, _, _)| existing != &key);
-                    page.snapshots.push((key, page.items.clone(), now));
-                    if page.snapshots.len() > 12 {
-                        page.snapshots.remove(0);
-                    }
+                    page.store_snapshot(now);
                 }
                 cx.notify();
             })
             .ok();
         }));
         cx.notify();
+    }
+
+    fn store_snapshot(&mut self, at: Instant) {
+        let Some(repository) = self.repository.clone() else {
+            return;
+        };
+        let key = (self.target_device.clone(), repository, self.filter);
+        self.snapshots.retain(|(existing, ..)| existing != &key);
+        self.snapshots
+            .push((key, self.items.clone(), at, self.paging.clone()));
+        if self.snapshots.len() > 12 {
+            self.snapshots.remove(0);
+        }
+    }
+
+    /// Append the next page. Items already on the board keep their place;
+    /// a PR that moved between pages since the first load is not repeated.
+    fn load_more(&mut self, cx: &mut Context<Self>) {
+        let Some(cursor) = self.paging.next_cursor.clone() else {
+            return;
+        };
+        if self.more_task.is_some()
+            || self.repository.is_none()
+            || matches!(self.load_state, PullRequestsLoadState::Loading)
+        {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.more_error = Some(PullRequestsPageError::Network);
+            cx.notify();
+            return;
+        };
+        let target_name = selected_device_name(&self.state.read(cx), self.target_device.as_deref());
+        let generation = self.generation;
+        let mut params = params_for_target(self.target_device.as_deref());
+        params["repository"] = self.repository.clone().unwrap().into();
+        params["filter"] = serde_json::to_value(self.filter).unwrap();
+        params["after"] = cursor.into();
+        self.more_error = None;
+        self.more_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::LIST_CHANGE_REQUEST_PAGE, params)
+                .await
+                .and_then(|value| {
+                    serde_json::from_value::<ChangeRequestPage>(value)
+                        .map_err(|error| RpcError::Failed(error.to_string()))
+                });
+            this.update(cx, |page, cx| {
+                if !response_is_current(page.generation, generation) {
+                    return;
+                }
+                page.more_task = None;
+                match result {
+                    Ok(next) => {
+                        let known: HashSet<String> =
+                            page.items.iter().map(|item| item.url.clone()).collect();
+                        page.items.extend(
+                            next.items
+                                .into_iter()
+                                .filter(|item| !known.contains(&item.url)),
+                        );
+                        page.paging = Paging {
+                            next_cursor: next.next_cursor,
+                            total: next.total_count.or(page.paging.total),
+                        };
+                        page.view_items = None;
+                        page.store_snapshot(page.last_loaded_at.unwrap_or_else(Instant::now));
+                    }
+                    Err(error) => page.more_error = Some(map_rpc_error(&error, &target_name)),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// "Load more" beneath the last group, with the remaining count when
+    /// GitHub reports it.
+    fn render_load_more(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.paging.next_cursor.as_ref()?;
+        let loading = self.more_task.is_some();
+        let remaining = self
+            .paging
+            .total
+            .map(|total| total.saturating_sub(self.items.len() as u64))
+            .filter(|remaining| *remaining > 0);
+        let label = match (loading, remaining) {
+            (true, _) => "Loading more…".to_owned(),
+            (false, Some(remaining)) => format!("Load {} more", remaining.min(50)),
+            (false, None) => "Load more".to_owned(),
+        };
+        Some(
+            div()
+                .mt(px(Theme::SPACE_LG))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(Theme::SPACE_SM))
+                .when_some(self.more_error.as_ref(), |el, error| {
+                    let (title, body) = error_copy(error);
+                    el.child(widgets::error_strip(theme, format!("{title}. {body}")))
+                })
+                .child(
+                    widgets::ghost_action(theme)
+                        .id("pull-requests-load-more")
+                        .debug_selector(|| "pull-requests-load-more".to_string())
+                        .role(gpui::Role::Button)
+                        .aria_label(label.clone())
+                        .tab_index(0)
+                        .h(px(32.0))
+                        .px(px(14.0))
+                        .border_1()
+                        .border_color(theme.border)
+                        .focus_visible(|style| style.border_color(theme.accent))
+                        .when(loading, |el| el.opacity(0.6))
+                        .gap(px(8.0))
+                        .when(loading, |el| {
+                            el.child(crate::loaders::mini_glyph_spinner(
+                                "pull-requests-more-spinner",
+                                1.5,
+                                theme.glyph,
+                                cx.entity_id(),
+                                cx,
+                            ))
+                        })
+                        .child(label)
+                        .on_click(cx.listener(|page, _, _, cx| page.load_more(cx))),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_device_switcher(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -1256,7 +1406,11 @@ impl Render for PullRequestsPage {
         let count = (!initial_loading
             && !matches!(self.load_state, PullRequestsLoadState::Failed(_))
             || !self.items.is_empty())
-        .then_some(self.items.len());
+        .then(|| {
+            self.paging.total.map_or(self.items.len(), |total| {
+                (total as usize).max(self.items.len())
+            })
+        });
         let items = self
             .view_items
             .get_or_insert_with(|| {
@@ -1328,13 +1482,15 @@ impl Render for PullRequestsPage {
                     .flex_wrap()
                     .gap(px(12.0))
                     .child(widgets::page_header(&theme, "Pull requests", count).when(
-                        self.items.len() == 50,
+                        self.paging.next_cursor.is_some(),
                         |el| {
                             el.child(
                                 div()
+                                    .id("pull-requests-loaded-count")
+                                    .debug_selector(|| "pull-requests-loaded-count".into())
                                     .text_size(px(11.0))
                                     .text_color(theme.text_muted)
-                                    .child("latest 50"),
+                                    .child(format!("{} loaded", self.items.len())),
                             )
                         },
                     ))
@@ -1512,11 +1668,15 @@ impl Render for PullRequestsPage {
                         .mt(px(Theme::SPACE_SM))
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_muted)
-                        .child(format!(
-                            "{} of {} pull requests",
-                            items.len(),
-                            self.items.len()
-                        )),
+                        .child(if self.paging.next_cursor.is_some() {
+                            format!(
+                                "{} of {} loaded pull requests · load more to search further",
+                                items.len(),
+                                self.items.len()
+                            )
+                        } else {
+                            format!("{} of {} pull requests", items.len(), self.items.len())
+                        }),
                 )
             });
         let content = if initial_loading {
@@ -1566,6 +1726,9 @@ impl Render for PullRequestsPage {
                 cx,
             )
         };
+        let load_more = (!initial_loading && !self.items.is_empty())
+            .then(|| self.render_load_more(&theme, cx))
+            .flatten();
         let scrollbar = popover::rail(self, "pull-requests-scrollbar", &theme, cx);
         if self.filter_fades.tick_at(Instant::now())
             || self.group_motions.values().any(|motion| motion.animating())
@@ -1613,7 +1776,8 @@ impl Render for PullRequestsPage {
                                         .pt(px(8.0))
                                         .pb(px(32.0))
                                         .child(width_probe)
-                                        .child(content),
+                                        .child(content)
+                                        .children(load_more),
                                 ),
                         )
                         .fade_overflow_y(&scroll),
@@ -2266,6 +2430,36 @@ fn response_is_current(current: u64, response: u64) -> bool {
     current == response
 }
 
+/// The first page, from the paged method or, on engines that predate it,
+/// the single-page listing.
+async fn fetch_page(
+    engine: &crate::state::EngineHandle,
+    params: serde_json::Value,
+) -> Result<ChangeRequestPage, RpcError> {
+    let decode = |error: serde_json::Error| RpcError::Failed(error.to_string());
+    match engine
+        .client()
+        .call(methods::LIST_CHANGE_REQUEST_PAGE, params.clone())
+        .await
+    {
+        Ok(value) => serde_json::from_value(value).map_err(decode),
+        Err(RpcError::UnknownMethod(_)) => {
+            let value = engine
+                .client()
+                .call(methods::LIST_FILTERED_CHANGE_REQUESTS, params)
+                .await?;
+            let items: Vec<ChangeRequestListItem> =
+                serde_json::from_value(value).map_err(decode)?;
+            Ok(ChangeRequestPage {
+                items,
+                next_cursor: None,
+                total_count: None,
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn settle_snapshot<T>(
     snapshot: &mut Vec<T>,
     result: Result<Vec<T>, PullRequestsPageError>,
@@ -2377,6 +2571,7 @@ mod tests {
                 ),
                 vec![pull_request("saved/repo", 10, 1, 1, 1)],
                 Instant::now(),
+                Paging::default(),
             ));
             page.apply_initial_repository("saved/repo".into(), Some("remote".into()), cx);
             assert_eq!(page.items[0].number, 10);
@@ -2413,6 +2608,7 @@ mod tests {
                 (None, "acme/zeron".into(), ChangeRequestFilter::Authored),
                 vec![pull_request("acme/zeron", 10, 1, 1, 1)],
                 Instant::now(),
+                Paging::default(),
             ));
             page.repository_input
                 .update(cx, |input, cx| input.set_text("ACME/ZERON", cx));
@@ -2457,10 +2653,14 @@ mod tests {
                     }
                     zeron_rpc::RpcReply::value(&Some("owner/repo"))
                 }
-                methods::LIST_FILTERED_CHANGE_REQUESTS => {
+                methods::LIST_CHANGE_REQUEST_PAGE => {
                     assert_eq!(params["repository"], "owner/repo");
                     assert_eq!(params["filter"], "authored");
-                    zeron_rpc::RpcReply::value(&vec![pull_request("owner/canonical", 7, 1, 1, 1)])
+                    zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                        items: vec![pull_request("owner/canonical", 7, 1, 1, 1)],
+                        next_cursor: None,
+                        total_count: Some(1),
+                    })
                 }
                 _ => panic!("unexpected request {method}"),
             }
@@ -2540,7 +2740,7 @@ mod tests {
             *calls.lock().unwrap(),
             [
                 methods::GET_CHANGE_REQUEST_REPOSITORY,
-                methods::LIST_FILTERED_CHANGE_REQUESTS
+                methods::LIST_CHANGE_REQUEST_PAGE
             ]
         );
         calls.lock().unwrap().clear();
@@ -2565,7 +2765,7 @@ mod tests {
             *calls.lock().unwrap(),
             [
                 methods::GET_CHANGE_REQUEST_REPOSITORY,
-                methods::LIST_FILTERED_CHANGE_REQUESTS
+                methods::LIST_CHANGE_REQUEST_PAGE
             ]
         );
     }
@@ -2648,7 +2848,7 @@ mod tests {
             *calls.lock().unwrap(),
             [
                 methods::GET_CHANGE_REQUEST_REPOSITORY,
-                methods::LIST_FILTERED_CHANGE_REQUESTS
+                methods::LIST_CHANGE_REQUEST_PAGE
             ]
         );
     }
@@ -2722,10 +2922,7 @@ mod tests {
             page.on_visible(cx);
         });
         cx.run_until_parked();
-        assert_eq!(
-            *calls.lock().unwrap(),
-            [methods::LIST_FILTERED_CHANGE_REQUESTS]
-        );
+        assert_eq!(*calls.lock().unwrap(), [methods::LIST_CHANGE_REQUEST_PAGE]);
     }
 
     #[gpui::test]
@@ -2746,6 +2943,7 @@ mod tests {
                     (None, "owner/repo".into(), filter),
                     vec![pull_request("owner/repo", number, 1, 1, 1)],
                     Instant::now(),
+                    Paging::default(),
                 ));
             }
             for (filter, number) in [
@@ -3253,5 +3451,206 @@ mod tests {
     fn visible_device_names_and_titles_are_sanitized() {
         assert_eq!(single_line("MacBook\n Pro"), "MacBook Pro");
         assert_eq!(single_line(&"a".repeat(200)), "a".repeat(200));
+    }
+
+    /// Serves two pages from the paged method, or only the legacy listing.
+    struct PagedRpc {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>,
+        legacy: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl zeron_rpc::RpcService for PagedRpc {
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
+            let after = params["after"].as_str().map(str::to_owned);
+            self.calls
+                .lock()
+                .unwrap()
+                .push((method.into(), after.clone()));
+            match (method, after.as_deref()) {
+                (methods::LIST_CHANGE_REQUEST_PAGE, _) if self.legacy => {
+                    Err(RpcError::UnknownMethod(method.into()))
+                }
+                (methods::LIST_CHANGE_REQUEST_PAGE, None) => {
+                    zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                        items: (1..=50)
+                            .map(|n| pull_request("owner/repo", n, 1, 1, 1))
+                            .collect(),
+                        next_cursor: Some("Y3Vyc29yOjUw".into()),
+                        total_count: Some(52),
+                    })
+                }
+                (methods::LIST_CHANGE_REQUEST_PAGE, Some("Y3Vyc29yOjUw")) => {
+                    zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                        // #50 moved onto the second page; it must not repeat.
+                        items: [50, 51, 52]
+                            .map(|n| pull_request("owner/repo", n, 1, 1, 1))
+                            .into(),
+                        next_cursor: None,
+                        total_count: Some(52),
+                    })
+                }
+                (methods::LIST_FILTERED_CHANGE_REQUESTS, None) => {
+                    zeron_rpc::RpcReply::value(&vec![pull_request("owner/repo", 1, 1, 1, 1)])
+                }
+                _ => panic!("unexpected request {method} {after:?}"),
+            }
+        }
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn paged_page(
+        cx: &mut gpui::TestAppContext,
+        legacy: bool,
+    ) -> (
+        Entity<PullRequestsPage>,
+        &mut gpui::VisualTestContext,
+        std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>,
+    ) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = zeron_rpc::memory_client(std::sync::Arc::new(PagedRpc {
+            calls: calls.clone(),
+            legacy,
+        }));
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.set_test_engine(crate::state::EngineHandle::from_test_client(client));
+                state
+            });
+            PullRequestsPage::new(state, cx)
+        });
+        page.update(cx, |page, cx| {
+            page.repository = Some("owner/repo".into());
+            page.load(false, cx);
+        });
+        (page, cx, calls)
+    }
+
+    fn settle(
+        cx: &mut gpui::VisualTestContext,
+        runtime: &tokio::runtime::Runtime,
+        done: impl Fn(&PullRequestsPage) -> bool,
+        page: &Entity<PullRequestsPage>,
+    ) {
+        for _ in 0..100 {
+            cx.run_until_parked();
+            if page.read_with(cx, |page, _| done(page)) {
+                return;
+            }
+            runtime.block_on(async { tokio::task::yield_now().await });
+        }
+    }
+
+    #[gpui::test]
+    fn pull_request_board_loads_more_pages_without_repeating_items(cx: &mut gpui::TestAppContext) {
+        let runtime = runtime();
+        let _guard = runtime.enter();
+        let (page, cx, calls) = paged_page(cx, false);
+        settle(
+            cx,
+            &runtime,
+            |page| page.load_state == PullRequestsLoadState::Ready,
+            &page,
+        );
+        cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+        cx.run_until_parked();
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.items.len(), 50);
+            assert_eq!(page.paging.total, Some(52));
+        });
+        assert!(cx.debug_bounds("pull-requests-loaded-count").is_some());
+        page.update(cx, |page, cx| {
+            let bottom = page.scroll.scroll.max_offset().y;
+            page.scroll.scroll.set_offset(gpui::point(px(0.0), -bottom));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let more = cx.debug_bounds("pull-requests-load-more").unwrap();
+        assert!(
+            more.bottom() <= px(800.0),
+            "the button is reachable at the end of the list"
+        );
+        cx.simulate_mouse_down(
+            more.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            more.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        settle(
+            cx,
+            &runtime,
+            |page| page.more_task.is_none() && page.items.len() > 50,
+            &page,
+        );
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.items.len(), 52, "the moved #50 appears once");
+            assert_eq!(page.paging.next_cursor, None);
+            assert_eq!(
+                page.snapshots.last().unwrap().1.len(),
+                52,
+                "snapshots keep every page"
+            );
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pull-requests-load-more").is_none(),
+            "the last page ends the list"
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                (methods::LIST_CHANGE_REQUEST_PAGE.to_owned(), None),
+                (
+                    methods::LIST_CHANGE_REQUEST_PAGE.to_owned(),
+                    Some("Y3Vyc29yOjUw".to_owned())
+                ),
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn pull_request_board_falls_back_on_engines_without_paging(cx: &mut gpui::TestAppContext) {
+        let runtime = runtime();
+        let _guard = runtime.enter();
+        let (page, cx, calls) = paged_page(cx, true);
+        settle(
+            cx,
+            &runtime,
+            |page| page.load_state == PullRequestsLoadState::Ready,
+            &page,
+        );
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.paging, Paging::default());
+        });
+        assert!(cx.debug_bounds("pull-requests-load-more").is_none());
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            [
+                methods::LIST_CHANGE_REQUEST_PAGE,
+                methods::LIST_FILTERED_CHANGE_REQUESTS
+            ]
+        );
     }
 }
