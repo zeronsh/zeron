@@ -1651,6 +1651,27 @@ async fn pull_request_list_dispatch_returns_provider_items() {
         .unwrap();
 
     assert_eq!(listed, vec![item.clone()]);
+    let page: zeron_proto::ChangeRequestPage = client
+        .call_as(
+            zeron_rpc::methods::LIST_CHANGE_REQUEST_PAGE,
+            serde_json::json!({ "repository": "acme/zeron", "filter": "reviewing", "targetDeviceId": core.device_id }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.items, vec![item.clone()]);
+    assert_eq!(
+        page.next_cursor, None,
+        "single-page providers end the listing"
+    );
+    assert!(
+        client
+            .call(
+                zeron_rpc::methods::LIST_CHANGE_REQUEST_PAGE,
+                serde_json::json!({ "repository": "acme/zeron", "after": "a b" }),
+            )
+            .await
+            .is_err()
+    );
     let detail: zeron_proto::ChangeRequestDetail = client
         .call_as(
             zeron_rpc::methods::GET_CHANGE_REQUEST,

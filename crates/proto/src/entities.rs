@@ -890,6 +890,17 @@ pub struct ChangeRequestListItem {
     pub updated_at: DateTime<Utc>,
 }
 
+/// One page of a repository-scoped listing, newest updates first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChangeRequestPage {
+    pub items: Vec<ChangeRequestListItem>,
+    /// Opaque provider cursor for the following page; `None` on the last one.
+    pub next_cursor: Option<String>,
+    /// Every match for the query, when the provider reports it.
+    pub total_count: Option<u64>,
+}
+
 /// Read-only GitHub detail response. Optional collections tolerate absent provider data.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]

@@ -201,6 +201,9 @@ pub mod methods {
     pub const LIST_REPOSITORY_CHANGE_REQUESTS: &str = "ListRepositoryChangeRequests";
     /// Filter-aware contract; older engines must not silently return authored results.
     pub const LIST_FILTERED_CHANGE_REQUESTS: &str = "ListFilteredChangeRequests";
+    /// Paged filter-aware listing (`after` cursor, total count). Clients fall
+    /// back to [`LIST_FILTERED_CHANGE_REQUESTS`] when an older engine rejects it.
+    pub const LIST_CHANGE_REQUEST_PAGE: &str = "ListChangeRequestPage";
     /// Resolve a selected checkout through local Git metadata only.
     pub const GET_CHANGE_REQUEST_REPOSITORY: &str = "GetChangeRequestRepository";
     pub const GET_CHANGE_REQUEST: &str = "GetChangeRequest";

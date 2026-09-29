@@ -25,7 +25,16 @@ const GIT_OUTPUT_LIMIT: usize = 64 * 1024;
 const GITHUB_OUTPUT_LIMIT: usize = 1024 * 1024;
 const GITHUB_RESULT_LIMIT: &str = "20";
 const GITHUB_JSON_FIELDS: &str = "number,title,url,state,baseRefName,headRefName,updatedAt,isCrossRepository,headRepositoryOwner";
-const GITHUB_SEARCH_QUERY: &str = "query($search: String!, $owner: String!, $name: String!) { repository(owner: $owner, name: $name) { nameWithOwner } search(query: $search, type: ISSUE, first: 50) { nodes { ... on PullRequest { author { login } number title url state isDraft mergeable reviewDecision createdAt updatedAt additions deletions repository { nameWithOwner } } } } }";
+const GITHUB_SEARCH_QUERY: &str = "query($search: String!, $owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { nameWithOwner } search(query: $search, type: ISSUE, first: 50, after: $after) { issueCount pageInfo { hasNextPage endCursor } nodes { ... on PullRequest { author { login } number title url state isDraft mergeable reviewDecision createdAt updatedAt additions deletions repository { nameWithOwner } } } } }";
+
+/// GitHub connection cursors are short opaque base64 tokens. Anything else is
+/// rejected before it reaches the provider.
+pub fn valid_page_cursor(cursor: &str) -> bool {
+    (1..=256).contains(&cursor.len())
+        && cursor
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"+/=_-:".contains(&b))
+}
 
 /// Strictly one repository; reject search qualifiers and unscoped requests.
 pub fn valid_pr_repository(repository: &str) -> bool {
@@ -138,6 +147,25 @@ pub trait OpenChangeRequestLookup: Send + Sync {
             return Err(ChangeRequestError::UnsupportedRepository);
         }
         self.list_authored_open(repository, refresh).await
+    }
+    /// One page of [`Self::list_filtered_open`]. Providers without cursors
+    /// serve a single page.
+    async fn list_filtered_page(
+        &self,
+        repository: &str,
+        filter: zeron_proto::ChangeRequestFilter,
+        after: Option<&str>,
+        refresh: bool,
+    ) -> Result<zeron_proto::ChangeRequestPage, ChangeRequestError> {
+        if after.is_some() {
+            return Ok(zeron_proto::ChangeRequestPage::default());
+        }
+        let items = self.list_filtered_open(repository, filter, refresh).await?;
+        Ok(zeron_proto::ChangeRequestPage {
+            total_count: Some(items.len() as u64),
+            items,
+            next_cursor: None,
+        })
     }
     async fn post_comment(
         &self,
@@ -499,41 +527,65 @@ impl GitHubCli {
         if !valid_pr_repository(repository) {
             return Err(ChangeRequestError::UnsupportedRepository);
         }
+        self.list_filtered_page(repository, filter, None, refresh)
+            .await
+            .map(|page| page.items)
+    }
+
+    /// One page of open pull requests, 50 at a time, newest updates first.
+    pub async fn list_filtered_page(
+        &self,
+        repository: &str,
+        filter: zeron_proto::ChangeRequestFilter,
+        after: Option<&str>,
+        refresh: bool,
+    ) -> Result<zeron_proto::ChangeRequestPage, ChangeRequestError> {
+        if !valid_pr_repository(repository) {
+            return Err(ChangeRequestError::UnsupportedRepository);
+        }
+        if after.is_some_and(|cursor| !valid_page_cursor(cursor)) {
+            return Err(ChangeRequestError::Decode);
+        }
         let repository = repository.to_ascii_lowercase();
+        let key = format!("list:{repository}:{filter:?}:{}", after.unwrap_or_default());
         let result = self
-            .cached_pr_request(format!("list:{repository}:{filter:?}"), refresh, async {
-                serde_json::to_value(self.fetch_filtered_open(&repository, filter).await?)
+            .cached_pr_request(key, refresh, async {
+                serde_json::to_value(self.fetch_filtered_page(&repository, filter, after).await?)
                     .map_err(|_| ChangeRequestError::Decode)
             })
             .await?;
         serde_json::from_value(result).map_err(|_| ChangeRequestError::Decode)
     }
 
-    async fn fetch_filtered_open(
+    async fn fetch_filtered_page(
         &self,
         repository: &str,
         filter: zeron_proto::ChangeRequestFilter,
-    ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError> {
-        let (items, canonical) = self.fetch_scoped_search(repository, filter).await?;
-        if items.is_empty()
+        after: Option<&str>,
+    ) -> Result<zeron_proto::ChangeRequestPage, ChangeRequestError> {
+        let (page, canonical) = self.fetch_scoped_search(repository, filter, after).await?;
+        if after.is_none()
+            && page.items.is_empty()
             && let Some(canonical) = canonical
             && !canonical.eq_ignore_ascii_case(repository)
         {
             // Search does not follow repository renames, although repository()
             // does. Follow only that verified canonical name, at most once.
+            // Clients adopt the canonical name, so later pages query it directly.
             return self
-                .fetch_scoped_search(&canonical, filter)
+                .fetch_scoped_search(&canonical, filter, None)
                 .await
                 .map(|result| result.0);
         }
-        Ok(items)
+        Ok(page)
     }
 
     async fn fetch_scoped_search(
         &self,
         repository: &str,
         filter: zeron_proto::ChangeRequestFilter,
-    ) -> Result<(Vec<ChangeRequestListItem>, Option<String>), ChangeRequestError> {
+        after: Option<&str>,
+    ) -> Result<(zeron_proto::ChangeRequestPage, Option<String>), ChangeRequestError> {
         let (owner, name) = repository
             .split_once('/')
             .ok_or(ChangeRequestError::UnsupportedRepository)?;
@@ -555,7 +607,14 @@ impl GitHubCli {
                 format!("name={name}"),
                 "-f".into(),
                 format!("search=is:pr is:open {qualifier}repo:{repository} sort:updated-desc"),
-            ],
+            ]
+            .into_iter()
+            .chain(
+                after
+                    .into_iter()
+                    .flat_map(|cursor| ["-f".into(), format!("after={cursor}")]),
+            )
+            .collect(),
             cwd: None,
             env: vec![
                 ("GH_PROMPT_DISABLED".into(), "1".into()),
@@ -598,7 +657,19 @@ impl GitHubCli {
                 .then_with(|| left.repository.cmp(&right.repository))
                 .then_with(|| left.number.cmp(&right.number))
         });
-        Ok((items, canonical))
+        let info = response.data.search.page_info;
+        let next_cursor = info
+            .filter(|info| info.has_next_page && !items.is_empty())
+            .and_then(|info| info.end_cursor)
+            .filter(|cursor| valid_page_cursor(cursor));
+        Ok((
+            zeron_proto::ChangeRequestPage {
+                items,
+                next_cursor,
+                total_count: response.data.search.issue_count,
+            },
+            canonical,
+        ))
     }
 
     async fn list_for_selector(
@@ -694,6 +765,15 @@ impl OpenChangeRequestLookup for GitHubCli {
         refresh: bool,
     ) -> Result<Vec<ChangeRequestListItem>, ChangeRequestError> {
         GitHubCli::list_filtered_open(self, repository, filter, refresh).await
+    }
+    async fn list_filtered_page(
+        &self,
+        repository: &str,
+        filter: zeron_proto::ChangeRequestFilter,
+        after: Option<&str>,
+        refresh: bool,
+    ) -> Result<zeron_proto::ChangeRequestPage, ChangeRequestError> {
+        GitHubCli::list_filtered_page(self, repository, filter, after, refresh).await
     }
     async fn post_comment(
         &self,
@@ -1097,8 +1177,20 @@ struct GhSearchData {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GhSearchConnection {
     nodes: Vec<GhSearchPullRequest>,
+    #[serde(default)]
+    issue_count: Option<u64>,
+    #[serde(default)]
+    page_info: Option<GhPageInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPageInfo {
+    has_next_page: bool,
+    end_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1880,6 +1972,65 @@ mod tests {
                 .iter()
                 .any(|arg| arg.contains("repo:acme/zeron"))
         );
+    }
+
+    #[tokio::test]
+    async fn pr_pages_pass_the_cursor_and_report_the_next_one_and_total() {
+        let item = |number| {
+            search_pull_request(
+                "acme/zeron",
+                number,
+                "PR",
+                "OPEN",
+                "UNKNOWN",
+                "2026-08-10T09:30:00Z",
+                "2026-08-19T12:00:00Z",
+                false,
+                None,
+            )
+        };
+        let page = |items, next: Option<&str>| {
+            serde_json::to_vec(&serde_json::json!({"data": {"search": {
+                "issueCount": 120,
+                "pageInfo": {"hasNextPage": next.is_some(), "endCursor": next},
+                "nodes": items,
+            }}}))
+            .unwrap()
+        };
+        let runner = FakeProcessRunner::with_responses([
+            command_success(page(vec![item(1)], Some("Y3Vyc29yOjUw"))),
+            command_success(page(vec![item(2)], None)),
+        ]);
+        let github = GitHubCli::with_runner(runner.clone());
+        let filter = zeron_proto::ChangeRequestFilter::All;
+        let first = github
+            .list_filtered_page("acme/zeron", filter, None, false)
+            .await
+            .unwrap();
+        assert_eq!(first.next_cursor.as_deref(), Some("Y3Vyc29yOjUw"));
+        assert_eq!(first.total_count, Some(120));
+        let second = github
+            .list_filtered_page("acme/zeron", filter, first.next_cursor.as_deref(), false)
+            .await
+            .unwrap();
+        assert_eq!(second.items[0].number, 2);
+        assert_eq!(second.next_cursor, None, "the last page has no cursor");
+        let requests = runner.requests();
+        assert!(!requests[0].args.iter().any(|arg| arg.starts_with("after=")));
+        assert!(
+            requests[1]
+                .args
+                .iter()
+                .any(|arg| arg == "after=Y3Vyc29yOjUw")
+        );
+        assert_eq!(
+            github
+                .list_filtered_page("acme/zeron", filter, Some("x repo:other/x"), false)
+                .await,
+            Err(ChangeRequestError::Decode),
+            "cursors cannot smuggle search qualifiers"
+        );
+        assert_eq!(runner.requests().len(), 2);
     }
 
     #[tokio::test]

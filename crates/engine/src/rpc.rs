@@ -1488,6 +1488,7 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_OPEN_CHANGE_REQUESTS
             | methods::LIST_REPOSITORY_CHANGE_REQUESTS
             | methods::LIST_FILTERED_CHANGE_REQUESTS
+            | methods::LIST_CHANGE_REQUEST_PAGE
             | methods::GET_CHANGE_REQUEST_REPOSITORY
             | methods::GET_CHANGE_REQUEST
             | methods::GET_CHANGE_REQUEST_DIFF
@@ -2606,6 +2607,34 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(change_request_rpc_error)?;
                 RpcReply::value(&items)
+            }
+            methods::LIST_CHANGE_REQUEST_PAGE => {
+                #[derive(Deserialize)]
+                struct P {
+                    repository: String,
+                    #[serde(default)]
+                    filter: zeron_proto::ChangeRequestFilter,
+                    #[serde(default)]
+                    after: Option<String>,
+                    #[serde(default)]
+                    refresh: bool,
+                }
+                let p: P = parse_params(params)?;
+                if !crate::source_control::valid_pr_repository(&p.repository) {
+                    return Err(RpcError::BadParams("repository must be owner/repo".into()));
+                }
+                if p.after
+                    .as_deref()
+                    .is_some_and(|cursor| !crate::source_control::valid_page_cursor(cursor))
+                {
+                    return Err(RpcError::BadParams("invalid page cursor".into()));
+                }
+                let page = self
+                    .open_change_requests
+                    .list_filtered_page(&p.repository, p.filter, p.after.as_deref(), p.refresh)
+                    .await
+                    .map_err(change_request_rpc_error)?;
+                RpcReply::value(&page)
             }
             methods::POST_CHANGE_REQUEST_COMMENT => {
                 #[derive(Deserialize)]
@@ -4144,6 +4173,8 @@ mod tests {
         assert!(forwardable(methods::LIST_OPEN_CHANGE_REQUESTS));
         assert!(forwardable(methods::LIST_REPOSITORY_CHANGE_REQUESTS));
         assert!(forwardable(methods::LIST_FILTERED_CHANGE_REQUESTS));
+        assert!(forwardable(methods::LIST_CHANGE_REQUEST_PAGE));
+        assert!(!is_stream_method(methods::LIST_CHANGE_REQUEST_PAGE));
         assert!(forwardable(methods::GET_CHANGE_REQUEST_REPOSITORY));
         assert!(forwardable(methods::GET_CHANGE_REQUEST));
         assert!(forwardable(methods::GET_CHANGE_REQUEST_DIFF));
