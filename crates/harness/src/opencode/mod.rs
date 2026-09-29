@@ -1586,7 +1586,23 @@ async fn run_session(session: Session) {
     let variant = model.as_ref().and_then(|(provider, model_id)| {
         pick_variant(&providers, provider, model_id, request.reasoning)
     });
-    let context_catalog = ContextCatalog::from_providers(&providers);
+    let context_windows: HashMap<String, u64> = providers
+        .all
+        .iter()
+        .flatten()
+        .flat_map(|provider| {
+            provider
+                .models
+                .iter()
+                .flat_map(|models| models.iter())
+                .filter_map(|(id, model)| {
+                    Some((
+                        format!("{}/{}", provider.id.as_deref()?, id),
+                        model.limit.context.filter(|n| *n > 0)?,
+                    ))
+                })
+        })
+        .collect();
     drop(providers);
 
     let mut assistant_message_id = new_message_id();
@@ -2146,7 +2162,7 @@ async fn run_session(session: Session) {
                             unbound_children: &mut unbound_children,
                             turn: &mut turn,
                             pending_usage: &mut pending_usage,
-                            context_catalog: &context_catalog,
+                            context_windows: &context_windows,
                         }).await;
                         match outcome {
                             BusOutcome::Continue => maybe_preempt!(),
@@ -2239,47 +2255,7 @@ async fn create_session(
     unreachable!("create_session retry loop returns from every path")
 }
 
-/// Context limits as advertised by this run's provider catalog.
-///
-/// Presence and capacity are distinct facts: a model advertised WITHOUT a
-/// `limit.context` clears a stale window (`Some(0)`), while a model absent
-/// from the catalog — fetch failed, V2 sync race, unknown provider — leaves
-/// the previous window untouched (`None`). Collapsing both into "not in the
-/// map" is what made one transient catalog failure wipe a known capacity.
-#[derive(Debug, Default)]
-struct ContextCatalog {
-    /// `{provider}/{model}` -> advertised limit (`None` = none advertised).
-    models: HashMap<String, Option<u64>>,
-}
-
-impl ContextCatalog {
-    fn from_providers(providers: &ProviderCatalog) -> Self {
-        let mut models = HashMap::new();
-        for provider in providers.all.iter().flatten() {
-            let Some(provider_id) = provider.id.as_deref() else {
-                continue;
-            };
-            for (model_id, model) in provider.models.iter().flatten() {
-                models.insert(
-                    format!("{provider_id}/{model_id}"),
-                    model.limit.context.filter(|n| *n > 0),
-                );
-            }
-        }
-        Self { models }
-    }
-
-    /// `None` = unknown model (preserve the previous window), `Some(0)` =
-    /// advertised without a limit (clear it), `Some(n)` = advertised capacity.
-    fn window(&self, provider: &str, model: &str) -> Option<u64> {
-        self.models
-            .get(&format!("{provider}/{model}"))
-            .copied()
-            .map(|limit| limit.unwrap_or(0))
-    }
-}
-
-fn context_usage_event(info: &Value, context_catalog: &ContextCatalog) -> Option<AgentEvent> {
+fn context_usage_event(info: &Value, context_windows: &HashMap<String, u64>) -> Option<AgentEvent> {
     let tokens = info.get("tokens")?;
     let counts: Vec<u64> = [
         tokens.get("input"),
@@ -2306,7 +2282,7 @@ fn context_usage_event(info: &Value, context_catalog: &ContextCatalog) -> Option
         .get("providerID")
         .and_then(Value::as_str)
         .zip(info.get("modelID").and_then(Value::as_str))
-        .and_then(|(provider, model)| context_catalog.window(provider, model));
+        .and_then(|(provider, model)| context_windows.get(&format!("{provider}/{model}")).copied());
     (tokens.is_some() || window.is_some()).then_some(AgentEvent::ContextUsage { tokens, window })
 }
 
@@ -2615,7 +2591,7 @@ struct BusCtx<'a> {
     unbound_children: &'a mut HashMap<String, String>,
     turn: &'a mut TurnState,
     pending_usage: &'a mut Option<AgentEvent>,
-    context_catalog: &'a ContextCatalog,
+    context_windows: &'a HashMap<String, u64>,
 }
 
 /// Wrap an event as subagent-attributed traffic.
@@ -2666,7 +2642,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
         unbound_children,
         turn,
         pending_usage,
-        context_catalog,
+        context_windows,
     } = ctx;
     // Envelope styles: /global/event wraps ({payload: {...}}); a bare
     // /event feed (tests) delivers the payload directly.
@@ -2842,7 +2818,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 if role == "assistant"
                     && let Some(tokens) = info.get("tokens")
                 {
-                    if let Some(usage) = context_usage_event(info, context_catalog)
+                    if let Some(usage) = context_usage_event(info, context_windows)
                         && !send(event_tx, usage).await
                     {
                         return BusOutcome::ConsumerGone;
@@ -4184,19 +4160,9 @@ mod tests;
 #[cfg(test)]
 mod context_tests {
     use super::*;
-
-    fn catalog(entries: &[(&str, Option<u64>)]) -> ContextCatalog {
-        ContextCatalog {
-            models: entries
-                .iter()
-                .map(|(key, limit)| ((*key).to_owned(), *limit))
-                .collect(),
-        }
-    }
-
     #[test]
     fn context_includes_cache_and_uses_reported_model_limit() {
-        let windows = catalog(&[("provider/model", Some(200_000))]);
+        let windows = HashMap::from([("provider/model".into(), 200000)]);
         let info = json!({"providerID":"provider","modelID":"model", "tokens": {
             "input": 200, "output": 100, "reasoning": 50, "cache": {"read":40000,"write":1800}
         }});
@@ -4225,7 +4191,7 @@ mod context_tests {
 
     #[test]
     fn malformed_usage_is_ignored_without_panicking() {
-        let windows = catalog(&[("provider/model", Some(200_000))]);
+        let windows = HashMap::from([("provider/model".to_owned(), 200_000)]);
         for info in [
             json!({}),
             json!({"tokens": null}),
@@ -4251,27 +4217,13 @@ mod context_tests {
     }
 
     #[test]
-    fn known_model_without_a_context_limit_clears_the_previous_window() {
-        let windows = catalog(&[("provider/unknown", None)]);
-        let info = json!({"providerID":"provider","modelID":"unknown",
-                          "tokens":{"input":10,"output":2}});
-        assert_eq!(
-            context_usage_event(&info, &windows),
-            Some(AgentEvent::ContextUsage {
-                tokens: Some(12),
-                window: Some(0)
-            })
-        );
-    }
-
-    #[test]
     fn unknown_model_preserves_the_previous_window() {
         // A catalog that failed to load (or lags the 2.x model sync)
         // advertises nothing; an absent model must not read as "no limit".
         let info = json!({"providerID":"provider","modelID":"unknown",
                           "tokens":{"input":10,"output":2}});
         assert_eq!(
-            context_usage_event(&info, &ContextCatalog::default()),
+            context_usage_event(&info, &HashMap::new()),
             Some(AgentEvent::ContextUsage {
                 tokens: Some(12),
                 window: None

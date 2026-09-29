@@ -350,7 +350,6 @@ impl SessionDoc {
         serde_json::from_str(&value).ok()
     }
 
-    /// Missing fields preserve their current values; an explicit zero window clears capacity.
     pub fn update_context_usage(
         &self,
         tokens: Option<u64>,
@@ -359,11 +358,7 @@ impl SessionDoc {
         let previous = self.context_usage().unwrap_or_default();
         let next = zeron_proto::ContextUsage {
             tokens: tokens.or(previous.tokens),
-            window: match window {
-                Some(0) => None,
-                Some(window) => Some(window),
-                None => previous.window,
-            },
+            window: window.filter(|n| *n > 0).or(previous.window),
         };
         if next != previous {
             self.doc
@@ -2124,8 +2119,8 @@ mod context_usage_tests {
             .unwrap();
         assert_eq!(replica.context_usage(), host.context_usage());
         let version = host.doc().oplog_vv();
-        // Compaction replaces occupancy while leaving the model capacity intact.
-        host.update_context_usage(Some(0), None).unwrap();
+        // Compaction is a replacement, not an accumulating counter. Zero capacity is invalid.
+        host.update_context_usage(Some(0), Some(0)).unwrap();
         replica
             .doc()
             .import(&host.doc().export(ExportMode::updates(&version)).unwrap())
@@ -2137,26 +2132,6 @@ mod context_usage_tests {
                 window: Some(200_000)
             })
         );
-        // An explicit zero capacity clears a stale limit after a model change.
-        let clear_version = host.doc().oplog_vv();
-        host.update_context_usage(None, Some(0)).unwrap();
-        assert_eq!(
-            host.context_usage(),
-            Some(zeron_proto::ContextUsage {
-                tokens: Some(0),
-                window: None
-            })
-        );
-        replica
-            .doc()
-            .import(
-                &host
-                    .doc()
-                    .export(ExportMode::updates(&clear_version))
-                    .unwrap(),
-            )
-            .unwrap();
-        assert_eq!(replica.context_usage(), host.context_usage());
         host.update_context_usage(None, Some(1_000_000)).unwrap();
         assert_eq!(host.context_usage().unwrap().tokens, Some(0));
         let rebuilt = crate::rebuild_thin_doc(&host).unwrap().doc;

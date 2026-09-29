@@ -526,8 +526,7 @@ pub enum AgentEvent {
         diff: Option<ToolDiff>,
     },
     /// Latest context occupancy, independent of cumulative billing usage.
-    /// Missing fields preserve the previous measurement; zero tokens is valid,
-    /// and a zero window clears the previous capacity.
+    /// Missing fields preserve the previous measurement; zero tokens is valid.
     #[serde(rename_all = "camelCase")]
     ContextUsage {
         tokens: Option<u64>,
