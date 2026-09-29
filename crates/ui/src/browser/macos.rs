@@ -859,6 +859,25 @@ impl NativePage {
     pub fn fixture_visible(&self) -> bool {
         !self.0.borrow().view.isHidden()
     }
+    pub fn fixture_cookies(&self, completion: impl FnOnce(Vec<String>) + 'static) {
+        use objc2_foundation::{NSArray, NSHTTPCookie};
+        let completion = RefCell::new(Some(completion));
+        let block = block2::RcBlock::new(move |cookies: std::ptr::NonNull<NSArray<NSHTTPCookie>>| {
+            let cookies = unsafe { cookies.as_ref() };
+            let values = cookies.iter().map(|cookie| format!(
+                "{}={}; domain={}; path={}; httpOnly={}; sessionOnly={}",
+                cookie.name(), cookie.value(), cookie.domain(), cookie.path(),
+                cookie.isHTTPOnly(), cookie.isSessionOnly()
+            )).collect();
+            if let Some(completion) = completion.borrow_mut().take() {
+                completion(values);
+            }
+        });
+        unsafe {
+            self.0.borrow().view.configuration().websiteDataStore().httpCookieStore().getAllCookies(&block);
+        }
+    }
+
     pub fn fixture_eval(&self, script: &str) {
         unsafe {
             self.0

@@ -230,7 +230,11 @@ fn main() -> anyhow::Result<()> {
             let run: anyhow::Result<()> = async {
                 pause(cx, 1200).await;
                 if let Some(url) = &storage_url {
-                    return storage::exercise(window, state.clone(), &storage_root, &storage_profile, url, cx).await;
+                    storage::exercise(window, state.clone(), &storage_root, &storage_profile, url, cx).await?;
+                    std::fs::write(output.join("storage-result.json"), serde_json::to_vec(&serde_json::json!({
+                        "profile": storage_profile, "url": url, "status": "pass"
+                    }))?)?;
+                    return Ok(());
                 }
                 if std::env::var_os("ZERON_TRANSCRIPT_LINK_FIXTURE_ONLY").is_some() {
                     return transcript_links::exercise(window, state.clone(), &_origin, &output, cx).await;
@@ -536,6 +540,11 @@ fn main() -> anyhow::Result<()> {
             drop(state);
             let _ = window.update(cx, |_, window, _| window.remove_window());
             pause(cx, 100).await;
+            // AppKit terminate: exits the process without returning from Application::run.
+            // Report failure before entering that path so native runners cannot see a false pass.
+            if result.lock().unwrap().is_some() {
+                std::process::exit(1);
+            }
             cx.update(|cx| cx.quit());
         }).detach();
     });

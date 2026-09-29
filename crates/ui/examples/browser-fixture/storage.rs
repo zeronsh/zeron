@@ -56,11 +56,30 @@ pub async fn exercise(
     let (id, browser) = window.update(cx, |shell, window, cx| {
         shell.fixture_open_browser(Some(url.to_owned()), window, cx)
     })?;
-    loaded(&browser, cx).await?;
+    let loaded_result = loaded(&browser, cx).await;
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("ZERON_BROWSER_STORAGE_DIAGNOSTICS").is_some() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        browser.read_with(cx, |browser, _| browser.fixture_cookies(move |cookies| {
+            let _ = tx.send(cookies);
+        }));
+        eprintln!("Storage native cookies before close ({url}): {:?}", rx.await?);
+    }
+    loaded_result?;
     window.update(cx, |shell, window, cx| {
         shell.fixture_close_browser(id, window, cx)
     })?;
     drop(browser);
+    eprintln!("Storage lifecycle: closed page and dropped browser ({url})");
+    if url.ends_with("/delete") && std::env::var_os("ZERON_BROWSER_STORAGE_REOPEN").is_some() {
+        let empty = format!("{}/empty", url.strip_suffix("/delete").unwrap());
+        let (id, reopened) = window.update(cx, |shell, window, cx| {
+            shell.fixture_open_browser(Some(empty), window, cx)
+        })?;
+        loaded(&reopened, cx).await?;
+        window.update(cx, |shell, window, cx| shell.fixture_close_browser(id, window, cx))?;
+        eprintln!("Storage diagnostic: empty after closing and reopening the deleted page");
+    }
     if url.ends_with("/write") {
         super::pause(cx, 2200).await; // Wait for the intentionally short-lived cookie.
         let url = format!("{}/read", url.strip_suffix("/write").unwrap());

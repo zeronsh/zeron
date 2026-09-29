@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import queue
 import struct
+import sys
 import subprocess
 import tempfile
 import threading
@@ -47,17 +48,25 @@ PAGE = r"""<!doctype html><title>Storage fixture</title><script>
     document.cookie = 'durable=; Path=/; Max-Age=0';
     localStorage.removeItem('token');
     await transaction(true, null);
-  } else {
-    const present = mode === 'read';
-    check(document.cookie.includes('durable=fixture') === present, 'persistent cookie');
-    check(!document.cookie.includes('expired='), 'expired cookie returned');
-    check(!document.cookie.includes('removed='), 'deleted cookie returned');
-    check(localStorage.getItem('token') === (present ? 'fixture' : null), 'localStorage');
-    check((await transaction(false)) === (present ? 'fixture' : undefined), 'IndexedDB');
-    const cookies = await (await fetch('/cookies')).json();
-    check(cookies.includes('httpOnlyToken=fixture') === present, 'HttpOnly cookie');
-    check(!document.cookie.includes('httpOnlyToken'), 'HttpOnly cookie exposed');
   }
+  const present = mode === 'write' || mode === 'read';
+  const cookies = await (await fetch('/cookies')).json();
+  const actual = {
+    cookie: document.cookie,
+    cookies,
+    localStorage: localStorage.getItem('token'),
+    indexedDB: (await transaction(false)) ?? null,
+  };
+  const failures = [];
+  const verify = (ok, message) => { if (!ok) failures.push(message); };
+  verify(actual.cookie.includes('durable=fixture') === present, 'persistent cookie');
+  if (mode !== 'write') verify(!actual.cookie.includes('expired='), 'expired cookie returned');
+  verify(!actual.cookie.includes('removed='), 'deleted cookie returned');
+  verify(actual.localStorage === (present ? 'fixture' : null), 'localStorage');
+  verify(actual.indexedDB === (present ? 'fixture' : null), 'IndexedDB');
+  verify(cookies.includes('httpOnlyToken=fixture') === present, 'HttpOnly cookie');
+  verify(!actual.cookie.includes('httpOnlyToken'), 'HttpOnly cookie exposed');
+  check(failures.length === 0, failures.join(', ') + '; state=' + JSON.stringify(actual));
   db.close();
   document.title = 'storage:pass';
 })().catch(error => { document.title = 'storage:fail:' + error.message; });
@@ -183,10 +192,16 @@ def main():
                 env = dict(os.environ, ZERON_BROWSER_STORAGE_ROOT=str(root),
                            ZERON_BROWSER_STORAGE_PROFILE=profile,
                            ZERON_BROWSER_STORAGE_URL=origin + '/' + mode)
-                command = [str(Path(args.fixture).resolve()), str(root / 'captures')]
+                captures = root / f'{profile}-{mode}'
+                result_file = captures / 'storage-result.json'
+                result_file.unlink(missing_ok=True)
+                command = [str(Path(args.fixture).resolve()), str(captures)]
                 if os.uname().sysname == 'Darwin':
                     command[:0] = ['bash', str(Path(__file__).resolve().parent / 'run-macos-browser-fixture.sh')]
                 subprocess.run(command, env=env, check=True, timeout=60)
+                assert json.loads(result_file.read_text()) == {
+                    'profile': profile, 'url': origin + '/' + mode, 'status': 'pass'
+                }, f'missing or invalid storage result for {profile}: {mode}'
             print(f'PASS {profile}: {mode}', flush=True)
 
         try:
@@ -207,15 +222,34 @@ def main():
                 assert (root / 'a' / 'cookies.sqlite').stat().st_mode & 0o077 == 0
                 print('PASS profile locking, independent profiles, storage errors, file permissions', flush=True)
         finally:
+            # Cleanup must attempt every synthetic profile without replacing the test failure.
+            primary_error = sys.exc_info()[1]
+            cleanup_errors = []
             if args.fixture and os.uname().sysname == 'Darwin':
                 for profile in ('a', 'a-other', 'b'):
                     env = dict(os.environ, ZERON_BROWSER_STORAGE_ROOT=str(root),
                                ZERON_BROWSER_STORAGE_PROFILE=profile,
                                ZERON_BROWSER_STORAGE_URL='cleanup')
-                    subprocess.run(['bash', str(Path(__file__).resolve().parent / 'run-macos-browser-fixture.sh'),
-                                    str(Path(args.fixture).resolve()), str(root / 'captures')],
-                                   env=env, check=True, timeout=60)
-    server.shutdown()
+                    captures = root / f'{profile}-cleanup'
+                    result_file = captures / 'storage-result.json'
+                    try:
+                        subprocess.run(['bash', str(Path(__file__).resolve().parent / 'run-macos-browser-fixture.sh'),
+                                        str(Path(args.fixture).resolve()), str(captures)],
+                                       env=env, check=True, timeout=60)
+                        assert json.loads(result_file.read_text()) == {
+                            'profile': profile, 'url': 'cleanup', 'status': 'pass'
+                        }, f'missing or invalid cleanup result for {profile}'
+                        print(f'PASS cleanup: {profile}', flush=True)
+                    except Exception as error:
+                        cleanup_errors.append(error)
+                        print(f'FAIL cleanup: {profile}: {error}', file=sys.stderr, flush=True)
+            server.shutdown()
+            server.server_close()
+            if cleanup_errors:
+                if primary_error is not None:
+                    primary_error.add_note(f'Profile cleanup also failed: {cleanup_errors!r}')
+                else:
+                    raise ExceptionGroup('Profile cleanup failed', cleanup_errors)
 
 
 if __name__ == '__main__':
