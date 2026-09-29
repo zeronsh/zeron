@@ -3,6 +3,8 @@
 mod interactions;
 #[path = "pull_request_code.rs"]
 mod code;
+#[path = "pull_request_handoff.rs"]
+mod handoff;
 use crate::{
     settings::{self, PullRequestDestination, widgets},
     state::AppState,
@@ -29,6 +31,11 @@ pub struct ClosePullRequest;
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = shell, no_json)]
 pub struct OpenPrImage(pub String);
+
+/// Open a new session with this prompt staged in the composer (not sent).
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = shell, no_json)]
+pub struct StartPullRequestSession(pub String);
 
 pub fn open(url: &str, window: &mut Window, cx: &mut App) {
     open_on_device(url, None, window, cx);
@@ -863,6 +870,7 @@ fn action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Statefu
             | "pr-copy-url"
             | "pr-copy-patch"
             | "pr-copy-path"
+            | "pr-copy-checkout"
             | "pr-files"
             | "pr-fold-all"
             | "pr-detail-refresh"
@@ -877,7 +885,9 @@ fn action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Statefu
         "pr-fold-all" => Some(crate::icons::FOLD_VERTICAL),
         "pr-back" => Some(crate::icons::ALT_ARROW_LEFT),
         "pr-copy-url" if label == "Link copied" => Some(crate::icons::CHECK),
-        "pr-copy-url" | "pr-copy-patch" | "pr-copy-path" => Some(crate::icons::COPY),
+        "pr-copy-url" | "pr-copy-patch" | "pr-copy-path" | "pr-copy-checkout" => {
+            Some(crate::icons::COPY)
+        }
         "pr-detail-refresh" | "pr-retry-diff" => Some(crate::icons::REFRESH),
         "pr-external" => Some(crate::icons::ARROW_UP_RIGHT),
         "pr-files" => Some(crate::icons::FILE_TREE),
@@ -1355,7 +1365,9 @@ impl Render for PullRequestDetailPage {
                                     }),
                             );
                         }
-                        column = column.child(checks.mt(px(16.0)));
+                        column = column
+                            .child(checks.mt(px(16.0)))
+                            .child(self.handoff_card(detail, &theme, cx));
                         let description = div()
                             .p(px(16.0))
                             .min_h(px(60.0))

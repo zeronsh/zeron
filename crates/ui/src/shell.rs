@@ -13196,6 +13196,25 @@ impl Render for Shell {
                     cx.notify();
                 },
             ))
+            .on_action(cx.listener(
+                |this, action: &crate::pull_request_detail::StartPullRequestSession, _, cx| {
+                    this.open_new_session(None, cx);
+                    // Stage after the composer has swapped to the new
+                    // session's (empty) draft, which runs on the state
+                    // observation `open_new_session` just queued.
+                    let composer = this.composer.clone();
+                    let prompt = action.0.clone();
+                    cx.defer(move |cx| {
+                        composer.update(cx, |composer, cx| {
+                            composer
+                                .input
+                                .update(cx, |input, cx| input.set_text(prompt, cx));
+                            composer.focus_pending = true;
+                            cx.notify();
+                        });
+                    });
+                },
+            ))
             // New session works from anywhere — `open_new_session` routes back
             // to chat itself, so Settings is not a dead spot.
             .on_action(cx.listener(|this, _: &NewSession, _, cx| this.open_new_session(None, cx)))
@@ -15854,6 +15873,73 @@ mod exit_regressions {
                 }
             });
         }
+    }
+
+    #[gpui::test]
+    fn pull_request_handoff_stages_its_prompt_in_a_new_session(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                shell.open_chat("existing".into(), cx);
+                shell.composer.update(cx, |composer, cx| {
+                    composer
+                        .input
+                        .update(cx, |input, cx| input.set_text("half-written reply", cx))
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |_, window, cx| {
+                window.dispatch_action(
+                    Box::new(crate::pull_request_detail::StartPullRequestSession(
+                        "Review pull request #7".into(),
+                    )),
+                    cx,
+                )
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(
+                    shell.state.read(cx).selected_chat.is_none(),
+                    "a new session opens"
+                );
+                let composer = shell.composer.read(cx);
+                assert_eq!(composer.input.read(cx).text(), "Review pull request #7");
+                assert!(composer.focus_pending);
+            })
+            .unwrap();
     }
 
     #[gpui::test]
