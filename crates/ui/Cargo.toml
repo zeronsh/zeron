@@ -13,6 +13,7 @@ compact-picker-fixture = ["gpui_platform/test-support"]
 browser-fixture = []
 windows-render-fixture = []
 appshots-fixture = ["gpui_platform/test-support"]
+pull-request-fixture = ["gpui_platform/test-support"]
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
 
 [[example]]
@@ -38,6 +39,10 @@ required-features = ["appshots-fixture"]
 [[example]]
 name = "tool-images-fixture"
 required-features = ["appshots-fixture"]
+
+[[example]]
+name = "pull-request-fixture"
+required-features = ["pull-request-fixture"]
 
 [[example]]
 name = "new-project-fixture"

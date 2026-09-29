@@ -17931,3 +17931,13 @@ mod settings_modal_regressions {
         });
     }
 }
+
+/// Native visual QA of the pull request board and detail with isolated data.
+#[cfg(feature = "pull-request-fixture")]
+impl Shell {
+    pub fn fixture_pull_request_detail(
+        &self,
+    ) -> Option<Entity<crate::pull_request_detail::PullRequestDetailPage>> {
+        self.pull_request_detail.clone()
+    }
+}
