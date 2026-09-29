@@ -192,17 +192,9 @@ impl PullRequestDetailPage {
                         .flex_col()
                         .gap(px(12.0))
                         .child(
+                            // Text and actions share the card's 16px content edge.
                             div()
                                 .flex()
-                                .items_start()
-                                .gap(px(10.0))
-                                .child(
-                                    crate::icons::icon(crate::icons::BOT)
-                                        .size(px(16.0))
-                                        .flex_none()
-                                        .mt(px(1.0))
-                                        .text_color(theme.text_muted),
-                                )
                                 .child(
                                     div()
                                         .flex_1()
@@ -229,7 +221,6 @@ impl PullRequestDetailPage {
                             div()
                                 .id("pr-handoff-actions")
                                 .debug_selector(|| "pr-handoff-actions".into())
-                                .pl(px(26.0))
                                 .flex()
                                 .flex_wrap()
                                 .gap(px(8.0))
@@ -240,7 +231,8 @@ impl PullRequestDetailPage {
                     widgets::card_row(theme, false)
                         .min_h(px(44.0))
                         .py(px(8.0))
-                        .gap(px(8.0))
+                        // Same label column and gap as the overview rows.
+                        .gap(px(16.0))
                         .child(
                             div()
                                 .w(px(80.0))

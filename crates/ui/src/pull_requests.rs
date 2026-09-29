@@ -1680,27 +1680,7 @@ impl Render for PullRequestsPage {
                 )
             });
         let content = if initial_loading {
-            div()
-                .mt(px(72.0))
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(12.0))
-                .text_size(crate::typography::ui_rems(13.0))
-                .text_color(theme.text_muted)
-                .child(crate::loaders::gradient_spinner(
-                    "pull-requests-loading",
-                    &theme,
-                    3.0,
-                    cx.entity_id(),
-                    cx,
-                ))
-                .child(if self.initial_scope_task.is_some() {
-                    "Finding repository…"
-                } else {
-                    "Loading pull requests…"
-                })
-                .into_any_element()
+            crate::pull_request_skeleton::board(PR_TABLE_ROW_HEIGHT, cx.entity_id(), &theme, cx)
         } else if self.items.is_empty() {
             self.render_empty_or_error(&theme)
         } else if items.is_empty() {

@@ -811,6 +811,18 @@ impl PullRequestDetailPage {
     }
 }
 
+#[cfg(feature = "pull-request-fixture")]
+impl PullRequestDetailPage {
+    /// 0 Summary, 1 Code, 2 Activity.
+    pub fn fixture_select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.select_tab(TABS[index.min(TABS.len() - 1)].0, cx);
+    }
+
+    pub fn fixture_select_file(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.select_code_file(index, cx);
+    }
+}
+
 fn rich_text(
     body: &crate::markdown::BlockTree,
     key: String,
@@ -1053,6 +1065,84 @@ fn status_chip(raw: &str, theme: &Theme) -> AnyElement {
 /// Space between the Summary's stacked cards; the header sits 2× further.
 const CARD_GAP: f32 = 12.0;
 
+/// Title and metadata line; shared by the loaded page and its placeholder.
+fn detail_header(
+    title: &str,
+    author: &str,
+    repository: String,
+    number: u64,
+    fetched: Option<Instant>,
+    theme: &Theme,
+) -> gpui::Div {
+    div()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .child(
+            // `page_header` keeps one line; a PR title wraps instead.
+            div()
+                .id("pr-detail-title")
+                .debug_selector(|| "pr-detail-title".into())
+                .px(px(8.0))
+                .min_w_0()
+                .text_size(crate::typography::ui_rems(20.0))
+                .line_height(crate::typography::ui_rems(26.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(title.to_owned()),
+        )
+        .child(
+            div()
+                .id("pr-detail-meta")
+                .debug_selector(|| "pr-detail-meta".into())
+                .flex_none()
+                .mt(px(12.0))
+                .px(px(8.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_color(theme.text_muted)
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(super::pull_request_media::avatar(
+                            author,
+                            "pr-author".into(),
+                            20.0,
+                            theme,
+                        ))
+                        .child(if author.is_empty() {
+                            "Deleted account".to_owned()
+                        } else {
+                            author.to_owned()
+                        }),
+                )
+                .child(meta_item(crate::icons::FOLDER_WITH_FILES, repository, theme))
+                .child(meta_item(
+                    crate::icons::PULL_REQUEST,
+                    number.to_string(),
+                    theme,
+                ))
+                .when_some(fetched, |el, fetched| {
+                    let age = if fetched.elapsed().as_secs() < 60 {
+                        "just now".into()
+                    } else {
+                        format!("{}m ago", fetched.elapsed().as_secs() / 60)
+                    };
+                    el.child(meta_item(
+                        crate::icons::CLOCK_CIRCLE,
+                        format!("Updated {age}"),
+                        theme,
+                    ))
+                }),
+        )
+}
+
 /// One muted icon-and-text item of the header's metadata line.
 fn meta_item(glyph: &'static str, text: String, theme: &Theme) -> gpui::Div {
     div()
@@ -1067,21 +1157,6 @@ fn meta_item(glyph: &'static str, text: String, theme: &Theme) -> gpui::Div {
                 .text_color(theme.text_muted),
         )
         .child(text)
-}
-
-fn overview_status(label: &'static str, value: &str, theme: &Theme) -> AnyElement {
-    div()
-        .id(SharedString::from(format!("pr-overview-{label}")))
-        .debug_selector(move || format!("pr-overview-{label}"))
-        .flex_1()
-        .min_w(px(160.0))
-        .flex()
-        .flex_col()
-        .items_start()
-        .gap(px(8.0))
-        .child(widgets::section_label(theme, label).px_0())
-        .child(status_chip(value, theme))
-        .into_any_element()
 }
 
 fn field(label: &str, value: String, first: bool, theme: &Theme) -> AnyElement {
@@ -1106,12 +1181,17 @@ fn field(label: &str, value: String, first: bool, theme: &Theme) -> AnyElement {
             .into_any_element()
     } else {
         div()
+            .min_w_0()
+            .truncate()
             .font_family(theme.font_mono.clone())
             .text_size(crate::typography::ui_rems(12.0))
             .child(value)
             .into_any_element()
     };
+    let id = format!("pr-field-{label}");
     widgets::card_row(theme, first)
+        .id(SharedString::from(id.clone()))
+        .debug_selector(move || id.clone())
         .min_h(px(44.0))
         .py(px(8.0))
         .child(
@@ -1174,60 +1254,14 @@ impl Render for PullRequestDetailPage {
                     .join("/");
                 column = column
                     .when(self.tab != Tab::Code, |column| {
-                        column
-                            .child(widgets::page_header(&theme, &detail.title, None))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .mt(px(12.0))
-                                    .px(px(8.0))
-                                    .text_size(crate::typography::ui_rems(12.0))
-                                    .flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .text_color(theme.text_muted)
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(8.0))
-                                            .child(super::pull_request_media::avatar(
-                                                &detail.author.login,
-                                                "pr-author".into(),
-                                                20.0,
-                                                &theme,
-                                            ))
-                                            .child(if detail.author.login.is_empty() {
-                                                "Deleted account".to_owned()
-                                            } else {
-                                                detail.author.login.clone()
-                                            }),
-                                    )
-                                    .child(meta_item(
-                                        crate::icons::FOLDER_WITH_FILES,
-                                        repository,
-                                        &theme,
-                                    ))
-                                    .child(meta_item(
-                                        crate::icons::PULL_REQUEST,
-                                        detail.number.to_string(),
-                                        &theme,
-                                    ))
-                                    .when_some(self.fetched, |el, fetched| {
-                                        let age = if fetched.elapsed().as_secs() < 60 {
-                                            "just now".into()
-                                        } else {
-                                            format!("{}m ago", fetched.elapsed().as_secs() / 60)
-                                        };
-                                        el.child(meta_item(
-                                            crate::icons::CLOCK_CIRCLE,
-                                            format!("Updated {age}"),
-                                            &theme,
-                                        ))
-                                    }),
-                            )
+                        column.child(detail_header(
+                            &detail.title,
+                            &detail.author.login,
+                            repository,
+                            detail.number,
+                            self.fetched,
+                            &theme,
+                        ))
                     })
                     .when(self.tab == Tab::Summary, |el| {
                         el.child(
@@ -1235,33 +1269,26 @@ impl Render for PullRequestDetailPage {
                                 .id("pr-overview")
                                 .debug_selector(|| "pr-overview".into())
                                 .mt(px(24.0))
-                                .child(
-                                    div()
-                                        .id("pr-overview-statuses")
-                                        .debug_selector(|| "pr-overview-statuses".into())
-                                        .p(px(16.0))
-                                        .flex()
-                                        .flex_wrap()
-                                        .gap(px(16.0))
-                                        .child(overview_status(
-                                            "Status",
-                                            if detail.is_draft {
-                                                "Draft"
-                                            } else {
-                                                &detail.state
-                                            },
-                                            &theme,
-                                        ))
-                                        .child(overview_status(
-                                            "Review",
-                                            if detail.review_decision.is_empty() {
-                                                "No review decision"
-                                            } else {
-                                                &detail.review_decision
-                                            },
-                                            &theme,
-                                        )),
-                                )
+                                .child(field(
+                                    "Status",
+                                    if detail.is_draft {
+                                        "Draft".into()
+                                    } else {
+                                        detail.state.clone()
+                                    },
+                                    true,
+                                    &theme,
+                                ))
+                                .child(field(
+                                    "Review",
+                                    if detail.review_decision.is_empty() {
+                                        "No review decision".into()
+                                    } else {
+                                        detail.review_decision.clone()
+                                    },
+                                    false,
+                                    &theme,
+                                ))
                                 .child(field(
                                     "Branch",
                                     format!("{} → {}", detail.head_ref_name, detail.base_ref_name),
@@ -1431,10 +1458,9 @@ impl Render for PullRequestDetailPage {
                                 .child(action("pr-retry-diff", "Retry diff", &theme).on_click(
                                     cx.listener(|page, _, _, cx| page.load_diff(true, cx)),
                                 ));
-                        } else if self.diff.is_some() {
-                            column = column.child(self.code_workspace(&theme, window, cx));
                         } else {
-                            column = column.child(div().mt(px(20.0)).child("Loading diff…"));
+                            // Loading renders the same workspace with placeholders.
+                            column = column.child(self.code_workspace(&theme, window, cx));
                         }
                     }
                     Tab::Activity => {
@@ -1451,8 +1477,16 @@ impl Render for PullRequestDetailPage {
                                 &comment.created_at
                             }
                         });
+                        // The thread keeps the same 24px under the header as the
+                        // Summary's first card.
+                        let mut thread = div()
+                            .id("pr-activity-thread")
+                            .debug_selector(|| "pr-activity-thread".into())
+                            .mt(px(24.0))
+                            .flex()
+                            .flex_col();
                         if activity.is_empty() {
-                            column = column.child(
+                            thread = thread.child(
                                 div()
                                     .text_color(theme.text_muted)
                                     .child("No comments or reviews yet."),
@@ -1463,7 +1497,7 @@ impl Render for PullRequestDetailPage {
                             .map(|comment| comment.author.login.as_str());
                         for (index, comment) in activity {
                             let own = comment.viewer_did_author || viewer_login.is_some_and(|login| login.eq_ignore_ascii_case(&comment.author.login));
-                            column = column.child(
+                            thread = thread.child(
                                 div().w_full().flex().mb(px(24.0))
                                     .when(own, |el| el.justify_end())
                                     .child(div()
@@ -1528,39 +1562,53 @@ impl Render for PullRequestDetailPage {
                                     }))),
                             );
                         }
+                        column = column.child(thread);
                     }
                 }
             } else if self.loading {
-                if let Some(preview) = &self.preview {
-                    column = column
-                        .child(
-                            div()
-                                .text_color(theme.text_muted)
-                                .child(preview.repository.clone()),
+                // The loaded layout with placeholders, so nothing shifts when
+                // the pull request arrives. The board's row supplies the header.
+                if self.tab != Tab::Code {
+                    column = column.child(match &self.preview {
+                        Some(preview) => detail_header(
+                            &preview.title,
+                            &preview.author.login,
+                            preview.repository.clone(),
+                            preview.number,
+                            None,
+                            &theme,
                         )
-                        .child(
-                            div()
-                                .mt(px(12.0))
-                                .text_size(crate::typography::ui_rems(22.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(preview.title.clone()),
-                        );
+                        .into_any_element(),
+                        None => div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(12.0))
+                            .px(px(8.0))
+                            .child(crate::pull_request_skeleton::bar(
+                                gpui::relative(0.6),
+                                20.0,
+                                0,
+                                cx.entity_id(),
+                                &theme,
+                                cx,
+                            ))
+                            .child(crate::pull_request_skeleton::bar(
+                                px(240.0),
+                                10.0,
+                                1,
+                                cx.entity_id(),
+                                &theme,
+                                cx,
+                            ))
+                            .into_any_element(),
+                    });
                 }
-                column = column.child(
-                    div()
-                        .py(px(32.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(crate::loaders::mini_glyph_spinner(
-                            "pr-detail-loading",
-                            1.75,
-                            theme.glyph,
-                            cx.entity_id(),
-                            cx,
-                        ))
-                        .child("Loading pull request…"),
-                );
+                column = column.child(crate::pull_request_skeleton::summary(
+                    CARD_GAP,
+                    cx.entity_id(),
+                    &theme,
+                    cx,
+                ));
             }
             let scroll = self.scroll.scroll.clone();
             let rail = crate::popover::rail(self, "pr-detail-scrollbar", &theme, cx);
@@ -2090,22 +2138,24 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pull_request_overview_groups_statuses_and_wraps_on_narrow_windows(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn pull_request_overview_rows_share_one_label_column(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::default()));
         let (_, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, true));
         for width in [900.0, 320.0] {
             cx.simulate_resize(gpui::size(px(width), px(1000.0)));
             cx.run_until_parked();
-            let group = cx.debug_bounds("pr-overview-statuses").unwrap();
-            let status = cx.debug_bounds("pr-overview-Status").unwrap();
-            let review = cx.debug_bounds("pr-overview-Review").unwrap();
-            for cell in [status, review] {
-                assert!(
-                    cell.left() >= group.left() && cell.right() <= group.right(),
-                    "{cell:?} outside {group:?}"
-                );
+            let rows: Vec<_> = [
+                "pr-field-Status",
+                "pr-field-Review",
+                "pr-field-Branch",
+                "pr-field-Changes",
+            ]
+            .iter()
+            .map(|id| cx.debug_bounds(id).unwrap())
+                .collect();
+            for pair in rows.windows(2) {
+                assert_eq!(pair[0].left(), pair[1].left(), "{rows:?}");
+                assert!(pair[1].top() >= pair[0].bottom(), "{rows:?}");
             }
             // Cards stack at one rhythm, with no floating labels between them.
             let cards: Vec<_> = ["pr-overview", "pr-checks-card", "pr-handoff", "pr-description"]
@@ -2115,11 +2165,13 @@ mod tests {
             for pair in cards.windows(2) {
                 assert_eq!(pair[1].top() - pair[0].bottom(), px(CARD_GAP), "{cards:?}");
             }
-            if width > 600.0 {
-                assert_eq!(status.top(), review.top());
-                assert!(group.size.height < px(110.0));
-            } else {
-                assert!(review.top() >= status.bottom());
+               let meta = cx.debug_bounds("pr-detail-meta").unwrap();
+            assert_eq!(cards[0].top() - meta.bottom(), px(24.0), "header sits 2× the card gap above");
+            // The long fixture title wraps inside the column instead of clipping.
+            let title = cx.debug_bounds("pr-detail-title").unwrap();
+            assert!(title.right() <= cards[0].right(), "{title:?}");
+            if width < 600.0 {
+                assert!(title.size.height > px(30.0), "narrow titles wrap: {title:?}");
             }
         }
     }
@@ -2350,6 +2402,9 @@ mod tests {
             let column = cx.debug_bounds("pr-content-column").unwrap();
             let composer = cx.debug_bounds("pr-comment-surface").unwrap();
             let nav = cx.debug_bounds("pr-detail-nav").unwrap();
+            let meta = cx.debug_bounds("pr-detail-meta").unwrap();
+            let thread = cx.debug_bounds("pr-activity-thread").unwrap();
+            assert_eq!(thread.top() - meta.bottom(), px(24.0), "header gap matches Summary");
             let mine = cx.debug_bounds("pr-message-0").unwrap();
             let other = cx.debug_bounds("pr-message-1").unwrap();
             assert_eq!(composer.left(), column.left() + px(40.0));

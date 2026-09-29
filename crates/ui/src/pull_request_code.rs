@@ -522,7 +522,14 @@ impl PullRequestDetailPage {
             .gap(px(1.0))
             .pt(px(4.0))
             .pb(px(if wide { NAV_CLEARANCE } else { 8.0 }));
-        if entries.is_empty() {
+        let loading = self.diff.is_none();
+        if loading {
+            list = list.child(crate::pull_request_skeleton::tree(
+                cx.entity_id(),
+                theme,
+                cx,
+            ));
+        } else if entries.is_empty() {
             list = list.child(
                 div()
                     .px(px(8.0))
@@ -601,10 +608,14 @@ impl PullRequestDetailPage {
                 }
             });
         }
-        let (additions, deletions) = self
-            .code_stats
-            .iter()
-            .fold((0, 0), |(a, d), (add, del)| (a + add, d + del));
+        // The PR detail already knows the totals while the patch loads.
+        let (file_count, additions, deletions) = match (&self.detail, loading) {
+            (Some(detail), true) => (detail.files.len(), detail.additions, detail.deletions),
+            _ => self.code_stats.iter().fold(
+                (self.code_files.len(), 0, 0),
+                |(files, a, d), (add, del)| (files, a + add, d + del),
+            ),
+        };
         div()
             .id("pr-file-browser")
             .debug_selector(|| "pr-file-browser".into())
@@ -627,7 +638,7 @@ impl PullRequestDetailPage {
                         div()
                             .flex_1()
                             .text_color(theme.text_muted)
-                            .child(self.code_files.len().to_string()),
+                            .child(file_count.to_string()),
                     )
                     .child(counts(additions, deletions, 11.0, theme)),
             )
@@ -656,6 +667,7 @@ impl PullRequestDetailPage {
     ) -> AnyElement {
         let _ = window;
         let wide = self.code_pane_width.is_some_and(|width| width >= WIDE_MIN);
+        let loading = self.diff.is_none();
         let active = self.active_file();
         let file_count = self.code_files.len();
         let all_folded = file_count > 0 && self.collapsed_files.len() == file_count;
@@ -732,7 +744,9 @@ impl PullRequestDetailPage {
                     .px(px(4.0))
                     .text_size(px(12.0))
                     .text_color(theme.text_muted)
-                    .child(if file_count == 0 {
+                    .child(if loading {
+                        "Loading changes…".to_owned()
+                    } else if file_count == 0 {
                         "No changed files".to_owned()
                     } else {
                         format!("File {position} of {file_count}")
@@ -779,12 +793,22 @@ impl PullRequestDetailPage {
             .border_1()
             .border_color(theme.border)
             .overflow_hidden()
-            .child(
-                gpui::list(self.code_list.clone(), cx.processor(Self::render_code_row))
-                    .size_full()
-                    .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
-            )
-            .children(self.sticky_header(theme, cx));
+            .map(|el| {
+                if loading {
+                    el.child(crate::pull_request_skeleton::diff(
+                        cx.entity_id(),
+                        theme,
+                        cx,
+                    ))
+                } else {
+                    el.child(
+                        gpui::list(self.code_list.clone(), cx.processor(Self::render_code_row))
+                            .size_full()
+                            .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
+                    )
+                    .children(self.sticky_header(theme, cx))
+                }
+            });
         let editor = div()
             .relative()
             .flex_1()
