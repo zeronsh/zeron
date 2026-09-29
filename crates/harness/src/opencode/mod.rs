@@ -4505,17 +4505,10 @@ mod mcp_injection_tests {
         for major in [1, 2] {
             let exe = fixture.path().join(format!("opencode-{major}"));
             let script = format!(
-                // Version probing has a short production deadline. Answer in
-                // the shell so a cold Node startup on a busy CI runner cannot
-                // exhaust it before this MCP-isolation fixture even starts.
-                r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  printf '%s\n' '{major}.0.0'
-  exit 0
-fi
-exec node - "$@" <<'NODE'
+                r#"#!/usr/bin/env node
 const http = require('node:http');
 const version = '{major}.0.0';
+if (process.argv.includes('--version')) {{ console.log(version); process.exit(0); }}
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
 const server = {major} === 1 ? config.mcp.zeron : config.mcp.servers.zeron;
 if (!server || server.command[1] !== 'mcp') throw new Error('missing MCP config');
@@ -4528,7 +4521,6 @@ http.createServer((req, res) => {{
   }}
   res.statusCode = 404; res.end('{{}}');
 }}).listen(port, '127.0.0.1');
-NODE
 "#
             );
             std::fs::write(&exe, script).unwrap();
