@@ -547,6 +547,35 @@ where
     })
 }
 
+/// [`menu_in`] travelling from the trigger's side: `from` is the signed
+/// starting offset (negative above the resting place for dropdowns,
+/// positive below it for menus that open upward).
+pub fn menu_in_from<E>(id: impl Into<ElementId>, from: f32, element: E) -> AnimationElement<E>
+where
+    E: Styled + IntoElement + 'static,
+{
+    element.with_animation(id, MENU_IN.animation(), move |el, t| {
+        el.relative()
+            .opacity(0.3 + 0.7 * t)
+            .top(px(from * (1.0 - t)))
+    })
+}
+
+/// [`menu_out`] retreating toward the trigger by half the entrance travel.
+pub fn menu_out_toward<E>(
+    id: impl Into<ElementId>,
+    toward: f32,
+    t: f32,
+    element: E,
+) -> AnimationElement<E>
+where
+    E: Styled + IntoElement + 'static,
+{
+    element.with_animation(id, MENU_OUT.animation(), move |el, _| {
+        el.relative().opacity(1.0 - t).top(px(toward * 0.5 * t))
+    })
+}
+
 /// Popover exit: the reverse of [`menu_in`] — fade to 0 + translateY 0→−2 over
 /// [`MENU_OUT`]. Unlike the entrances, the eased progress `t` comes from the
 /// caller (computed off [`crate::popover::Popup`]'s closing instant at render

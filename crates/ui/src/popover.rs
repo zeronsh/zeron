@@ -513,13 +513,28 @@ fn frosted_menu(exit: Option<f32>, content: AnyElement) -> AnyElement {
 /// and the overlay also keeps stray clicks from reaching whatever sits
 /// underneath.
 fn menu_motion(id: SharedString, exit: Option<f32>, inner: gpui::Div) -> AnyElement {
+    menu_motion_from(id, exit, inner, -2.0)
+}
+
+/// [`menu_motion`] with the entrance travelling `from` px (signed) out of
+/// the trigger's side, and the exit retreating back toward it.
+fn menu_motion_from(
+    id: SharedString,
+    exit: Option<f32>,
+    inner: gpui::Div,
+    from: f32,
+) -> AnyElement {
     if let Some(t) = exit {
         let inner = inner.relative().child(div().absolute().inset_0().occlude());
-        motion::menu_out(SharedString::from(format!("{id}-out")), t, inner).into_any_element()
+        motion::menu_out_toward(SharedString::from(format!("{id}-out")), from, t, inner)
+            .into_any_element()
     } else {
-        motion::menu_in(id, inner).into_any_element()
+        motion::menu_in_from(id, from, inner).into_any_element()
     }
 }
+
+/// Entrance travel for menus that open away from a trigger edge.
+const MENU_TRAVEL: f32 = 4.0;
 
 /// Wrap popover content in a floating anchored layer attached to the trigger:
 /// the caller `.child(anchored_menu(...))`s this from the trigger element while
@@ -583,10 +598,11 @@ pub fn anchored_menu_below_end(
                 gpui::anchored()
                     .anchor(Anchor::TopRight)
                     .snap_to_window_with_margin(px(8.0))
-                    .child(menu_motion(
+                    .child(menu_motion_from(
                         id.into(),
                         exit,
                         div().occlude().pt(px(6.0)).child(content),
+                        -MENU_TRAVEL,
                     )),
             )
             .priority(1)
@@ -684,10 +700,11 @@ pub fn anchored_menu_below_layer(
                 gpui::anchored()
                     .anchor(Anchor::TopLeft)
                     .snap_to_window_with_margin(px(8.0))
-                    .child(menu_motion(
+                    .child(menu_motion_from(
                         id.into(),
                         exit,
                         div().occlude().pt(px(gap)).child(content),
+                        -MENU_TRAVEL,
                     )),
             )
             .priority(priority)
@@ -711,10 +728,11 @@ pub fn anchored_menu_above(
             gpui::anchored()
                 .anchor(Anchor::BottomLeft)
                 .snap_to_window_with_margin(px(8.0))
-                .child(menu_motion(
+                .child(menu_motion_from(
                     id.into(),
                     exit,
                     div().occlude().pb(px(6.0)).child(content),
+                    MENU_TRAVEL,
                 )),
         )
         .priority(1)
@@ -783,10 +801,11 @@ pub fn anchored_menu_above_end(
                 gpui::anchored()
                     .anchor(Anchor::BottomRight)
                     .snap_to_window_with_margin(px(8.0))
-                    .child(menu_motion(
+                    .child(menu_motion_from(
                         id.into(),
                         exit,
                         div().occlude().pb(px(6.0)).child(content),
+                        MENU_TRAVEL,
                     )),
             )
             .priority(1)
