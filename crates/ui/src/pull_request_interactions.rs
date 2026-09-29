@@ -92,8 +92,8 @@ impl PullRequestDetailPage {
         params["body"] = body.clone().into();
         self.comment_task = Some(cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::POST_CHANGE_REQUEST_COMMENT, params).await
-                .map_err(|error| format!("Could not confirm submission: {error}. Your draft is kept; check GitHub before sending again."))
-                .and_then(|value| serde_json::from_value::<zeron_proto::ChangeRequestComment>(value).map_err(|error| error.to_string()));
+                .map_err(|error| format!("Couldn’t confirm your comment was posted. {} Your draft is kept; check GitHub before sending again.", super::failure_reason(&error)))
+                .and_then(|value| serde_json::from_value::<zeron_proto::ChangeRequestComment>(value).map_err(|_| "Your comment was posted, but its reply couldn’t be read. Refresh to see it.".to_owned()));
             let result = cx.background_executor().spawn(async move {
                 result.map(|comment| { let parsed = super::super::pull_request_media::parse_description(&comment.body); (comment, parsed) })
             }).await;

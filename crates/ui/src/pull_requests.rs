@@ -1029,11 +1029,6 @@ impl PullRequestsPage {
                     }
                     let now = Instant::now();
                     page.last_loaded_at = Some(now);
-                    let key = (
-                        page.target_device.clone(),
-                        page.repository.clone().unwrap(),
-                        page.filter,
-                    );
                     page.store_snapshot(now);
                 }
                 cx.notify();

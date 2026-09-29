@@ -37,6 +37,31 @@ pub struct OpenPrImage(pub String);
 #[action(namespace = shell, no_json)]
 pub struct StartPullRequestSession(pub String);
 
+/// What went wrong and what to do, in words. Error codes and transport
+/// details never reach the reader.
+fn failure_reason(error: &zeron_rpc::RpcError) -> &'static str {
+    use zeron_rpc::{RpcError, capability_errors as codes};
+    match error {
+        RpcError::Capability(code) if code == codes::PULL_REQUESTS_CLI_UNAVAILABLE => {
+            "Install GitHub CLI (gh) on this device and sign in."
+        }
+        RpcError::Capability(code) if code == codes::PULL_REQUESTS_AUTHENTICATION => {
+            "Run gh auth login on this device, then refresh."
+        }
+        RpcError::Capability(code) if code == codes::PULL_REQUESTS_RATE_LIMITED => {
+            "GitHub’s rate limit was reached. Try again in 15 minutes."
+        }
+        RpcError::Capability(code) if code == codes::PULL_REQUESTS_TIMEOUT => {
+            "GitHub didn’t respond in time. Try again."
+        }
+        RpcError::Capability(code) if code == codes::PULL_REQUESTS_DECODE => {
+            "GitHub’s response was too large or unreadable. Open it on GitHub instead."
+        }
+        RpcError::UnknownMethod(_) => "Update Zeron on the selected device.",
+        _ => "Check the connection and try again.",
+    }
+}
+
 pub fn open(url: &str, window: &mut Window, cx: &mut App) {
     open_on_device(url, None, window, cx);
 }
@@ -272,6 +297,9 @@ pub struct PullRequestDetailPage {
     jumped_file: Option<usize>,
     file_tree_scroll: gpui::ScrollHandle,
     diff_error: Option<String>,
+    /// Refresh ran away from the Code tab: its next diff load must bypass
+    /// the engine cache so it matches the refreshed details.
+    diff_refresh_owed: bool,
     tab: Tab,
     checks_expanded: bool,
     tab_slide: crate::motion::IndicatorSlide,
@@ -339,6 +367,7 @@ impl PullRequestDetailPage {
             jumped_file: None,
             file_tree_scroll: gpui::ScrollHandle::new(),
             diff_error: None,
+            diff_refresh_owed: false,
             tab: Tab::Summary,
             checks_expanded: false,
             tab_slide: crate::motion::IndicatorSlide::at(tab_slot(Tab::Summary), Instant::now()),
@@ -474,23 +503,7 @@ impl PullRequestDetailPage {
                     .when(self.loading, |el| el.opacity(0.4))
                     .on_click(cx.listener(|page, _, _, cx| {
                         cx.stop_propagation();
-                        if !page.loading {
-                            page.diff = None;
-                            let cached = page.cache.borrow_mut().get(&page.target, &page.url);
-                            if let Some(mut snapshot) = cached {
-                                snapshot.diff = None;
-                                snapshot.fetched = Instant::now();
-                                page.cache.borrow_mut().put(
-                                    page.target.clone(),
-                                    page.url.clone(),
-                                    snapshot,
-                                );
-                            }
-                            page.load(true, cx);
-                            if page.tab == Tab::Code {
-                                page.load_diff(true, cx);
-                            }
-                        }
+                        page.refresh(cx);
                     })),
             )
             .child(
@@ -530,6 +543,29 @@ impl PullRequestDetailPage {
             .into_any_element()
     }
 
+    /// Reload the details, and the diff now or on the next Code visit.
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        self.diff = None;
+        let cached = self.cache.borrow_mut().get(&self.target, &self.url);
+        if let Some(mut snapshot) = cached {
+            snapshot.diff = None;
+            snapshot.fetched = Instant::now();
+            self.cache
+                .borrow_mut()
+                .put(self.target.clone(), self.url.clone(), snapshot);
+        }
+        self.load(true, cx);
+        if self.tab == Tab::Code {
+            self.load_diff(true, cx);
+        } else {
+            self.diff_task = None;
+            self.diff_refresh_owed = true;
+        }
+    }
+
     fn params(&self, refresh: bool) -> serde_json::Value {
         let mut params = serde_json::json!({"url": self.url, "refresh": refresh});
         if let Some(target) = &self.target {
@@ -551,8 +587,8 @@ impl PullRequestDetailPage {
         let params = self.params(refresh);
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::GET_CHANGE_REQUEST, params).await
-                .map_err(|error| format!("Could not load this PR: {error}. Check GitHub CLI authentication and update the selected device if needed."))
-                .and_then(|value| serde_json::from_value::<ChangeRequestDetail>(value).map_err(|error| error.to_string()));
+                .map_err(|error| format!("Couldn’t load this pull request. {}", failure_reason(&error)))
+                .and_then(|value| serde_json::from_value::<ChangeRequestDetail>(value).map_err(|_| "The device sent a pull request this version can’t read. Update Zeron on the selected device.".to_owned()));
             // Large descriptions and review threads must not stall the UI thread.
             let result = cx.background_executor().spawn(async move {
                 result.map(|detail| DetailSnapshot {
@@ -587,17 +623,14 @@ impl PullRequestDetailPage {
             return;
         };
         self.diff_error = None;
+        let refresh = refresh || std::mem::take(&mut self.diff_refresh_owed);
         let params = self.params(refresh);
         self.diff_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
                 .call(methods::GET_CHANGE_REQUEST_DIFF, params)
                 .await
-                .map_err(|error| {
-                    format!(
-                        "Could not load the diff: {error}. Open GitHub in your browser for large diffs."
-                    )
-                })
+                .map_err(|error| format!("Couldn’t load the diff. {}", failure_reason(&error)))
                 .and_then(|value| {
                     serde_json::from_value::<String>(value)
                         .map_err(|_| "The device returned an invalid diff.".to_owned())
@@ -1796,6 +1829,116 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Records each diff request's `refresh` flag.
+    struct DiffRpc(Arc<std::sync::Mutex<Vec<bool>>>);
+    #[async_trait::async_trait]
+    impl zeron_rpc::RpcService for DiffRpc {
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
+            match method {
+                methods::GET_CHANGE_REQUEST => zeron_rpc::RpcReply::value(&ChangeRequestDetail {
+                    title: "Fresh".into(),
+                    ..Default::default()
+                }),
+                methods::GET_CHANGE_REQUEST_DIFF => {
+                    self.0.lock().unwrap().push(params["refresh"] == true);
+                    zeron_rpc::RpcReply::value(
+                        &"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n",
+                    )
+                }
+                other => Err(zeron_rpc::RpcError::UnknownMethod(other.into())),
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn pull_request_refresh_away_from_code_refreshes_the_next_diff(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let diffs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (page, cx) = cx.add_window_view(|window, cx| {
+            let state = cx.new(|_| AppState::new());
+            let cache = Rc::new(RefCell::new(PullRequestCache::default()));
+            let mut cached = snapshot("Cached");
+            cached.diff = Some(ParsedDiff::new(
+                "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n".into(),
+            ));
+            cache
+                .borrow_mut()
+                .put(None, "https://github.com/a/b/pull/1".into(), cached);
+            state.update(cx, |state, _| {
+                state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                    zeron_rpc::memory_client(Arc::new(DiffRpc(diffs.clone()))),
+                ))
+            });
+            PullRequestDetailPage::new(
+                state,
+                "https://github.com/a/b/pull/1".into(),
+                None,
+                cache,
+                None,
+                window,
+                cx,
+            )
+        });
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            for _ in 0..100 {
+                cx.run_until_parked();
+                runtime.block_on(async { tokio::task::yield_now().await });
+                if page.read_with(cx, |page, _| {
+                    page.task.is_none() && page.diff_task.is_none()
+                }) {
+                    break;
+                }
+            }
+        };
+        page.update(cx, |page, cx| page.refresh(cx));
+        settle(cx);
+        page.update(cx, |page, cx| page.select_tab(Tab::Code, cx));
+        settle(cx);
+        page.update(cx, |page, cx| {
+            page.select_tab(Tab::Summary, cx);
+            page.diff = None;
+            page.select_tab(Tab::Code, cx);
+        });
+        settle(cx);
+        assert_eq!(
+            *diffs.lock().unwrap(),
+            [true, false],
+            "only the first diff load after a refresh bypasses the cache"
+        );
+    }
+
+    #[test]
+    fn pull_request_failures_read_as_words_not_codes() {
+        use zeron_rpc::{RpcError, capability_errors as codes};
+        for error in [
+            RpcError::Capability(codes::PULL_REQUESTS_AUTHENTICATION.into()),
+            RpcError::Capability(codes::PULL_REQUESTS_DECODE.into()),
+            RpcError::Transport("socket reset by peer".into()),
+            RpcError::UnknownMethod(methods::GET_CHANGE_REQUEST.into()),
+        ] {
+            let reason = failure_reason(&error);
+            assert!(!reason.contains("pull_requests."), "{reason}");
+            assert!(!reason.contains("socket"), "{reason}");
+            assert!(!reason.contains("GetChangeRequest"), "{reason}");
+        }
+        assert_eq!(
+            failure_reason(&RpcError::Capability(
+                codes::PULL_REQUESTS_AUTHENTICATION.into()
+            )),
+            "Run gh auth login on this device, then refresh."
+        );
+    }
+
     #[test]
     fn ci_summary_handles_mixed_and_unreported_checks() {
         let check = |conclusion: &str, state: &str, status: &str| zeron_proto::ChangeRequestCheck {
@@ -2270,7 +2413,6 @@ mod tests {
 
     #[gpui::test]
     fn pull_request_detail_actions_fit_and_tabs_switch(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext;
         cx.update(|cx| cx.set_global(Theme::default()));
         let (host, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, true));
         let page = host.read_with(cx, |host, _| host.page.clone());
@@ -2468,7 +2610,6 @@ mod tests {
 
     #[gpui::test]
     fn pull_request_error_keeps_retry_and_browser_actions(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext;
         cx.update(|cx| cx.set_global(Theme::default()));
         let (_, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, false));
         cx.simulate_resize(gpui::size(px(320.0), px(800.0)));
