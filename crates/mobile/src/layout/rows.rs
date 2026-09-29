@@ -14,13 +14,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use zeron_doc::parts::MessagePart;
 use zeron_doc::parts::MessageStatus;
 use zeron_doc::schema::{MessageRole, SessionMessageEntry};
-use zeron_markdown::parser::{BlockTree, IncrementalParser, TopBlock};
+use zeron_markdown::parser::{IncrementalParser, TopBlock};
 use zeron_text::WhiteSpace;
 
 use super::display::{ColorRole, DisplayBuilder, FadeEdge, TextRun, WidgetKind};
 use super::markdown::{Ctx, PBlock, PText, Px, place, place_text, prepare_block, prepare_plain};
 use super::style::{Family, TYPE, Weight};
-use super::tools::{ToolGroup, place_tools};
+use super::tools::{ThoughtState, ToolGroup, place_tools};
 
 /// Row kinds the painter may style differently (e.g. context menus).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -167,34 +167,12 @@ struct EntryState {
     rows: Vec<Placed>,
 }
 
-/// One reasoning part's incremental parse state (desktop's per-part parse
-/// cache, `ui/src/transcript.rs::parse`): the canonical tree once settled, the
-/// mended display tree while the part is the streaming tail.
-struct ThoughtState {
-    parser: IncrementalParser,
-    source_len: usize,
-    source_hash: u64,
-    live: bool,
-    tree: Arc<BlockTree>,
-}
-
-impl Default for ThoughtState {
-    fn default() -> Self {
-        Self {
-            parser: IncrementalParser::new(),
-            source_len: usize::MAX,
-            source_hash: 0,
-            live: false,
-            tree: Arc::new(BlockTree::default()),
-        }
-    }
-}
-
 /// Builds rows incrementally across snapshots.
 #[derive(Default)]
 pub(crate) struct RowBuilder {
     parts: HashMap<String, PartState>,
-    thoughts: HashMap<String, ThoughtState>,
+    /// Reasoning parts' parse + prepared detail, keyed `{entry}#{part}`.
+    pub(crate) thoughts: HashMap<String, ThoughtState>,
     entries: HashMap<String, EntryState>,
     pending: HashMap<String, (String, Arc<RowCore>)>,
     working: Option<Arc<RowCore>>,
@@ -204,7 +182,7 @@ pub(crate) struct RowBuilder {
     pub detail_open: HashMap<u64, bool>,
 }
 
-fn quick_hash(s: &str) -> u64 {
+pub(crate) fn quick_hash(s: &str) -> u64 {
     // Change detector for a part's text: the whole text, so a same-length
     // rewrite is caught too. Only parts of messages that changed get here,
     // and re-parsing them is already linear in their length.
@@ -492,23 +470,6 @@ impl RowBuilder {
         }
         state.blocks = next.clone();
         next
-    }
-
-    /// The reasoning part's parse tree, incrementally cached (desktop's
-    /// per-part parse wiring: hanging inline markers mended while the part is
-    /// the streaming tail, the canonical tree once it settles).
-    pub(crate) fn thought_tree(&mut self, entry_id: &str, part_id: &str, text: &str, live: bool) -> Arc<BlockTree> {
-        let hash = quick_hash(text);
-        let state = self.thoughts.entry(format!("{entry_id}#{part_id}")).or_default();
-        if state.source_len == text.len() && state.source_hash == hash && state.live == live {
-            return state.tree.clone();
-        }
-        state.parser.set_text(text);
-        state.source_len = text.len();
-        state.source_hash = hash;
-        state.live = live;
-        state.tree = Arc::new(if live { state.parser.display_tree() } else { state.parser.tree().clone() });
-        state.tree.clone()
     }
 
     fn user_row(&mut self, ctx: &mut Ctx, id: &str, content: &str, pending: bool) -> RowCore {

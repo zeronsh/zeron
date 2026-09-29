@@ -8,14 +8,14 @@
 use std::sync::Arc;
 
 use zeron_doc::parts::{MessagePart, SubagentStatus};
-use zeron_markdown::parser::{Block, BlockTree, InlineRun, InlineStyle};
+use zeron_markdown::parser::{Block, BlockTree, IncrementalParser, InlineRun, InlineStyle};
 use zeron_proto::ToolCall;
 use zeron_text::WhiteSpace;
 
-use super::display::{ColorRole, Decoration, DisplayBuilder, WidgetKind};
+use super::display::{ColorRole, Decoration, DisplayBuilder, FadeEdge, WidgetKind};
 use super::file_icons::{basename, file_icon_asset};
 use super::markdown::{Ctx, PText, Px, SpanPaint, place_text, prepare_plain};
-use super::rows::{Content, RowBuilder, RowCore, RowKind, next_version, place_text_lines, row_key};
+use super::rows::{Content, RowBuilder, RowCore, RowKind, next_version, place_text_lines, quick_hash, row_key};
 use super::style::{Family, Weight, baseline};
 
 /// Desktop → phone scale (12pt tool text → 13.5pt).
@@ -69,8 +69,8 @@ pub(crate) struct ToolGroup {
 pub(crate) enum DetailBlock {
     /// Mono lines (invocation / output), single-line each, scrolling sideways.
     Lines { lines: Vec<PText>, more: Option<PText> },
-    /// Thought markdown flattened to styled prose lines, wrapped at width.
-    Prose(PText),
+    /// Thought markdown flattened to styled lines, wrapped at width.
+    Thought(Arc<ThoughtBody>),
     Stats(Vec<StatRow>),
     Diff { rows: Vec<DiffRowP>, notice: Option<PText>, digits: usize },
 }
@@ -326,9 +326,13 @@ fn result_block(ctx: &mut Ctx, st: &Styles, part: &MessagePart) -> Option<Detail
 /// `thought_lines`: inline markers become real styling, blocks flatten
 /// structurally (headings bold, list markers, quote bars, verbatim code
 /// lines, tables as `·`-joined rows). Desktop wraps at a char budget to keep
-/// its detail height analytic; here each logical line is one line box and the
-/// text engine wraps it at the painted width, so heights stay exact anyway.
-fn thought_lines(tree: &BlockTree) -> Vec<Vec<InlineRun>> {
+/// its detail height analytic; here the text engine wraps each line at the
+/// painted width beside its gutter, so heights stay exact anyway.
+///
+/// Every logical line fills at least one visual line, so only the first `cap`
+/// can ever show: flattening stops there (a long thought costs the same per
+/// streamed delta as a short one). `true` = more content follows the cap.
+fn thought_lines(tree: &BlockTree, cap: usize) -> (Vec<Vec<InlineRun>>, bool) {
     let mut out: Vec<Vec<InlineRun>> = Vec::new();
     for top in &tree.blocks {
         if !out.is_empty() {
@@ -336,11 +340,16 @@ fn thought_lines(tree: &BlockTree) -> Vec<Vec<InlineRun>> {
             out.push(Vec::new());
         }
         thought_block_lines(&top.block, 0, &mut out);
+        if out.len() > cap {
+            break;
+        }
     }
+    let more = out.len() > cap;
+    out.truncate(cap);
     while out.last().is_some_and(|l| l.iter().all(|r| r.text.trim().is_empty())) {
         out.pop();
     }
-    out
+    (out, more)
 }
 
 /// The indent run every line opens with; list/quote handlers rewrite it to
@@ -489,46 +498,73 @@ fn thought_block_lines(block: &Block, indent: usize, out: &mut Vec<Vec<InlineRun
     }
 }
 
-/// Flattened thought lines as one wrapped styled text at the detail's type
-/// size — desktop's `thought_line_text`: faint prose, semibold bold, mono
-/// code, underlined links (NOT clickable — a thought is a record, not a
-/// surface). Logical lines are hard `\n`s; `place_text_lines` wraps each at
-/// the painted width, one `out_lh` line box per visual line.
-fn prepare_thought(ctx: &mut Ctx, st: &Styles, lines: &[Vec<InlineRun>]) -> PText {
+/// One flattened thought line, split at its slot-0 run: the gutter (indent,
+/// list marker, quote bars) and the body the text engine wraps beside it. A
+/// wrapped body hangs under its own first word and keeps its quote bars —
+/// what desktop's re-indented char wrap draws.
+pub(crate) struct ThoughtLine {
+    /// Gutter width: the body's x offset on every visual line.
+    indent: f32,
+    /// The gutter on the first visual line (None when it's only spaces).
+    gutter: Option<PText>,
+    /// Quote bars repeated on wrapped continuation lines.
+    bars: Option<PText>,
+    /// None for a blank line (still one line box).
+    body: Option<PText>,
+}
+
+/// A thought's prepared detail: at most [`MAX_LINES`] logical lines (only
+/// those can show); `more` = content past them.
+pub(crate) struct ThoughtBody {
+    lines: Vec<ThoughtLine>,
+    more: bool,
+    lh: f32,
+}
+
+/// One reasoning part's parse and prepared detail. The parse is incremental
+/// like text parts' (the mended display tree while the part is the streaming
+/// tail, the canonical tree once settled); the prepared body is reused while
+/// its visible lines are unchanged.
+#[derive(Default)]
+pub(crate) struct ThoughtState {
+    parser: IncrementalParser,
+    /// (len, hash, live) of the last source fed to the parser.
+    source: Option<(usize, u64, bool)>,
+    lines: Vec<Vec<InlineRun>>,
+    body: Option<Arc<ThoughtBody>>,
+}
+
+/// Flattened thought lines at the detail's type size — desktop's
+/// `thought_line_text`: faint prose, semibold bold, mono code, underlined
+/// links (NOT clickable — a thought is a record, not a surface).
+fn prepare_thought(ctx: &mut Ctx, st: &Styles, lines: &[Vec<InlineRun>], more: bool) -> ThoughtBody {
     let size = st.size;
     let semi = ctx.typo.style(Family::Sans, Weight::Semibold, false, size);
     let italic = ctx.typo.style(Family::Sans, Weight::Regular, true, size);
     let semi_italic = ctx.typo.style(Family::Sans, Weight::Semibold, true, size);
     let mono_italic = ctx.typo.style(Family::Mono, Weight::Regular, true, size);
-    let mut text = String::new();
-    let mut spans: Vec<zeron_text::Span> = Vec::new();
-    let mut paints = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if i > 0 {
-            // Cover the hard break: extend the touching span, or open one for
-            // a blank line (spans must cover the text contiguously).
-            let start = text.len();
-            text.push('\n');
-            match spans.last_mut() {
-                Some(span) if span.range.end == start => span.range.end = text.len(),
-                _ => {
-                    spans.push(zeron_text::Span {
-                        range: start..text.len(),
-                        style: st.label.id,
-                        pad_start: 0.0,
-                        pad_end: 0.0,
-                        atomic: false,
-                    });
-                    paints.push(SpanPaint {
-                        color: ColorRole::TextFaint,
-                        decoration: Decoration::None,
-                        link: None,
-                        chip: false,
-                    });
-                }
-            }
+    let mut prepared = Vec::with_capacity(lines.len());
+    for line in lines {
+        let Some((head, runs)) = line.split_first() else {
+            prepared.push(ThoughtLine { indent: 0.0, gutter: None, bars: None, body: None });
+            continue;
+        };
+        // `Pre`: the gutter's trailing spaces are content, so they count.
+        let gutter = (!head.text.is_empty()).then(|| prepare_plain(ctx, &head.text, st.label, st.out_lh, ColorRole::TextFaint, WhiteSpace::Pre));
+        let indent = gutter.as_ref().map_or(0.0, |g| g.p.max_content_width());
+        let gutter = gutter.filter(|_| !head.text.trim().is_empty());
+        let bars = head.text.contains('│').then(|| {
+            let bars: String = head.text.chars().map(|c| if c == '│' { c } else { ' ' }).collect();
+            prepare_plain(ctx, &bars, st.label, st.out_lh, ColorRole::TextFaint, WhiteSpace::Pre)
+        });
+        if runs.iter().all(|r| r.text.trim().is_empty()) {
+            prepared.push(ThoughtLine { indent, gutter, bars, body: None });
+            continue;
         }
-        for run in line {
+        let mut text = String::new();
+        let mut spans: Vec<zeron_text::Span> = Vec::with_capacity(runs.len());
+        let mut paints = Vec::with_capacity(runs.len());
+        for run in runs {
             if run.text.is_empty() {
                 continue;
             }
@@ -564,31 +600,121 @@ fn prepare_thought(ctx: &mut Ctx, st: &Styles, lines: &[Vec<InlineRun>]) -> PTex
                 chip: false,
             });
         }
+        // Code lines are verbatim (indentation, aligned spaces); prose
+        // collapses whitespace like the transcript's markdown does.
+        let verbatim = runs.iter().all(|r| r.style.code);
+        let p = zeron_text::prepare(
+            &ctx.typo.book,
+            ctx.cache,
+            &text,
+            &spans,
+            &zeron_text::PrepareOptions {
+                white_space: if verbatim { WhiteSpace::PreWrap } else { WhiteSpace::PreLine },
+                overflow_wrap: zeron_text::OverflowWrap::Anywhere,
+                ..Default::default()
+            },
+        );
+        let body = PText {
+            p,
+            lh: st.out_lh,
+            base: baseline(st.out_lh, st.label),
+            paints,
+            links: Vec::new(),
+            chip: (0.0, 0.0),
+        };
+        prepared.push(ThoughtLine { indent, gutter, bars, body: Some(body) });
     }
-    let p = zeron_text::prepare(
-        &ctx.typo.book,
-        ctx.cache,
-        &text,
-        &spans,
-        &zeron_text::PrepareOptions {
-            white_space: WhiteSpace::PreLine,
-            overflow_wrap: zeron_text::OverflowWrap::Anywhere,
-            ..Default::default()
-        },
-    );
-    PText {
-        p,
-        lh: st.out_lh,
-        base: baseline(st.out_lh, st.label),
-        paints,
-        links: Vec::new(),
-        chip: (0.0, 0.0),
+    ThoughtBody { lines: prepared, more, lh: st.out_lh }
+}
+
+/// Visual lines a thought fills at body width `bw`, capped at
+/// [`MAX_LINES`]; `true` when content is cut (bottom fade).
+fn thought_extent(t: &ThoughtBody, bw: f32) -> (usize, bool) {
+    let mut n = 0usize;
+    for line in &t.lines {
+        n += line.visual_lines(bw);
+        if n > MAX_LINES {
+            return (MAX_LINES, true);
+        }
+    }
+    (n, t.more)
+}
+
+impl ThoughtLine {
+    fn visual_lines(&self, bw: f32) -> usize {
+        self.body.as_ref().map_or(1, |b| b.p.line_count((bw - self.indent).max(1.0)).max(1))
+    }
+}
+
+/// Paint a thought's lines from `by`: gutters, wrapped bodies beside them,
+/// quote bars down wrapped lines; cut at [`MAX_LINES`] with a bottom fade.
+fn place_thought(t: &ThoughtBody, bx: f32, by: f32, bw: f32, o: &mut DisplayBuilder) {
+    let (shown, cut) = thought_extent(t, bw);
+    let runs_before = o.runs.len();
+    let mut row = 0usize;
+    for line in &t.lines {
+        if row >= shown {
+            break;
+        }
+        let y = by + row as f32 * t.lh;
+        let n = line.visual_lines(bw);
+        if let Some(g) = &line.gutter {
+            place_text(g, bx, y, g.p.max_content_width() + 1.0, Some(o));
+        }
+        if let Some(bars) = &line.bars {
+            for k in 1..n.min(shown - row) {
+                place_text(bars, bx, y + k as f32 * t.lh, bars.p.max_content_width() + 1.0, Some(o));
+            }
+        }
+        if let Some(body) = &line.body {
+            place_text(body, bx + line.indent, y, (bw - line.indent).max(1.0), Some(o));
+        }
+        row += n;
+    }
+    if cut {
+        // Drop the overflow of a wrapped line straddling the cap.
+        let limit = by + shown as f32 * t.lh;
+        let kept: Vec<_> = o.runs.drain(runs_before..).filter(|r| r.baseline < limit).collect();
+        o.runs.extend(kept);
+        o.fade(bx, limit - t.lh, bw, t.lh, FadeEdge::Bottom);
     }
 }
 
 // MARK: - Building
 
 impl RowBuilder {
+    /// A reasoning part's prepared detail. The parse advances incrementally
+    /// per streamed delta; flattening stops at the visible cap; preparing
+    /// (shaping) reruns only when the visible lines change.
+    fn thought_body(&mut self, ctx: &mut Ctx, st: &Styles, key: &str, text: &str, live: bool) -> Arc<ThoughtBody> {
+        let state = self.thoughts.entry(key.to_owned()).or_default();
+        let source = (text.len(), quick_hash(text), live);
+        if let (Some(body), Some(fed)) = (&state.body, state.source)
+            && fed == source
+        {
+            return body.clone();
+        }
+        state.parser.set_text(text);
+        state.source = Some(source);
+        let tree = if live { state.parser.display_tree() } else { state.parser.tree().clone() };
+        let (lines, more) = thought_lines(&tree, MAX_LINES);
+        if let Some(body) = &state.body
+            && body.more == more
+            && state.lines == lines
+        {
+            return body.clone();
+        }
+        let body = Arc::new(prepare_thought(ctx, st, &lines, more));
+        state.lines = lines;
+        state.body = Some(body.clone());
+        body
+    }
+
+    #[cfg(test)]
+    pub(crate) fn thought_body_for_test(&self, key: &str) -> Option<Arc<ThoughtBody>> {
+        self.thoughts.get(key).and_then(|s| s.body.clone())
+    }
+
     /// One group of consecutive tool / thought parts (`{msg}#g{n}`).
     pub(crate) fn tool_row(&mut self, ctx: &mut Ctx, entry_id: &str, id: &str, parts: &[&MessagePart], live: bool, agents: bool) -> RowCore {
         let key = row_key(id);
@@ -676,8 +802,7 @@ impl RowBuilder {
                             // Same parse wiring as text parts: incremental while
                             // streaming, inline markers mended for display, the
                             // canonical tree once settled.
-                            let tree = self.thought_tree(entry_id, part.id(), text, tail);
-                            vec![DetailBlock::Prose(prepare_thought(ctx, &st, &thought_lines(&tree)))]
+                            vec![DetailBlock::Thought(self.thought_body(ctx, &st, &format!("{entry_id}#{}", part.id()), text, tail))]
                         } else {
                             Vec::new()
                         };
@@ -832,12 +957,12 @@ fn place_block(block: &DetailBlock, px: Px, bx: f32, by: f32, bw: f32, out: Opti
             }
             h
         }
-        DetailBlock::Prose(p) => {
-            let shown = p.p.line_count(bw).min(MAX_LINES);
+        DetailBlock::Thought(t) => {
+            let (shown, _) = thought_extent(t, bw);
             if let Some(o) = out {
-                place_text_lines(p, bx, by + pad, bw, MAX_LINES, px, o);
+                place_thought(t, bx, by + pad, bw, o);
             }
-            pad * 2.0 + shown as f32 * p.lh
+            pad * 2.0 + shown as f32 * t.lh
         }
         DetailBlock::Stats(rows) => {
             let h = pad * 2.0 + rows.len() as f32 * lh;
@@ -966,7 +1091,13 @@ pub(crate) fn heap_bytes(t: &ToolGroup) -> usize {
                         .iter()
                         .map(|b| match b {
                             DetailBlock::Lines { lines, .. } => lines.iter().map(|p| p.p.heap_bytes()).sum(),
-                            DetailBlock::Prose(p) => p.p.heap_bytes(),
+                            DetailBlock::Thought(t) => t
+                                .lines
+                                .iter()
+                                .flat_map(|l| [&l.gutter, &l.bars, &l.body])
+                                .flatten()
+                                .map(|p| p.p.heap_bytes())
+                                .sum::<usize>(),
                             DetailBlock::Stats(rows) => rows.iter().map(|r| r.path.p.heap_bytes()).sum(),
                             DetailBlock::Diff { rows, .. } => rows.iter().map(|r| r.text.p.heap_bytes()).sum(),
                         })
@@ -978,6 +1109,18 @@ pub(crate) fn heap_bytes(t: &ToolGroup) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thought_lines_stop_at_the_visible_cap() {
+        use zeron_markdown::parser::parse_full;
+        let long: String = (0..100).map(|i| format!("para {i}\n\n")).collect();
+        let (lines, more) = thought_lines(&parse_full(&long), MAX_LINES);
+        assert!(more && lines.len() <= MAX_LINES && lines.len() >= MAX_LINES - 1, "{}", lines.len());
+        let (lines, more) = thought_lines(&parse_full("one\n\n- two\n\n```\n  three\n```"), MAX_LINES);
+        let text: Vec<String> = lines.iter().map(|l| l.iter().map(|r| r.text.as_str()).collect()).collect();
+        assert_eq!(text, ["one", "", "• two", "", "  three"]);
+        assert!(!more);
+    }
 
     #[test]
     fn summary_matches_desktop_wording() {
