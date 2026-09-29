@@ -288,7 +288,13 @@ pub struct ClientFrame {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerFrame {
     pub id: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `"ok": null` is a reply whose value is `null` (for example an absent
+    /// `Option`), distinct from a frame without `ok`.
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub ok: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub err: Option<String>,
@@ -296,6 +302,13 @@ pub struct ServerFrame {
     pub item: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub done: bool,
+}
+
+fn present_value<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 /// What a service returns for one invocation.
@@ -613,6 +626,23 @@ mod tests {
 
         let echoed = client.call("Echo", serde_json::json!(2)).await.unwrap();
         assert_eq!(echoed, serde_json::json!(2));
+    }
+
+    #[tokio::test]
+    async fn unary_null_reply_resolves_the_call() {
+        let client = memory_client(Arc::new(TestService));
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.call("Echo", serde_json::Value::Null),
+        )
+        .await
+        .expect("a null reply is a reply")
+        .unwrap();
+        assert_eq!(reply, serde_json::Value::Null);
+        let frame: ServerFrame = serde_json::from_str(r#"{"id":1,"ok":null}"#).unwrap();
+        assert_eq!(frame.ok, Some(serde_json::Value::Null));
+        let frame: ServerFrame = serde_json::from_str(r#"{"id":1,"done":true}"#).unwrap();
+        assert_eq!(frame.ok, None);
     }
 
     #[tokio::test]
