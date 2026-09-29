@@ -629,18 +629,21 @@ pub fn badge_active(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div 
         .child(label.into())
 }
 
-pub const SWITCH_WIDTH: f32 = 48.0;
-const SWITCH_HEIGHT: f32 = 28.0;
-const SWITCH_TRACK_HEIGHT: f32 = 24.0;
-/// Thumb inset inside the track; radii stay concentric (12 = 10 + 2).
-const SWITCH_THUMB_INSET: f32 = 2.0;
-const SWITCH_THUMB: f32 = SWITCH_TRACK_HEIGHT - 2.0 * SWITCH_THUMB_INSET;
-/// The thumb is a pill, wider than tall, with a dimpled grip.
+// The compact picker's slider in miniature: a rail with a larger pill thumb
+// that overhangs it by 2pt above and below and rides flush with its ends,
+// and an accent fill that runs behind the thumb as it travels. The travel
+// equals the thumb's height, so the open end of the rail is as long as the
+// thumb is tall and its state mark clears the rail's rounded end.
+pub const SWITCH_WIDTH: f32 = 54.0;
+const SWITCH_HEIGHT: f32 = 26.0;
+const SWITCH_TRACK_HEIGHT: f32 = 22.0;
+const SWITCH_THUMB: f32 = SWITCH_HEIGHT;
 const SWITCH_THUMB_WIDTH: f32 = 28.0;
+const SWITCH_TRAVEL: f32 = SWITCH_WIDTH - SWITCH_THUMB_WIDTH;
 
-/// A glass switch: a neutral track that the accent plate fills as the thumb
-/// travels, matching the composer's voice controls. The caller owns
-/// activation and accessibility.
+/// A glass switch: a neutral rail that the accent plate fills behind the
+/// thumb as it travels, like the compact picker's effort slider. The caller
+/// owns activation and accessibility.
 pub fn toggle_switch(theme: &Theme, on: bool, key: impl Into<SharedString>) -> gpui::Div {
     let key: SharedString = key.into();
     div()
@@ -705,10 +708,8 @@ impl RenderOnce for SwitchVisual {
             window.request_animation_frame();
         }
         let top = (SWITCH_HEIGHT - SWITCH_TRACK_HEIGHT) / 2.0;
-        let travel = SWITCH_WIDTH - SWITCH_THUMB_WIDTH - 2.0 * SWITCH_THUMB_INSET;
-        // The accent plate covers the neutral rim too, so the two crossfade
-        // as one surface while the thumb moves.
-        let track_element = crate::glass::light(
+        let thumb_left = SWITCH_TRAVEL * position;
+        let rail = crate::glass::light(
             div()
                 .absolute()
                 .top(px(top))
@@ -718,74 +719,76 @@ impl RenderOnce for SwitchVisual {
                 .rounded_full(),
             &self.theme,
             1.0,
-        )
-        .when(position > 0.001, |el| {
-            el.child(crate::glass::accent(
+        );
+        // Runs a rail radius past the thumb's centre, so its end is always
+        // under the thumb; it fades in with the travel so its rim and drop
+        // never peek around a resting thumb.
+        let fill_width = thumb_left + SWITCH_THUMB_WIDTH / 2.0 + SWITCH_TRACK_HEIGHT / 2.0;
+        let fill = (position > 0.001).then(|| {
+            crate::glass::accent(
                 div()
                     .absolute()
-                    .top(px(-1.0))
-                    .left(px(-1.0))
-                    .right(px(-1.0))
-                    .bottom(px(-1.0))
+                    .top(px(top))
+                    .left_0()
+                    .w(px(fill_width))
+                    .h(px(SWITCH_TRACK_HEIGHT))
                     .rounded_full(),
                 &self.theme,
-                position,
+                (position * 3.0).min(1.0),
                 0.0,
-            ))
-        })
-        // The state mark sits centred in the half the thumb leaves empty: a
-        // bar when on, a ring when off, crossfading with the thumb's travel.
-        .child({
-            let empty = SWITCH_WIDTH - SWITCH_THUMB_WIDTH - 2.0 * SWITCH_THUMB_INSET;
-            let centre = SWITCH_THUMB_INSET + empty / 2.0 - 1.0;
-            let ring = if self.theme.appearance.is_dark() {
-                gpui::white().opacity(0.22)
-            } else {
-                gpui::white().opacity(0.6)
-            };
-            div()
-                .absolute()
-                .inset_0()
-                .child(
-                    div()
-                        .absolute()
-                        .left(px(centre - 0.5))
-                        .top(px(SWITCH_TRACK_HEIGHT / 2.0 - 4.5))
-                        .w(px(1.0))
-                        .h(px(7.0))
-                        .rounded_full()
-                        .bg(gpui::white().opacity(0.55))
-                        .opacity(position),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .right(px(centre - 3.5))
-                        .top(px(SWITCH_TRACK_HEIGHT / 2.0 - 4.5))
-                        .size(px(7.0))
-                        .rounded_full()
-                        .border(px(1.0))
-                        .border_color(ring)
-                        .opacity(1.0 - position),
-                )
+            )
         });
-        let thumb_element = crate::glass::thumb(
+        // The state mark sits centred in the part of the rail the thumb
+        // leaves open: a bar on the fill when on, a ring on the rail when
+        // off, crossfading with the travel.
+        let mark = 7.0;
+        let mark_top = (SWITCH_HEIGHT - mark) / 2.0;
+        let bar_centre = SWITCH_TRAVEL / 2.0;
+        let ring_centre = SWITCH_THUMB_WIDTH + SWITCH_TRAVEL / 2.0;
+        let marks = div()
+            .absolute()
+            .inset_0()
+            .child(
+                div()
+                    .absolute()
+                    .left(px(bar_centre - 0.5))
+                    .top(px(mark_top))
+                    .w(px(1.0))
+                    .h(px(mark))
+                    .rounded_full()
+                    .bg(gpui::white().opacity(0.75))
+                    .opacity(position),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(ring_centre - mark / 2.0))
+                    .top(px(mark_top))
+                    .size(px(mark))
+                    .rounded_full()
+                    .border(px(1.0))
+                    .border_color(self.theme.text.opacity(0.3))
+                    .opacity(1.0 - position),
+            );
+        let thumb = crate::glass::thumb(
             div()
                 .absolute()
-                .top(px(top + SWITCH_THUMB_INSET))
-                .left(px(SWITCH_THUMB_INSET + travel * position))
+                .top_0()
+                .left(px(thumb_left))
                 .w(px(SWITCH_THUMB_WIDTH))
                 .h(px(SWITCH_THUMB))
                 .rounded_full(),
             &self.theme,
         )
-        .child(crate::glass::grip(3.0, 1.1, 4.0));
+        .child(crate::glass::grip(3.0, 1.2, 5.0));
         div()
             .relative()
             .w(px(SWITCH_WIDTH))
             .h(px(SWITCH_HEIGHT))
-            .child(track_element)
-            .child(thumb_element)
+            .child(rail)
+            .children(fill)
+            .child(marks)
+            .child(thumb)
     }
 }
 

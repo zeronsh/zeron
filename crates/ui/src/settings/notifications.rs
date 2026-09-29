@@ -154,7 +154,7 @@ impl Render for NotificationsPage {
         let background_only = self.background_only;
         let agent_updates = self.agent_updates;
         let toggle = |id: &'static str, label: &'static str, enabled: bool, interactive: bool| {
-            // Keep the visual inside its 56×40 activation target.
+            // Keep the visual inside its switch-wide, 40pt-tall activation target.
             // Disabled subordinate controls remain named switches in the
             // accessibility tree, but have no focus or input handlers.
             div()

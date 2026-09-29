@@ -106,8 +106,10 @@ pub(crate) fn light_plate(theme: &Theme, t: f32) -> Plate {
 /// spreads its coloured shadow.
 pub(crate) fn accent_plate(theme: &Theme, t: f32, glow: f32) -> Plate {
     let dark = theme.appearance.is_dark();
-    let base = theme.accent;
-    let top = lift(base, if dark { 0.10 } else { 0.22 });
+    // The theme's fill token, as every other accent fill uses. Dark plates
+    // keep their lighting faint so the token reads as itself, not a pastel.
+    let base = theme.accent_strong;
+    let top = lift(base, if dark { 0.06 } else { 0.22 });
     // Light: a defined edge a shade deeper than the fill, with a paler ring
     // just inside it. Dark: a soft lifted rim.
     let rim = if dark {
@@ -115,8 +117,8 @@ pub(crate) fn accent_plate(theme: &Theme, t: f32, glow: f32) -> Plate {
     } else {
         crate::motion::mix(base, black(1.0), 0.14)
     };
-    let highlight = white(if dark { 0.14 } else { 0.32 });
-    let ring = white(if dark { 0.08 } else { 0.22 });
+    let highlight = white(if dark { 0.12 } else { 0.32 });
+    let ring = white(if dark { 0.0 } else { 0.22 });
     // Dark plates sit flat at rest; light ones keep a faint coloured glow.
     let halo = base.opacity((if dark { 0.0 } else { 0.14 } + 0.3 * glow) * t);
     Plate {
@@ -166,6 +168,8 @@ pub(crate) fn thumb<E: Styled>(el: E, theme: &Theme) -> E {
 /// soft shade with a light lip below it, kept `margin` inside the pill's
 /// outline so no dimple sits on the rounded ends. Fills its parent.
 /// The thumb is near-white in every appearance, so the dimples are too.
+/// Dimples snap to device pixels so they stay crisp while the thumb slides
+/// instead of shimmering through fractional positions.
 pub(crate) fn grip(pitch: f32, dimple: f32, margin: f32) -> gpui::AnyElement {
     use gpui::{IntoElement, Styled as _};
     let shade = black(0.11);
@@ -173,6 +177,12 @@ pub(crate) fn grip(pitch: f32, dimple: f32, margin: f32) -> gpui::AnyElement {
     gpui::canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
+            let scale = window.scale_factor();
+            let snap = |v: f32| (v * scale).round() / scale;
+            let dimple = (dimple * scale).round().max(1.0) / scale;
+            let lip_drop = 1.0 / scale;
+            let origin_x = f32::from(bounds.origin.x);
+            let origin_y = f32::from(bounds.origin.y);
             let w = f32::from(bounds.size.width);
             let h = f32::from(bounds.size.height);
             let radius = h / 2.0;
@@ -188,7 +198,10 @@ pub(crate) fn grip(pitch: f32, dimple: f32, margin: f32) -> gpui::AnyElement {
             let dot = |window: &mut Window, x: f32, y: f32, color: Hsla| {
                 window.paint_quad(gpui::quad(
                     Bounds::new(
-                        bounds.origin + point(px(x - dimple / 2.0), px(y - dimple / 2.0)),
+                        point(
+                            px(snap(origin_x + x - dimple / 2.0)),
+                            px(snap(origin_y + y - dimple / 2.0)),
+                        ),
                         gpui::size(px(dimple), px(dimple)),
                     ),
                     Corners::all(px(dimple / 2.0)),
@@ -203,7 +216,7 @@ pub(crate) fn grip(pitch: f32, dimple: f32, margin: f32) -> gpui::AnyElement {
                     let (x, y) = (x0 + col as f32 * pitch, y0 + row as f32 * pitch);
                     if inside(x, y) {
                         // The lip first, peeking out below the shade.
-                        dot(window, x, y + 0.5, lip);
+                        dot(window, x, y + lip_drop, lip);
                         dot(window, x, y, shade);
                     }
                 }

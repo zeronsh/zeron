@@ -42,11 +42,21 @@ const THUMB_WIDTH: f32 = 44.0;
 const THUMB_HEIGHT: f32 = 32.0;
 const THUMB_INSET: f32 = THUMB_WIDTH / 2.0;
 const FILL_PAST: f32 = RAIL_HEIGHT / 2.0;
-const HEADER_HEIGHT: f32 = 46.0;
-/// The balanced header inside the card inset, then the slider block and the
-/// space above the option rows.
+/// Both header buttons fill the header's height, so they sit one card inset
+/// from the card's top and sides and their radius is concentric with its
+/// corners. 8pt of padding around the two-line title puts its text 12pt
+/// from the card's top and leading edges.
+const HEADER_HEIGHT: f32 = 48.0;
+/// Flush with the card inset, a 15pt glyph centred in 32pt ends 12pt from
+/// the card edge: the slider rail's end.
+const FAST_BUTTON_WIDTH: f32 = 32.0;
+/// The header inside the card inset, then the slider block and the space
+/// above the option rows. The slider's 4pt below its box leaves the rail
+/// 12pt from the card's bottom when no options follow.
 const HEADER_BLOCK: f32 = 2.0 * popover::CARD_INSET + HEADER_HEIGHT;
-const EFFORT_BLOCK: f32 = 2.0 + SLIDER_HEIGHT + 6.0;
+const SLIDER_TOP: f32 = 2.0;
+const SLIDER_BOTTOM: f32 = 4.0;
+const EFFORT_BLOCK: f32 = SLIDER_TOP + SLIDER_HEIGHT + SLIDER_BOTTOM;
 const OPTIONS_GAP: f32 = 4.0;
 
 #[derive(Default)]
@@ -791,9 +801,10 @@ impl Pickers {
         } else {
             0.5
         };
-        // Fast mode on the leading side; the effort titles the model's name,
-        // and together they are one button filling the rest of the row, its
-        // content centred within it; the chevron leans toward the list on hover.
+        // The effort titles the model's name as one button filling the row
+        // up to fast mode, its text on the rail's and option rows' edge; fast
+        // mode is a small icon button whose glyph ends where the rail does.
+        // The chevron leans toward the list on hover.
         let model_key: SharedString = format!("compact-model-link-{}", cx.entity_id()).into();
         let hover = motion::hover_t(&model_key);
         let lean = motion::EASE_OUT_QUINT.eval(hover);
@@ -803,13 +814,13 @@ impl Pickers {
             .aria_label(model_accessible)
             .flex_1()
             .min_w_0()
-            .h(px(HEADER_HEIGHT - 6.0))
+            .h_full()
             .px(px(8.0))
-            .rounded(px(10.0))
+            .rounded(px(popover::MENU_ITEM_RADIUS))
             .bg(crate::theme::ink(0.05 * hover))
             .flex()
             .flex_col()
-            .items_center()
+            .items_start()
             .justify_center()
             .cursor_pointer()
             .on_hover(motion::hover_listener(model_key))
@@ -826,7 +837,7 @@ impl Pickers {
                         .text_size(crate::typography::ui_rems(14.0))
                         .line_height(px(17.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.accent)
+                        .text_color(theme.text)
                         .child(effort.clone()),
                 )
             })
@@ -889,17 +900,19 @@ impl Pickers {
                         })
                         .into()
                     })
-                    // The same shape and height as the model button beside it.
-                    .relative()
-                    .size(px(HEADER_HEIGHT - 6.0))
+                    // A faint neutral plate marks it as a control in both
+                    // states; the glyph's colour is the state, and the
+                    // slider's fill carries the accent.
+                    .w(px(FAST_BUTTON_WIDTH))
+                    .h_full()
                     .flex_none()
-                    .rounded(px(10.0))
+                    .rounded(px(popover::MENU_ITEM_RADIUS))
                     .flex()
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .bg(crate::theme::ink(0.04 * (1.0 - fast_t)))
-                    .when(!fast, |el| el.hover(|s| s.bg(crate::theme::ink(0.07))))
+                    .bg(crate::theme::ink(0.04))
+                    .hover(|s| s.bg(crate::theme::ink(0.07)))
                     .when(fast_focus, |el| {
                         el.aria_active_descendant().shadow(focus_outline(&theme))
                     })
@@ -907,33 +920,22 @@ impl Pickers {
                         this.compact_keyboard = false;
                         this.pick_option(option.clone(), choice.clone(), default, cx);
                     }))
-                    .when(fast_t > 0.001, |el| {
-                        // Active is calm: a flat accent plate, no halo; the
-                        // slider carries the motion.
-                        el.child(crate::glass::accent(
-                            div().absolute().inset_0().rounded(px(10.0)),
-                            &theme,
-                            0.85 * fast_t,
-                            0.0,
-                        ))
-                    })
                     .child(
                         crate::icons::icon(crate::icons::FAST_TIER)
                             .size(px(15.0))
-                            // Light on the accent in every appearance.
-                            .text_color(motion::mix(theme.text_muted, gpui::white(), fast_t)),
+                            .text_color(motion::mix(theme.text_muted, theme.accent, fast_t)),
                     ),
             );
         }
+        // Flush with the card inset, like the option rows, so the title's
+        // text and the rows' labels share one leading edge.
         let header = div()
             .h(px(HEADER_HEIGHT))
             .flex_none()
-            .px(px(8.0))
             .flex()
-            .items_center()
-            .gap(px(8.0))
-            .children(fast_button)
-            .child(title);
+            .gap(px(popover::CARD_INSET))
+            .child(title)
+            .children(fast_button);
         let mut panel = div()
             .p(px(popover::CARD_INSET))
             .flex()
@@ -968,7 +970,6 @@ impl Pickers {
             if pressing {
                 window.request_animation_frame();
             }
-            let squeeze = 1.0 - 0.04 * press;
             let entity = cx.entity().downgrade();
             let drag_entity = entity.clone();
             let slider = div()
@@ -1059,7 +1060,9 @@ impl Pickers {
                     },
                 ))
                 .child({
-                    let (w, h) = (THUMB_WIDTH * squeeze, THUMB_HEIGHT * squeeze);
+                    // The thumb keeps its size (resizing would reflow its
+                    // grip); a press only lifts it on a softer, wider drop.
+                    let (w, h) = (THUMB_WIDTH, THUMB_HEIGHT);
                     // Fast mode breathes a soft accent halo under the thumb.
                     let live = intensity * (0.55 + 0.45 * breath);
                     let place = |el: gpui::Div| {
@@ -1084,13 +1087,29 @@ impl Pickers {
                                 inset: false,
                             }]))
                         })
+                        .when(press > 0.001, |el| {
+                            el.child(place(div()).shadow(vec![gpui::BoxShadow {
+                                color: gpui::black().opacity(0.12 * press),
+                                offset: gpui::point(px(0.0), px(2.0 * press)),
+                                blur_radius: px(8.0),
+                                spread_radius: px(0.0),
+                                inset: false,
+                            }]))
+                        })
                         .child(
                             crate::glass::thumb(place(div()), &theme)
                                 .child(crate::glass::grip(3.5, 1.3, 6.0))
                                 .when(effort_focus, |el| el.border_2().border_color(theme.text)),
                         )
                 });
-            panel = panel.child(div().px(px(12.0)).pt(px(2.0)).pb(px(6.0)).child(slider));
+            // The rail starts on the same edge as the title and row labels.
+            panel = panel.child(
+                div()
+                    .px(px(8.0))
+                    .pt(px(SLIDER_TOP))
+                    .pb(px(SLIDER_BOTTOM))
+                    .child(slider),
+            );
         }
         let fast_id = self.fast_option_id(cx);
         let option_count = self
