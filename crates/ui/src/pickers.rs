@@ -2745,13 +2745,16 @@ impl Pickers {
                 // Prefer below on the new-chat canvas only when it can fit
                 // useful content. Tall drafts/attachments can put the trigger
                 // near the window bottom; retain adaptive placement there.
-                if below && space_below >= 180.0 {
+                let prefer_below = below && space_below >= 180.0;
+                if prefer_below {
                     geometry = popover::MenuGeometry {
                         height: space_below,
                         below: true,
                     };
                 }
-                if compact {
+                // The compact card opens down on the new-chat canvas like the
+                // standard menu, and up from the docked composer.
+                if compact && !prefer_below {
                     geometry = popover::MenuGeometry {
                         height: (f32::from(bounds.top()) - 14.0).clamp(0.0, 640.0),
                         below: false,
@@ -5734,12 +5737,8 @@ impl Render for Pickers {
                     ),
                 ))
             });
-        let attach_model_overlay = if self.compact_model_picker(cx) {
-            attach_overlay
-        } else {
-            attach_overlay_end
-        };
-        let model_chip = attach_model_overlay(
+        // Both presentations align to the chip's trailing edge beside Send.
+        let model_chip = attach_overlay_end(
             model_chip,
             &mut overlay,
             PickerKind::HarnessModel,
@@ -7553,26 +7552,27 @@ mod tests {
             .unwrap();
         cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
-        cx.simulate_keystrokes(handle.into(), "down down enter");
+        cx.simulate_keystrokes(handle.into(), "down enter");
         handle
             .read_with(cx, |picker, cx| {
                 assert_eq!(picker.compact_control, CompactControl::Fast);
                 assert_eq!(picker.resolved(cx).model_options["serviceTier"], "fast");
             })
             .unwrap();
-        cx.simulate_keystrokes(handle.into(), "up enter");
+        cx.simulate_keystrokes(handle.into(), "enter");
         handle
             .read_with(cx, |picker, cx| {
-                assert_eq!(picker.compact_control, CompactControl::Reset);
+                assert_eq!(picker.compact_control, CompactControl::Fast);
                 assert!(
                     !picker
                         .resolved(cx)
                         .model_options
-                        .contains_key("serviceTier")
+                        .contains_key("serviceTier"),
+                    "Fast mode toggles back to the model default"
                 );
             })
             .unwrap();
-        cx.simulate_keystrokes(handle.into(), "down down home home");
+        cx.simulate_keystrokes(handle.into(), "down home home");
         handle
             .read_with(cx, |picker, cx| {
                 assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::Low))
@@ -7757,8 +7757,6 @@ mod tests {
                 picker.pick_harness(HarnessId::Codex, cx);
                 picker.pick_model("codex-model".into(), cx);
                 picker.pick_reasoning(ReasoningLevel::Low, cx);
-                picker.reset_compact_options(cx);
-                assert_eq!(picker.config.reasoning, None);
                 assert_eq!(picker.config.model.as_deref(), Some("codex-model"));
                 picker.state.update(cx, |state, cx| {
                     state.selected_chat = Some("thread".into());

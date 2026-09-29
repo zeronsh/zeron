@@ -195,9 +195,9 @@ fn main() -> anyhow::Result<()> {
                     })?;
                     pause(cx).await;
 
-                    // Model → Reset → Fast → Effort, then choose the ladder's
-                    // maximum using the real keyboard path.
-                    for key in ["down", "down", "down", "end"] {
+                    // Model → Fast → Effort, then choose the ladder's maximum
+                    // using the real keyboard path.
+                    for key in ["down", "down", "end"] {
                         press(window.into(), cx, key)?;
                     }
                     pause(cx).await;
@@ -212,25 +212,8 @@ fn main() -> anyhow::Result<()> {
                         "compact-effort-keyboard-xhigh.png",
                     )?;
 
-                    for key in ["up", "up", "enter"] {
-                        press(window.into(), cx, key)?;
-                    }
-                    pause(cx).await;
-                    window.update(cx, |view, _, cx| {
-                        let state = view.pickers.read(cx).fixture_compact_state(cx);
-                        assert_eq!(state.explicit_reasoning, None);
-                        assert_eq!(state.reasoning, Some(zeron_proto::ReasoningLevel::High));
-                        assert!(!state.fast);
-                    })?;
-                    capture(
-                        window.into(),
-                        cx,
-                        &output,
-                        "compact-reset-keyboard.png",
-                    )?;
-
-                    // Reset → Fast toggles the exact service-tier option.
-                    for key in ["down", "enter"] {
+                    // Effort → Fast toggles the exact service-tier option.
+                    for key in ["up", "enter"] {
                         press(window.into(), cx, key)?;
                     }
                     window.update(cx, |view, _, cx| {
@@ -246,7 +229,7 @@ fn main() -> anyhow::Result<()> {
 
                     // Return to Model, enter the list, move by keyboard, and
                     // star the focused model without changing the selection.
-                    for key in ["up", "up", "enter", "down", "cmd-shift-f"] {
+                    for key in ["up", "enter", "down", "cmd-shift-f"] {
                         press(window.into(), cx, key)?;
                     }
                     pause(cx).await;
@@ -287,15 +270,15 @@ fn main() -> anyhow::Result<()> {
                         view.title = "Compact picker · light narrow keyboard";
                         cx.notify();
                     })?;
-                    for key in ["down", "enter", "down", "down", "home"] {
+                    // Fast turns back off, then Effort moves to its lowest level.
+                    for key in ["down", "enter", "down", "home"] {
                         press(window.into(), cx, key)?;
                     }
                     pause(cx).await;
                     window.update(cx, |view, _, cx| {
-                        assert_eq!(
-                            view.pickers.read(cx).fixture_compact_state(cx).reasoning,
-                            Some(zeron_proto::ReasoningLevel::Low)
-                        );
+                        let state = view.pickers.read(cx).fixture_compact_state(cx);
+                        assert!(!state.fast);
+                        assert_eq!(state.reasoning, Some(zeron_proto::ReasoningLevel::Low));
                     })?;
                     capture(
                         window.into(),
@@ -304,24 +287,7 @@ fn main() -> anyhow::Result<()> {
                         "compact-effort-keyboard-light-narrow.png",
                     )?;
 
-                    for key in ["up", "up", "enter"] {
-                        press(window.into(), cx, key)?;
-                    }
-                    pause(cx).await;
-                    window.update(cx, |view, _, cx| {
-                        let state = view.pickers.read(cx).fixture_compact_state(cx);
-                        assert_eq!(state.explicit_reasoning, None);
-                        assert_eq!(state.reasoning, Some(zeron_proto::ReasoningLevel::High));
-                        assert!(!state.fast);
-                    })?;
-                    capture(
-                        window.into(),
-                        cx,
-                        &output,
-                        "compact-reset-keyboard-light-narrow.png",
-                    )?;
-
-                    for key in ["up", "enter", "down", "cmd-shift-f"] {
+                    for key in ["up", "up", "enter", "down", "cmd-shift-f"] {
                         press(window.into(), cx, key)?;
                     }
                     pause(cx).await;
@@ -340,7 +306,7 @@ fn main() -> anyhow::Result<()> {
 
                     std::fs::write(
                         output.join("result.txt"),
-                        "PASS: compact picker panel/list layout at dark/light and narrow/wide sizes; keyboard effort, reset, fast tier, and favorite identity behavior.\n",
+                        "PASS: compact picker panel/list layout at dark/light and narrow/wide sizes; keyboard effort, fast tier, and favorite identity behavior.\n",
                     )?;
                     Ok(())
                 }

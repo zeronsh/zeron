@@ -629,16 +629,16 @@ pub fn badge_active(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div 
         .child(label.into())
 }
 
-pub const SWITCH_WIDTH: f32 = 44.8;
-const SWITCH_HEIGHT: f32 = 28.8;
-const SWITCH_TRACK_HEIGHT: f32 = 20.8;
-const SWITCH_SIDE_INSET: f32 = 1.6;
-const SWITCH_THUMB_WIDTH: f32 = 24.0;
-const SWITCH_THUMB_HEIGHT: f32 = SWITCH_TRACK_HEIGHT - 2.0 * SWITCH_SIDE_INSET;
-const SWITCH_MARK_SIZE: f32 = 7.2;
+pub const SWITCH_WIDTH: f32 = 44.0;
+const SWITCH_HEIGHT: f32 = 28.0;
+const SWITCH_TRACK_HEIGHT: f32 = 24.0;
+/// Thumb inset inside the track; radii stay concentric (12 = 10 + 2).
+const SWITCH_THUMB_INSET: f32 = 2.0;
+const SWITCH_THUMB: f32 = SWITCH_TRACK_HEIGHT - 2.0 * SWITCH_THUMB_INSET;
 
-/// A pill switch with the on/off marks nested beneath a sliding thumb.
-/// The caller owns activation and accessibility; only the thumb interpolates.
+/// A glass switch: a neutral track that the accent plate fills as the thumb
+/// travels, matching the composer's voice controls. The caller owns
+/// activation and accessibility.
 pub fn toggle_switch(theme: &Theme, on: bool, key: impl Into<SharedString>) -> gpui::Div {
     let key: SharedString = key.into();
     div()
@@ -672,60 +672,6 @@ impl SwitchTravel {
     }
 }
 
-fn switch_track_color(theme: &Theme, on: bool) -> gpui::Hsla {
-    let dark = theme.appearance.is_dark();
-    if on {
-        if dark {
-            // Keep the accent saturated and opaque, but give the enabled
-            // track more depth against the dark settings surface.
-            crate::theme::flatten(gpui::black().opacity(0.14), theme.accent_strong)
-        } else {
-            // Preserve the current light opaque treatment.
-            let accent = theme.accent;
-            crate::theme::flatten(
-                gpui::hsla(accent.h, accent.s, accent.l + (1.0 - accent.l) * 0.10, 0.98),
-                theme.surface,
-            )
-        }
-    } else {
-        let opacity = match (dark, theme.is_frost()) {
-            (true, true) => 0.22,
-            (true, false) => 0.18,
-            (false, true) => 0.12,
-            (false, false) => 0.10,
-        };
-        crate::theme::flatten(theme.ink(opacity), theme.surface)
-    }
-}
-
-fn switch_thumb_color(theme: &Theme) -> gpui::Hsla {
-    let white = if theme.is_frost() {
-        if theme.appearance.is_dark() {
-            0.94
-        } else {
-            0.96
-        }
-    } else if theme.appearance.is_dark() {
-        0.96
-    } else {
-        1.0
-    };
-    crate::theme::flatten(gpui::white().opacity(white), theme.surface)
-}
-
-/// Frosted switches catch a little light across their rim and thumb. Both
-/// gradient stops are composited to opaque colors before painting.
-fn switch_surface_tones(theme: &Theme, base: gpui::Hsla, thumb: bool) -> (gpui::Hsla, gpui::Hsla) {
-    if !theme.is_frost() {
-        return (base, base);
-    }
-    let (light, shade) = if thumb { (0.12, 0.07) } else { (0.07, 0.09) };
-    (
-        crate::theme::flatten(gpui::white().opacity(light), base),
-        crate::theme::flatten(gpui::black().opacity(shade), base),
-    )
-}
-
 impl RenderOnce for SwitchVisual {
     fn render(self, window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
         let now = std::time::Instant::now();
@@ -756,110 +702,44 @@ impl RenderOnce for SwitchVisual {
         if (position - target).abs() > 0.001 {
             window.request_animation_frame();
         }
-        let dark = self.theme.appearance.is_dark();
-        let track = switch_track_color(&self.theme, self.on);
-        let (track_light, track_shade) = switch_surface_tones(&self.theme, track, false);
-        let thumb = switch_thumb_color(&self.theme);
-        let (thumb_light, thumb_shade) = switch_surface_tones(&self.theme, thumb, true);
-        let empty_width = SWITCH_WIDTH - SWITCH_THUMB_WIDTH - SWITCH_SIDE_INSET;
-        let mark_padding = (empty_width - SWITCH_MARK_SIZE) / 2.0;
-        let thumb_left = SWITCH_SIDE_INSET
-            + (SWITCH_WIDTH - SWITCH_THUMB_WIDTH - 2.0 * SWITCH_SIDE_INSET) * position;
-        let track_element = div()
-            .absolute()
-            .top(px((SWITCH_HEIGHT - SWITCH_TRACK_HEIGHT) / 2.0))
-            .left_0()
-            .w(px(SWITCH_WIDTH))
-            .h(px(SWITCH_TRACK_HEIGHT))
-            .rounded_full()
-            .bg(gpui::linear_gradient(
-                180.0,
-                gpui::linear_color_stop(track_light, 0.0),
-                gpui::linear_color_stop(track_shade, 1.0),
-            ))
-            .border_1()
-            .border_color(if self.on {
-                crate::theme::flatten(
-                    gpui::white().opacity(if self.theme.is_frost() { 0.16 } else { 0.12 }),
-                    track,
-                )
-            } else {
-                crate::theme::flatten(self.theme.border, track)
-            })
-            .child(
+        let top = (SWITCH_HEIGHT - SWITCH_TRACK_HEIGHT) / 2.0;
+        let travel = SWITCH_WIDTH - SWITCH_THUMB - 2.0 * SWITCH_THUMB_INSET;
+        // The accent plate covers the neutral rim too, so the two crossfade
+        // as one surface while the thumb moves.
+        let track_element = crate::glass::light(
+            div()
+                .absolute()
+                .top(px(top))
+                .left_0()
+                .w(px(SWITCH_WIDTH))
+                .h(px(SWITCH_TRACK_HEIGHT))
+                .rounded_full(),
+            &self.theme,
+            1.0,
+        )
+        .when(position > 0.001, |el| {
+            el.child(crate::glass::accent(
                 div()
                     .absolute()
-                    .inset_0()
-                    .px(px(mark_padding))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .size(px(SWITCH_MARK_SIZE))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .opacity(position)
-                            .child(
-                                div()
-                                    .w(px(1.2))
-                                    .h(px(7.2))
-                                    .rounded_full()
-                                    .bg(gpui::white().opacity(0.96)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .size(px(SWITCH_MARK_SIZE))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .opacity(1.0 - position)
-                            .child(
-                                div()
-                                    .size(px(6.4))
-                                    .rounded_full()
-                                    .border(px(1.0))
-                                    .border_color(gpui::white().opacity(0.92)),
-                            ),
-                    ),
-            );
-        let thumb_element = div()
-            .absolute()
-            .top(px((SWITCH_HEIGHT - SWITCH_THUMB_HEIGHT) / 2.0))
-            .left(px(thumb_left))
-            .w(px(SWITCH_THUMB_WIDTH))
-            .h(px(SWITCH_THUMB_HEIGHT))
-            .rounded_full()
-            .bg(gpui::linear_gradient(
-                180.0,
-                gpui::linear_color_stop(thumb_light, 0.0),
-                gpui::linear_color_stop(thumb_shade, 1.0),
+                    .top(px(-1.0))
+                    .left(px(-1.0))
+                    .right(px(-1.0))
+                    .bottom(px(-1.0))
+                    .rounded_full(),
+                &self.theme,
+                position,
+                0.0,
             ))
-            .border_1()
-            .border_color(crate::theme::flatten(
-                gpui::black().opacity(if dark { 0.10 } else { 0.08 }),
-                thumb,
-            ))
-            // The rim highlight only belongs to the on state; it fades with
-            // the thumb's travel so switching off doesn't pop.
-            .when(self.theme.is_frost() && position > 0.001, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .top(px(1.6))
-                        .left(px(7.2))
-                        .w(px(9.6))
-                        .h(px(1.0))
-                        .opacity(position)
-                        .rounded_full()
-                        .bg(crate::theme::flatten(
-                            gpui::white().opacity(0.45),
-                            thumb_light,
-                        )),
-                )
-            });
+        });
+        let thumb_element = crate::glass::thumb(
+            div()
+                .absolute()
+                .top(px(top + SWITCH_THUMB_INSET))
+                .left(px(SWITCH_THUMB_INSET + travel * position))
+                .size(px(SWITCH_THUMB))
+                .rounded_full(),
+            &self.theme,
+        );
         div()
             .relative()
             .w(px(SWITCH_WIDTH))
@@ -915,45 +795,6 @@ mod switch_tests {
             assert!(limits.top() >= px(Theme::TITLEBAR_HEIGHT));
             assert!(limits.bottom() <= pane.bottom());
         }
-    }
-
-    #[test]
-    fn switch_material_keeps_dark_accent_and_opaque_fills() {
-        use zeron_theme::SurfaceTreatment;
-
-        let mut dark = Theme::dark();
-        dark.surface_treatment = SurfaceTreatment::Opaque;
-        let dark_on = switch_track_color(&dark, true);
-        assert_eq!(dark_on.a, 1.0);
-        assert!(dark_on.l < dark.accent_strong.l);
-        assert_eq!(switch_track_color(&dark, false).a, 1.0);
-        assert_eq!(switch_thumb_color(&dark).a, 1.0);
-        assert_eq!(
-            switch_surface_tones(&dark, dark_on, false),
-            (dark_on, dark_on)
-        );
-        let opaque_off = switch_track_color(&dark, false);
-
-        dark.surface_treatment = SurfaceTreatment::Frosted;
-        assert_eq!(switch_track_color(&dark, true), dark_on);
-        assert_eq!(switch_track_color(&dark, false).a, 1.0);
-        assert_eq!(switch_thumb_color(&dark).a, 1.0);
-        assert_ne!(switch_track_color(&dark, false), opaque_off);
-        for (base, thumb) in [(dark_on, false), (switch_thumb_color(&dark), true)] {
-            let (light, shade) = switch_surface_tones(&dark, base, thumb);
-            assert_eq!((light.a, shade.a), (1.0, 1.0));
-            assert!(light.l > base.l && shade.l < base.l);
-        }
-
-        let mut light = Theme::light();
-        light.surface_treatment = SurfaceTreatment::Opaque;
-        assert_eq!(switch_track_color(&light, true).a, 1.0);
-        assert!(switch_track_color(&light, true).l > light.accent.l);
-        let light_on = switch_track_color(&light, true);
-        assert_eq!(
-            switch_surface_tones(&light, light_on, false),
-            (light_on, light_on)
-        );
     }
 
     #[test]
