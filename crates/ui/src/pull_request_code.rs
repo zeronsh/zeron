@@ -56,6 +56,11 @@ pub(super) fn stream(
     (rows, ranges)
 }
 
+/// Height of the divider above a file header; the first file has none.
+fn header_divider(file: usize) -> f32 {
+    if file > 0 { 1.0 } else { 0.0 }
+}
+
 /// The file whose span holds stream row `row`.
 fn file_at(ranges: &[Range<usize>], row: usize) -> Option<usize> {
     ranges
@@ -223,9 +228,11 @@ impl PullRequestDetailPage {
 
     fn scroll_to_file(&self, file: usize) {
         if let Some(range) = self.code_ranges.get(file) {
+            // Land just below the divider every header after the first
+            // carries, so it never doubles the stream card's own border.
             self.code_list.scroll_to(gpui::ListOffset {
                 item_ix: range.start,
-                offset_in_item: px(0.0),
+                offset_in_item: px(header_divider(file)),
             });
         }
     }
@@ -465,7 +472,7 @@ impl PullRequestDetailPage {
         let file = file_at(&self.code_ranges, top.item_ix)?;
         let range = self.code_ranges.get(file)?;
         if !range.contains(&top.item_ix)
-            || (top.item_ix == range.start && top.offset_in_item <= px(0.0))
+            || (top.item_ix == range.start && top.offset_in_item <= px(header_divider(file)))
         {
             return None;
         }

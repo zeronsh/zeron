@@ -1935,6 +1935,39 @@ mod tests {
         page.read_with(cx, |page, _| assert_eq!(page.code_stream.len(), 3));
     }
 
+    #[gpui::test]
+    fn pull_request_file_jump_hides_the_header_divider_under_the_card_border(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let (host, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, true));
+        let page = host.read_with(cx, |host, _| host.page.clone());
+        cx.simulate_resize(gpui::size(px(1200.0), px(700.0)));
+        page.update(cx, |page, cx| {
+            let body = (0..80).map(|n| format!("+line {n}\n")).collect::<String>();
+            let patch = ["a.rs", "b.rs", "c.rs"]
+                .iter()
+                .map(|name| format!("diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -0,0 +1,80 @@\n{body}"))
+                .collect::<String>();
+            page.install_diff(ParsedDiff::new(patch), cx);
+            page.select_tab(Tab::Code, cx);
+        });
+        cx.run_until_parked();
+        page.update(cx, |page, cx| page.select_code_file(1, cx));
+        cx.run_until_parked();
+        let viewport = cx.debug_bounds("pr-code-viewport").unwrap();
+        let header = cx.debug_bounds("pr-file-header-1").unwrap();
+        assert_eq!(
+            header.top(),
+            viewport.top(),
+            "the jumped-to header's divider hides under the card border"
+        );
+        assert!(
+            cx.debug_bounds("pr-sticky-file-1").is_none(),
+            "no pinned copy doubles the header"
+        );
+    }
+
     struct NavigationHitHost {
         page: Entity<PullRequestDetailPage>,
         presses: usize,
