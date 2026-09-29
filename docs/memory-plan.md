@@ -141,6 +141,21 @@ crate's `v2` feature (mimalloc 2.3.2, ~half of v3's retention); Linux runs the
 system allocator. Purge knobs (`MIMALLOC_PURGE_DELAY=0`,
 `MIMALLOC_ABANDONED_PAGE_PURGE=1`) measurably do NOT rescue v3.
 
+**Linux arenas (2026-09-29):** glibc gives every thread its own 64MB arena
+(default cap 8 × cores = 128 on the 16-core host) and trims only the top of a
+heap, so threads that come and go — harness readers, the tokio blocking pool —
+leave freed pages resident: the headless engine reached 7.2GB RSS after a day,
+6.6GB of it in 129 anonymous ~64MB mappings. `apps/zeron/src/main.rs` now
+calls `mallopt` at startup on Linux/glibc, before any thread exists:
+`M_ARENA_MAX=2`, `M_TRIM_THRESHOLD=128KB`, `M_MMAP_THRESHOLD=128KB`; an
+explicit `GLIBC_TUNABLES`/`MALLOC_*` setting still wins. Same bench (8 chats ×
+6 rounds of a 250KB reply replay through the real claude-code driver, RSS MB
+after 60s idle): glibc default 226, arena_max=2 186, mimalloc v2 235, jemalloc
+172, arena_max=2 + trim/mmap 128KB **159**. Production: 7.2GB → 373MB after a
+restart with those settings via `GLIBC_TUNABLES`. Re-run on this checkout (same
+bench driven over the engine's MCP surface): 278MB → **191MB**, anonymous
+mappings ≥16MB dropping 31 → 4.
+
 Known follow-ups: GPU atlas tiles for raw-bytes images still free only on
 window close (needs a small gpui-fork patch exposing a drop path for
 `ImageSource::Image`); UI-side full-transcript clone per frame
