@@ -2167,6 +2167,14 @@ mod tests {
             }
                let meta = cx.debug_bounds("pr-detail-meta").unwrap();
             assert_eq!(cards[0].top() - meta.bottom(), px(24.0), "header sits 2× the card gap above");
+            // Handoff actions trail the title on wide rows, inside the card.
+            let row = cx.debug_bounds("pr-handoff-row").unwrap();
+            let actions = cx.debug_bounds("pr-handoff-actions").unwrap();
+            assert!(actions.right() <= cards[2].right() - px(16.0), "{actions:?}");
+            if width > 600.0 {
+                assert!(actions.top() >= row.top() && actions.bottom() <= row.bottom());
+                assert!(actions.size.height <= px(34.0), "one line of actions: {actions:?}");
+            }
             // The long fixture title wraps inside the column instead of clipping.
             let title = cx.debug_bounds("pr-detail-title").unwrap();
             assert!(title.right() <= cards[0].right(), "{title:?}");

@@ -30,6 +30,15 @@ impl Handoff {
         }
     }
 
+    /// What the agent is asked to do, shown on hover.
+    fn summary(self) -> &'static str {
+        match self {
+            Self::Review => "Find bugs, regressions, and missing tests",
+            Self::AddressFeedback => "Make the changes reviewers asked for",
+            Self::FixChecks => "Reproduce and fix the failing checks",
+        }
+    }
+
     fn glyph(self) -> &'static str {
         match self {
             Self::Review => crate::icons::EYE,
@@ -147,121 +156,115 @@ pub(super) fn handoffs(detail: &ChangeRequestDetail) -> Vec<Handoff> {
 }
 
 impl PullRequestDetailPage {
+    /// Settings-style rows: purpose on the left with the actions trailing
+    /// (wrapping below on narrow widths), then the checkout command.
     pub(super) fn handoff_card(
         &self,
         detail: &ChangeRequestDetail,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let _ = cx;
         let command = checkout_command(detail, &self.url);
         let copy = command.clone();
         let buttons = handoffs(detail).into_iter().map(|kind| {
             let prompt = prompt(kind, detail, &self.url);
             let id = kind.id();
-            widgets::ghost_action(theme)
+            let summary = kind.summary();
+            widgets::action_button(theme, widgets::ActionTone::Filled)
                 .id(id)
                 .debug_selector(move || id.to_owned())
                 .role(gpui::Role::Button)
                 .aria_label(format!("{} in a new session", kind.label()))
+                .aria_description(summary)
                 .tab_index(0)
-                .h(px(32.0))
-                .px(px(12.0))
-                .gap(px(6.0))
+                .flex_none()
                 .border_1()
-                .border_color(theme.border)
+                .border_color(gpui::transparent_black())
                 .focus_visible(|style| style.border_color(theme.accent))
-                .cursor_pointer()
                 .child(
                     crate::icons::icon(kind.glyph())
                         .size(px(14.0))
+                        .flex_none()
                         .text_color(theme.text_muted),
                 )
                 .child(kind.label())
+                .tooltip(move |_, cx| cx.new(|_| PrActionTooltip(summary)).into())
                 .on_click(move |_, window, cx| {
                     window.dispatch_action(Box::new(StartPullRequestSession(prompt.clone())), cx)
                 })
         });
         widgets::section_card(theme)
-                .mt(px(CARD_GAP))
-                .id("pr-handoff")
-                .debug_selector(|| "pr-handoff".into())
-                .child(
-                    div()
-                        .p(px(16.0))
-                        .flex()
-                        .flex_col()
-                        .gap(px(12.0))
-                        .child(
-                            // Text and actions share the card's 16px content edge.
-                            div()
-                                .flex()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(2.0))
-                                        .child(
-                                            div()
-                                                .font_weight(gpui::FontWeight::MEDIUM)
-                                                .child("Hand off to an agent"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(crate::typography::ui_rems(12.0))
-                                                .text_color(theme.text_muted)
-                                                .child(
-                                                    "Opens a new session with this pull request's context. Review the prompt, then send it.",
-                                                ),
-                                        ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id("pr-handoff-actions")
-                                .debug_selector(|| "pr-handoff-actions".into())
-                                .flex()
-                                .flex_wrap()
-                                .gap(px(8.0))
-                                .children(buttons),
-                        ),
-                )
-                .child(
-                    widgets::card_row(theme, false)
-                        .min_h(px(44.0))
-                        .py(px(8.0))
-                        // Same label column and gap as the overview rows.
-                        .gap(px(16.0))
-                        .child(
-                            div()
-                                .w(px(80.0))
-                                .flex_none()
-                                .child(widgets::row_title(theme, "Checkout")),
-                        )
-                        .child(
-                            div()
-                                .id("pr-checkout-command")
-                                .debug_selector(|| "pr-checkout-command".into())
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .font_family(theme.font_mono.clone())
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .child(command),
-                        )
-                        .child(
-                            action("pr-copy-checkout", "Copy checkout command", theme).on_click(
-                                move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                        copy.clone(),
-                                    ));
-                                },
+            .mt(px(CARD_GAP))
+            .id("pr-handoff")
+            .debug_selector(|| "pr-handoff".into())
+            .child(
+                widgets::card_row(theme, true)
+                    .id("pr-handoff-row")
+                    .debug_selector(|| "pr-handoff-row".into())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(220.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(widgets::row_title(theme, "Hand off to an agent"))
+                            .child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .text_color(theme.text_muted)
+                                    .child("Opens a new session with the prompt ready to send."),
                             ),
+                    )
+                    .child(
+                        div()
+                            .id("pr-handoff-actions")
+                            .debug_selector(|| "pr-handoff-actions".into())
+                            // Keep the buttons on one line when the row wraps.
+                            .flex_none()
+                            .max_w_full()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(8.0))
+                            .children(buttons),
+                    ),
+            )
+            .child(
+                // Same label column and gap as the overview rows.
+                widgets::card_row(theme, false)
+                    .min_h(px(44.0))
+                    .py(px(8.0))
+                    .flex_nowrap()
+                    .child(
+                        div()
+                            .w(px(80.0))
+                            .flex_none()
+                            .child(widgets::row_title(theme, "Checkout")),
+                    )
+                    .child(
+                        div()
+                            .id("pr-checkout-command")
+                            .debug_selector(|| "pr-checkout-command".into())
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(theme.font_mono.clone())
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .child(command),
+                    )
+                    .child(
+                        action("pr-copy-checkout", "Copy checkout command", theme).on_click(
+                            move |_, _, cx| {
+                                cx.stop_propagation();
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    copy.clone(),
+                                ));
+                            },
                         ),
-                )
-                .into_any_element()
+                    ),
+            )
+            .into_any_element()
     }
 }
 
