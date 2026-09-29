@@ -7128,7 +7128,7 @@ impl Shell {
         // The footer uses the chat sidebar's theme so the account and
         // settings buttons render identically in both places.
         let footer_theme = Theme::of(cx).clone();
-        let footer = self.render_sidebar_footer(&footer_theme, cx);
+        let footer = self.render_sidebar_footer_row(&footer_theme, cx);
         let outlet = self.settings_outlet(section, window, cx);
         div()
             .id("settings-page")
@@ -8469,60 +8469,6 @@ impl Shell {
         // t3code's archived accordion, below the active list.
         let archived_section = self.render_archived_section(theme, cx);
 
-        let pull_requests_button = div()
-            .id("open-pull-requests")
-            .role(gpui::Role::Button)
-            .aria_label("Pull requests")
-            .tab_index(0)
-            .debug_selector(|| "open-pull-requests".into())
-            .focus_visible(|style| style.border_2().border_color(theme.accent))
-            .size(px(SIDEBAR_FOOTER_ACTION_SIZE))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(8.0))
-            .text_color(if matches!(self.route, Route::PullRequests) {
-                theme.text
-            } else {
-                theme.text_muted
-            })
-            .bg(if matches!(self.route, Route::PullRequests) {
-                theme.glass_hover()
-            } else {
-                motion::hover_blend(
-                    "open-pull-requests",
-                    theme.glass_hover().opacity(0.0),
-                    theme.glass_hover(),
-                )
-            })
-            .on_hover(motion::hover_listener("open-pull-requests"))
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.pull_request_detail = None;
-                this.pull_request_detail_subscription = None;
-                if let Some(page) = &this.pull_requests_page {
-                    page.update(cx, |page, cx| page.select_url(None, cx));
-                }
-                this.open_pull_requests(cx);
-                cx.notify();
-            }))
-            .tooltip(|_, cx| {
-                cx.new(|_| WindowControlTooltip {
-                    label: "Pull requests",
-                })
-                .into()
-            })
-            .tooltip_show_delay(Duration::from_millis(350))
-            .child(icon(icons::PULL_REQUEST).size(px(15.0)).text_color(
-                if matches!(self.route, Route::PullRequests) {
-                    theme.text
-                } else {
-                    motion::hover_blend("open-pull-requests", theme.text_muted, theme.text)
-                },
-            ));
-
-
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
         let filter_row = self.render_spaces_filter(theme, cx);
@@ -8740,9 +8686,7 @@ impl Shell {
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(SIDEBAR_FOOTER_ACTION_GAP))
-                    .child(div().flex_1().min_w_0().child(self.render_sidebar_footer(theme, cx)))
-                    .child(pull_requests_button),
+                    .child(self.render_sidebar_footer_row(theme, cx)),
             )
             .into_any_element()
     }
@@ -9090,6 +9034,80 @@ impl Shell {
     /// the right. Shared by the chat sidebar and the settings page so both
     /// sit in one position. Local runtimes advertise their storage boundary
     /// and offer sync; synced runtimes offer sign-out.
+    /// Account, settings, and the Pull requests entry. Chat and Settings both
+    /// render this exact row so the footer holds still across the swap.
+    fn render_sidebar_footer_row(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("sidebar-footer-row")
+            .debug_selector(|| "sidebar-footer-row".into())
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(SIDEBAR_FOOTER_ACTION_GAP))
+            .child(div().flex_1().min_w_0().child(self.render_sidebar_footer(theme, cx)))
+            .child(self.render_pull_requests_button(theme, cx))
+            .into_any_element()
+    }
+
+    fn render_pull_requests_button(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("open-pull-requests")
+            .role(gpui::Role::Button)
+            .aria_label("Pull requests")
+            .tab_index(0)
+            .debug_selector(|| "open-pull-requests".into())
+            .focus_visible(|style| style.border_2().border_color(theme.accent))
+            .size(px(SIDEBAR_FOOTER_ACTION_SIZE))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.0))
+            .text_color(if matches!(self.route, Route::PullRequests) {
+                theme.text
+            } else {
+                theme.text_muted
+            })
+            .bg(if matches!(self.route, Route::PullRequests) {
+                theme.glass_hover()
+            } else {
+                motion::hover_blend(
+                    "open-pull-requests",
+                    theme.glass_hover().opacity(0.0),
+                    theme.glass_hover(),
+                )
+            })
+            .on_hover(motion::hover_listener("open-pull-requests"))
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                // Leaving Settings through its own footer is a plain route
+                // change; nothing there should grab focus on the way out.
+                this.settings_focus_pending = false;
+                this.pull_request_detail = None;
+                this.pull_request_detail_subscription = None;
+                if let Some(page) = &this.pull_requests_page {
+                    page.update(cx, |page, cx| page.select_url(None, cx));
+                }
+                this.open_pull_requests(cx);
+                cx.notify();
+            }))
+            .tooltip(|_, cx| {
+                cx.new(|_| WindowControlTooltip {
+                    label: "Pull requests",
+                })
+                .into()
+            })
+            .tooltip_show_delay(Duration::from_millis(350))
+            .child(icon(icons::PULL_REQUEST).size(px(15.0)).text_color(
+                if matches!(self.route, Route::PullRequests) {
+                    theme.text
+                } else {
+                    motion::hover_blend("open-pull-requests", theme.text_muted, theme.text)
+                },
+            ))
+        .into_any_element()
+    }
+
     fn render_sidebar_footer(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let (user_line, menu_identity) = {
             let state = self.state.read(cx);
@@ -15876,6 +15894,64 @@ mod exit_regressions {
     }
 
     #[gpui::test]
+    fn settings_footer_keeps_the_pull_requests_entry(cx: &mut TestAppContext) {
+        // Chat and Settings both render this row; host it alone so the full
+        // shell's pages don't cover it.
+        struct FooterRow(Entity<Shell>);
+        impl Render for FooterRow {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    div()
+                        .w(px(256.0))
+                        .child(shell.render_sidebar_footer_row(&Theme::default(), cx))
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            FooterRow(cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                )
+            }))
+        });
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        shell.update(cx, |shell, cx| shell.open_settings(SettingsSection::General, cx));
+        cx.update(|window, cx| window.draw(cx).clear());
+        let row = cx.debug_bounds("sidebar-footer-row").unwrap();
+        let entry = cx
+            .debug_bounds("open-pull-requests")
+            .expect("Settings keeps the Pull requests entry");
+        let gear = cx.debug_bounds("settings-trigger").unwrap();
+        assert!(entry.left() > gear.right() && entry.right() <= row.right());
+        cx.simulate_click(entry.center(), gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| {
+            assert!(
+                matches!(shell.route, Route::PullRequests),
+                "it opens the board straight from Settings"
+            )
+        });
+    }
+
+    #[gpui::test]
     fn pull_request_handoff_stages_its_prompt_in_a_new_session(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
@@ -17939,5 +18015,13 @@ impl Shell {
         &self,
     ) -> Option<Entity<crate::pull_request_detail::PullRequestDetailPage>> {
         self.pull_request_detail.clone()
+    }
+
+    pub fn fixture_pull_request_settings(&mut self, open: bool, cx: &mut Context<Self>) {
+        if open {
+            self.open_settings(SettingsSection::General, cx);
+        } else {
+            self.close_settings(cx);
+        }
     }
 }

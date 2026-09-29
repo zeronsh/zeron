@@ -187,6 +187,11 @@ fn main() -> anyhow::Result<()> {
                     pause(cx, 6000).await;
                     set_delay(0)?;
                     shot(cx, "02-board")?;
+                    window.update(cx, |s, _, cx| s.fixture_pull_request_settings(true, cx))?;
+                    pause(cx, 600).await;
+                    shot(cx, "02b-settings")?;
+                    window.update(cx, |s, _, cx| s.fixture_pull_request_settings(false, cx))?;
+                    pause(cx, 300).await;
                     window.update(cx, |_, w, _| w.resize(size(px(760.), px(848.))))?;
                     pause(cx, 600).await;
                     shot(cx, "03-board-760")?;
