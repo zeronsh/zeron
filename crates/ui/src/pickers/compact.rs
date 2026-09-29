@@ -18,19 +18,36 @@ pub(super) struct CatalogStatus {
 }
 
 pub(super) const COMPACT_WIDTH: f32 = 256.0;
-// The rail is a 24px capsule holding a 20px thumb 2px from its edge, so
-// their radii stay concentric (12 = 10 + 2). Stops and pointer input share
-// the thumb's centre inset, and endpoint dots stay inside the caps.
-const SLIDER_HEIGHT: f32 = 32.0;
-const RAIL_HEIGHT: f32 = 24.0;
+/// One-line model rows (plus the 2px gap) so about seven fit at once.
+pub(super) const COMPACT_ROW_HEIGHT: f32 = 32.0;
+pub(super) const COMPACT_LIST_ROWS: f32 = 7.0;
+/// The list fits its rows, up to [`COMPACT_LIST_ROWS`]; empty and loading
+/// states keep room for a few skeleton rows.
+pub(super) fn compact_list_height(rows: usize) -> f32 {
+    let rows = if rows == 0 {
+        4.0
+    } else {
+        (rows as f32).min(COMPACT_LIST_ROWS)
+    };
+    rows * (COMPACT_ROW_HEIGHT + popover::MENU_GAP) + 2.0 * popover::CARD_INSET
+}
+// A 28px rail under a 44x32 pill thumb that overhangs it by 2px, so the
+// handle reads as the thing to grab. Stops and pointer input share the
+// thumb's centre inset; the fill runs a rail radius past the centre, always
+// hidden under the thumb.
+const SLIDER_HEIGHT: f32 = 36.0;
+const RAIL_HEIGHT: f32 = 28.0;
 const RAIL_TOP: f32 = (SLIDER_HEIGHT - RAIL_HEIGHT) / 2.0;
-const THUMB_SIZE: f32 = 20.0;
-const THUMB_INSET: f32 = RAIL_HEIGHT / 2.0;
-/// Header (32) inside the card inset, the effort label and slider, and the
+const THUMB_WIDTH: f32 = 44.0;
+const THUMB_HEIGHT: f32 = 32.0;
+const THUMB_INSET: f32 = THUMB_WIDTH / 2.0;
+const FILL_PAST: f32 = RAIL_HEIGHT / 2.0;
+const HEADER_HEIGHT: f32 = 46.0;
+/// The balanced header inside the card inset, then the slider block and the
 /// space above the option rows.
-const HEADER_BLOCK: f32 = 40.0;
-const EFFORT_BLOCK: f32 = 6.0 + 18.0 + 4.0 + SLIDER_HEIGHT;
-const OPTIONS_GAP: f32 = 8.0;
+const HEADER_BLOCK: f32 = 2.0 * popover::CARD_INSET + HEADER_HEIGHT;
+const EFFORT_BLOCK: f32 = 2.0 + SLIDER_HEIGHT + 6.0;
+const OPTIONS_GAP: f32 = 4.0;
 
 #[derive(Default)]
 pub(super) struct CompactMotion {
@@ -38,6 +55,10 @@ pub(super) struct CompactMotion {
     press: Option<ScalarTransition>,
     drag_fraction: Option<f32>,
     energy: Option<ScalarTransition>,
+    /// Shimmer clock for fast mode and the top effort levels, integrated
+    /// per frame so changing intensity never jumps the band.
+    shimmer_phase: f32,
+    shimmer_last_frame: Option<std::time::Instant>,
     fast: Option<ScalarTransition>,
     height: Option<ScalarTransition>,
     page: Option<bool>,
@@ -45,13 +66,13 @@ pub(super) struct CompactMotion {
     pub frame_height: f32,
 }
 
-struct ScalarTransition {
+pub(super) struct ScalarTransition {
     from: f32,
     to: f32,
     started: std::time::Instant,
 }
 impl ScalarTransition {
-    fn value(&self, now: std::time::Instant) -> f32 {
+    pub(super) fn value(&self, now: std::time::Instant) -> f32 {
         let progress = motion::RESIZE.progress(
             now.duration_since(self.started).as_secs_f32()
                 / motion::RESIZE
@@ -61,7 +82,7 @@ impl ScalarTransition {
         );
         motion::lerp(self.from, self.to, progress)
     }
-    fn sample(
+    pub(super) fn sample(
         state: &mut Option<Self>,
         target: f32,
         now: std::time::Instant,
@@ -107,7 +128,16 @@ impl Pickers {
         let harness = row.harness;
         let model = row.model.id.clone();
         let label: SharedString = row.model.label.clone().into();
-        let subtitle: SharedString = row.harness_name.clone();
+        // The brand mark names the provider; a description appears only to
+        // tell identically named rows apart.
+        let attribution: Option<SharedString> = row
+            .model
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| row.ambiguous && !d.is_empty())
+            .map(|d| SharedString::from(d.to_owned()));
+        let hovered = self.active == ix;
         let details: SharedString = match row.model.description.as_deref() {
             Some(description) => format!(
                 "{} · {}\n{}",
@@ -137,9 +167,9 @@ impl Pickers {
             .aria_selected(selected)
             .tooltip(move |_, cx| cx.new(|_| PickerHint(details.clone())).into())
             .tooltip_show_delay(std::time::Duration::from_millis(500))
-            .h(px(48.0))
-            .px(px(8.0))
-            .py(px(6.0))
+            .h(px(COMPACT_ROW_HEIGHT))
+            .pl(px(8.0))
+            .pr(px(4.0))
             .rounded(px(popover::MENU_ITEM_RADIUS))
             .flex()
             .items_center()
@@ -166,27 +196,36 @@ impl Pickers {
             .on_click(cx.listener(move |this, _, _, cx| this.activate_model_index(ix, cx)))
             .child(
                 crate::icons::icon(icon)
-                    .size(px(17.0))
+                    .size(px(14.0))
+                    .flex_none()
                     .text_color(tint.unwrap_or(theme.text_muted)),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
+                    .flex()
+                    .items_baseline()
+                    .gap(px(6.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .child(
                         div()
+                            .flex_none()
+                            .max_w_full()
                             .truncate()
-                            .text_size(crate::typography::ui_rems(12.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .child(label),
                     )
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .child(subtitle),
-                    ),
+                    .when_some(attribution, |el, attribution| {
+                        el.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text_muted)
+                                .child(attribution),
+                        )
+                    }),
             )
             .child(div().size(px(14.0)).when(selected, |el| {
                 el.child(
@@ -212,6 +251,8 @@ impl Pickers {
                     .flex()
                     .items_center()
                     .justify_center()
+                    // Quiet until the row is hovered or the model is starred.
+                    .when(!favorite && !hovered, |el| el.opacity(0.0))
                     .hover(|s| s.bg(crate::theme::ink(0.08)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
@@ -245,28 +286,132 @@ impl Pickers {
         self.setting_menu = None;
         self.compact_model_list = true;
         self.model_rail = ModelRail::All;
-        // Open at the favorites group, even when the current model is further down.
-        self.active = 0;
-        self.model_scroll
-            .scroll_to_item(0, gpui::ScrollStrategy::Top);
+        // Open on the current model: its provider's group at the top when
+        // the model sits near the start of it, else centred on the model.
+        let selected = self.selected_model_index(cx);
+        self.active = selected;
+        let start = self
+            .compact_groups(cx)
+            .into_iter()
+            .rev()
+            .find(|(_, start)| *start <= selected)
+            .map_or(0, |(_, start)| start);
+        if selected - start < COMPACT_LIST_ROWS as usize - 2 {
+            // One row of the previous group stays above, under the edge
+            // fade, so the group's first row is never washed out and the
+            // list shows there is more above.
+            self.model_scroll.scroll_to_item_strict_with_offset(
+                start,
+                gpui::ScrollStrategy::Top,
+                usize::from(start > 0),
+            );
+        } else {
+            self.model_scroll
+                .scroll_to_item_strict(selected, gpui::ScrollStrategy::Center);
+        }
         self.focus_on_mount = true;
         cx.notify();
     }
 
+    /// Where each provider's group starts in the unsearched list: starred
+    /// models first, then one run per provider.
+    fn compact_groups(&self, cx: &App) -> Vec<(Option<HarnessId>, usize)> {
+        let rows = self.model_rows(cx);
+        let mut groups: Vec<(Option<HarnessId>, usize)> = Vec::new();
+        for (ix, row) in rows.iter().enumerate() {
+            let group =
+                (!self.defaults.is_favorite(row.harness, &row.model.id)).then_some(row.harness);
+            if groups.last().is_none_or(|(last, _)| *last != group) {
+                groups.push((group, ix));
+            }
+        }
+        groups
+    }
+
     pub(super) fn compact_model_back_header(&self, cx: &mut Context<Self>) -> gpui::Div {
         let theme = Theme::of(cx).for_popup();
+        let searching = !self.search.read(cx).text().trim().is_empty();
+        let groups = if searching {
+            Vec::new()
+        } else {
+            self.compact_groups(cx)
+        };
+        // The group whose rows sit at the top of the scroll lights its chip.
+        // Rows share one pitch, so the offset names the top row directly.
+        let top = (f32::from(-self.model_scroll_base().offset().y)
+            / (COMPACT_ROW_HEIGHT + popover::MENU_GAP))
+            .round()
+            .max(0.0) as usize;
+        let current = groups
+            .iter()
+            .rev()
+            .find(|(_, start)| *start <= top)
+            .map(|(group, _)| *group);
+        let strip = (groups.len() > 1).then(|| {
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .children(groups.into_iter().map(|(group, start)| {
+                    let viewed = current == Some(group);
+                    let (icon, tint, name): (&'static str, Option<gpui::Hsla>, SharedString) =
+                        match group {
+                            None => (crate::icons::STAR_BOLD, None, "Starred".into()),
+                            Some(harness) => {
+                                let (icon, tint) = harness_brand_icon(harness);
+                                let name = self
+                                    .rail_descriptors(cx)
+                                    .into_iter()
+                                    .find(|d| d.id == harness)
+                                    .map(|d| d.name)
+                                    .unwrap_or_default();
+                                (icon, tint, name.into())
+                            }
+                        };
+                    let hint = name.clone();
+                    div()
+                        .id(SharedString::from(format!("compact-group-{start}")))
+                        .role(gpui::Role::Button)
+                        .aria_label(SharedString::from(format!("Jump to {name}")))
+                        .tooltip(move |_, cx| cx.new(|_| PickerHint(hint.clone())).into())
+                        .size(px(26.0))
+                        .rounded(px(7.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .when(viewed, |el| el.bg(crate::theme::ink(0.08)))
+                        .when(!viewed, |el| {
+                            el.opacity(0.7)
+                                .hover(|s| s.bg(crate::theme::ink(0.05)).opacity(1.0))
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.compact_keyboard = false;
+                            this.active = start;
+                            this.model_scroll
+                                .scroll_to_item_strict(start, gpui::ScrollStrategy::Top);
+                            cx.notify();
+                        }))
+                        .child(crate::icons::icon(icon).size(px(14.0)).text_color(
+                            tint.unwrap_or(if viewed { theme.text } else { theme.text_muted }),
+                        ))
+                }))
+        });
         div()
             .h(px(40.0))
             .flex_none()
             .px(px(popover::CARD_INSET))
             .flex()
             .items_center()
+            .gap(px(4.0))
             .child(
                 popover::menu_row(&theme, false, "compact-model-back")
                     .id("compact-model-back")
                     .role(gpui::Role::Button)
                     .aria_label("Back to effort")
-                    .w_full()
+                    .flex_1()
+                    .min_w_0()
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.compact_control = CompactControl::Model;
                         this.compact_model_list = false;
@@ -278,8 +423,9 @@ impl Pickers {
                             .size(px(14.0))
                             .text_color(theme.text_muted),
                     )
-                    .child("Select model"),
+                    .child(div().truncate().child("Models")),
             )
+            .children(strip)
     }
 
     pub(super) fn compact_fast_choice(&self, cx: &App) -> Option<(String, String, bool, bool)> {
@@ -381,7 +527,10 @@ impl Pickers {
                 OPTIONS_GAP + (6.0 + options as f32 * 28.0).min(64.0)
             };
         let target = self.menu_geometry().height.min(if self.compact_model_list {
-            302.0
+            // Back header and search (40 each) above the list.
+            80.0 + compact_list_height(
+                self.model_rows_len(cx) + self.compact_catalog_statuses(cx).len(),
+            ) + 2.0
         } else {
             panel_height
         });
@@ -422,15 +571,10 @@ impl Pickers {
         if revealing {
             window.request_animation_frame();
         }
-        // One short directional entrance, coordinated with the card resize.
-        // Initial opening uses the shared popover entrance only.
-        let direction = if self.compact_model_list { 1.0 } else { -1.0 };
-        let content = div()
-            .relative()
-            .left(px(direction * 6.0 * (1.0 - reveal)))
-            .opacity(0.65 + reveal * 0.35)
-            .child(content)
-            .into_any_element();
+        // The new page fades in while the card resizes to it: the swap
+        // never shows at full strength and nothing slides sideways against
+        // the vertical resize. Initial opening uses the popover entrance.
+        let content = div().opacity(reveal).child(content).into_any_element();
         self.popover_frame_flush(COMPACT_WIDTH, content, cx)
     }
 
@@ -602,73 +746,110 @@ impl Pickers {
             .map(reasoning_label)
             .unwrap_or("Default")
             .into();
-        let model_hint: SharedString = format!("Change model\n{}", label).into();
         let model_accessible: SharedString =
             format!("{} · {} · Change model", effort, label).into();
         let model_focus = self.compact_keyboard && self.compact_control == CompactControl::Model;
         let fast_focus = self.compact_keyboard && self.compact_control == CompactControl::Fast;
         let effort_focus = self.compact_keyboard && self.compact_control == CompactControl::Effort;
-        let brand = self.effective_harness(cx).map(harness_brand_icon);
         let now = std::time::Instant::now();
         let reduced = cx.reduce_motion();
-        // Leading: the current model, which opens the list. Trailing: fast
-        // mode, whose accent glass fades in like the composer's Stop.
-        let mut header = div()
-            .h(px(32.0))
-            .flex_none()
+        // Fast mode alone brings the fill to life: a sheen and speed streaks
+        // racing toward the thumb, and a breathing glow.
+        let fast = self
+            .compact_fast_choice(cx)
+            .is_some_and(|(_, _, _, fast)| fast);
+        let (intensity, powering) = ScalarTransition::sample(
+            &mut self.compact_motion.energy,
+            if fast { 1.0 } else { 0.0 },
+            now,
+            reduced,
+        );
+        if powering {
+            window.request_animation_frame();
+        }
+        let dt = self
+            .compact_motion
+            .shimmer_last_frame
+            .replace(now)
+            .map_or(0.0, |last| now.duration_since(last).as_secs_f32().min(0.05));
+        let alive =
+            intensity > 0.001 && !reduced && window.is_window_active() && self.open.is_open();
+        if alive {
+            self.compact_motion.shimmer_phase =
+                (self.compact_motion.shimmer_phase + dt * (0.32 + 0.22 * intensity)).fract();
+            window.request_animation_frame();
+        }
+        let phase = self.compact_motion.shimmer_phase;
+        let breath = if alive {
+            0.5 + 0.5 * (std::f32::consts::TAU * phase).sin()
+        } else {
+            0.5
+        };
+        // Fast mode on the leading side; the effort titles the model's name,
+        // and together they are one button filling the rest of the row, its
+        // content centred within it; the chevron leans toward the list on hover.
+        let model_key: SharedString = format!("compact-model-link-{}", cx.entity_id()).into();
+        let hover = motion::hover_t(&model_key);
+        let lean = motion::EASE_OUT_QUINT.eval(hover);
+        let title = div()
+            .id("compact-select-model")
+            .role(gpui::Role::Button)
+            .aria_label(model_accessible)
+            .flex_1()
+            .min_w_0()
+            .h(px(HEADER_HEIGHT - 6.0))
+            .px(px(8.0))
+            .rounded(px(10.0))
+            .bg(crate::theme::ink(0.05 * hover))
             .flex()
+            .flex_col()
             .items_center()
-            .gap(px(4.0))
+            .justify_center()
+            .cursor_pointer()
+            .on_hover(motion::hover_listener(model_key))
+            .when(model_focus, |el| {
+                el.aria_active_descendant().shadow(focus_outline(&theme))
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.compact_keyboard = false;
+                this.show_compact_models(cx);
+            }))
+            .when(!levels.is_empty(), |el| {
+                el.child(
+                    div()
+                        .text_size(crate::typography::ui_rems(14.0))
+                        .line_height(px(17.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.accent)
+                        .child(effort.clone()),
+                )
+            })
             .child(
                 div()
-                    .id("compact-select-model")
-                    .role(gpui::Role::Button)
-                    .aria_label(model_accessible)
-                    .tooltip(move |_, cx| cx.new(|_| PickerHint(model_hint.clone())).into())
-                    .h(px(28.0))
-                    .flex_1()
+                    .max_w_full()
                     .min_w_0()
-                    // The trailing chevron sits optically closer to the edge.
-                    .pl(px(8.0))
-                    .pr(px(6.0))
-                    .rounded(px(popover::MENU_ITEM_RADIUS))
                     .flex()
                     .items_center()
-                    .gap(px(6.0))
-                    .cursor_pointer()
-                    .when(model_focus, |el| {
-                        el.aria_active_descendant().shadow(focus_outline(&theme))
-                    })
-                    .hover(|s| s.bg(crate::theme::ink(0.05)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.compact_keyboard = false;
-                        this.show_compact_models(cx);
-                    }))
-                    .when_some(brand, |el, (icon, tint)| {
-                        el.child(
-                            crate::icons::icon(icon)
-                                .size(px(14.0))
-                                .flex_none()
-                                .text_color(tint.unwrap_or(theme.text_muted)),
-                        )
-                    })
+                    .gap(px(3.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .line_height(px(15.0))
+                    .text_color(motion::mix(theme.text_muted, theme.text, hover))
+                    .child(div().min_w_0().truncate().child(label.clone()))
                     .child(
+                        // Leans 3pt toward the list and firms up on hover.
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(label.clone()),
-                    )
-                    .child(
-                        crate::icons::icon(crate::icons::ALT_ARROW_RIGHT)
-                            .size(px(11.0))
                             .flex_none()
-                            .text_color(theme.text_muted),
+                            .relative()
+                            .left(px(3.0 * lean))
+                            .opacity(0.55 + 0.45 * lean)
+                            .child(
+                                crate::icons::icon(crate::icons::ALT_ARROW_RIGHT)
+                                    .size(px(10.0))
+                                    .text_color(motion::mix(theme.text_muted, theme.text, lean)),
+                            ),
                     ),
             );
+        let mut fast_button = None;
         if let Some((option, choice, default, fast)) = self.compact_fast_choice(cx) {
             let (fast_t, fading) = ScalarTransition::sample(
                 &mut self.compact_motion.fast,
@@ -679,7 +860,7 @@ impl Pickers {
             if fading {
                 window.request_animation_frame();
             }
-            header = header.child(
+            fast_button = Some(
                 div()
                     .id("compact-fast")
                     .role(gpui::Role::Button)
@@ -702,15 +883,17 @@ impl Pickers {
                         })
                         .into()
                     })
+                    // The same shape and height as the model button beside it.
                     .relative()
-                    .size(px(28.0))
+                    .size(px(HEADER_HEIGHT - 6.0))
                     .flex_none()
-                    .rounded_full()
+                    .rounded(px(10.0))
                     .flex()
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .when(!fast, |el| el.hover(|s| s.bg(crate::theme::ink(0.06))))
+                    .bg(crate::theme::ink(0.04 * (1.0 - fast_t)))
+                    .when(!fast, |el| el.hover(|s| s.bg(crate::theme::ink(0.07))))
                     .when(fast_focus, |el| {
                         el.aria_active_descendant().shadow(focus_outline(&theme))
                     })
@@ -719,20 +902,32 @@ impl Pickers {
                         this.pick_option(option.clone(), choice.clone(), default, cx);
                     }))
                     .when(fast_t > 0.001, |el| {
+                        // Active is calm: a flat accent plate, no halo; the
+                        // slider carries the motion.
                         el.child(crate::glass::accent(
-                            div().absolute().inset_0().rounded_full(),
+                            div().absolute().inset_0().rounded(px(10.0)),
                             &theme,
-                            fast_t,
+                            0.85 * fast_t,
                             0.0,
                         ))
                     })
                     .child(
                         crate::icons::icon(crate::icons::FAST_TIER)
-                            .size(px(14.0))
-                            .text_color(motion::mix(theme.text_muted, theme.on_accent, fast_t)),
+                            .size(px(15.0))
+                            // Light on the accent in every appearance.
+                            .text_color(motion::mix(theme.text_muted, gpui::white(), fast_t)),
                     ),
             );
         }
+        let header = div()
+            .h(px(HEADER_HEIGHT))
+            .flex_none()
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .children(fast_button)
+            .child(title);
         let mut panel = div()
             .p(px(popover::CARD_INSET))
             .flex()
@@ -758,20 +953,6 @@ impl Pickers {
             if moving {
                 window.request_animation_frame();
             }
-            let fast = self
-                .compact_fast_choice(cx)
-                .is_some_and(|(_, _, _, fast)| fast);
-            // Fast mode spreads the fill's glow, as the voice level does for
-            // Stop; a static glow rather than a running animation.
-            let (energy, energizing) = ScalarTransition::sample(
-                &mut self.compact_motion.energy,
-                fast_energy(fraction, fast),
-                now,
-                reduced,
-            );
-            if energizing {
-                window.request_animation_frame();
-            }
             let (press, pressing) = ScalarTransition::sample(
                 &mut self.compact_motion.press,
                 if self.effort_dragging { 1.0 } else { 0.0 },
@@ -781,7 +962,7 @@ impl Pickers {
             if pressing {
                 window.request_animation_frame();
             }
-            let thumb_size = THUMB_SIZE * (1.0 - 0.04 * press);
+            let squeeze = 1.0 - 0.04 * press;
             let entity = cx.entity().downgrade();
             let drag_entity = entity.clone();
             let slider = div()
@@ -861,46 +1042,49 @@ impl Pickers {
                     1.0,
                 ))
                 // A contained glow: it must not wash over the option rows.
-                .child(effort_fill(&theme, fraction, levels.len(), energy * 0.35))
-                .child(
+                .child(effort_fill(
+                    &theme,
+                    fraction,
+                    levels.len(),
+                    Shimmer {
+                        intensity,
+                        phase,
+                        breath,
+                    },
+                ))
+                .child({
+                    let (w, h) = (THUMB_WIDTH * squeeze, THUMB_HEIGHT * squeeze);
+                    // Fast mode breathes a soft accent halo under the thumb.
+                    let live = intensity * (0.55 + 0.45 * breath);
+                    let place = |el: gpui::Div| {
+                        el.absolute()
+                            .left(gpui::relative(fraction))
+                            .ml(px(-w / 2.0))
+                            .w(px(w))
+                            .h(px(h))
+                            .rounded_full()
+                    };
                     div()
                         .absolute()
                         .left(px(THUMB_INSET))
                         .right(px(THUMB_INSET))
-                        .top(px((SLIDER_HEIGHT - thumb_size) / 2.0))
+                        .top(px((SLIDER_HEIGHT - h) / 2.0))
+                        .when(intensity > 0.001, |el| {
+                            el.child(place(div()).shadow(vec![gpui::BoxShadow {
+                                color: theme.accent.opacity(0.35 * live),
+                                offset: gpui::point(px(0.0), px(1.0)),
+                                blur_radius: px(10.0),
+                                spread_radius: px(0.0),
+                                inset: false,
+                            }]))
+                        })
                         .child(
-                            crate::glass::thumb(
-                                div()
-                                    .absolute()
-                                    .left(gpui::relative(fraction))
-                                    .ml(px(-thumb_size / 2.0))
-                                    .size(px(thumb_size))
-                                    .rounded_full(),
-                                &theme,
-                            )
-                            .when(effort_focus, |el| el.border_2().border_color(theme.text)),
-                        ),
-                );
-            // The value sits with its control rather than in the header.
-            panel = panel
-                .child(
-                    div()
-                        .mt(px(6.0))
-                        .h(px(18.0))
-                        .px(px(8.0))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .child(div().text_color(theme.text_muted).child("Reasoning"))
-                        .child(
-                            div()
-                                .text_color(theme.text)
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .child(effort.clone()),
-                        ),
-                )
-                .child(div().px(px(8.0)).pt(px(4.0)).child(slider));
+                            crate::glass::thumb(place(div()), &theme)
+                                .child(crate::glass::grip(3.5, 1.3, 6.0))
+                                .when(effort_focus, |el| el.border_2().border_color(theme.text)),
+                        )
+                });
+            panel = panel.child(div().px(px(12.0)).pt(px(2.0)).pb(px(6.0)).child(slider));
         }
         let option_count = self
             .setting_groups(cx)
@@ -935,10 +1119,28 @@ impl Pickers {
 
 /// The accent glass fill from the rail's start to just past the thumb, with
 /// the stops painted over rail and fill in one coordinate space.
-fn effort_fill(theme: &Theme, fraction: f32, count: usize, energy: f32) -> AnyElement {
-    let fill = crate::glass::accent_plate(theme, 1.0, energy);
-    let filled_stop = gpui::white().opacity(0.7);
-    let open_stop = theme.text_muted.opacity(0.45);
+#[derive(Clone, Copy)]
+struct Shimmer {
+    /// 0 at rest, up to 1 for fast mode on a top level.
+    intensity: f32,
+    /// 0–1 position of the band's sweep.
+    phase: f32,
+    /// 0–1 breathing of the glow.
+    breath: f32,
+}
+
+fn effort_fill(theme: &Theme, fraction: f32, count: usize, shimmer: Shimmer) -> AnyElement {
+    let Shimmer {
+        intensity,
+        phase,
+        breath,
+    } = shimmer;
+    // A contained glow that breathes; it must not wash over the option rows.
+    let fill = crate::glass::accent_plate(theme, 1.0, intensity * (0.2 + 0.25 * breath));
+    let accent = theme.accent;
+    // Quiet stops: a hint of the ladder, not a second focal point.
+    let filled_stop = gpui::white().opacity(0.4);
+    let open_stop = theme.text_muted.opacity(0.28);
     gpui::canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -953,14 +1155,80 @@ fn effort_fill(theme: &Theme, fraction: f32, count: usize, energy: f32) -> AnyEl
             };
             fill.paint(
                 window,
-                rect(
-                    0.0,
-                    RAIL_TOP,
-                    (center + THUMB_INSET).min(width),
-                    RAIL_HEIGHT,
-                ),
+                rect(0.0, RAIL_TOP, (center + FILL_PAST).min(width), RAIL_HEIGHT),
                 RAIL_HEIGHT / 2.0,
             );
+            // Fast mode: a band of light flows through the whole fill toward
+            // the thumb. Two slow waves drift at different speeds, shading
+            // the fill between a lifted accent and a hue-shifted one, and the
+            // light gathers just before the thumb. It is painted in thin
+            // strips whose gradients join end to end; the end strips carry
+            // the fill's corner radius, so it never leaves the rounded ends.
+            let fill_end = (center + FILL_PAST).min(width);
+            if intensity > 0.001 && fill_end > RAIL_HEIGHT {
+                let inset = 1.0;
+                let height = RAIL_HEIGHT - 2.0 * inset;
+                let radius = height / 2.0;
+                let (from, to) = (inset, fill_end - inset);
+                let base = accent;
+                let lifted = motion::mix(base, gpui::white(), 0.45);
+                let shifted = gpui::hsla(
+                    (base.h + 0.07).fract(),
+                    base.s,
+                    (base.l + 0.14).min(0.9),
+                    1.0,
+                );
+                let tau = std::f32::consts::TAU;
+                let flow = |x: f32| -> gpui::Hsla {
+                    let slow = 0.5 + 0.5 * (tau * (x / 150.0 - 2.0 * phase)).sin();
+                    let quick = 0.5 + 0.5 * (tau * (x / 64.0 - 3.0 * phase) + 1.7).sin();
+                    let glow = (0.65 * slow + 0.35 * quick).powi(2);
+                    let charge = (-(center - x).max(0.0) / 40.0).exp() * (0.6 + 0.4 * breath);
+                    let lead = ((x - from) / 28.0).clamp(0.0, 1.0);
+                    let alpha = intensity * ((0.08 + 0.34 * glow) * lead + 0.22 * charge);
+                    motion::mix(shifted, lifted, slow).opacity(alpha.min(1.0))
+                };
+                let mut edges = vec![from, (from + radius).min(to)];
+                let inner_end = (to - radius).max(edges[1]);
+                let mut x = edges[1];
+                while x + 4.0 < inner_end {
+                    x += 4.0;
+                    edges.push(x);
+                }
+                if inner_end > *edges.last().unwrap() {
+                    edges.push(inner_end);
+                }
+                if to > *edges.last().unwrap() {
+                    edges.push(to);
+                }
+                let last = edges.len().saturating_sub(2);
+                for (i, pair) in edges.windows(2).enumerate() {
+                    let (x0, x1) = (pair[0], pair[1]);
+                    if x1 - x0 < 0.1 {
+                        continue;
+                    }
+                    let r = px(radius.min(x1 - x0));
+                    let zero = px(0.0);
+                    let corners = gpui::Corners {
+                        top_left: if i == 0 { r } else { zero },
+                        bottom_left: if i == 0 { r } else { zero },
+                        top_right: if i == last { r } else { zero },
+                        bottom_right: if i == last { r } else { zero },
+                    };
+                    window.paint_quad(gpui::quad(
+                        rect(x0, RAIL_TOP + inset, x1 - x0, height),
+                        corners,
+                        gpui::linear_gradient(
+                            90.0,
+                            gpui::linear_color_stop(flow(x0), 0.0),
+                            gpui::linear_color_stop(flow(x1), 1.0),
+                        ),
+                        px(0.0),
+                        gpui::transparent_black(),
+                        gpui::BorderStyle::default(),
+                    ));
+                }
+            }
             for i in 0..count {
                 let stop = if count > 1 {
                     i as f32 / (count - 1) as f32
@@ -988,14 +1256,6 @@ fn effort_fill(theme: &Theme, fraction: f32, count: usize, energy: f32) -> AnyEl
     .absolute()
     .inset_0()
     .into_any_element()
-}
-
-fn fast_energy(fraction: f32, fast: bool) -> f32 {
-    if fast {
-        0.25 + 0.75 * fraction.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
 }
 
 fn effort_fraction(x: f32, width: f32) -> f32 {
@@ -1035,15 +1295,6 @@ mod tests {
     }
 
     #[test]
-    fn glow_requires_fast_mode_at_every_effort() {
-        for fraction in [0.0, 0.2, 0.5, 0.8, 1.0] {
-            assert_eq!(fast_energy(fraction, false), 0.0);
-            assert!(fast_energy(fraction, true) > 0.0);
-        }
-        assert!(fast_energy(1.0, true) > fast_energy(0.0, true));
-    }
-
-    #[test]
     fn continuous_drag_and_stops_share_inset_geometry() {
         let width = 228.0;
         for count in 2..=8 {
@@ -1055,7 +1306,7 @@ mod tests {
                 assert!(x - 2.0 >= 0.0 && x + 2.0 <= width);
             }
         }
-        assert!((effort_fraction(63.0, width) - 0.25).abs() < 0.00001);
+        assert!((effort_fraction(68.0, width) - 0.25).abs() < 0.00001);
         assert_eq!(effort_fraction(-100.0, width), 0.0);
         assert_eq!(effort_fraction(500.0, width), 1.0);
     }

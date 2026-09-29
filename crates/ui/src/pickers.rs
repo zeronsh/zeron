@@ -3688,7 +3688,14 @@ impl Pickers {
         let compact = self.compact_model_picker(cx);
         let height = self.menu_geometry().height.min(self.open_model_height);
         let (list_height, tray_height) = model_menu_budgets(height, self.setting_groups(cx).len());
-        let list_height = if compact { 216.0 } else { list_height };
+        let list_height = if compact {
+            compact::compact_list_height(
+                self.model_rows_len(cx) + self.compact_catalog_statuses(cx).len(),
+            )
+            .min((height - 80.0).max(0.0))
+        } else {
+            list_height
+        };
 
         let theme = Theme::of(cx).for_popup();
 
@@ -7754,6 +7761,10 @@ mod tests {
                 picker.activate_model_index(claude, cx);
                 assert!(!picker.compact_model_list);
                 assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+                // The list reopens on the current model, not the first row.
+                picker.show_compact_models(cx);
+                assert_ne!(claude, 0);
+                assert_eq!(picker.active, claude);
                 picker.pick_harness(HarnessId::Codex, cx);
                 picker.pick_model("codex-model".into(), cx);
                 picker.pick_reasoning(ReasoningLevel::Low, cx);
