@@ -821,6 +821,13 @@ impl PullRequestDetailPage {
     pub fn fixture_select_file(&mut self, index: usize, cx: &mut Context<Self>) {
         self.select_code_file(index, cx);
     }
+
+    /// Scroll the review stream so a file's header is pinned.
+    pub fn fixture_scroll_code(&mut self, distance: f32, cx: &mut Context<Self>) {
+        self.code_list.scroll_by(px(distance));
+        self.jumped_file = None;
+        cx.notify();
+    }
 }
 
 fn rich_text(

@@ -111,6 +111,8 @@ fn main() -> anyhow::Result<()> {
             let mut settings = settings::UiSettings::default();
             settings.last_pull_request_repository = Some(repository.clone());
             settings.pull_request_destination = settings::PullRequestDestination::Native;
+            // Match the default desktop look: translucent, frosted surfaces.
+            settings.surface = zeron_theme::SurfacePreference::Frosted;
             settings::init(settings.clone(), data.clone(), cx);
             let fonts = typography::register_fonts(cx);
             typography::init(
@@ -226,6 +228,16 @@ fn main() -> anyhow::Result<()> {
                     detail.update(cx, |d, cx| d.fixture_select_tab(1, cx));
                     pause(cx, 800).await;
                     shot(cx, "12-code-light")?;
+                    detail.update(cx, |d, cx| {
+                        d.fixture_select_file(1, cx);
+                        d.fixture_scroll_code(240.0, cx);
+                    });
+                    pause(cx, 500).await;
+                    shot(cx, "12b-sticky-light")?;
+                    cx.update(|cx| appearance::set_mode(appearance::AppearanceMode::Dark, cx));
+                    pause(cx, 500).await;
+                    shot(cx, "12c-sticky-dark")?;
+                    cx.update(|cx| appearance::set_mode(appearance::AppearanceMode::Light, cx));
                     window.update(cx, |_, w, _| w.resize(size(px(600.), px(848.))))?;
                     detail.update(cx, |d, cx| d.fixture_select_tab(0, cx));
                     pause(cx, 800).await;

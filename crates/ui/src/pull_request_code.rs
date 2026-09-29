@@ -15,6 +15,12 @@ const PICKER_HEIGHT: f32 = 360.0;
 /// Room under the diff for the floating section navigation. The file tree
 /// runs to the window edge instead and scrolls its last rows clear of it.
 const NAV_CLEARANCE: f32 = 76.0;
+/// Frosted pinned header: blur and veil strong enough to erase the text
+/// scrolling under it, light enough to keep the header rows' tone.
+const STICKY_BLUR: f32 = 32.0;
+const STICKY_VEIL: f32 = 0.18;
+/// The stream card's 12px radius inside its 1px border.
+const CARD_INNER_RADIUS: f32 = 11.0;
 
 /// One entry of the virtualized review stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -377,7 +383,10 @@ impl PullRequestDetailPage {
         let collapsed = self.collapsed_files.contains(&file);
         let (additions, deletions) = self.code_stats.get(file).copied().unwrap_or_default();
         let paint = crate::changes::sticky_file_header_paint(theme);
-        let (rest, hover) = if sticky {
+        // Frosted: the pinned copy blurs what scrolls beneath it and keeps the
+        // rows' own translucent wash, so both read as one header. Opaque
+        // surfaces need the solid equivalent to hide the rows.
+        let (rest, hover) = if sticky && !theme.is_frost() {
             (paint.rest_bg, paint.hover_bg)
         } else {
             (theme.ink(0.025), theme.ink(0.05))
@@ -414,6 +423,10 @@ impl PullRequestDetailPage {
                     .border_color(paint.border.opacity(if sticky { 1.0 } else { 0.0 }))
             })
             .when(sticky, |el| el.block_mouse_except_scroll())
+            // Follow the stream card's inner corner radius at the top edge.
+            .when(sticky || file == 0, |el| {
+                el.rounded_t(px(CARD_INNER_RADIUS))
+            })
             .cursor_pointer()
             .hover(move |style| style.bg(hover))
             .focus_visible(move |style| style.bg(hover))
@@ -481,10 +494,17 @@ impl PullRequestDetailPage {
             Some((bounds.origin.y - self.code_list.viewport_bounds().origin.y).as_f32())
         });
         let header = self.file_header(file, true, theme, cx);
-        let paint = crate::changes::sticky_file_header_paint(theme);
-        let header = match paint.frost_tint {
-            Some(tint) => div().w_full().bg(tint).child(header).into_any_element(),
-            None => header,
+        // A faint veil of the content plane melts the blurred glyphs beneath
+        // without lifting the header above the rows' own tone.
+        let header = if theme.is_frost() {
+            div()
+                .w_full()
+                .rounded_t(px(CARD_INNER_RADIUS))
+                .bg(theme.bg.opacity(STICKY_VEIL))
+                .child(header)
+                .into_any_element()
+        } else {
+            header
         };
         Some(
             div()
@@ -493,8 +513,8 @@ impl PullRequestDetailPage {
                 .left_0()
                 .w_full()
                 .child(crate::frost::frosted(
-                    0.0,
-                    crate::changes::STICKY_FILE_HEADER_BLUR,
+                    CARD_INNER_RADIUS,
+                    STICKY_BLUR,
                     header,
                 ))
                 .into_any_element(),
