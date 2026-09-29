@@ -21,6 +21,7 @@ use objc2_web_kit::{
 };
 use std::{
     cell::{Cell, RefCell},
+    mem::ManuallyDrop,
     rc::Rc,
 };
 use wry::{WebView, WebViewBuilderExtMacos, WebViewExtMacOS};
@@ -36,13 +37,17 @@ pub(super) struct BrowserData(Rc<RefCell<BrowserStore>>);
 impl BrowserData {
     pub fn for_profile(profile: super::profile::BrowserProfile) -> Self {
         thread_local! {
-            // Keep named stores alive until the app exits, including after its
-            // last window closes or the active identity changes. Destroying a
-            // WKWebsiteDataStore removes its network session; WebKit's cookie
-            // flush on UI-process disconnect only visits sessions still alive.
-            // A weak registry can therefore lose pending cookie deletions while
-            // localStorage/IndexedDB have already been saved during teardown.
-            static PROFILES: RefCell<std::collections::HashMap<std::path::PathBuf, Rc<RefCell<BrowserStore>>>> = RefCell::new(std::collections::HashMap::new());
+            // Keep named stores alive through process termination, including
+            // after the last window closes or the active identity changes.
+            // macOS runs Rust TLS destructors during AppKit's exit(). Releasing
+            // a WKWebsiteDataStore there removes its network session before
+            // WebKit's UI-process-disconnect handler can flush its cookies.
+            // In particular, deleted cookies can reappear on the next launch.
+            // Intentionally skip this registry's destructor: WebKit must still
+            // own the sessions when our process disconnects, and the OS reclaims
+            // these process-lifetime references on exit.
+            static PROFILES: ManuallyDrop<RefCell<std::collections::HashMap<std::path::PathBuf, Rc<RefCell<BrowserStore>>>>> =
+                ManuallyDrop::new(RefCell::new(std::collections::HashMap::new()));
         }
         PROFILES.with(|profiles| {
             let mut profiles = profiles.borrow_mut();
