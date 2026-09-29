@@ -186,6 +186,8 @@ impl PullRequestDetailPage {
                 None,
             ));
         }
+        // Same shape as the chat composer: the input with the send circle
+        // trailing on its last line.
         let mut surface = div()
             .id("pr-comment-surface")
             .debug_selector(|| "pr-comment-surface".into())
@@ -196,13 +198,7 @@ impl PullRequestDetailPage {
             .bg(theme.input_glass_bg())
             .flex()
             .flex_col()
-            .gap(px(8.0))
-            .child(
-                div()
-                    .max_h(px(120.0))
-                    .overflow_hidden()
-                    .child(self.comment_input.clone()),
-            );
+            .gap(px(8.0));
         if let Some(error) = &self.comment_error {
             surface = surface.child(
                 div()
@@ -214,29 +210,22 @@ impl PullRequestDetailPage {
         surface = surface.child(
             div()
                 .flex()
-                .items_center()
-                .justify_between()
+                .items_end()
                 .gap(px(8.0))
                 .child(
                     div()
-                        .text_size(px(11.0))
-                        .text_color(theme.text_muted)
-                        .child("Markdown"),
+                        .flex_1()
+                        .min_w_0()
+                        .max_h(px(120.0))
+                        .overflow_hidden()
+                        .child(self.comment_input.clone()),
                 )
                 .child(
-                    widgets::ghost_action(theme)
-                        .id("pr-send-comment")
+                    crate::composer::send_circle("pr-send-comment", !can_send, theme)
                         .debug_selector(|| "pr-send-comment".into())
                         .role(gpui::Role::Button)
-                        .aria_label("Send PR comment")
+                        .aria_label(if sending { "Sending PR comment" } else { "Send PR comment" })
                         .tab_index(0)
-                        .when(!can_send, |el| el.opacity(0.45))
-                        .child(
-                            crate::icons::icon(crate::icons::ARROW_UP)
-                                .size(px(16.0))
-                                .text_color(theme.text),
-                        )
-                        .child(if sending { "Sending…" } else { "Comment" })
                         .on_click(cx.listener(move |page, _, _, cx| {
                             if can_send {
                                 page.send_comment(cx);

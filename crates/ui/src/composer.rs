@@ -10510,21 +10510,9 @@ impl Composer {
                 // Share the submission guard with Enter, including pending
                 // edits and the new-session runnable-agent check.
                 let blocked = self.send_blocked(cx);
-                div()
-                    .id("composer-send")
-                    .debug_selector(|| "composer-send".into())
-                    .size(px(28.0))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(theme.text)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(blocked, |el| el.opacity(0.35))
+                send_circle("composer-send", blocked, theme)
                     .when(!blocked, |el| {
-                        el.cursor_pointer()
-                            .hover(|s| s.opacity(0.85))
-                            .on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
+                        el.on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                     })
                     .tooltip(crate::settings::widgets::text_tooltip(
                         if mode == SendButtonMode::Queue {
@@ -10533,15 +10521,37 @@ impl Composer {
                             "Send message"
                         },
                     ))
-                    .child(
-                        crate::icons::icon(crate::icons::ARROW_UP)
-                            .size(px(14.0))
-                            .text_color(theme.bg),
-                    )
                     .into_any_element()
             }
         }
     }
+}
+
+/// The composer's send control: a size-7 filled circle with an up arrow,
+/// dimmed and inert while `blocked`. Other message composers reuse it so
+/// sending looks the same everywhere.
+pub(crate) fn send_circle(
+    id: &'static str,
+    blocked: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .size(px(28.0))
+        .flex_none()
+        .rounded_full()
+        .bg(theme.text)
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(blocked, |el| el.opacity(0.35))
+        .when(!blocked, |el| el.cursor_pointer().hover(|s| s.opacity(0.85)))
+        .child(
+            crate::icons::icon(crate::icons::ARROW_UP)
+                .size(px(14.0))
+                .text_color(theme.bg),
+        )
 }
 
 /// The completion popups' floating rails run through
