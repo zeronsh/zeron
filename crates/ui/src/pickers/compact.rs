@@ -1060,8 +1060,8 @@ impl Pickers {
                     },
                 ))
                 .child({
-                    // The thumb keeps its size (resizing would reflow its
-                    // grip); a press only lifts it on a softer, wider drop.
+                    // A plain handle that keeps its size; a press only lifts
+                    // it on a softer, wider drop.
                     let (w, h) = (THUMB_WIDTH, THUMB_HEIGHT);
                     // Fast mode breathes a soft accent halo under the thumb.
                     let live = intensity * (0.55 + 0.45 * breath);
@@ -1098,7 +1098,6 @@ impl Pickers {
                         })
                         .child(
                             crate::glass::thumb(place(div()), &theme)
-                                .child(crate::glass::grip(3.5, 1.3, 6.0))
                                 .when(effort_focus, |el| el.border_2().border_color(theme.text)),
                         )
                 });
