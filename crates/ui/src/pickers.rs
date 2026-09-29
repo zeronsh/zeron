@@ -4800,7 +4800,10 @@ impl Pickers {
             .into_iter()
             .filter(|g| tray || !is_toggle(g));
         for (ix, group) in groups.enumerate() {
-            if tray && self.compact_model_picker(cx) && !Self::compact_option_visible(&group.id) {
+            if tray
+                && self.compact_model_picker(cx)
+                && !Self::compact_option_visible(&group.id, self.fast_option_id(cx).as_deref())
+            {
                 continue;
             }
             let open = self.setting_scope == scope && self.setting_menu.as_ref() == Some(&group.id);
@@ -5555,6 +5558,23 @@ fn model_menu_budgets(height: f32, setting_count: usize) -> (f32, f32) {
     (body - tray, tray)
 }
 
+/// Fast mode's `(on, off)` choices, whatever form a harness gives it: a
+/// `fastMode`/`fast_mode` toggle, or a tier/speed option offering `fast`
+/// beside its default. Every model then gets the same fast-mode UI.
+fn fast_mode_values(option: &zeron_proto::ModelOption) -> Option<(&str, &str)> {
+    let has = |id: &str| option.choices.iter().any(|choice| choice.id == id);
+    if matches!(option.id.as_str(), "fastMode" | "fast_mode") && has("on") {
+        let off = if option.default_choice == "on" {
+            "off"
+        } else {
+            option.default_choice.as_str()
+        };
+        return (option.default_choice != "on").then_some(("on", off));
+    }
+    (has("fast") && option.default_choice != "fast")
+        .then_some(("fast", option.default_choice.as_str()))
+}
+
 /// Attach the (single) open popover above a selector trigger.
 fn attach_overlay(
     chip: gpui::Stateful<gpui::Div>,
@@ -5777,14 +5797,14 @@ impl Render for Pickers {
         });
         let fast = self.selected_model(cx).is_some_and(|model| {
             model.options.iter().any(|option| {
-                option.id == "serviceTier"
-                    && self
-                        .resolved(cx)
+                fast_mode_values(option).is_some_and(|(on, _)| {
+                    self.resolved(cx)
                         .model_options
                         .get(&option.id)
                         .and_then(|value| value.as_str())
                         .unwrap_or(&option.default_choice)
-                        == "fast"
+                        == on
+                })
             })
         });
         let chip_width = self.model_chip_width(
@@ -6365,6 +6385,48 @@ mod tests {
                 })
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn every_fast_mode_encoding_gets_the_same_controls() {
+        let option = |id: &str, choices: &[&str], default: &str| ModelOption {
+            id: id.into(),
+            label: id.into(),
+            choices: choices
+                .iter()
+                .map(|c| ModelOptionChoice {
+                    id: (*c).into(),
+                    label: (*c).into(),
+                })
+                .collect(),
+            default_choice: default.into(),
+        };
+        // Codex tier, Claude toggle, ACP speed and the snake_case toggle.
+        assert_eq!(
+            fast_mode_values(&option("serviceTier", &["default", "fast"], "default")),
+            Some(("fast", "default"))
+        );
+        assert_eq!(
+            fast_mode_values(&option("fastMode", &["off", "on"], "off")),
+            Some(("on", "off"))
+        );
+        assert_eq!(
+            fast_mode_values(&option("speed", &["standard", "fast"], "standard")),
+            Some(("fast", "standard"))
+        );
+        assert_eq!(
+            fast_mode_values(&option("fast_mode", &["off", "on"], "off")),
+            Some(("on", "off"))
+        );
+        // Not fast mode: other toggles, or fast already the default.
+        assert_eq!(
+            fast_mode_values(&option("thinking", &["off", "on"], "off")),
+            None
+        );
+        assert_eq!(
+            fast_mode_values(&option("serviceTier", &["default", "fast"], "fast")),
+            None
+        );
     }
 
     #[gpui::test]

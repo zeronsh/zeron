@@ -429,30 +429,32 @@ impl Pickers {
     }
 
     pub(super) fn compact_fast_choice(&self, cx: &App) -> Option<(String, String, bool, bool)> {
-        let option = self
+        let (option, on, off) = self
             .selected_model(cx)?
             .options
             .iter()
-            .find(|o| o.id == "serviceTier")?;
-        if !option.choices.iter().any(|c| c.id == "fast") || option.default_choice == "fast" {
-            return None;
-        }
+            .find_map(|o| fast_mode_values(o).map(|(on, off)| (o, on, off)))?;
         let options = self.explicit_options(cx);
         let fast = options
             .get(&option.id)
             .and_then(|v| v.as_str())
             .unwrap_or(&option.default_choice)
-            == "fast";
+            == on;
         Some((
             option.id.clone(),
-            if fast {
-                option.default_choice.clone()
-            } else {
-                "fast".into()
-            },
+            if fast { off.to_owned() } else { on.to_owned() },
             fast,
             fast,
         ))
+    }
+
+    /// The selected model's fast-mode option id, whichever form it takes.
+    pub(super) fn fast_option_id(&self, cx: &App) -> Option<String> {
+        self.selected_model(cx)?
+            .options
+            .iter()
+            .find(|o| fast_mode_values(o).is_some())
+            .map(|o| o.id.clone())
     }
 
     pub(super) fn pick_effort_at(&mut self, x: gpui::Pixels, cx: &mut Context<Self>) {
@@ -476,9 +478,10 @@ impl Pickers {
         self.pick_compact_effort(levels[index], cx);
     }
 
-    pub(super) fn compact_option_visible(id: &ModelSetting) -> bool {
+    /// Effort and fast mode have their own controls in the compact card.
+    pub(super) fn compact_option_visible(id: &ModelSetting, fast: Option<&str>) -> bool {
         !matches!(id, ModelSetting::Reasoning)
-            && !matches!(id, ModelSetting::Option(id) if id == "serviceTier")
+            && !matches!(id, ModelSetting::Option(id) if Some(id.as_str()) == fast)
     }
 
     fn compact_controls(&self, cx: &App) -> Vec<CompactControl> {
@@ -489,10 +492,11 @@ impl Pickers {
         if !self.trait_ladder(cx).is_empty() {
             controls.push(CompactControl::Effort);
         }
+        let fast_id = self.fast_option_id(cx);
         controls.extend(
             self.setting_groups(cx)
                 .into_iter()
-                .filter(|g| Self::compact_option_visible(&g.id))
+                .filter(|g| Self::compact_option_visible(&g.id, fast_id.as_deref()))
                 .map(|g| CompactControl::Option(g.id)),
         );
         controls
@@ -510,10 +514,11 @@ impl Pickers {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let fast_id = self.fast_option_id(cx);
         let options = self
             .setting_groups(cx)
             .iter()
-            .filter(|g| Self::compact_option_visible(&g.id))
+            .filter(|g| Self::compact_option_visible(&g.id, fast_id.as_deref()))
             .count();
         let panel_height = HEADER_BLOCK
             + if self.trait_ladder(cx).is_empty() {
@@ -606,10 +611,11 @@ impl Pickers {
                     _ => NO_ACTIVE_ROW,
                 };
                 if let CompactControl::Option(id) = &self.compact_control {
+                    let fast_id = self.fast_option_id(cx);
                     let index = self
                         .setting_groups(cx)
                         .iter()
-                        .filter(|g| Self::compact_option_visible(&g.id))
+                        .filter(|g| Self::compact_option_visible(&g.id, fast_id.as_deref()))
                         .position(|g| &g.id == id)
                         .unwrap_or(0);
                     self.menu_scroll
@@ -1086,10 +1092,11 @@ impl Pickers {
                 });
             panel = panel.child(div().px(px(12.0)).pt(px(2.0)).pb(px(6.0)).child(slider));
         }
+        let fast_id = self.fast_option_id(cx);
         let option_count = self
             .setting_groups(cx)
             .iter()
-            .filter(|g| Self::compact_option_visible(&g.id))
+            .filter(|g| Self::compact_option_visible(&g.id, fast_id.as_deref()))
             .count();
         if option_count > 0 {
             let options = self.render_traits_sections(cx);
