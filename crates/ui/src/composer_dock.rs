@@ -4,10 +4,12 @@
 use std::{cell::RefCell, rc::Rc, time::Instant};
 
 mod panel_handoff;
+#[cfg(test)]
+mod terminal_tests;
 
 use gpui::{
-    AnyElement, App, Bounds, Element, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
-    Pixels, Window, point, px,
+    AnyElement, App, AvailableSpace, Bounds, Element, GlobalElementId, InspectorElementId,
+    IntoElement, LayoutId, Pixels, Window, point, px, size,
 };
 
 /// Critically damped motion: no oscillation, and both position and velocity
@@ -292,6 +294,56 @@ impl Default for DockState {
 }
 
 impl DockState {
+    // Sampling copies leaves the route's position, velocity and clock untouched.
+    // Both terminal budgeting and prepaint use this exact step: a second spring
+    // or last-frame surface bounds would either lag or fight the route motion.
+    fn position_at(&self, x: f32, y: f32, reduced: bool, now: Instant) -> (Glide, Glide) {
+        let docked = self.frame.docked;
+        let dt = if self.last_docked != docked {
+            0.0
+        } else {
+            self.last_geometry.map_or(0.0, |last| {
+                now.saturating_duration_since(last).as_secs_f32()
+            })
+        };
+        let moving = self.moving || self.last_docked != docked || self.frame.active;
+        let mut position = self.position.unwrap_or((Glide::new(x), Glide::new(y)));
+        if let Some(progress) = self.pane.progress {
+            if progress >= panel_handoff::GEOMETRY_SWITCH {
+                let travel = if docked { 12.0 } else { 8.0 };
+                position = (
+                    Glide::new(x),
+                    Glide::new(
+                        y + travel * (1.0 - stage(progress, panel_handoff::GEOMETRY_SWITCH, 1.0)),
+                    ),
+                );
+            }
+        } else if reduced || !moving {
+            position = (Glide::new(x), Glide::new(y));
+        } else {
+            position.0.advance(x, dt, duration(docked));
+            position.1.advance(y, dt, duration(docked));
+        }
+        position
+    }
+
+    fn terminal_limit(
+        &self,
+        viewport: f32,
+        height: f32,
+        reserved: f32,
+        reduced: bool,
+        now: Instant,
+    ) -> f32 {
+        let y = if self.frame.docked {
+            viewport - height - reserved
+        } else {
+            (viewport - height) * 0.5 + 8.0
+        };
+        let bottom = self.position_at(0.0, y, reduced, now).1.value + height;
+        (viewport - bottom).max(0.0)
+    }
+
     /// Retained transcript pixels belong to the source column. Letting them
     /// reflow into the hero's wider layout before fading creates an exit flash.
     pub fn transcript_width(&mut self, target: f32, docked: bool, panel_handoff: bool) -> f32 {
@@ -427,6 +479,7 @@ pub(crate) struct DockedComposer {
     viewport_height: f32,
     reduced: bool,
     now: Instant,
+    terminal: Option<crate::terminal::dock::SharedGeometry>,
 }
 
 pub(crate) fn docked_composer(
@@ -442,11 +495,19 @@ pub(crate) fn docked_composer(
         viewport_height,
         reduced,
         now,
+        terminal: None,
+    }
+}
+
+impl DockedComposer {
+    pub fn reserve_terminal(mut self, geometry: crate::terminal::dock::SharedGeometry) -> Self {
+        self.terminal = Some(geometry);
+        self
     }
 }
 
 impl Element for DockedComposer {
-    type RequestLayoutState = ();
+    type RequestLayoutState = bool;
     type PrepaintState = ();
     fn id(&self) -> Option<gpui::ElementId> {
         None
@@ -460,15 +521,78 @@ impl Element for DockedComposer {
         _: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
-    ) -> (LayoutId, ()) {
-        (self.child.request_layout(window, cx), ())
+    ) -> (LayoutId, bool) {
+        let layout = self.child.request_layout(window, cx);
+        if let Some(terminal) = self
+            .terminal
+            .as_ref()
+            .filter(|g| g.get().reserved_height > 0.0)
+        {
+            // Keep the measured child as a layout root. Reattaching a measured
+            // node would reuse GPUI's cached absolute bounds from the origin.
+            // An identical centered slot locates it in the parent; prepaint_at
+            // then carries the same persistent child and hitboxes to that slot.
+            let measured = self.child.layout_as_root(
+                size(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+                window,
+                cx,
+            );
+            let height = f32::from(measured.height);
+            let mut geometry = terminal.get();
+            // The reservation may shrink for the window, but never follows
+            // the animated collision limit: that would retarget the composer
+            // towards its own previous position and stall its spring.
+            let available = (self.viewport_height
+                - height
+                - crate::theme::Theme::TITLEBAR_HEIGHT
+                - crate::theme::Theme::STATUS_STRIP_HEIGHT)
+                .max(0.0);
+            geometry = crate::terminal::dock::Geometry::new(
+                geometry.reserved_height,
+                geometry.content_height,
+                geometry.limit.min(available),
+            );
+            geometry.reserved_height = f32::from(window.pixel_snap(px(geometry.reserved_height)));
+            let state = self.state.borrow();
+            let clearance = state.terminal_limit(
+                self.viewport_height,
+                height,
+                geometry.reserved_height,
+                self.reduced,
+                self.now,
+            );
+            // Round towards free space. Ordinary layout rounds to the nearest
+            // device pixel, which could put the terminal over the composer by
+            // a fraction of a pixel and disagree with the underlay's bottom.
+            let scale = window.scale_factor();
+            geometry.height = geometry
+                .reserved_height
+                .min((clearance * scale).floor() / scale);
+            if !state.frame.docked {
+                let hero_limit = ((self.viewport_height - height) * 0.5 - 8.0).max(0.0);
+                geometry.limit = geometry.limit.min(hero_limit);
+                geometry.content_height =
+                    geometry.content_height.min(hero_limit).max(geometry.height);
+            }
+            terminal.set(geometry);
+            use gpui::prelude::*;
+            let slot = gpui::div()
+                .w(measured.width)
+                .h(measured.height)
+                .flex_none()
+                .mx_auto()
+                .into_any_element()
+                .request_layout(window, cx);
+            return (slot, true);
+        }
+        (layout, false)
     }
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut (),
+        measured: &mut bool,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -481,35 +605,10 @@ impl Element for DockedComposer {
         } else {
             (self.viewport_height - f32::from(bounds.size.height)) * 0.5 + 8.0
         };
-        let dt = if state.last_docked != docked {
-            0.0
-        } else {
-            state.last_geometry.map_or(0.0, |last| {
-                self.now.saturating_duration_since(last).as_secs_f32()
-            })
-        };
+        let position = state.position_at(x, y, self.reduced, self.now);
         state.last_geometry = Some(self.now);
-        state.moving |= state.last_docked != docked || state.frame.active;
         state.last_docked = docked;
-        let moving = state.moving;
-        let handoff = state.pane.progress;
-        let position = state.position.get_or_insert((Glide::new(x), Glide::new(y)));
-        if let Some(progress) = handoff {
-            if progress >= panel_handoff::GEOMETRY_SWITCH {
-                let travel = if docked { 12.0 } else { 8.0 };
-                *position = (
-                    Glide::new(x),
-                    Glide::new(
-                        y + travel * (1.0 - stage(progress, panel_handoff::GEOMETRY_SWITCH, 1.0)),
-                    ),
-                );
-            }
-        } else if self.reduced || !moving {
-            *position = (Glide::new(x), Glide::new(y));
-        } else {
-            position.0.advance(x, dt, duration(docked));
-            position.1.advance(y, dt, duration(docked));
-        }
+        state.position = Some(position);
         let offset = point(
             px(position.0.value - x),
             px(position.1.value - f32::from(bounds.top())),
@@ -524,14 +623,22 @@ impl Element for DockedComposer {
             window.request_animation_frame();
         }
         drop(state);
-        window.with_element_offset(offset, |window| self.child.prepaint(window, cx));
+        if *measured {
+            self.child.prepaint_at(
+                point(px(position.0.value), px(position.1.value)),
+                window,
+                cx,
+            );
+        } else {
+            window.with_element_offset(offset, |window| self.child.prepaint(window, cx));
+        }
     }
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
-        _: &mut (),
+        _: &mut bool,
         _: &mut (),
         window: &mut Window,
         cx: &mut App,

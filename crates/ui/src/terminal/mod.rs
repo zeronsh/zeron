@@ -11,6 +11,7 @@
 //! `zeron_proto` (`TerminalSession`, `TerminalEvent`) — the same contract the
 //! engine serves (feature-inventory §2.1).
 
+pub(crate) mod dock;
 pub mod emulator;
 pub mod panel;
 pub mod view;
