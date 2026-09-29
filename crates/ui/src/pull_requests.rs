@@ -203,6 +203,9 @@ pub struct PullRequestsPage {
     repository_error: Option<String>,
     initial_scope_attempted: bool,
     initial_scope_task: Option<Task<()>>,
+    /// The project the board was last opened from. Opening it from another
+    /// project follows that project; an explicit choice stands until then.
+    seen_context: Option<ProjectRef>,
     _repository_events: Subscription,
     snapshots: Vec<(
         (Option<String>, String, ChangeRequestFilter),
@@ -296,6 +299,7 @@ impl PullRequestsPage {
             repository_error: None,
             initial_scope_attempted: false,
             initial_scope_task: None,
+            seen_context: None,
             _repository_events: repository_events,
             snapshots: Vec::new(),
             paging: Paging::default(),
@@ -332,6 +336,9 @@ impl PullRequestsPage {
         page
     }
 
+    /// Pick the board's repository without asking: the project it was opened
+    /// from (sidebar project, else the open session's), else the repository
+    /// viewed last, else the most recently active local Git project.
     fn initialize_repository(&mut self, cx: &mut Context<Self>) {
         if self.repository.is_some() || self.initial_scope_attempted || !self.visible {
             return;
@@ -341,50 +348,60 @@ impl PullRequestsPage {
             return;
         };
         let saved = crate::settings::current(cx);
-        // The sidebar scope is independent of the retained conversation/project.
-        let current = saved.space_filter.as_deref().and_then(|id| {
-            state
-                .spaces
-                .iter()
-                .find(|space| space.id == id)
-                .map(|space| (space.path.clone(), space.device_id.clone()))
-        });
-        if saved.space_filter.is_some() && current.is_none() {
+        let context = match context_project(state, saved.space_filter.as_deref()) {
             // Wait for the project's first frame, rather than pinning a stale scope.
-            return;
-        }
+            ContextProject::Waiting => return,
+            ContextProject::Project(project) => Some(project),
+            ContextProject::None => None,
+        };
+        let local = state
+            .local_device_id
+            .clone()
+            .unwrap_or_else(|| engine.engine_info().device_id.clone());
         let fallback = saved
             .last_pull_request_repository
             .filter(|repo| valid_repository_filter(repo))
             .map(|repo| (repo, saved.last_pull_request_device));
-        let Some((cwd, device)) = current else {
+        let candidates = match &context {
+            Some(project) => vec![project.clone()],
+            None if fallback.is_some() => Vec::new(),
+            None => recent_git_projects(state, &local),
+        };
+        self.seen_context = context;
+        if candidates.is_empty() {
             if let Some((repo, target)) = fallback {
                 self.apply_initial_repository(repo, target, cx);
             }
             return;
-        };
-        let local = state
-            .local_device_id
-            .as_deref()
-            .unwrap_or(&engine.engine_info().device_id);
-        let target = (device != local).then_some(device);
-        let mut params = params_for_target(target.as_deref());
-        params["cwd"] = cwd.into();
+        }
+        let explicit_context = self.seen_context.is_some();
         self.initial_scope_attempted = true;
         self.load_state = PullRequestsLoadState::Loading;
         self.initial_scope_task = Some(cx.spawn(async move |this, cx| {
-            let request = engine.client().call(methods::GET_CHANGE_REQUEST_REPOSITORY, params);
-            let deadline = cx.background_executor().timer(std::time::Duration::from_secs(3));
-            futures::pin_mut!(request, deadline);
-            let result = match futures::future::select(request, deadline).await {
-                futures::future::Either::Left((result, _)) => result,
-                futures::future::Either::Right(_) => Err(RpcError::Failed("Repository detection timed out".into())),
-            };
-            let discovery_failed = result.is_err();
-            let repository = result
-                .ok()
-                .and_then(|value| serde_json::from_value::<Option<String>>(value).ok())
-                .flatten();
+            let mut discovery_failed = false;
+            let mut found = None;
+            for project in candidates {
+                let target = (project.device != local).then(|| project.device.clone());
+                let mut params = params_for_target(target.as_deref());
+                params["cwd"] = project.path.into();
+                let request = engine.client().call(methods::GET_CHANGE_REQUEST_REPOSITORY, params);
+                let deadline = cx.background_executor().timer(std::time::Duration::from_secs(3));
+                futures::pin_mut!(request, deadline);
+                let result = match futures::future::select(request, deadline).await {
+                    futures::future::Either::Left((result, _)) => result,
+                    futures::future::Either::Right(_) => Err(RpcError::Failed("Repository detection timed out".into())),
+                };
+                discovery_failed |= result.is_err();
+                if let Some(repository) = result
+                    .ok()
+                    .and_then(|value| serde_json::from_value::<Option<String>>(value).ok())
+                    .flatten()
+                    .filter(|repo| valid_repository_filter(repo))
+                {
+                    found = Some((repository, target));
+                    break;
+                }
+            }
             let _ = this.update(cx, |page, cx| {
                 page.initial_scope_task = None;
                 // User selection cancels this task; never override their scope.
@@ -392,15 +409,36 @@ impl PullRequestsPage {
                     return;
                 }
                 page.load_state = PullRequestsLoadState::Idle;
-                if let Some((repo, target)) = initial_repository_scope(repository, target, fallback)
-                {
+                if let Some((repo, target)) = found.or(fallback) {
                     page.apply_initial_repository(repo, target, cx);
-                } else if discovery_failed {
+                } else if discovery_failed && explicit_context {
                     page.repository_error = Some("Couldn’t detect this project’s repository. Choose a repository to continue.".into());
                 }
                 cx.notify();
             });
         }));
+    }
+
+    /// Opened from a different project than last time: show that project's
+    /// pull requests instead of whatever the board held.
+    fn follow_context(&mut self, cx: &mut Context<Self>) {
+        if self.repository.is_none() {
+            return;
+        }
+        let saved = crate::settings::current(cx);
+        let ContextProject::Project(project) =
+            context_project(self.state.read(cx), saved.space_filter.as_deref())
+        else {
+            return;
+        };
+        if self.seen_context.as_ref() == Some(&project) {
+            return;
+        }
+        self.repository = None;
+        self.initial_scope_task = None;
+        self.initial_scope_attempted = false;
+        self.repository_error = None;
+        self.reset_for_target(self.target_device.clone());
     }
 
     fn apply_initial_repository(
@@ -416,6 +454,9 @@ impl PullRequestsPage {
     }
 
     pub(crate) fn on_project_scope_changed(&mut self, cx: &mut Context<Self>) {
+        if self.visible {
+            self.follow_context(cx);
+        }
         if self.repository.is_none() {
             self.initial_scope_task = None;
             self.initial_scope_attempted = false;
@@ -430,7 +471,8 @@ impl PullRequestsPage {
     pub fn on_visible(&mut self, cx: &mut Context<Self>) {
         self.visible = true;
         self.reconcile_target_device(cx);
-        // Seed one scope only; subsequent navigation reuses its snapshot.
+        // Returning from the same project reuses the board as it was.
+        self.follow_context(cx);
         self.initialize_repository(cx);
         cx.notify();
     }
@@ -718,7 +760,15 @@ impl PullRequestsPage {
             let mut seen = HashSet::new();
             recent.retain(|repo| seen.insert(repo.clone()));
             recent.truncate(5);
-            let projects = self.state.read(cx).spaces.clone();
+            // Only Git projects can have a GitHub repository.
+            let projects: Vec<_> = self
+                .state
+                .read(cx)
+                .spaces
+                .iter()
+                .filter(|project| project.git_detected)
+                .cloned()
+                .collect();
             let menu = popover::popover_card(theme)
                 .w(px(280.0))
                 .flex()
@@ -767,10 +817,8 @@ impl PullRequestsPage {
                                 .max_h(px(240.0))
                                 .overflow_y_scroll()
                                 .children(projects.into_iter().map(|project| {
-                                    let label = project
-                                        .name
-                                        .clone()
-                                        .unwrap_or_else(|| project.path.clone());
+                                    let label = project.display_name().to_owned();
+                                    let path = project.path.clone();
                                     popover::menu_row(
                                         theme,
                                         false,
@@ -780,7 +828,14 @@ impl PullRequestsPage {
                                     .role(gpui::Role::Button)
                                     .tab_index(0)
                                     .aria_label(format!("Open repository for {label}"))
-                                    .child(div().min_w_0().truncate().child(label))
+                                    .child(div().flex_none().child(label))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_color(theme.text_muted)
+                                            .child(path),
+                                    )
                                     .on_click(cx.listener(
                                         move |page, _, _, cx| {
                                             cx.stop_propagation();
@@ -2242,15 +2297,71 @@ fn normalized_target_device(
     }
 }
 
-fn initial_repository_scope(
-    current: Option<String>,
-    target: Option<String>,
-    fallback: Option<(String, Option<String>)>,
-) -> Option<(String, Option<String>)> {
-    current
-        .filter(|repo| valid_repository_filter(repo))
-        .map(|repo| (repo, target))
-        .or_else(|| fallback.filter(|(repo, _)| valid_repository_filter(repo)))
+/// A project folder on a device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectRef {
+    path: String,
+    device: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ContextProject {
+    /// The sidebar names a project whose row has not synced yet.
+    Waiting,
+    Project(ProjectRef),
+    None,
+}
+
+/// Where the board is opened from: the sidebar's project, else the open
+/// session's project.
+fn context_project(state: &AppState, space_filter: Option<&str>) -> ContextProject {
+    let project = |id: &str| {
+        state
+            .spaces
+            .iter()
+            .find(|space| space.id == id)
+            .map(|space| ProjectRef {
+                path: space.path.clone(),
+                device: space.device_id.clone(),
+            })
+    };
+    if let Some(id) = space_filter {
+        return project(id).map_or(ContextProject::Waiting, ContextProject::Project);
+    }
+    state
+        .selected_chat_row()
+        .and_then(|chat| chat.space_id.as_deref())
+        .and_then(project)
+        .map_or(ContextProject::None, ContextProject::Project)
+}
+
+/// Git projects to try when nothing points at one: this device's first,
+/// most recent session activity first. Bounded: each costs a lookup.
+fn recent_git_projects(state: &AppState, local: &str) -> Vec<ProjectRef> {
+    let mut projects: Vec<_> = state
+        .spaces
+        .iter()
+        .filter(|space| space.git_detected)
+        .map(|space| {
+            let active = state
+                .chats
+                .iter()
+                .filter(|chat| chat.space_id.as_deref() == Some(space.id.as_str()))
+                .filter_map(|chat| chat.last_message_at)
+                .max()
+                .unwrap_or(space.created_at);
+            (space.device_id != local, std::cmp::Reverse(active), space)
+        })
+        .collect();
+    projects.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    projects
+        .into_iter()
+        .take(4)
+        .map(|(.., space)| ProjectRef {
+            path: space.path.clone(),
+            device: space.device_id.clone(),
+        })
+        .collect()
 }
 
 fn valid_repository_filter(value: &str) -> bool {
@@ -2512,15 +2623,100 @@ mod tests {
         }
     }
 
+    fn space(id: &str, device: &str, git: bool, created_minutes_ago: i64) -> zeron_proto::Space {
+        zeron_proto::Space {
+            id: id.into(),
+            device_id: device.into(),
+            path: format!("/{id}"),
+            name: None,
+            git_detected: git,
+            git_checked_at: None,
+            checkout_id: None,
+            repository_id: None,
+            created_at: Utc::now() - TimeDelta::minutes(created_minutes_ago),
+        }
+    }
+
+    fn session(space: &str, last_message_at: Option<DateTime<Utc>>) -> zeron_proto::Chat {
+        zeron_proto::Chat {
+            id: "chat".into(),
+            device_id: "local".into(),
+            title: None,
+            archived: false,
+            cwd: None,
+            branch: None,
+            checkout_id: None,
+            source_context: None,
+            config: None,
+            last_message_preview: None,
+            last_message_at,
+            created_at: Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            parent_chat_id: None,
+            space_id: Some(space.into()),
+            last_seen_at: None,
+            room_gen: None,
+        }
+    }
+
+    fn project(id: &str, device: &str) -> ProjectRef {
+        ProjectRef {
+            path: format!("/{id}"),
+            device: device.into(),
+        }
+    }
+
     #[test]
-    fn pull_request_default_scope_prefers_current_and_preserves_fallback_device() {
-        let saved = Some(("saved/repo".into(), Some("remote".into())));
+    fn pull_request_board_opens_on_the_sidebar_or_session_project() {
+        let mut state = AppState::new();
+        state.spaces = vec![
+            space("comet", "local", true, 60),
+            space("other", "local", true, 60),
+        ];
+        let mut chat = session("comet", None);
+        state.chats = vec![chat.clone()];
+        state.selected_chat = Some("chat".into());
         assert_eq!(
-            initial_repository_scope(Some("current/repo".into()), None, saved.clone()),
-            Some(("current/repo".into(), None))
+            context_project(&state, None),
+            ContextProject::Project(project("comet", "local")),
+            "the open session's project"
         );
-        assert_eq!(initial_repository_scope(None, None, saved.clone()), saved);
-        assert!(initial_repository_scope(None, None, Some(("bad filter".into(), None))).is_none());
+        assert_eq!(
+            context_project(&state, Some("other")),
+            ContextProject::Project(project("other", "local")),
+            "the sidebar's project wins"
+        );
+        assert_eq!(
+            context_project(&state, Some("unsynced")),
+            ContextProject::Waiting
+        );
+        chat.space_id = None;
+        state.chats = vec![chat];
+        assert_eq!(context_project(&state, None), ContextProject::None);
+    }
+
+    #[test]
+    fn pull_request_board_first_run_tries_recent_local_git_projects() {
+        let mut state = AppState::new();
+        state.spaces = vec![
+            space("old", "local", true, 600),
+            space("remote", "remote", true, 1),
+            space("notes", "local", false, 1),
+            space("active", "local", true, 900),
+            space("new", "local", true, 5),
+        ];
+        state.chats = vec![session("active", Some(Utc::now()))];
+        assert_eq!(
+            recent_git_projects(&state, "local"),
+            [
+                project("active", "local"),
+                project("new", "local"),
+                project("old", "local"),
+                project("remote", "remote"),
+            ],
+            "session activity first, this device before others, Git only"
+        );
     }
 
     #[gpui::test]
@@ -2743,6 +2939,129 @@ mod tests {
                 methods::LIST_CHANGE_REQUEST_PAGE
             ]
         );
+    }
+
+    /// `/<name>` checkouts belong to `owner/<name>`, except `/scratch`.
+    struct ProjectRepositoryRpc(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    #[async_trait::async_trait]
+    impl zeron_rpc::RpcService for ProjectRepositoryRpc {
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
+            match method {
+                methods::GET_CHANGE_REQUEST_REPOSITORY => {
+                    let cwd = params["cwd"].as_str().unwrap().to_owned();
+                    self.0.lock().unwrap().push(cwd.clone());
+                    let name = cwd.trim_start_matches('/');
+                    zeron_rpc::RpcReply::value(
+                        &(name != "scratch").then(|| format!("owner/{name}")),
+                    )
+                }
+                methods::LIST_CHANGE_REQUEST_PAGE => {
+                    let repository = params["repository"].as_str().unwrap();
+                    zeron_rpc::RpcReply::value(&ChangeRequestPage {
+                        items: vec![pull_request(repository, 7, 1, 1, 1)],
+                        next_cursor: None,
+                        total_count: Some(1),
+                    })
+                }
+                _ => panic!("unexpected request {method}"),
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn pull_request_board_finds_and_follows_the_repository_it_is_opened_from(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let settings_dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::default());
+            crate::settings::init(
+                crate::settings::UiSettings::default(),
+                settings_dir.path(),
+                cx,
+            );
+        });
+        let lookups = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::memory_client(std::sync::Arc::new(ProjectRepositoryRpc(
+                    lookups.clone(),
+                ))),
+            ));
+            state.local_device_id = Some("local".into());
+            state.spaces = vec![
+                space("comet", "local", true, 60),
+                space("scratch", "local", true, 1),
+                space("docs", "local", true, 120),
+            ];
+        });
+        let page = cx.new(|cx| PullRequestsPage::new(state.clone(), cx));
+        let page_ready = {
+            let page = page.clone();
+            move |cx: &mut gpui::TestAppContext| {
+                page.read_with(cx, |page, _| {
+                    page.initial_scope_task.is_none()
+                        && page.load_state == PullRequestsLoadState::Ready
+                })
+            }
+        };
+        let settle = |cx: &mut gpui::TestAppContext| {
+            for _ in 0..100 {
+                cx.run_until_parked();
+                runtime.block_on(tokio::time::sleep(std::time::Duration::from_millis(1)));
+                if page_ready(cx) {
+                    break;
+                }
+            }
+        };
+        settle(cx);
+        // First run, All projects, nothing saved: the newest Git project that
+        // is on GitHub, without asking.
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.repository.as_deref(), Some("owner/comet"));
+            assert!(page.repository_error.is_none());
+        });
+        assert_eq!(*lookups.lock().unwrap(), ["/scratch", "/comet"]);
+
+        // Opened from a session in another project: that project's PRs.
+        page.update(cx, |page, _| page.on_hidden());
+        state.update(cx, |state, _| {
+            state.chats = vec![session("docs", None)];
+            state.selected_chat = Some("chat".into());
+        });
+        page.update(cx, |page, cx| page.on_visible(cx));
+        settle(cx);
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.repository.as_deref(), Some("owner/docs"))
+        });
+
+        // An explicit choice stands while the board reopens from the same project.
+        page.update(cx, |page, cx| {
+            page.repository_input
+                .update(cx, |input, cx| input.set_text("elsewhere/repo", cx));
+            page.select_repository(cx);
+        });
+        settle(cx);
+        page.update(cx, |page, cx| {
+            page.on_hidden();
+            page.on_visible(cx);
+        });
+        settle(cx);
+        page.read_with(cx, |page, _| {
+            assert_eq!(page.repository.as_deref(), Some("elsewhere/repo"))
+        });
+        assert_eq!(*lookups.lock().unwrap(), ["/scratch", "/comet", "/docs"]);
     }
 
     #[gpui::test]
