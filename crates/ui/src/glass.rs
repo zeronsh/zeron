@@ -152,6 +152,25 @@ pub(crate) fn thumb_plate(theme: &Theme) -> Plate {
     }
 }
 
+/// The clean handle for switches: near-flat opaque white with no inset
+/// highlight or grip, a hairline edge, and a soft two-layer drop that lifts
+/// it off the rail in either appearance.
+pub(crate) fn knob_plate(theme: &Theme) -> Plate {
+    let dark = theme.appearance.is_dark();
+    Plate {
+        background: vertical(hsla(0.0, 0.0, 1.0, 1.0), hsla(0.0, 0.0, 0.975, 1.0)),
+        rim: black(0.05),
+        shadows: vec![
+            shadow(black(if dark { 0.24 } else { 0.10 }), 1.0, 2.0, 0.0, false),
+            shadow(black(if dark { 0.16 } else { 0.08 }), 2.0, 6.0, 0.0, false),
+        ],
+    }
+}
+
+pub(crate) fn knob<E: Styled>(el: E, theme: &Theme) -> E {
+    knob_plate(theme).apply(el)
+}
+
 pub(crate) fn light<E: Styled>(el: E, theme: &Theme, t: f32) -> E {
     light_plate(theme, t).apply(el)
 }

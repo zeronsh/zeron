@@ -629,21 +629,18 @@ pub fn badge_active(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div 
         .child(label.into())
 }
 
-// The compact picker's slider in miniature: a rail with a larger pill thumb
-// that overhangs it by 2pt above and below and rides flush with its ends,
-// and an accent fill that runs behind the thumb as it travels. The travel
-// equals the thumb's height, so the open end of the rail is as long as the
-// thumb is tall and its state mark clears the rail's rounded end.
-pub const SWITCH_WIDTH: f32 = 54.0;
-const SWITCH_HEIGHT: f32 = 26.0;
-const SWITCH_TRACK_HEIGHT: f32 = 22.0;
-const SWITCH_THUMB: f32 = SWITCH_HEIGHT;
-const SWITCH_THUMB_WIDTH: f32 = 28.0;
-const SWITCH_TRAVEL: f32 = SWITCH_WIDTH - SWITCH_THUMB_WIDTH;
+// Clean glass: a pill thumb inset evenly inside the rail, so the radii stay
+// concentric (14 = 12 + 2), wider than tall like the slider's thumb, with
+// no grip. Thin on/off marks in the open stretch of rail back up the colour.
+pub const SWITCH_WIDTH: f32 = 56.0;
+const SWITCH_HEIGHT: f32 = 28.0;
+const SWITCH_THUMB_INSET: f32 = 2.0;
+const SWITCH_THUMB: f32 = SWITCH_HEIGHT - 2.0 * SWITCH_THUMB_INSET;
+const SWITCH_THUMB_WIDTH: f32 = 32.0;
+const SWITCH_TRAVEL: f32 = SWITCH_WIDTH - SWITCH_THUMB_WIDTH - 2.0 * SWITCH_THUMB_INSET;
 
-/// A glass switch: a neutral rail that the accent plate fills behind the
-/// thumb as it travels, like the compact picker's effort slider. The caller
-/// owns activation and accessibility.
+/// A glass switch: a neutral rail that crossfades to the accent plate as the
+/// thumb travels. The caller owns activation and accessibility.
 pub fn toggle_switch(theme: &Theme, on: bool, key: impl Into<SharedString>) -> gpui::Div {
     let key: SharedString = key.into();
     div()
@@ -672,7 +669,7 @@ struct SwitchTravel {
 
 impl SwitchTravel {
     fn value(&self, now: std::time::Instant) -> f32 {
-        let t = (now.duration_since(self.started).as_secs_f32() / 0.18).min(1.0);
+        let t = (now.duration_since(self.started).as_secs_f32() / 0.16).min(1.0);
         self.from + (self.target - self.from) * (1.0 - (1.0 - t).powi(3))
     }
 }
@@ -707,86 +704,103 @@ impl RenderOnce for SwitchVisual {
         if (position - target).abs() > 0.001 {
             window.request_animation_frame();
         }
-        let top = (SWITCH_HEIGHT - SWITCH_TRACK_HEIGHT) / 2.0;
-        let thumb_left = SWITCH_TRAVEL * position;
-        let rail = crate::glass::light(
-            div()
-                .absolute()
-                .top(px(top))
-                .left_0()
-                .w(px(SWITCH_WIDTH))
-                .h(px(SWITCH_TRACK_HEIGHT))
-                .rounded_full(),
-            &self.theme,
-            1.0,
-        );
-        // Runs a rail radius past the thumb's centre, so its end is always
-        // under the thumb; it fades in with the travel so its rim and drop
-        // never peek around a resting thumb.
-        let fill_width = thumb_left + SWITCH_THUMB_WIDTH / 2.0 + SWITCH_TRACK_HEIGHT / 2.0;
-        let fill = (position > 0.001).then(|| {
-            crate::glass::accent(
-                div()
-                    .absolute()
-                    .top(px(top))
-                    .left_0()
-                    .w(px(fill_width))
-                    .h(px(SWITCH_TRACK_HEIGHT))
-                    .rounded_full(),
-                &self.theme,
-                (position * 3.0).min(1.0),
-                0.0,
-            )
-        });
-        // The state mark sits centred in the part of the rail the thumb
-        // leaves open: a bar on the fill when on, a ring on the rail when
-        // off, crossfading with the travel.
-        let mark = 7.0;
-        let mark_top = (SWITCH_HEIGHT - mark) / 2.0;
-        let bar_centre = SWITCH_TRAVEL / 2.0;
-        let ring_centre = SWITCH_THUMB_WIDTH + SWITCH_TRAVEL / 2.0;
+        // The accent plate covers the neutral rim too, so the two crossfade
+        // as one surface while the thumb moves.
+        let rail = crate::glass::light(div().absolute().inset_0().rounded_full(), &self.theme, 1.0)
+            .when(position > 0.001, |el| {
+                el.child(crate::glass::accent(
+                    div()
+                        .absolute()
+                        .top(px(-1.0))
+                        .left(px(-1.0))
+                        .right(px(-1.0))
+                        .bottom(px(-1.0))
+                        .rounded_full(),
+                    &self.theme,
+                    position,
+                    0.0,
+                ))
+            });
+        // The state mark sits in the stretch of rail the thumb leaves open: a
+        // bar on the fill when on, a slim upright oval on the rail when off,
+        // crossfading with the travel. They share one height, like an I and
+        // an O of one face, and sit on the stretch's area centroid (12.25pt
+        // in, since the rail's round end trims its outer side), rounded to
+        // 12.5 so their edges land on whole Retina pixels.
+        let mark_centre = 12.5;
+        let (mark_h, oval_w) = (7.0, 5.0);
+        // Both marks land at 3:1 against the surface under them (measured
+        // on the default accent): the bar is the thumb's white, full on the
+        // lighter dark-mode fill and at 0.7 on the deeper light-mode one; the
+        // faint-text oval mirrors that on the neutral rail.
+        let dark = self.theme.appearance.is_dark();
+        let (bar_alpha, oval_alpha) = if dark { (1.0, 0.7) } else { (0.7, 1.0) };
         let marks = div()
             .absolute()
             .inset_0()
             .child(
                 div()
                     .absolute()
-                    .left(px(bar_centre - 0.5))
-                    .top(px(mark_top))
+                    .left(px(mark_centre - 0.5))
+                    .top(px((SWITCH_HEIGHT - mark_h) / 2.0))
                     .w(px(1.0))
-                    .h(px(mark))
+                    .h(px(mark_h))
                     .rounded_full()
-                    .bg(gpui::white().opacity(0.75))
+                    .bg(gpui::white().opacity(bar_alpha))
                     .opacity(position),
             )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(ring_centre - mark / 2.0))
-                    .top(px(mark_top))
-                    .size(px(mark))
-                    .rounded_full()
-                    .border(px(1.0))
-                    .border_color(self.theme.text.opacity(0.3))
-                    .opacity(1.0 - position),
-            );
-        let thumb = crate::glass::thumb(
+            .child({
+                // A true ellipse, not a rounded rect: a rect's straight
+                // sides read as the digit zero at this size.
+                let color = self.theme.text_faint.opacity(oval_alpha * (1.0 - position));
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        if color.a <= 0.001 {
+                            return;
+                        }
+                        let centre = bounds.center();
+                        // Semi-axes to the stroke's centre line.
+                        let (rx, ry) = ((oval_w - 1.0) / 2.0, (mark_h - 1.0) / 2.0);
+                        let mut path = gpui::PathBuilder::stroke(px(1.0));
+                        for i in 0..=48 {
+                            let angle = std::f32::consts::TAU * i as f32 / 48.0;
+                            let p = gpui::point(
+                                centre.x + px(rx * angle.cos()),
+                                centre.y + px(ry * angle.sin()),
+                            );
+                            if i == 0 {
+                                path.move_to(p);
+                            } else {
+                                path.line_to(p);
+                            }
+                        }
+                        if let Ok(path) = path.build() {
+                            window.paint_path(path, color);
+                        }
+                    },
+                )
+                .absolute()
+                .left(px(SWITCH_WIDTH - mark_centre - oval_w / 2.0))
+                .top(px((SWITCH_HEIGHT - mark_h) / 2.0))
+                .w(px(oval_w))
+                .h(px(mark_h))
+            });
+        let thumb = crate::glass::knob(
             div()
                 .absolute()
-                .top_0()
-                .left(px(thumb_left))
+                .top(px(SWITCH_THUMB_INSET))
+                .left(px(SWITCH_THUMB_INSET + SWITCH_TRAVEL * position))
                 .w(px(SWITCH_THUMB_WIDTH))
                 .h(px(SWITCH_THUMB))
                 .rounded_full(),
             &self.theme,
-        )
-        .child(crate::glass::grip(3.0, 1.2, 5.0));
+        );
         div()
             .relative()
             .w(px(SWITCH_WIDTH))
             .h(px(SWITCH_HEIGHT))
             .child(rail)
-            .children(fill)
             .child(marks)
             .child(thumb)
     }
