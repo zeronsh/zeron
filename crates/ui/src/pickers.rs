@@ -529,7 +529,11 @@ pub struct Pickers {
     menu_geometry: HashMap<PickerKind, popover::MenuGeometry>,
     model_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     // Keep the open menu anchored while its selected label and options change.
-    open_model_width: Option<gpui::Pixels>,
+    /// The model chip glides to its content's width as the model, effort
+    /// or fast tier changes; `chip_resizing` clips instead of truncating
+    /// while it moves.
+    chip_width: Option<compact::ScalarTransition>,
+    chip_resizing: bool,
     open_model_height: f32,
     compact_model_list: bool,
     compact_control: compact::CompactControl,
@@ -762,7 +766,8 @@ impl Pickers {
             target_generation: 0,
             menu_geometry: HashMap::new(),
             model_trigger_bounds: None,
-            open_model_width: None,
+            chip_width: None,
+            chip_resizing: false,
             open_model_height: model_menu_height(0),
             compact_model_list: false,
             compact_control: compact::CompactControl::default(),
@@ -1151,7 +1156,6 @@ impl Pickers {
             return;
         }
         if kind == PickerKind::HarnessModel {
-            self.open_model_width = self.model_trigger_bounds.map(|bounds| bounds.size.width);
             self.open_model_height = model_menu_height(self.setting_groups(cx).len());
             self.compact_control = compact::CompactControl::Model;
             self.compact_model_list = false;
@@ -2764,11 +2768,6 @@ impl Pickers {
                     .update(cx, |this, cx| {
                         if kind == PickerKind::HarnessModel {
                             this.model_trigger_bounds = Some(bounds);
-                            if this.mounted_kind() == Some(kind) && this.open_model_width.is_none()
-                            {
-                                this.open_model_width = Some(bounds.size.width);
-                                cx.notify();
-                            }
                         }
                         if this.menu_geometry.get(&kind) != Some(&geometry) {
                             this.menu_geometry.insert(kind, geometry);
@@ -2784,6 +2783,63 @@ impl Pickers {
     }
 
     // ---- render ----
+
+    /// The model chip's content width (padding, brand slot, label, effort
+    /// and fast mark), eased toward on every change. The chip is anchored at
+    /// its trailing edge beside Send, as is its popover, so only its leading
+    /// edge moves and an open card stays put while the selection updates.
+    #[allow(clippy::too_many_arguments)]
+    fn model_chip_width(
+        &mut self,
+        window: &mut Window,
+        label: &SharedString,
+        suffix: Option<&SharedString>,
+        label_loading: bool,
+        fast: bool,
+        cx: &App,
+    ) -> f32 {
+        const GAP: f32 = 6.0;
+        let size = crate::typography::ui_rems(12.0).to_pixels(window.rem_size());
+        let mut font = window.text_style().font();
+        font.weight = gpui::FontWeight::MEDIUM;
+        let measure = |text: &SharedString| -> f32 {
+            let run = gpui::TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color: gpui::black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            f32::from(
+                window
+                    .text_system()
+                    .shape_line(text.clone(), size, &[run], None)
+                    .width,
+            )
+            .ceil()
+        };
+        let label_width = if label_loading { 56.0 } else { measure(label) };
+        let mut width = 2.0 * 6.0 + 16.0 + GAP + label_width;
+        if let Some(suffix) = suffix {
+            width += GAP + measure(suffix);
+        }
+        if fast {
+            width += GAP + 13.0;
+        }
+        let target = width.min(248.0);
+        let (value, moving) = compact::ScalarTransition::sample(
+            &mut self.chip_width,
+            target,
+            std::time::Instant::now(),
+            cx.reduce_motion(),
+        );
+        self.chip_resizing = moving;
+        if moving {
+            window.request_animation_frame();
+        }
+        value
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn trigger_chip(
@@ -2814,6 +2870,7 @@ impl Pickers {
         // this picker's entity.
         let id: SharedString = format!("{base}-{}", cx.entity_id()).into();
         let open = self.open_kind() == Some(kind);
+        let resizing = kind == PickerKind::HarnessModel && self.chip_resizing;
         // Ghost pill (zeron composer/styles.tsx `pill`): `h-8 rounded-lg px-2.5
         // gap-1.5 text-[12px] font-medium text-muted-foreground`, icons size-4,
         // hover/open wash — no border, no caret; the actions row stays quiet.
@@ -2823,10 +2880,6 @@ impl Pickers {
             .id(id.clone())
             .h(px(32.0))
             .max_w(px(248.0))
-            .when(
-                kind == PickerKind::HarnessModel && self.mounted_kind() == Some(kind),
-                |chip| chip.when_some(self.open_model_width, |chip, width| chip.w(width)),
-            )
             // Shrinkable under row pressure — four footer chips share one
             // line; without min_w_0 they overflowed and painted overlapped.
             .min_w_0()
@@ -2893,7 +2946,15 @@ impl Pickers {
                 el.child(popover::skeleton_bar(56.0, cx.entity_id(), cx))
             })
             .when(!label_loading, |el| {
-                el.child(div().min_w_0().truncate().child(label))
+                el.child(if resizing {
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(label)
+                } else {
+                    div().min_w_0().truncate().child(label)
+                })
             })
             // The effort half of the combined model+effort chip (and the space
             // chip's "@ device" tag): muted, no icon — one button, two tones.
@@ -2901,14 +2962,18 @@ impl Pickers {
             // pressure the suffix yields FIRST (large shrink factor) so the
             // model name — the run's identity — truncates last.
             .when_some(suffix, |el, (suffix, tint)| {
-                el.child(
-                    div()
-                        .flex_shrink(1000.0)
-                        .min_w_0()
-                        .truncate()
-                        .text_color(tint.unwrap_or(theme.text_muted.opacity(0.7)))
-                        .child(suffix),
-                )
+                let suffix_el = div()
+                    .flex_shrink(1000.0)
+                    .min_w_0()
+                    .text_color(tint.unwrap_or(theme.text_muted.opacity(0.7)));
+                el.child(if resizing {
+                    suffix_el
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(suffix)
+                } else {
+                    suffix_el.truncate().child(suffix)
+                })
             })
     }
 
@@ -5722,6 +5787,14 @@ impl Render for Pickers {
                         == "fast"
             })
         });
+        let chip_width = self.model_chip_width(
+            window,
+            &model_label,
+            chip_suffix.as_ref().map(|(text, _)| text),
+            chip_label_loading,
+            fast,
+            cx,
+        );
         let model_chip = self
             .trigger_chip(
                 PickerKind::HarnessModel,
@@ -5744,6 +5817,7 @@ impl Render for Pickers {
                     ),
                 ))
             });
+        let model_chip = model_chip.w(px(chip_width));
         // Both presentations align to the chip's trailing edge beside Send.
         let model_chip = attach_overlay_end(
             model_chip,
@@ -6294,10 +6368,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn open_model_trigger_keeps_its_width_across_model_and_option_changes(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(|cx| cx.set_global(Theme::dark()));
+    fn open_model_trigger_follows_the_selection_while_open(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            // Settle the width glide in one frame.
+            motion::set_reduced_motion(cx, true);
+        });
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
             let mut pickers = Pickers::new(state, cx);
@@ -6331,15 +6407,18 @@ mod tests {
             cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
                 .unwrap();
             handle
-                .read_with(cx, |pickers, _| pickers.model_trigger_bounds.unwrap())
+                .read_with(cx, |pickers, _| {
+                    pickers.model_trigger_bounds.unwrap().size.width
+                })
                 .unwrap()
         };
-        let before = draw(cx);
+        let short = draw(cx);
         handle
             .update(cx, |pickers, window, cx| {
                 pickers.open_model_menu(window, cx)
             })
             .unwrap();
+        let mut widths = Vec::new();
         for (model, fast) in [("long", false), ("long", true), ("short", false)] {
             handle
                 .update(cx, |pickers, _, cx| {
@@ -6354,12 +6433,14 @@ mod tests {
                     cx.notify();
                 })
                 .unwrap();
-            assert_eq!(
-                draw(cx),
-                before,
-                "open trigger moved for {model}, fast={fast}"
-            );
+            widths.push(draw(cx));
         }
+        // The open chip names the live selection instead of keeping the
+        // width it opened with: longer for the long model, longer again
+        // with its effort and fast mark, and back once the short one returns.
+        assert!(widths[0] > short, "{widths:?} vs {short:?}");
+        assert!(widths[1] > widths[0], "{widths:?}");
+        assert_eq!(widths[2], short);
     }
 
     #[gpui::test]
