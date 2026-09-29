@@ -1454,8 +1454,13 @@ pub(crate) fn subagent_doc_id(chat_id: &str, tool_use_id: &str) -> String {
 /// Test-only instrumentation: how often `drive_run`'s coalesced commit branch
 /// fires. The sink-dirty regression test proves the branch ticks once per
 /// commit window instead of spinning on a deadline left in the past.
+/// Thread-local so parallel tests' runs can't bleed into the count: the
+/// test's current-thread runtime runs its spawned `drive_run` on its own
+/// thread.
 #[cfg(test)]
-static FLUSH_TICKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static FLUSH_TICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// A live subagent transcript sink: its own doc (opened by id — the room
 /// `chat2/{docId}/ws` dials automatically, so viewers sync it like a chat),
@@ -2105,7 +2110,7 @@ async fn drive_run(
                 },
                 _ = tokio::time::sleep_until(flush_at), if dirty || subagents.values().any(|s| s.dirty) => {
                     #[cfg(test)]
-                    FLUSH_TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    FLUSH_TICKS.with(|t| t.set(t.get() + 1));
                     // Coalesced STREAM_COMMIT_MS tick: one doc commit per window
                     // (parent + any dirty subagent docs).
                     if dirty {
@@ -3164,7 +3169,7 @@ mod tests {
     #[tokio::test]
     async fn empty_subagent_events_commit_once_per_window_not_per_tick() {
         use super::*;
-        FLUSH_TICKS.store(0, std::sync::atomic::Ordering::Relaxed);
+        FLUSH_TICKS.with(|t| t.set(0));
         let (feed, rx) = mpsc::unbounded_channel();
         let registry = HarnessRegistry::new();
         registry.register(Arc::new(FeedHarness {
@@ -3198,7 +3203,7 @@ mod tests {
         // Well past several commit windows with the stream still open: the
         // loop must idle between commits, not spin on a past deadline.
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let ticks = FLUSH_TICKS.load(std::sync::atomic::Ordering::Relaxed);
+        let ticks = FLUSH_TICKS.with(|t| t.get());
         assert!(
             (1..=8).contains(&ticks),
             "commit branch fired {ticks} times in 1s for one empty subagent event"
