@@ -158,26 +158,26 @@ impl PullRequestDetailPage {
                         index == self.mention_index,
                         format!("pr-mention-{}-{index}", cx.entity_id()),
                     )
-                        .id(SharedString::from(format!("pr-mention-{index}")))
-                        .w_full()
-                        .child(super::super::pull_request_media::avatar(
-                            login,
-                            format!("pr-mention-avatar-{index}").into(),
-                            20.0,
-                            theme,
-                        ))
-                        .child(format!("@{login}"))
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(|page, _, window, cx| {
-                                window.focus(&page.comment_input.read(cx).focus_handle(cx), cx)
-                            }),
-                        )
-                        .on_click(cx.listener(move |page, _, _, cx| {
-                            page.mention_index = index;
-                            page.accept_person(cx);
-                            cx.notify();
-                        })),
+                    .id(SharedString::from(format!("pr-mention-{index}")))
+                    .w_full()
+                    .child(super::super::pull_request_media::avatar(
+                        login,
+                        format!("pr-mention-avatar-{index}").into(),
+                        20.0,
+                        theme,
+                    ))
+                    .child(format!("@{login}"))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|page, _, window, cx| {
+                            window.focus(&page.comment_input.read(cx).focus_handle(cx), cx)
+                        }),
+                    )
+                    .on_click(cx.listener(move |page, _, _, cx| {
+                        page.mention_index = index;
+                        page.accept_person(cx);
+                        cx.notify();
+                    })),
                 );
             }
             stack = stack.child(crate::popover::full_width_menu_above(
@@ -483,7 +483,10 @@ mod tests {
         cx.run_until_parked();
         let menu = cx.debug_bounds("pr-mention-menu").unwrap();
         let composer = cx.debug_bounds("pr-comment-surface").unwrap();
-        assert!(menu.bottom() <= composer.top(), "mentions float above the input");
+        assert!(
+            menu.bottom() <= composer.top(),
+            "mentions float above the input"
+        );
         assert_eq!(menu.left(), composer.left());
         assert_eq!(menu.right(), composer.right());
         page.update(cx, |page, cx| {

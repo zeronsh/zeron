@@ -2016,8 +2016,12 @@ mod tests {
             PullRequestDestination::Native
         );
         assert!(!legacy.open_web_links_in_zeron);
-        let browser: UiSettings = serde_json::from_str(r#"{"pullRequestDestination":"browser"}"#).unwrap();
-        assert_eq!(browser.pull_request_destination, PullRequestDestination::Native);
+        let browser: UiSettings =
+            serde_json::from_str(r#"{"pullRequestDestination":"browser"}"#).unwrap();
+        assert_eq!(
+            browser.pull_request_destination,
+            PullRequestDestination::Native
+        );
         for destination in PullRequestDestination::ALL {
             let settings = UiSettings {
                 pull_request_destination: destination,

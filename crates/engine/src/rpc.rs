@@ -2665,7 +2665,11 @@ impl RpcService for EngineRpc {
                 let p: P = parse_params(params)?;
                 let detail = self
                     .open_change_requests
-                    .detail(&p.url, method == methods::GET_CHANGE_REQUEST_DIFF, p.refresh)
+                    .detail(
+                        &p.url,
+                        method == methods::GET_CHANGE_REQUEST_DIFF,
+                        p.refresh,
+                    )
                     .await
                     .map_err(change_request_rpc_error)?;
                 RpcReply::value(&detail)

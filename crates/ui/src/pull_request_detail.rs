@@ -1,18 +1,18 @@
 //! Native PR inspection and explicit comment submission.
-#[path = "pull_request_interactions.rs"]
-mod interactions;
 #[path = "pull_request_code.rs"]
 mod code;
 #[path = "pull_request_handoff.rs"]
 mod handoff;
+#[path = "pull_request_interactions.rs"]
+mod interactions;
 use crate::{
     settings::{self, PullRequestDestination, widgets},
     state::AppState,
     theme::Theme,
 };
 use gpui::{
-    Action, AnyElement, App, Context, Entity, Focusable, IntoElement, Render, SharedString, Subscription,
-    Task, Window, div, prelude::*, px,
+    Action, AnyElement, App, Context, Entity, Focusable, IntoElement, Render, SharedString,
+    Subscription, Task, Window, div, prelude::*, px,
 };
 #[cfg(test)]
 use std::time::Duration;
@@ -83,14 +83,26 @@ enum Tab {
 
 /// Navigation segments in display order: (tab, label, element id, glyph).
 const TABS: [(Tab, &str, &str, &str); 3] = [
-    (Tab::Summary, "Summary", "pr-summary", crate::icons::DOCUMENT),
+    (
+        Tab::Summary,
+        "Summary",
+        "pr-summary",
+        crate::icons::DOCUMENT,
+    ),
     (Tab::Code, "Code", "pr-code", crate::icons::FILE_CODE),
-    (Tab::Activity, "Activity", "pr-activity", crate::icons::CHAT_ROUND_LINE),
+    (
+        Tab::Activity,
+        "Activity",
+        "pr-activity",
+        crate::icons::CHAT_ROUND_LINE,
+    ),
 ];
 
 /// Slot of `tab` in the navigation pill, in segments from the leading edge.
 fn tab_slot(tab: Tab) -> f32 {
-    TABS.iter().position(|(candidate, ..)| *candidate == tab).unwrap_or(0) as f32
+    TABS.iter()
+        .position(|(candidate, ..)| *candidate == tab)
+        .unwrap_or(0) as f32
 }
 
 const NAV_PADDING: f32 = 4.0;
@@ -203,11 +215,13 @@ impl ParsedDiff {
             .enumerate()
             .map(|(file, (_, start))| {
                 let end = files.get(file + 1).map_or(rows.len(), |(_, end)| *end);
-                rows[*start..end].iter().fold((0, 0), |(add, del), row| match row.kind {
-                    LineKind::Add if row.role == RowRole::Line => (add + 1, del),
-                    LineKind::Del if row.role == RowRole::Line => (add, del + 1),
-                    _ => (add, del),
-                })
+                rows[*start..end]
+                    .iter()
+                    .fold((0, 0), |(add, del), row| match row.kind {
+                        LineKind::Add if row.role == RowRole::Line => (add + 1, del),
+                        LineKind::Del if row.role == RowRole::Line => (add, del + 1),
+                        _ => (add, del),
+                    })
             })
             .collect();
         let columns = rows
@@ -375,9 +389,15 @@ impl PullRequestDetailPage {
             checks_expanded: false,
             tab_slide: crate::motion::IndicatorSlide::at(tab_slot(Tab::Summary), Instant::now()),
             tab_focus: [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()],
-            file_search: cx.new(|cx| crate::composer::ComposerInput::with_context(
-                "Find a changed file…", "PaletteSearch", cx,
-            ).with_single_line().with_text_metrics(12.0, 16.0)),
+            file_search: cx.new(|cx| {
+                crate::composer::ComposerInput::with_context(
+                    "Find a changed file…",
+                    "PaletteSearch",
+                    cx,
+                )
+                .with_single_line()
+                .with_text_metrics(12.0, 16.0)
+            }),
             file_search_subscription: None,
             file_query: String::new(),
             files_expanded: false,
@@ -404,17 +424,26 @@ impl PullRequestDetailPage {
             image_previous_focus: None,
             image_error: None,
         };
-        page.file_search_subscription = Some(cx.subscribe(&page.file_search, |page: &mut Self, input, event, cx| {
-            if matches!(event, crate::composer::ComposerInputEvent::Edited) {
-                page.file_query = input.read(cx).text().to_lowercase();
-                cx.notify();
-            } else if matches!(event, crate::composer::ComposerInputEvent::Submitted) {
-                if let Some(index) = page.code_files.iter().position(|(path, _)| path.to_lowercase().contains(&page.file_query)) {
-                    page.select_code_file(index, cx);
-                    if page.files_expanded { page.toggle_files(cx); }
+        page.file_search_subscription = Some(cx.subscribe(
+            &page.file_search,
+            |page: &mut Self, input, event, cx| {
+                if matches!(event, crate::composer::ComposerInputEvent::Edited) {
+                    page.file_query = input.read(cx).text().to_lowercase();
+                    cx.notify();
+                } else if matches!(event, crate::composer::ComposerInputEvent::Submitted) {
+                    if let Some(index) = page
+                        .code_files
+                        .iter()
+                        .position(|(path, _)| path.to_lowercase().contains(&page.file_query))
+                    {
+                        page.select_code_file(index, cx);
+                        if page.files_expanded {
+                            page.toggle_files(cx);
+                        }
+                    }
                 }
-            }
-        }));
+            },
+        ));
         let page_handle = cx.weak_entity();
         page.code_list.set_scroll_handler(move |_, _, cx| {
             // Scrolling hands the tree selection back to the scroll position
@@ -457,11 +486,10 @@ impl PullRequestDetailPage {
                     .as_ref()
                     .map(|item| (item.number, item.title.clone()))
             });
-        let label = identity
-            .as_ref()
-            .map_or_else(|| "Pull request".into(), |(number, title)| {
-                format!("pull request {number}, {title}")
-            });
+        let label = identity.as_ref().map_or_else(
+            || "Pull request".into(),
+            |(number, title)| format!("pull request {number}, {title}"),
+        );
         let identity = identity.map_or_else(
             || "Pull request".into(),
             |(number, title)| format!("{number} · {title}"),
@@ -714,77 +742,84 @@ impl PullRequestDetailPage {
                 Some(detail.comments.len() + detail.reviews.len()),
             ]
         });
-        let segments = TABS.into_iter().enumerate().map(|(slot, (tab, label, id, glyph))| {
-            // 1 while the thumb sits on this slot, 0 once it is a slot away.
-            let covered = (1.0 - (position - slot as f32).abs()).clamp(0.0, 1.0);
-            let hover_key = format!("pr-detail-{}-{id}", cx.entity_id());
-            let hover = crate::motion::hover_t(&hover_key);
-            let emphasis = covered.max(hover);
-            let selected = tab == self.tab;
-            let count = counts.and_then(|counts| counts[slot]).filter(|count| *count > 0);
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .role(gpui::Role::Tab)
-                .aria_label(match count {
-                    Some(count) => format!("{label}, {count}"),
-                    None => label.to_owned(),
-                })
-                .aria_selected(selected)
-                .track_focus(&self.tab_focus[slot].clone().tab_stop(selected))
-                .tab_index(0)
-                .min_w_0()
-                .h(px(NAV_SEGMENT_HEIGHT))
-                .px(px(14.0))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap(px(6.0))
-                .text_size(crate::typography::ui_rems(12.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(crate::motion::mix(theme.text_muted, theme.text, emphasis))
-                .bg(crate::motion::mix(
-                    theme.glass_hover().opacity(0.0),
-                    theme.glass_hover(),
-                    hover * (1.0 - covered) * 0.6,
-                ))
-                .focus_visible(|style| style.bg(theme.glass_hover()))
-                .cursor_pointer()
-                .on_hover(crate::motion::hover_listener(hover_key))
-                .child(
-                    crate::icons::icon(glyph)
-                        .size(px(14.0))
-                        .flex_none()
-                        .text_color(crate::motion::mix(theme.text_muted, theme.text, emphasis)),
-                )
-                .child(div().min_w_0().truncate().child(label))
-                .children(count.map(|count| {
-                    div()
-                        .flex_none()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .font_weight(gpui::FontWeight::NORMAL)
-                        .text_color(crate::motion::mix(
-                            theme.text_muted.opacity(0.7),
-                            theme.text_muted,
-                            emphasis,
-                        ))
-                        .child(count.to_string())
-                }))
-                .on_click(cx.listener(move |page, _, _, cx| page.select_tab(tab, cx)))
-                .on_key_down(cx.listener(move |page, event: &gpui::KeyDownEvent, window, cx| {
-                    let next = match event.keystroke.key.as_str() {
-                        "left" => (slot + TABS.len() - 1) % TABS.len(),
-                        "right" => (slot + 1) % TABS.len(),
-                        "home" => 0,
-                        "end" => TABS.len() - 1,
-                        _ => return,
-                    };
-                    cx.stop_propagation();
-                    page.select_tab(TABS[next].0, cx);
-                    window.focus(&page.tab_focus[next], cx);
-                }))
-        });
+        let segments = TABS
+            .into_iter()
+            .enumerate()
+            .map(|(slot, (tab, label, id, glyph))| {
+                // 1 while the thumb sits on this slot, 0 once it is a slot away.
+                let covered = (1.0 - (position - slot as f32).abs()).clamp(0.0, 1.0);
+                let hover_key = format!("pr-detail-{}-{id}", cx.entity_id());
+                let hover = crate::motion::hover_t(&hover_key);
+                let emphasis = covered.max(hover);
+                let selected = tab == self.tab;
+                let count = counts
+                    .and_then(|counts| counts[slot])
+                    .filter(|count| *count > 0);
+                div()
+                    .id(id)
+                    .debug_selector(move || id.into())
+                    .role(gpui::Role::Tab)
+                    .aria_label(match count {
+                        Some(count) => format!("{label}, {count}"),
+                        None => label.to_owned(),
+                    })
+                    .aria_selected(selected)
+                    .track_focus(&self.tab_focus[slot].clone().tab_stop(selected))
+                    .tab_index(0)
+                    .min_w_0()
+                    .h(px(NAV_SEGMENT_HEIGHT))
+                    .px(px(14.0))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(6.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(crate::motion::mix(theme.text_muted, theme.text, emphasis))
+                    .bg(crate::motion::mix(
+                        theme.glass_hover().opacity(0.0),
+                        theme.glass_hover(),
+                        hover * (1.0 - covered) * 0.6,
+                    ))
+                    .focus_visible(|style| style.bg(theme.glass_hover()))
+                    .cursor_pointer()
+                    .on_hover(crate::motion::hover_listener(hover_key))
+                    .child(
+                        crate::icons::icon(glyph)
+                            .size(px(14.0))
+                            .flex_none()
+                            .text_color(crate::motion::mix(theme.text_muted, theme.text, emphasis)),
+                    )
+                    .child(div().min_w_0().truncate().child(label))
+                    .children(count.map(|count| {
+                        div()
+                            .flex_none()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .text_color(crate::motion::mix(
+                                theme.text_muted.opacity(0.7),
+                                theme.text_muted,
+                                emphasis,
+                            ))
+                            .child(count.to_string())
+                    }))
+                    .on_click(cx.listener(move |page, _, _, cx| page.select_tab(tab, cx)))
+                    .on_key_down(cx.listener(
+                        move |page, event: &gpui::KeyDownEvent, window, cx| {
+                            let next = match event.keystroke.key.as_str() {
+                                "left" => (slot + TABS.len() - 1) % TABS.len(),
+                                "right" => (slot + 1) % TABS.len(),
+                                "home" => 0,
+                                "end" => TABS.len() - 1,
+                                _ => return,
+                            };
+                            cx.stop_propagation();
+                            page.select_tab(TABS[next].0, cx);
+                            window.focus(&page.tab_focus[next], cx);
+                        },
+                    ))
+            });
         let tabs = div()
             .id("pr-detail-nav")
             .debug_selector(|| "pr-detail-nav".into())
@@ -1148,7 +1183,11 @@ fn detail_header(
                             author.to_owned()
                         }),
                 )
-                .child(meta_item(crate::icons::FOLDER_WITH_FILES, repository, theme))
+                .child(meta_item(
+                    crate::icons::FOLDER_WITH_FILES,
+                    repository,
+                    theme,
+                ))
                 .child(meta_item(
                     crate::icons::PULL_REQUEST,
                     number.to_string(),
@@ -1253,7 +1292,8 @@ impl Render for PullRequestDetailPage {
         let theme = Theme::of(cx).clone();
         let content = {
             let mut column = widgets::page_column()
-                .id("pr-content-column").debug_selector(|| "pr-content-column".into())
+                .id("pr-content-column")
+                .debug_selector(|| "pr-content-column".into())
                 .max_w(px(760.0))
                 .when(self.tab == Tab::Code, |el| {
                     el.max_w_full().px(px(24.0)).h_full().min_h_0()
@@ -1519,74 +1559,98 @@ impl Render for PullRequestDetailPage {
                                     .child("No comments or reviews yet."),
                             );
                         }
-                        let viewer_login = detail.comments.iter().chain(detail.reviews.iter())
-                            .find(|comment| comment.viewer_did_author && !comment.author.login.is_empty())
+                        let viewer_login = detail
+                            .comments
+                            .iter()
+                            .chain(detail.reviews.iter())
+                            .find(|comment| {
+                                comment.viewer_did_author && !comment.author.login.is_empty()
+                            })
                             .map(|comment| comment.author.login.as_str());
                         for (index, comment) in activity {
-                            let own = comment.viewer_did_author || viewer_login.is_some_and(|login| login.eq_ignore_ascii_case(&comment.author.login));
+                            let own = comment.viewer_did_author
+                                || viewer_login.is_some_and(|login| {
+                                    login.eq_ignore_ascii_case(&comment.author.login)
+                                });
                             thread = thread.child(
-                                div().w_full().flex().mb(px(24.0))
-                                    .when(own, |el| el.justify_end())
-                                    .child(div()
-                                    .id(SharedString::from(format!("pr-message-{index}")))
-                                    .debug_selector(move || format!("pr-message-{index}"))
-                                    .min_w_0()
-                                    .w(gpui::relative(0.9))
-                                    .when(own, |el| el
-                                        .max_w(gpui::relative(0.8))
-                                        .px(px(16.0)).py(px(10.0))
-                                        .rounded(px(Theme::BUBBLE_RADIUS))
-                                        .bg(crate::theme::user_bubble_bg()))
+                                div()
+                                    .w_full()
                                     .flex()
-                                    .flex_col()
-                                    .gap(px(8.0))
+                                    .mb(px(24.0))
+                                    .when(own, |el| el.justify_end())
                                     .child(
                                         div()
-                                            .flex()
-                                            .flex_wrap()
-                                            .items_center()
-                                            .gap(px(8.0))
-                                            .child(super::pull_request_media::avatar(
-                                                &comment.author.login,
-                                                format!("pr-actor-{index}").into(),
-                                                24.0,
-                                                &theme,
-                                            ))
-                                            .child(
-                                                div().font_weight(gpui::FontWeight::MEDIUM).child(
-                                                    if comment.author.login.is_empty() {
-                                                        "Deleted account".to_owned()
-                                                    } else {
-                                                        comment.author.login.clone()
-                                                    },
-                                                ),
-                                            )
-                                            .when(!comment.state.is_empty(), |el| {
-                                                el.child(status_chip(&comment.state, &theme))
+                                            .id(SharedString::from(format!("pr-message-{index}")))
+                                            .debug_selector(move || format!("pr-message-{index}"))
+                                            .min_w_0()
+                                            .w(gpui::relative(0.9))
+                                            .when(own, |el| {
+                                                el.max_w(gpui::relative(0.8))
+                                                    .px(px(16.0))
+                                                    .py(px(10.0))
+                                                    .rounded(px(Theme::BUBBLE_RADIUS))
+                                                    .bg(crate::theme::user_bubble_bg())
                                             })
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(8.0))
                                             .child(
                                                 div()
-                                                    .text_size(crate::typography::ui_rems(11.0))
-                                                    .text_color(theme.text_muted)
-                                                    .child(activity_time(
-                                                        if comment.created_at.is_empty() {
-                                                            &comment.submitted_at
-                                                        } else {
-                                                            &comment.created_at
-                                                        },
-                                                    )),
-                                            ),
-                                    )
-                                    .children(self.activity_bodies.get(index).map(|body| {
-                                        div().child(rich_text(
-                                            body,
-                                            format!("pr-activity-{index}"),
-                                            &self.url,
-                                            &theme,
-                                            window,
-                                            cx.weak_entity(),
-                                        ))
-                                    }))),
+                                                    .flex()
+                                                    .flex_wrap()
+                                                    .items_center()
+                                                    .gap(px(8.0))
+                                                    .child(super::pull_request_media::avatar(
+                                                        &comment.author.login,
+                                                        format!("pr-actor-{index}").into(),
+                                                        24.0,
+                                                        &theme,
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                                            .child(
+                                                                if comment.author.login.is_empty() {
+                                                                    "Deleted account".to_owned()
+                                                                } else {
+                                                                    comment.author.login.clone()
+                                                                },
+                                                            ),
+                                                    )
+                                                    .when(!comment.state.is_empty(), |el| {
+                                                        el.child(status_chip(
+                                                            &comment.state,
+                                                            &theme,
+                                                        ))
+                                                    })
+                                                    .child(
+                                                        div()
+                                                            .text_size(crate::typography::ui_rems(
+                                                                11.0,
+                                                            ))
+                                                            .text_color(theme.text_muted)
+                                                            .child(activity_time(
+                                                                if comment.created_at.is_empty() {
+                                                                    &comment.submitted_at
+                                                                } else {
+                                                                    &comment.created_at
+                                                                },
+                                                            )),
+                                                    ),
+                                            )
+                                            .children(self.activity_bodies.get(index).map(
+                                                |body| {
+                                                    div().child(rich_text(
+                                                        body,
+                                                        format!("pr-activity-{index}"),
+                                                        &self.url,
+                                                        &theme,
+                                                        window,
+                                                        cx.weak_entity(),
+                                                    ))
+                                                },
+                                            )),
+                                    ),
                             );
                         }
                         column = column.child(thread);
@@ -2021,7 +2085,8 @@ mod tests {
         });
         cx.simulate_resize(gpui::size(px(1200.0), px(850.0)));
         page.update(cx, |page, cx| {
-            page.file_search.update(cx, |input, cx| input.set_text("NESTED", cx));
+            page.file_search
+                .update(cx, |input, cx| input.set_text("NESTED", cx));
         });
         cx.run_until_parked();
         page.read_with(cx, |page, _| assert_eq!(page.file_query, "nested"));
@@ -2031,7 +2096,8 @@ mod tests {
         assert!(cx.debug_bounds("pr-file-1").is_none());
         assert!(cx.debug_bounds("pr-file-2").is_some());
         page.update(cx, |page, cx| {
-            page.file_search.update(cx, |input, cx| input.set_text("", cx));
+            page.file_search
+                .update(cx, |input, cx| input.set_text("", cx));
         });
         for (width, height) in [(320.0, 600.0), (900.0, 400.0), (1200.0, 850.0)] {
             cx.simulate_resize(gpui::size(px(width), px(height)));
@@ -2042,13 +2108,24 @@ mod tests {
             assert!(viewport.size.height >= px(60.0), "{viewport:?}");
             assert!(viewport.bottom() <= nav.top());
             assert!(toolbar.bottom() <= viewport.top());
-            assert_eq!(toolbar.left(), viewport.left(), "toolbar and stream share an edge");
+            assert_eq!(
+                toolbar.left(),
+                viewport.left(),
+                "toolbar and stream share an edge"
+            );
             let header = cx.debug_bounds("pr-file-header-0").unwrap();
             assert_eq!(header.size.height, px(crate::changes::FILE_HEADER_HEIGHT));
             if width >= 900.0 {
                 let browser = cx.debug_bounds("pr-file-browser").unwrap();
-                assert!(browser.right() < viewport.left(), "files stay beside the diff");
-                assert_eq!(browser.top(), toolbar.top(), "tree header aligns with the toolbar");
+                assert!(
+                    browser.right() < viewport.left(),
+                    "files stay beside the diff"
+                );
+                assert_eq!(
+                    browser.top(),
+                    toolbar.top(),
+                    "tree header aligns with the toolbar"
+                );
                 let search = cx.debug_bounds("pr-file-search").unwrap();
                 assert_eq!(search.size.height, px(crate::surface_chrome::CONTROL_SIZE));
                 let files = cx.debug_bounds("pr-file-list").unwrap();
@@ -2059,16 +2136,35 @@ mod tests {
                 );
                 assert!(cx.debug_bounds("pr-files").is_none());
             } else {
-                assert!(cx.debug_bounds("pr-file-browser").is_none(), "compact stream keeps its width");
+                assert!(
+                    cx.debug_bounds("pr-file-browser").is_none(),
+                    "compact stream keeps its width"
+                );
                 let files = cx.debug_bounds("pr-files").unwrap();
-                cx.simulate_mouse_down(files.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
-                cx.simulate_mouse_up(files.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+                cx.simulate_mouse_down(
+                    files.center(),
+                    gpui::MouseButton::Left,
+                    gpui::Modifiers::default(),
+                );
+                cx.simulate_mouse_up(
+                    files.center(),
+                    gpui::MouseButton::Left,
+                    gpui::Modifiers::default(),
+                );
                 cx.run_until_parked();
                 let picker = cx.debug_bounds("pr-file-picker").unwrap();
                 assert!(picker.top() >= toolbar.bottom() && picker.right() <= px(width));
                 let file = cx.debug_bounds("pr-file-2").unwrap();
-                cx.simulate_mouse_down(file.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
-                cx.simulate_mouse_up(file.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+                cx.simulate_mouse_down(
+                    file.center(),
+                    gpui::MouseButton::Left,
+                    gpui::Modifiers::default(),
+                );
+                cx.simulate_mouse_up(
+                    file.center(),
+                    gpui::MouseButton::Left,
+                    gpui::Modifiers::default(),
+                );
                 cx.run_until_parked();
                 page.read_with(cx, |page, _| {
                     assert_eq!(page.active_file(), Some(2));
@@ -2076,8 +2172,16 @@ mod tests {
                 });
             }
             let toggle = cx.debug_bounds("pr-split").unwrap();
-            cx.simulate_mouse_down(toggle.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
-            cx.simulate_mouse_up(toggle.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+            cx.simulate_mouse_down(
+                toggle.center(),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.simulate_mouse_up(
+                toggle.center(),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
             page.update(cx, |page, cx| page.select_code_file(0, cx));
             cx.run_until_parked();
             page.read_with(cx, |page, _| assert!(page.code_split));
@@ -2088,34 +2192,82 @@ mod tests {
             assert!(right.right() <= viewport.right());
             assert!((left.size.width - right.size.width).abs() < px(1.0));
             assert!(left.right() <= right.left());
-            cx.simulate_mouse_down(toggle.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
-            cx.simulate_mouse_up(toggle.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+            cx.simulate_mouse_down(
+                toggle.center(),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.simulate_mouse_up(
+                toggle.center(),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
             cx.run_until_parked();
             page.read_with(cx, |page, _| assert!(!page.code_split));
-            for selector in ["pr-copy-patch", "pr-previous-file", "pr-next-file", "pr-split", "pr-fold-all"] {
+            for selector in [
+                "pr-copy-patch",
+                "pr-previous-file",
+                "pr-next-file",
+                "pr-split",
+                "pr-fold-all",
+            ] {
                 let control = cx.debug_bounds(selector).unwrap();
-                assert!(control.left() >= px(24.0) && control.right() <= px(width - 24.0), "{selector}: {control:?}");
+                assert!(
+                    control.left() >= px(24.0) && control.right() <= px(width - 24.0),
+                    "{selector}: {control:?}"
+                );
             }
         }
         let file = cx.debug_bounds("pr-file-2").unwrap();
-        cx.simulate_mouse_down(file.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_up(file.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_down(
+            file.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            file.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
         cx.run_until_parked();
         page.read_with(cx, |page, _| assert_eq!(page.active_file(), Some(2)));
-        assert!(cx.debug_bounds("pr-file-browser").is_some(), "wide file navigator remains available after selection");
+        assert!(
+            cx.debug_bounds("pr-file-browser").is_some(),
+            "wide file navigator remains available after selection"
+        );
         page.update(cx, |page, cx| page.select_code_file(0, cx));
         cx.run_until_parked();
         let header = cx.debug_bounds("pr-file-header-0").unwrap();
-        cx.simulate_mouse_down(header.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_up(header.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_down(
+            header.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            header.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
         cx.run_until_parked();
         page.read_with(cx, |page, _| {
             assert!(page.collapsed_files.contains(&0));
-            assert_eq!(page.code_ranges[0], 0..1, "a folded file keeps only its header");
+            assert_eq!(
+                page.code_ranges[0],
+                0..1,
+                "a folded file keeps only its header"
+            );
         });
         let fold_all = cx.debug_bounds("pr-fold-all").unwrap();
-        cx.simulate_mouse_down(fold_all.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_up(fold_all.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_down(
+            fold_all.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            fold_all.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
         cx.run_until_parked();
         page.read_with(cx, |page, _| assert_eq!(page.code_stream.len(), 3));
     }
@@ -2207,22 +2359,40 @@ mod tests {
         cx.update(|cx| cx.set_global(Theme::default()));
         let (host, cx) = cx.add_window_view(|window, cx| {
             let state = cx.new(|_| AppState::new());
-            let page = cx.new(|cx| PullRequestDetailPage::new(
-                state, "https://github.com/a/b/pull/1".into(), None,
-                Default::default(), None, window, cx,
-            ));
-            NavigationHitHost { page, presses: 0, clicks: 0, raw_presses: Default::default() }
+            let page = cx.new(|cx| {
+                PullRequestDetailPage::new(
+                    state,
+                    "https://github.com/a/b/pull/1".into(),
+                    None,
+                    Default::default(),
+                    None,
+                    window,
+                    cx,
+                )
+            });
+            NavigationHitHost {
+                page,
+                presses: 0,
+                clicks: 0,
+                raw_presses: Default::default(),
+            }
         });
         cx.simulate_resize(gpui::size(px(600.0), px(400.0)));
         cx.run_until_parked();
         let tab = cx.debug_bounds("pr-code").unwrap();
         let nav = cx.debug_bounds("pr-detail-nav").unwrap();
-        for point in [tab.center(), gpui::point(nav.left() + px(2.0), nav.center().y)] {
+        for point in [
+            tab.center(),
+            gpui::point(nav.left() + px(2.0), nav.center().y),
+        ] {
             cx.simulate_mouse_down(point, gpui::MouseButton::Left, gpui::Modifiers::default());
             cx.simulate_mouse_up(point, gpui::MouseButton::Left, gpui::Modifiers::default());
         }
         host.read_with(cx, |host, cx| {
-            assert_eq!(host.presses, 0, "tabs and glass padding must block selection starts beneath them");
+            assert_eq!(
+                host.presses, 0,
+                "tabs and glass padding must block selection starts beneath them"
+            );
             assert_eq!(host.clicks, 0, "tabs must block underlying links/images");
             assert_eq!(
                 host.raw_presses.get(),
@@ -2235,7 +2405,10 @@ mod tests {
         cx.simulate_mouse_down(outside, gpui::MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_up(outside, gpui::MouseButton::Left, gpui::Modifiers::default());
         host.read_with(cx, |host, _| {
-            assert_eq!(host.presses, 1, "only the glass footprint should intercept input");
+            assert_eq!(
+                host.presses, 1,
+                "only the glass footprint should intercept input"
+            );
             assert_eq!(host.clicks, 1);
             assert_eq!(host.raw_presses.get(), 1);
         });
@@ -2247,11 +2420,23 @@ mod tests {
         cx.update(|cx| cx.set_global(Theme::default()));
         let (host, cx) = cx.add_window_view(|window, cx| {
             let state = cx.new(|_| AppState::new());
-            let page = cx.new(|cx| PullRequestDetailPage::new(
-                state, "https://github.com/a/b/pull/1".into(), None,
-                Default::default(), None, window, cx,
-            ));
-            NavigationHitHost { page, presses: 0, clicks: 0, raw_presses: Default::default() }
+            let page = cx.new(|cx| {
+                PullRequestDetailPage::new(
+                    state,
+                    "https://github.com/a/b/pull/1".into(),
+                    None,
+                    Default::default(),
+                    None,
+                    window,
+                    cx,
+                )
+            });
+            NavigationHitHost {
+                page,
+                presses: 0,
+                clicks: 0,
+                raw_presses: Default::default(),
+            }
         });
         let page = host.read_with(cx, |host, _| host.page.clone());
         cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
@@ -2259,16 +2444,28 @@ mod tests {
             cx.simulate_resize(gpui::size(px(width), px(400.0)));
             cx.run_until_parked();
             let nav = cx.debug_bounds("pr-detail-nav").unwrap();
-            assert!(nav.left() >= px(16.0) && nav.right() <= px(width - 16.0), "{nav:?}");
-            let segments: Vec<_> = TABS.iter().map(|(_, _, id, _)| cx.debug_bounds(id).unwrap()).collect();
+            assert!(
+                nav.left() >= px(16.0) && nav.right() <= px(width - 16.0),
+                "{nav:?}"
+            );
+            let segments: Vec<_> = TABS
+                .iter()
+                .map(|(_, _, id, _)| cx.debug_bounds(id).unwrap())
+                .collect();
             for pair in segments.windows(2) {
-                assert!((pair[0].size.width - pair[1].size.width).abs() <= px(1.0), "{segments:?}");
+                assert!(
+                    (pair[0].size.width - pair[1].size.width).abs() <= px(1.0),
+                    "{segments:?}"
+                );
             }
             for (tab, slot) in [(Tab::Code, 1), (Tab::Activity, 2), (Tab::Summary, 0)] {
                 page.update(cx, |page, cx| page.select_tab(tab, cx));
                 cx.run_until_parked();
                 let thumb = cx.debug_bounds("pr-detail-nav-thumb").unwrap();
-                assert!((thumb.origin.x - segments[slot].origin.x).abs() <= px(1.0), "{thumb:?}");
+                assert!(
+                    (thumb.origin.x - segments[slot].origin.x).abs() <= px(1.0),
+                    "{thumb:?}"
+                );
                 assert!((thumb.size.width - segments[slot].size.width).abs() <= px(1.0));
             }
         }
@@ -2289,34 +2486,52 @@ mod tests {
             ]
             .iter()
             .map(|id| cx.debug_bounds(id).unwrap())
-                .collect();
+            .collect();
             for pair in rows.windows(2) {
                 assert_eq!(pair[0].left(), pair[1].left(), "{rows:?}");
                 assert!(pair[1].top() >= pair[0].bottom(), "{rows:?}");
             }
             // Cards stack at one rhythm, with no floating labels between them.
-            let cards: Vec<_> = ["pr-overview", "pr-checks-card", "pr-handoff", "pr-description"]
-                .iter()
-                .map(|id| cx.debug_bounds(id).unwrap())
-                .collect();
+            let cards: Vec<_> = [
+                "pr-overview",
+                "pr-checks-card",
+                "pr-handoff",
+                "pr-description",
+            ]
+            .iter()
+            .map(|id| cx.debug_bounds(id).unwrap())
+            .collect();
             for pair in cards.windows(2) {
                 assert_eq!(pair[1].top() - pair[0].bottom(), px(CARD_GAP), "{cards:?}");
             }
-               let meta = cx.debug_bounds("pr-detail-meta").unwrap();
-            assert_eq!(cards[0].top() - meta.bottom(), px(24.0), "header sits 2× the card gap above");
+            let meta = cx.debug_bounds("pr-detail-meta").unwrap();
+            assert_eq!(
+                cards[0].top() - meta.bottom(),
+                px(24.0),
+                "header sits 2× the card gap above"
+            );
             // Handoff actions trail the title on wide rows, inside the card.
             let row = cx.debug_bounds("pr-handoff-row").unwrap();
             let actions = cx.debug_bounds("pr-handoff-actions").unwrap();
-            assert!(actions.right() <= cards[2].right() - px(16.0), "{actions:?}");
+            assert!(
+                actions.right() <= cards[2].right() - px(16.0),
+                "{actions:?}"
+            );
             if width > 600.0 {
                 assert!(actions.top() >= row.top() && actions.bottom() <= row.bottom());
-                assert!(actions.size.height <= px(34.0), "one line of actions: {actions:?}");
+                assert!(
+                    actions.size.height <= px(34.0),
+                    "one line of actions: {actions:?}"
+                );
             }
             // The long fixture title wraps inside the column instead of clipping.
             let title = cx.debug_bounds("pr-detail-title").unwrap();
             assert!(title.right() <= cards[0].right(), "{title:?}");
             if width < 600.0 {
-                assert!(title.size.height > px(30.0), "narrow titles wrap: {title:?}");
+                assert!(
+                    title.size.height > px(30.0),
+                    "narrow titles wrap: {title:?}"
+                );
             }
         }
     }
@@ -2487,7 +2702,11 @@ mod tests {
             assert!(nav.size.width <= px(width));
             assert_eq!(nav.size.height, px(44.0));
             page.read_with(cx, |page, _| {
-                assert_eq!(page.scroll.scroll.max_offset().y, px(0.0), "Code has one vertical scroller");
+                assert_eq!(
+                    page.scroll.scroll.max_offset().y,
+                    px(0.0),
+                    "Code has one vertical scroller"
+                );
             });
         }
         cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
@@ -2548,15 +2767,26 @@ mod tests {
             let nav = cx.debug_bounds("pr-detail-nav").unwrap();
             let meta = cx.debug_bounds("pr-detail-meta").unwrap();
             let thread = cx.debug_bounds("pr-activity-thread").unwrap();
-            assert_eq!(thread.top() - meta.bottom(), px(24.0), "header gap matches Summary");
+            assert_eq!(
+                thread.top() - meta.bottom(),
+                px(24.0),
+                "header gap matches Summary"
+            );
             let mine = cx.debug_bounds("pr-message-0").unwrap();
             let other = cx.debug_bounds("pr-message-1").unwrap();
             assert_eq!(composer.left(), column.left() + px(40.0));
             assert_eq!(composer.right(), column.right() - px(40.0));
             assert_eq!(nav.center().x, composer.center().x);
-            assert_eq!(nav.top() - composer.bottom(), px(16.0), "docked above the navigation");
+            assert_eq!(
+                nav.top() - composer.bottom(),
+                px(16.0),
+                "docked above the navigation"
+            );
             let scroll = cx.debug_bounds("pr-detail-scroll").unwrap();
-            assert!(scroll.bottom() <= composer.top(), "the thread never scrolls behind it");
+            assert!(
+                scroll.bottom() <= composer.top(),
+                "the thread never scrolls behind it"
+            );
             if width >= 900.0 {
                 assert_eq!(
                     composer.size.height,

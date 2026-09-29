@@ -3282,7 +3282,10 @@ mod tests {
                 title.size.width > px(120.0),
                 "statuses squeezed title at {width}"
             );
-            assert!(title.right() <= row.right(), "title overflow at {width}: row={row:?}, title={title:?}");
+            assert!(
+                title.right() <= row.right(),
+                "title overflow at {width}: row={row:?}, title={title:?}"
+            );
             cx.simulate_mouse_move(title.center(), None, gpui::Modifiers::default());
             cx.run_until_parked();
             assert_eq!(

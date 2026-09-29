@@ -1969,7 +1969,8 @@ pub struct Shell {
     pull_requests_page: Option<Entity<PullRequestsPage>>,
     pull_request_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
     pull_request_detail_subscription: Option<Subscription>,
-    pull_request_cache: std::rc::Rc<std::cell::RefCell<crate::pull_request_detail::PullRequestCache>>,
+    pull_request_cache:
+        std::rc::Rc<std::cell::RefCell<crate::pull_request_detail::PullRequestCache>>,
     devices_page: Option<Entity<DevicesPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
@@ -6714,10 +6715,7 @@ impl Shell {
     /// The titlebar owns new-session creation regardless of sidebar state. It
     /// remains available on PR screens, even without a selected session.
     pub(super) fn titlebar_plus_alpha(&self, cx: &App) -> f32 {
-        titlebar_new_session_alpha(
-            &self.route,
-            self.state.read(cx).selected_chat.is_some(),
-        )
+        titlebar_new_session_alpha(&self.route, self.state.read(cx).selected_chat.is_some())
     }
 
     /// Native Windows caption controls integrated into Zeron's unified
@@ -9044,7 +9042,12 @@ impl Shell {
             .flex()
             .items_center()
             .gap(px(SIDEBAR_FOOTER_ACTION_GAP))
-            .child(div().flex_1().min_w_0().child(self.render_sidebar_footer(theme, cx)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.render_sidebar_footer(theme, cx)),
+            )
             .child(self.render_pull_requests_button(theme, cx))
             .into_any_element()
     }
@@ -9099,7 +9102,7 @@ impl Shell {
                     motion::hover_blend("open-pull-requests", theme.text_muted, theme.text)
                 },
             ))
-        .into_any_element()
+            .into_any_element()
     }
 
     fn render_sidebar_footer(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -14200,8 +14203,14 @@ mod tests {
         assert_eq!(titlebar_new_session_alpha(&Route::Chat, false), 0.0);
         assert_eq!(titlebar_new_session_alpha(&Route::PullRequests, false), 1.0);
         assert_eq!(titlebar_new_session_alpha(&Route::PullRequests, true), 1.0);
-        assert_eq!(titlebar_new_session_alpha(&Route::Settings(SettingsSection::Devices), true), 0.0);
-        assert_eq!(titlebar_new_session_alpha(&Route::Settings(SettingsSection::Devices), false), 0.0);
+        assert_eq!(
+            titlebar_new_session_alpha(&Route::Settings(SettingsSection::Devices), true),
+            0.0
+        );
+        assert_eq!(
+            titlebar_new_session_alpha(&Route::Settings(SettingsSection::Devices), false),
+            0.0
+        );
     }
 
     #[test]
@@ -15907,7 +15916,9 @@ mod exit_regressions {
             }))
         });
         let shell = host.read_with(cx, |host, _| host.0.clone());
-        shell.update(cx, |shell, cx| shell.open_settings(SettingsSection::General, cx));
+        shell.update(cx, |shell, cx| {
+            shell.open_settings(SettingsSection::General, cx)
+        });
         cx.update(|window, cx| window.draw(cx).clear());
         let row = cx.debug_bounds("sidebar-footer-row").unwrap();
         let entry = cx

@@ -1628,18 +1628,26 @@ async fn pull_request_list_dispatch_returns_provider_items() {
     let client = zeron_rpc::memory_client(Arc::new(rpc));
 
     let unscoped = client
-        .call(zeron_rpc::methods::LIST_OPEN_CHANGE_REQUESTS, serde_json::json!({}))
+        .call(
+            zeron_rpc::methods::LIST_OPEN_CHANGE_REQUESTS,
+            serde_json::json!({}),
+        )
         .await;
-    assert!(unscoped.is_err(), "legacy unscoped requests must never reach the provider");
+    assert!(
+        unscoped.is_err(),
+        "legacy unscoped requests must never reach the provider"
+    );
 
     for invalid in [
         serde_json::json!({ "filter": "all" }),
         serde_json::json!({ "repository": "acme/zeron", "filter": "unknown" }),
     ] {
-        assert!(client
-            .call(zeron_rpc::methods::LIST_FILTERED_CHANGE_REQUESTS, invalid)
-            .await
-            .is_err());
+        assert!(
+            client
+                .call(zeron_rpc::methods::LIST_FILTERED_CHANGE_REQUESTS, invalid)
+                .await
+                .is_err()
+        );
     }
 
     let listed: Vec<ChangeRequestListItem> = client
