@@ -19,9 +19,11 @@ use std::sync::Arc;
 use super::parser::{Block, BlockTree, InlineRun, TopBlock};
 use crate::workspace_links::{FileLinkRoot, InlineCodePath, PathProbes, resolve_inline_code_path};
 
-/// How many text parts stay memoized. A streaming reply re-parses into a new
-/// tree on every commit, so the recent parts are the ones frames ask for.
-const CACHED_PARTS: usize = 8;
+/// How many text parts stay memoized, least recently used evicted first. A
+/// viewport can hold many short parts at once, and a streaming reply
+/// re-parses into a new tree on every commit, so stale streamed trees age out
+/// while every part on screen stays cached across frames.
+const CACHED_PARTS: usize = 32;
 
 /// Text parts already rewritten, keyed by their source tree and reset when
 /// the file-link roots change.
@@ -67,16 +69,20 @@ impl InlineCodeLinkCache {
         if !source_local {
             return tree.clone();
         }
-        if let Some(part) = self
+        if let Some(ix) = self
             .parts
             .iter()
-            .find(|part| Arc::ptr_eq(&part.source, tree))
+            .position(|part| Arc::ptr_eq(&part.source, tree))
         {
-            return part.linked.clone();
+            // Most recently used last.
+            let part = self.parts.remove(ix);
+            let linked = part.linked.clone();
+            self.parts.push(part);
+            return linked;
         }
         let linked = Arc::new(link_tree(tree, roots, &mut self.probes));
         if self.parts.len() >= CACHED_PARTS {
-            self.parts.clear();
+            self.parts.remove(0);
         }
         self.parts.push(LinkedPart {
             source: tree.clone(),
@@ -464,6 +470,25 @@ mod tests {
         let third = cache.linked_tree(&tree, &roots, true);
         assert!(!Arc::ptr_eq(&first, &third));
         assert!(!cache.set_revision(8));
+    }
+
+    #[test]
+    fn a_part_in_use_survives_other_parts_filling_the_cache() {
+        let fixture = Fixture::new();
+        let roots = fixture.roots(true);
+        let mut cache = InlineCodeLinkCache::default();
+        cache.set_revision(1);
+        let kept = Arc::new(fixture.tree("`top.md`"));
+        let first = cache.linked_tree(&kept, &roots, true);
+        let mut others = Vec::new();
+        for ix in 0..CACHED_PARTS * 2 {
+            let other = Arc::new(fixture.tree(&format!("part {ix}")));
+            cache.linked_tree(&other, &roots, true);
+            others.push(other);
+            // A part rendered every frame stays the most recent.
+            assert!(Arc::ptr_eq(&first, &cache.linked_tree(&kept, &roots, true)));
+        }
+        assert!(cache.parts.len() <= CACHED_PARTS);
     }
 
     /// The linked span reaches the same hit testing a Markdown file link

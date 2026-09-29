@@ -3585,8 +3585,9 @@ impl Shell {
     /// side chat's link resolves against, and edits, the side chat's files.
     /// An absolute path the linking checkout cannot own falls through the
     /// chat's parent and this device's project roots before it is treated
-    /// as a host file; the first known root that owns the path wins, and the
-    /// file opens in that chat's context.
+    /// as a host file; the first known root that owns the path wins. A chat
+    /// root opens the file in that chat's context; a project root and a host
+    /// file open by absolute path through the linking chat.
     fn open_workspace_file_link(
         &mut self,
         chat_id: &str,
@@ -3603,12 +3604,25 @@ impl Shell {
         use crate::workspace_links::FileLinkResolution;
         let (owner_chat, link) = match crate::workspace_links::first_root_owning(target, root_refs)
         {
-            // A project root has no chat of its own; its link opens in the
-            // linking chat's file context.
-            Some(FileLinkResolution::Owned { root, link }) => (
-                roots[root].chat.as_deref().unwrap_or(chat_id).to_owned(),
-                link,
-            ),
+            Some(FileLinkResolution::Owned { root, link }) => match roots[root].chat.as_deref() {
+                Some(owner) => (owner.to_owned(), link),
+                // A linking chat without a checkout of its own resolves in
+                // its own file context, as before.
+                None if root == 0 => (chat_id.to_owned(), link),
+                // A project root past the linking chat's own has no chat of
+                // its own, and its relative path would name a different file
+                // under the linking chat's checkout: read it by absolute path
+                // through the linking chat, which keeps it editable only
+                // inside that checkout.
+                None => (
+                    chat_id.to_owned(),
+                    crate::workspace_links::WorkspaceFileLink {
+                        path: roots[root].absolute(&link).to_string_lossy().into_owned(),
+                        outside: true,
+                        ..link
+                    },
+                ),
+            },
             // An absolute path no known root owns is still a file link: it
             // opens read-only through the linking chat's own file context.
             Some(FileLinkResolution::Outside(link)) => (chat_id.to_owned(), link),
@@ -14878,6 +14892,13 @@ mod exit_regressions {
         std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
         std::fs::write(&outside, "# Informe\n").unwrap();
         cx.update(|cx| {
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -14955,6 +14976,35 @@ mod exit_regressions {
                 assert_eq!(
                     shell.file_surface_paths.get(&id).map(String::as_str),
                     Some(outside_target.as_str())
+                );
+                assert_eq!(shell.file_surfaces[&id].read(cx).chat_id(), "owner");
+
+                // A path under another project root on this device keeps its
+                // absolute spelling: its root-relative tail would name a
+                // different file under the linking chat's checkout.
+                let project = dir.path().join("other-project");
+                shell.state.update(cx, |state, _| {
+                    state.apply_spaces(vec![zeron_proto::Space {
+                        id: "other".into(),
+                        device_id: "local".into(),
+                        path: project.to_string_lossy().into_owned(),
+                        name: None,
+                        git_detected: false,
+                        git_checked_at: None,
+                        checkout_id: None,
+                        created_at: Utc::now(),
+                    }]);
+                });
+                let project_target = project.join("notes.md").to_string_lossy().into_owned();
+                activation.target = LinkTarget::new("project", &project_target);
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Internal
+                );
+                let id = shell.file_surface_seq;
+                assert_eq!(
+                    shell.file_surface_paths.get(&id).map(String::as_str),
+                    Some(project_target.as_str())
                 );
                 assert_eq!(shell.file_surfaces[&id].read(cx).chat_id(), "owner");
             })

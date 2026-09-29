@@ -156,11 +156,20 @@ impl LinkUi {
             target,
             roots.iter().map(|root| root.root.as_str()),
         )? {
-            crate::workspace_links::FileLinkResolution::Owned { root, link } => {
-                let root = &roots[root];
+            crate::workspace_links::FileLinkResolution::Owned { root: ix, link } => {
+                let root = &roots[ix];
+                let absolute = root.absolute(&link);
+                // A project root past the linking chat's own opens by
+                // absolute path (see `Shell::open_workspace_file_link`), so
+                // its hover card shows that path too.
+                let path = if ix > 0 && root.chat.is_none() {
+                    absolute.to_string_lossy().into_owned()
+                } else {
+                    link.path
+                };
                 Some(crate::workspace_links::FileLink {
-                    absolute: root.absolute(&link),
-                    path: link.path,
+                    absolute,
+                    path,
                     local: root.local,
                 })
             }

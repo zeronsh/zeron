@@ -1123,11 +1123,12 @@ impl AppState {
 
     /// The ordered checkouts a file link from `chat_id` may resolve against:
     /// the chat's own checkout, its parent chat's, then every project root on
-    /// this device. Project roots have no owning chat — a link that matches
-    /// one opens in the linking chat's file context. `local` marks roots
-    /// whose files sit on this disk; a remote chat's worktree still resolves
-    /// links (reads go through its own device) but cannot offer local file
-    /// actions.
+    /// the linking chat's device — an agent's paths name its own disk, so a
+    /// root on another device never owns them. Project roots have no owning
+    /// chat — a link that matches one opens by absolute path through the
+    /// linking chat. `local` marks roots whose files sit on this disk; a
+    /// remote chat's worktree still resolves links (reads go through its own
+    /// device) but cannot offer local file actions.
     pub(crate) fn file_link_roots(
         &self,
         chat_id: &str,
@@ -1141,7 +1142,7 @@ impl AppState {
                 .is_none_or(|local| device == local)
         };
         let mut roots: Vec<FileLinkRoot> = Vec::new();
-        let mut push = |chat: Option<&Chat>, root: Option<&str>| {
+        let mut push = |chat: Option<&Chat>, device: &str, root: Option<&str>| {
             let Some(root) = root.filter(|root| !root.is_empty()) else {
                 return;
             };
@@ -1150,27 +1151,34 @@ impl AppState {
             }
             roots.push(FileLinkRoot {
                 chat: chat.map(|chat| chat.id.clone()),
-                local: chat.is_none_or(|chat| on_this_device(&chat.device_id)),
+                local: on_this_device(device),
                 root: root.to_owned(),
             });
         };
         let chat_row = |id: &str| self.chats.iter().find(|chat| chat.id == id);
-        push(
-            chat_row(chat_id),
-            chat_row(chat_id).and_then(|chat| chat.cwd.as_deref()),
-        );
-        if let Some(parent_id) = chat_row(chat_id).and_then(|chat| chat.parent_chat_id.clone()) {
-            push(
-                chat_row(&parent_id),
-                chat_row(&parent_id).and_then(|chat| chat.cwd.as_deref()),
-            );
+        let linking = chat_row(chat_id);
+        // Roots on the linking chat's device; an unknown chat row falls back
+        // to this device's.
+        let on_link_device = |device: &str| match linking {
+            Some(chat) => chat.device_id == device,
+            None => on_this_device(device),
+        };
+        if let Some(chat) = linking {
+            push(Some(chat), &chat.device_id, chat.cwd.as_deref());
         }
-        for space in self.spaces.iter().filter(|space| {
-            self.local_device_id
-                .as_deref()
-                .is_none_or(|local| space.device_id == local)
-        }) {
-            push(None, Some(space.path.as_str()));
+        if let Some(parent) = linking
+            .and_then(|chat| chat.parent_chat_id.as_deref())
+            .and_then(chat_row)
+            .filter(|parent| on_link_device(&parent.device_id))
+        {
+            push(Some(parent), &parent.device_id, parent.cwd.as_deref());
+        }
+        for space in self
+            .spaces
+            .iter()
+            .filter(|space| on_link_device(&space.device_id))
+        {
+            push(None, &space.device_id, Some(space.path.as_str()));
         }
         roots
     }
@@ -4336,6 +4344,15 @@ mod tests {
         );
         assert!(state.chat_is_local("fork"));
         assert!(!state.chat_is_local("remote"));
+        // A remote chat's paths name its own device: this device's projects
+        // and a parent hosted here never own them.
+        assert_eq!(
+            state.file_link_roots("remote"),
+            vec![
+                root(Some("remote"), "/far/worktree", false),
+                root(None, "/remote/only", false),
+            ]
+        );
 
         // An absolute path outside every known root is still a file: it
         // resolves as an outside link owned by the linking chat.
