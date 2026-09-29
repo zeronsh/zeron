@@ -8,14 +8,15 @@
 use std::sync::Arc;
 
 use zeron_doc::parts::{MessagePart, SubagentStatus};
+use zeron_markdown::parser::{Block, BlockTree, InlineRun, InlineStyle};
 use zeron_proto::ToolCall;
 use zeron_text::WhiteSpace;
 
-use super::display::{ColorRole, DisplayBuilder, WidgetKind};
+use super::display::{ColorRole, Decoration, DisplayBuilder, WidgetKind};
 use super::file_icons::{basename, file_icon_asset};
-use super::markdown::{Ctx, PText, Px, place_text, prepare_plain};
+use super::markdown::{Ctx, PText, Px, SpanPaint, place_text, prepare_plain};
 use super::rows::{Content, RowBuilder, RowCore, RowKind, next_version, place_text_lines, row_key};
-use super::style::{Family, Weight};
+use super::style::{Family, Weight, baseline};
 
 /// Desktop → phone scale (12pt tool text → 13.5pt).
 const T: f32 = 1.125;
@@ -68,7 +69,7 @@ pub(crate) struct ToolGroup {
 pub(crate) enum DetailBlock {
     /// Mono lines (invocation / output), single-line each, scrolling sideways.
     Lines { lines: Vec<PText>, more: Option<PText> },
-    /// Thought text, wrapped.
+    /// Thought markdown flattened to styled prose lines, wrapped at width.
     Prose(PText),
     Stats(Vec<StatRow>),
     Diff { rows: Vec<DiffRowP>, notice: Option<PText>, digits: usize },
@@ -192,6 +193,8 @@ struct Styles {
     label: super::style::Resolved,
     mono: super::style::Resolved,
     mono_small: super::style::Resolved,
+    /// Detail type size in points (pre-text-scale), for thought run faces.
+    size: f32,
     lh: f32,
     out_lh: f32,
 }
@@ -317,6 +320,272 @@ fn result_block(ctx: &mut Ctx, st: &Styles, part: &MessagePart) -> Option<Detail
     lines_block(ctx, st, output.as_deref()?, None)
 }
 
+// MARK: - Thoughts (desktop `thought_lines`, engine-width wrapping)
+
+/// Flatten a parsed thought into styled logical lines — the desktop's
+/// `thought_lines`: inline markers become real styling, blocks flatten
+/// structurally (headings bold, list markers, quote bars, verbatim code
+/// lines, tables as `·`-joined rows). Desktop wraps at a char budget to keep
+/// its detail height analytic; here each logical line is one line box and the
+/// text engine wraps it at the painted width, so heights stay exact anyway.
+fn thought_lines(tree: &BlockTree) -> Vec<Vec<InlineRun>> {
+    let mut out: Vec<Vec<InlineRun>> = Vec::new();
+    for top in &tree.blocks {
+        if !out.is_empty() {
+            // One blank separator line between top-level blocks.
+            out.push(Vec::new());
+        }
+        thought_block_lines(&top.block, 0, &mut out);
+    }
+    while out.last().is_some_and(|l| l.iter().all(|r| r.text.trim().is_empty())) {
+        out.pop();
+    }
+    out
+}
+
+/// The indent run every line opens with; list/quote handlers rewrite it to
+/// plant markers/bars, so it exists even at zero indent.
+fn indent_run(indent: usize) -> Vec<InlineRun> {
+    vec![InlineRun { text: " ".repeat(indent), style: InlineStyle::default() }]
+}
+
+/// Append text to a line, merging into the tail run when styles match.
+fn push_styled(line: &mut Vec<InlineRun>, text: &str, style: &InlineStyle) {
+    if text.is_empty() {
+        return;
+    }
+    match line.last_mut() {
+        Some(last) if last.style == *style => last.text.push_str(text),
+        _ => line.push(InlineRun { text: text.to_owned(), style: style.clone() }),
+    }
+}
+
+/// Close a line: the indent run in front (see [`indent_run`]).
+fn finish_line(indent: usize, mut line: Vec<InlineRun>) -> Vec<InlineRun> {
+    let mut full = indent_run(indent);
+    full.append(&mut line);
+    full
+}
+
+/// One segment (between hard `\n`s) into an output line; whitespace-only
+/// segments are dropped, exactly as desktop's token wrap drops them.
+fn flush_segment(indent: usize, line: &mut Vec<InlineRun>, out: &mut Vec<Vec<InlineRun>>) {
+    if line.iter().any(|r| !r.text.trim().is_empty()) {
+        out.push(finish_line(indent, std::mem::take(line)));
+    } else {
+        line.clear();
+    }
+}
+
+/// Runs into logical lines: hard `\n`s break, wrapping is the engine's.
+fn push_runs(runs: &[InlineRun], indent: usize, out: &mut Vec<Vec<InlineRun>>) {
+    let mut line: Vec<InlineRun> = Vec::new();
+    for run in runs {
+        for (ix, piece) in run.text.split('\n').enumerate() {
+            if ix > 0 {
+                flush_segment(indent, &mut line, out);
+            }
+            if !piece.is_empty() {
+                push_styled(&mut line, piece, &run.style);
+            }
+        }
+    }
+    flush_segment(indent, &mut line, out);
+}
+
+/// One markdown block into thought detail lines, `indent` spaces deep.
+fn thought_block_lines(block: &Block, indent: usize, out: &mut Vec<Vec<InlineRun>>) {
+    match block {
+        Block::Paragraph { runs } => push_runs(runs, indent, out),
+        Block::Heading { runs, .. } => {
+            // Headings keep the detail's single type size — bold is the cue.
+            let bold: Vec<InlineRun> = runs
+                .iter()
+                .map(|r| {
+                    let mut r = r.clone();
+                    r.style.bold = true;
+                    r
+                })
+                .collect();
+            push_runs(&bold, indent, out);
+        }
+        Block::CodeBlock { code, .. } => {
+            let style = InlineStyle { code: true, ..InlineStyle::default() };
+            for line in code.lines() {
+                let mut row = indent_run(indent);
+                if !line.is_empty() {
+                    row.push(InlineRun { text: line.to_owned(), style: style.clone() });
+                }
+                out.push(row);
+            }
+        }
+        Block::List { ordered_start, items } => {
+            // Tight rendering: no blank lines inside a list.
+            for (ix, item) in items.iter().enumerate() {
+                let marker = match ordered_start {
+                    Some(start) => format!("{}. ", start + ix as u64),
+                    None => "• ".to_string(),
+                };
+                let inner = indent + marker.chars().count();
+                let mark = out.len();
+                for child in item {
+                    thought_block_lines(child, inner, out);
+                }
+                if out.len() == mark {
+                    // An empty item still shows its marker.
+                    out.push(indent_run(inner));
+                }
+                // The item's first line trades its indent spaces for the marker.
+                if let Some(first) = out[mark].first_mut() {
+                    first.text = format!("{}{marker}", " ".repeat(indent));
+                }
+            }
+        }
+        Block::BlockQuote { children } => {
+            let mark = out.len();
+            for (ix, child) in children.iter().enumerate() {
+                if ix > 0 {
+                    out.push(Vec::new());
+                }
+                thought_block_lines(child, indent + 2, out);
+            }
+            // Trade the two quote-indent spaces for the bar on every quoted
+            // line — nested list markers sit after their own deeper indent.
+            for line in &mut out[mark..] {
+                if let Some(first) = line.first_mut()
+                    && first.text.len() >= indent + 2
+                {
+                    first.text.replace_range(indent..indent + 2, "│ ");
+                }
+            }
+        }
+        Block::Table { header, rows, .. } => {
+            // A thought is a record, not a layout surface: cells joined with
+            // a dot separator, header bold — no column machinery.
+            let join = |cells: &[Vec<InlineRun>], bold: bool| -> Vec<InlineRun> {
+                let mut line: Vec<InlineRun> = Vec::new();
+                for (ix, cell) in cells.iter().enumerate() {
+                    if ix > 0 {
+                        push_styled(&mut line, " · ", &InlineStyle::default());
+                    }
+                    for r in cell {
+                        let mut r = r.clone();
+                        r.style.bold |= bold;
+                        push_styled(&mut line, &r.text, &r.style);
+                    }
+                }
+                line
+            };
+            push_runs(&join(header, true), indent, out);
+            for row in rows {
+                push_runs(&join(row, false), indent, out);
+            }
+        }
+        Block::Rule => {
+            let mut row = indent_run(indent);
+            row.push(InlineRun { text: "———".into(), style: InlineStyle::default() });
+            out.push(row);
+        }
+    }
+}
+
+/// Flattened thought lines as one wrapped styled text at the detail's type
+/// size — desktop's `thought_line_text`: faint prose, semibold bold, mono
+/// code, underlined links (NOT clickable — a thought is a record, not a
+/// surface). Logical lines are hard `\n`s; `place_text_lines` wraps each at
+/// the painted width, one `out_lh` line box per visual line.
+fn prepare_thought(ctx: &mut Ctx, st: &Styles, lines: &[Vec<InlineRun>]) -> PText {
+    let size = st.size;
+    let semi = ctx.typo.style(Family::Sans, Weight::Semibold, false, size);
+    let italic = ctx.typo.style(Family::Sans, Weight::Regular, true, size);
+    let semi_italic = ctx.typo.style(Family::Sans, Weight::Semibold, true, size);
+    let mono_italic = ctx.typo.style(Family::Mono, Weight::Regular, true, size);
+    let mut text = String::new();
+    let mut spans: Vec<zeron_text::Span> = Vec::new();
+    let mut paints = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            // Cover the hard break: extend the touching span, or open one for
+            // a blank line (spans must cover the text contiguously).
+            let start = text.len();
+            text.push('\n');
+            match spans.last_mut() {
+                Some(span) if span.range.end == start => span.range.end = text.len(),
+                _ => {
+                    spans.push(zeron_text::Span {
+                        range: start..text.len(),
+                        style: st.label.id,
+                        pad_start: 0.0,
+                        pad_end: 0.0,
+                        atomic: false,
+                    });
+                    paints.push(SpanPaint {
+                        color: ColorRole::TextFaint,
+                        decoration: Decoration::None,
+                        link: None,
+                        chip: false,
+                    });
+                }
+            }
+        }
+        for run in line {
+            if run.text.is_empty() {
+                continue;
+            }
+            let s = &run.style;
+            let style = if s.code {
+                if s.italic { mono_italic } else { st.mono }
+            } else if s.bold {
+                if s.italic { semi_italic } else { semi }
+            } else if s.italic {
+                italic
+            } else {
+                st.label
+            };
+            let start = text.len();
+            text.push_str(&run.text);
+            spans.push(zeron_text::Span {
+                range: start..text.len(),
+                style: style.id,
+                pad_start: 0.0,
+                pad_end: 0.0,
+                atomic: false,
+            });
+            paints.push(SpanPaint {
+                color: ColorRole::TextFaint,
+                decoration: if s.strikethrough {
+                    Decoration::Strikethrough
+                } else if s.link.is_some() {
+                    Decoration::Underline
+                } else {
+                    Decoration::None
+                },
+                link: None,
+                chip: false,
+            });
+        }
+    }
+    let p = zeron_text::prepare(
+        &ctx.typo.book,
+        ctx.cache,
+        &text,
+        &spans,
+        &zeron_text::PrepareOptions {
+            white_space: WhiteSpace::PreLine,
+            overflow_wrap: zeron_text::OverflowWrap::Anywhere,
+            ..Default::default()
+        },
+    );
+    PText {
+        p,
+        lh: st.out_lh,
+        base: baseline(st.out_lh, st.label),
+        paints,
+        links: Vec::new(),
+        chip: (0.0, 0.0),
+    }
+}
+
 // MARK: - Building
 
 impl RowBuilder {
@@ -344,6 +613,7 @@ impl RowBuilder {
             label: ctx.typo.style(Family::Sans, Weight::Regular, false, size),
             mono: ctx.typo.style(Family::Mono, Weight::Regular, false, size),
             mono_small: ctx.typo.style(Family::Mono, Weight::Regular, false, 11.0 * T),
+            size,
             lh: ctx.typo.px(18.0 * T),
             out_lh: ctx.typo.px(OUT_LH * T),
         };
@@ -396,10 +666,18 @@ impl RowBuilder {
                         });
                     }
                     MessagePart::Reasoning { text, .. } => {
-                        // A streaming thought opens by default (desktop).
-                        let open = self.detail_open.get(&dkey).copied().unwrap_or(live && i == last);
+                        // A streaming thought opens by default (desktop). Live
+                        // only while it is the tail of a streaming reply:
+                        // once anything follows, the thought is finished even
+                        // though the entry still streams.
+                        let tail = live && i == last;
+                        let open = self.detail_open.get(&dkey).copied().unwrap_or(tail);
                         let body = if open && !text.trim().is_empty() {
-                            vec![DetailBlock::Prose(prepare_plain(ctx, text.trim(), st.label, st.out_lh, ColorRole::TextFaint, WhiteSpace::PreWrap))]
+                            // Same parse wiring as text parts: incremental while
+                            // streaming, inline markers mended for display, the
+                            // canonical tree once settled.
+                            let tree = self.thought_tree(entry_id, part.id(), text, tail);
+                            vec![DetailBlock::Prose(prepare_thought(ctx, &st, &thought_lines(&tree)))]
                         } else {
                             Vec::new()
                         };

@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use zeron_doc::parts::MessagePart;
 use zeron_doc::parts::MessageStatus;
 use zeron_doc::schema::{MessageRole, SessionMessageEntry};
-use zeron_markdown::parser::{IncrementalParser, TopBlock};
+use zeron_markdown::parser::{BlockTree, IncrementalParser, TopBlock};
 use zeron_text::WhiteSpace;
 
 use super::display::{ColorRole, DisplayBuilder, FadeEdge, TextRun, WidgetKind};
@@ -167,10 +167,34 @@ struct EntryState {
     rows: Vec<Placed>,
 }
 
+/// One reasoning part's incremental parse state (desktop's per-part parse
+/// cache, `ui/src/transcript.rs::parse`): the canonical tree once settled, the
+/// mended display tree while the part is the streaming tail.
+struct ThoughtState {
+    parser: IncrementalParser,
+    source_len: usize,
+    source_hash: u64,
+    live: bool,
+    tree: Arc<BlockTree>,
+}
+
+impl Default for ThoughtState {
+    fn default() -> Self {
+        Self {
+            parser: IncrementalParser::new(),
+            source_len: usize::MAX,
+            source_hash: 0,
+            live: false,
+            tree: Arc::new(BlockTree::default()),
+        }
+    }
+}
+
 /// Builds rows incrementally across snapshots.
 #[derive(Default)]
 pub(crate) struct RowBuilder {
     parts: HashMap<String, PartState>,
+    thoughts: HashMap<String, ThoughtState>,
     entries: HashMap<String, EntryState>,
     pending: HashMap<String, (String, Arc<RowCore>)>,
     working: Option<Arc<RowCore>>,
@@ -209,7 +233,7 @@ impl RowBuilder {
             let rows = match reuse {
                 Some(rows) => {
                     for part in &entry.parts {
-                        if matches!(part, MessagePart::Text { .. }) {
+                        if matches!(part, MessagePart::Text { .. } | MessagePart::Reasoning { .. }) {
                             live_parts.insert(format!("{}#{}", entry.id, part.id()));
                         }
                     }
@@ -235,6 +259,7 @@ impl RowBuilder {
         }
         self.entries.retain(|id, _| live_entries.contains(id.as_str()));
         self.parts.retain(|id, _| live_parts.contains(id));
+        self.thoughts.retain(|id, _| live_parts.contains(id));
 
         // Optimistic sends not yet echoed by the host.
         let mut live_pending = HashSet::new();
@@ -367,6 +392,7 @@ impl RowBuilder {
                     if tools.iter().any(|p| matches!(p, MessagePart::Tool { call, .. } if call.is_subagent_spawn())) {
                         flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                     }
+                    live_parts.insert(format!("{}#{}", entry.id, part.id()));
                     tools.push(part);
                 }
                 MessagePart::Reasoning { .. } => {}
@@ -466,6 +492,23 @@ impl RowBuilder {
         }
         state.blocks = next.clone();
         next
+    }
+
+    /// The reasoning part's parse tree, incrementally cached (desktop's
+    /// per-part parse wiring: hanging inline markers mended while the part is
+    /// the streaming tail, the canonical tree once it settles).
+    pub(crate) fn thought_tree(&mut self, entry_id: &str, part_id: &str, text: &str, live: bool) -> Arc<BlockTree> {
+        let hash = quick_hash(text);
+        let state = self.thoughts.entry(format!("{entry_id}#{part_id}")).or_default();
+        if state.source_len == text.len() && state.source_hash == hash && state.live == live {
+            return state.tree.clone();
+        }
+        state.parser.set_text(text);
+        state.source_len = text.len();
+        state.source_hash = hash;
+        state.live = live;
+        state.tree = Arc::new(if live { state.parser.display_tree() } else { state.parser.tree().clone() });
+        state.tree.clone()
     }
 
     fn user_row(&mut self, ctx: &mut Ctx, id: &str, content: &str, pending: bool) -> RowCore {

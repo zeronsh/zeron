@@ -153,6 +153,143 @@ fn toggles_expand_tool_groups_and_long_user_messages() {
     assert!(open.placement(0).unwrap().height > folded.placement(0).unwrap().height * 3.0);
 }
 
+/// Thinking renders desktop-style: markdown flattened to styled detail lines
+/// (bold/lists/code/quotes, underlined non-clickable links), not literal
+/// markers (desktop PR #220; the mobile port dropped it).
+#[test]
+fn thinking_renders_styled_markdown_not_markers() {
+    use zeron_doc::parts::{MessagePart, MessageStatus};
+    use zeron_doc::schema::{MessageRole, SessionMessageEntry};
+    let reasoning = concat!(
+        "**Planning** the `fix`\n\n",
+        "- point *one*\n",
+        "- point two with a [link](https://example.com)\n\n",
+        "```rust\n",
+        "let x = 1;\n",
+        "```\n\n",
+        "> quoted text",
+    );
+    let mut w = worker(390.0);
+    w.input = TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            id: "a".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Reasoning { id: "r0".into(), text: reasoning.into() }],
+            created_at: 0,
+            device_id: String::new(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })],
+        ..Default::default()
+    };
+    let folded = w.pass();
+    let key = folded.placement(0).unwrap().key;
+    w.builder.expanded.insert(key);
+    w.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
+    w.builder.invalidate(key);
+    let frame = w.pass();
+    let d = frame.display(0).unwrap();
+    assert!(!d.text.contains("**"), "{}", d.text);
+    assert!(!d.text.contains("`fix`"), "{}", d.text);
+    assert!(!d.text.contains("```"), "{}", d.text);
+    assert!(d.text.contains("Planning"), "{}", d.text);
+    assert!(d.text.contains("• point one"), "{}", d.text);
+    assert!(d.text.contains("let x = 1;"), "{}", d.text);
+    assert!(d.text.contains("│ quoted text"), "{}", d.text);
+    assert!(d.runs.iter().any(|r| r.decoration == display::Decoration::Underline), "{:?}", d.runs);
+    assert!(d.links.is_empty(), "thought links must not be clickable");
+    assert!(d.runs.iter().any(|r| r.color == display::ColorRole::TextFaint));
+    // Bold is a distinct face: "Planning" isn't painted in the regular style.
+    let slice = |r: &display::TextRun| -> String {
+        d.text.encode_utf16().skip(r.start as usize).take(r.len as usize).filter_map(|u| char::from_u32(u as u32)).collect()
+    };
+    let planning = d.runs.iter().find(|r| slice(r) == "Planning").expect("a Planning run");
+    let regular = d.runs.iter().find(|r| slice(r) == " the ").expect("a regular run");
+    assert_ne!(planning.style, regular.style, "bold uses the semibold face");
+    // Paint/measure hold across widths (display() debug-asserts equality).
+    for width in [280.0, 320.0, 430.0, 744.0, 1024.0] {
+        let mut w = worker(width);
+        w.input = TranscriptInput {
+            entries: vec![Arc::new(SessionMessageEntry {
+                id: "a".into(),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Reasoning { id: "r0".into(), text: reasoning.into() }],
+                created_at: 0,
+                device_id: String::new(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: None,
+                duration_ms: None,
+            })],
+            ..Default::default()
+        };
+        let key = w.pass().placement(0).unwrap().key;
+        w.builder.expanded.insert(key);
+        w.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
+        w.builder.invalidate(key);
+        let frame = w.pass();
+        let d = frame.display(0).unwrap();
+        assert!(d.text.contains("• point one"), "width {width}: {}", d.text);
+        for run in &d.runs {
+            assert!(run.x >= -0.5 && run.x + run.width <= width + 0.5, "width {width}: {run:?}");
+        }
+    }
+}
+
+/// A thought streamed through the incremental parser (live display mend)
+/// settles to exactly the frame a fresh full parse lays out.
+#[test]
+fn streaming_thought_markdown_settles_to_the_fresh_parse() {
+    use zeron_doc::parts::{MessagePart, MessageStatus};
+    use zeron_doc::schema::{MessageRole, SessionMessageEntry};
+    let text = "**Checking** the `parser`\n\n1. first step\n2. second with [docs](https://example.com)\n\n> note\n\n```rust\nfn main() {}\n```";
+    let entry = |status: MessageStatus, text: &str| {
+        Arc::new(SessionMessageEntry {
+            id: "a".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Reasoning { id: "r0".into(), text: text.to_owned() }],
+            created_at: 0,
+            device_id: String::new(),
+            status: Some(status),
+            continuation_of: None,
+            duration_ms: None,
+        })
+    };
+    let mut live = worker(390.0);
+    let mut shown = String::new();
+    let mut key = 0;
+    for chunk in text.chars().collect::<Vec<_>>().chunks(5) {
+        shown.extend(chunk);
+        live.input = TranscriptInput { entries: vec![entry(MessageStatus::Streaming, &shown)], ..Default::default() };
+        let frame = live.pass();
+        key = frame.placement(0).unwrap().key;
+        assert!(!frame.display(0).unwrap().text.contains("**"), "mend holds while streaming");
+    }
+    live.builder.expanded.insert(key);
+    live.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
+    live.builder.invalidate(key);
+    live.input = TranscriptInput { entries: vec![entry(MessageStatus::Complete, text)], ..Default::default() };
+    let streamed = live.pass();
+
+    let mut fresh = worker(390.0);
+    fresh.input = TranscriptInput { entries: vec![entry(MessageStatus::Complete, text)], ..Default::default() };
+    let folded = fresh.pass();
+    let fresh_key = folded.placement(0).unwrap().key;
+    assert_eq!(key, fresh_key);
+    fresh.builder.expanded.insert(fresh_key);
+    fresh.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
+    fresh.builder.invalidate(fresh_key);
+    let settled = fresh.pass();
+
+    assert_eq!(streamed.row_count(), settled.row_count());
+    for i in 0..settled.row_count() {
+        let a = streamed.display(i).unwrap();
+        let b = settled.display(i).unwrap();
+        assert_eq!(a.text, b.text, "row {i} text");
+        assert!((a.height - b.height).abs() < 0.01, "row {i} height");
+    }
+}
+
 /// Release-mode timings (run with `cargo test --release -p zeron-mobile -- --ignored --nocapture`).
 #[test]
 #[ignore]
