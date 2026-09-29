@@ -12,6 +12,9 @@ const TREE_ROW_HEIGHT: f32 = 28.0;
 const TREE_INDENT: f32 = 14.0;
 const PICKER_WIDTH: f32 = 320.0;
 const PICKER_HEIGHT: f32 = 360.0;
+/// Room under the diff for the floating section navigation. The file tree
+/// runs to the window edge instead and scrolls its last rows clear of it.
+const NAV_CLEARANCE: f32 = 76.0;
 
 /// One entry of the virtualized review stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -504,14 +507,14 @@ impl PullRequestDetailPage {
             .debug_selector(|| "pr-file-list".into())
             .role(gpui::Role::Tree)
             .aria_label("Changed files")
-            .flex_1()
-            .min_h_0()
+            .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.file_tree_scroll)
             .flex()
             .flex_col()
             .gap(px(1.0))
-            .pb(px(8.0));
+            .pt(px(4.0))
+            .pb(px(if wide { NAV_CLEARANCE } else { 8.0 }));
         if entries.is_empty() {
             list = list.child(
                 div()
@@ -629,7 +632,12 @@ impl PullRequestDetailPage {
                     .debug_selector(|| "pr-file-search".into())
                     .child(div().flex_1().min_w_0().child(self.file_search.clone())),
             )
-            .child(list)
+            .child(
+                div().flex_1().min_h_0().relative().child(
+                    crate::edge_fade::edge_faded(16.0, true, true, list)
+                        .fade_overflow_y(&self.file_tree_scroll),
+                ),
+            )
             .into_any_element()
     }
 
@@ -778,6 +786,7 @@ impl PullRequestDetailPage {
             .flex()
             .flex_col()
             .gap(px(8.0))
+            .pb(px(NAV_CLEARANCE))
             .child(toolbar)
             .child(viewport)
             .when(!wide && self.files_expanded, |el| {

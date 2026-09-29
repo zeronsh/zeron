@@ -419,13 +419,21 @@ impl PullRequestDetailPage {
         let identity = self
             .detail
             .as_ref()
-            .map(|detail| format!("#{} · {}", detail.number, detail.title))
+            .map(|detail| (detail.number, detail.title.clone()))
             .or_else(|| {
                 self.preview
                     .as_ref()
-                    .map(|item| format!("#{} · {}", item.number, item.title))
-            })
-            .unwrap_or_else(|| "Pull request".into());
+                    .map(|item| (item.number, item.title.clone()))
+            });
+        let label = identity
+            .as_ref()
+            .map_or_else(|| "Pull request".into(), |(number, title)| {
+                format!("pull request {number}, {title}")
+            });
+        let identity = identity.map_or_else(
+            || "Pull request".into(),
+            |(number, title)| format!("{number} · {title}"),
+        );
         div()
             .w_full()
             .min_w_0()
@@ -439,7 +447,14 @@ impl PullRequestDetailPage {
                     .w_auto()
                     .justify_start()
                     .px(px(4.0))
-                    .aria_label(format!("Back to pull requests from {identity}"))
+                    .aria_label(format!("Back to pull requests from {label}"))
+                    .gap(px(6.0))
+                    .child(
+                        crate::icons::icon(crate::icons::PULL_REQUEST)
+                            .size(px(13.0))
+                            .flex_none()
+                            .text_color(theme.text_muted),
+                    )
                     .child(
                         div()
                             .id("pr-back-title")
@@ -1035,6 +1050,25 @@ fn status_chip(raw: &str, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// Space between the Summary's stacked cards; the header sits 2× further.
+const CARD_GAP: f32 = 12.0;
+
+/// One muted icon-and-text item of the header's metadata line.
+fn meta_item(glyph: &'static str, text: String, theme: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .text_color(theme.text_muted)
+        .child(
+            crate::icons::icon(glyph)
+                .size(px(13.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+        )
+        .child(text)
+}
+
 fn overview_status(label: &'static str, value: &str, theme: &Theme) -> AnyElement {
     div()
         .id(SharedString::from(format!("pr-overview-{label}")))
@@ -1119,10 +1153,11 @@ impl Render for PullRequestDetailPage {
                     el.max_w_full().px(px(24.0)).h_full().min_h_0()
                 })
                 .pt(px(24.0))
-                .pb(px(if self.tab == Tab::Activity {
-                    248.0
-                } else {
-                    76.0
+                .pb(px(match self.tab {
+                    Tab::Activity => 248.0,
+                    // The workspace reserves its own room for the navigation.
+                    Tab::Code => 0.0,
+                    Tab::Summary => 76.0,
                 }))
                 .text_size(crate::typography::ui_rems(13.0))
                 .text_color(theme.text);
@@ -1170,43 +1205,36 @@ impl Render for PullRequestDetailPage {
                                                 detail.author.login.clone()
                                             }),
                                     )
-                                    .child(
-                                        crate::icons::icon(crate::icons::FOLDER_WITH_FILES)
-                                            .size(px(14.0))
-                                            .text_color(theme.text_muted),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(crate::typography::ui_rems(12.0))
-                                            .text_color(theme.text_muted)
-                                            .child(format!("{repository} · #{}", detail.number)),
-                                    ),
-                            )
-                            .when_some(
-                                self.fetched.filter(|_| self.tab != Tab::Code),
-                                |el, fetched| {
-                                    let age = if fetched.elapsed().as_secs() < 60 {
-                                        "just now".into()
-                                    } else {
-                                        format!("{}m ago", fetched.elapsed().as_secs() / 60)
-                                    };
-                                    el.child(
-                                        div()
-                                            .mt(px(12.0))
-                                            .px(px(8.0))
-                                            .text_size(px(11.0))
-                                            .text_color(theme.text_muted)
-                                            .child(format!("Last refreshed {age}")),
-                                    )
-                                },
+                                    .child(meta_item(
+                                        crate::icons::FOLDER_WITH_FILES,
+                                        repository,
+                                        &theme,
+                                    ))
+                                    .child(meta_item(
+                                        crate::icons::PULL_REQUEST,
+                                        detail.number.to_string(),
+                                        &theme,
+                                    ))
+                                    .when_some(self.fetched, |el, fetched| {
+                                        let age = if fetched.elapsed().as_secs() < 60 {
+                                            "just now".into()
+                                        } else {
+                                            format!("{}m ago", fetched.elapsed().as_secs() / 60)
+                                        };
+                                        el.child(meta_item(
+                                            crate::icons::CLOCK_CIRCLE,
+                                            format!("Updated {age}"),
+                                            &theme,
+                                        ))
+                                    }),
                             )
                     })
                     .when(self.tab == Tab::Summary, |el| {
-                        el.child(widgets::section(
-                            &theme,
-                            "Overview",
+                        el.child(
                             widgets::section_card(&theme)
-                                .mt_0()
+                                .id("pr-overview")
+                                .debug_selector(|| "pr-overview".into())
+                                .mt(px(24.0))
                                 .child(
                                     div()
                                         .id("pr-overview-statuses")
@@ -1251,7 +1279,7 @@ impl Render for PullRequestDetailPage {
                                     false,
                                     &theme,
                                 )),
-                        ))
+                        )
                     });
                 match self.tab {
                     Tab::Summary => {
@@ -1366,7 +1394,7 @@ impl Render for PullRequestDetailPage {
                             );
                         }
                         column = column
-                            .child(checks.mt(px(16.0)))
+                            .child(checks.mt(px(CARD_GAP)))
                             .child(self.handoff_card(detail, &theme, cx));
                         let description = div()
                             .p(px(16.0))
@@ -1390,7 +1418,9 @@ impl Render for PullRequestDetailPage {
                             );
                         column = column.child(
                             widgets::section_card(&theme)
-                                .mt(px(24.0))
+                                .id("pr-description")
+                                .debug_selector(|| "pr-description".into())
+                                .mt(px(CARD_GAP))
                                 .child(description),
                         );
                     }
@@ -1838,6 +1868,10 @@ mod tests {
                 assert_eq!(search.size.height, px(crate::surface_chrome::CONTROL_SIZE));
                 let files = cx.debug_bounds("pr-file-list").unwrap();
                 assert!(files.top() >= search.bottom() && files.size.height > px(40.0));
+                assert!(
+                    files.bottom() > viewport.bottom(),
+                    "the tree runs to the window edge while the diff clears the navigation"
+                );
                 assert!(cx.debug_bounds("pr-files").is_none());
             } else {
                 assert!(cx.debug_bounds("pr-file-browser").is_none(), "compact stream keeps its width");
@@ -2039,6 +2073,14 @@ mod tests {
                     cell.left() >= group.left() && cell.right() <= group.right(),
                     "{cell:?} outside {group:?}"
                 );
+            }
+            // Cards stack at one rhythm, with no floating labels between them.
+            let cards: Vec<_> = ["pr-overview", "pr-checks-card", "pr-handoff", "pr-description"]
+                .iter()
+                .map(|id| cx.debug_bounds(id).unwrap())
+                .collect();
+            for pair in cards.windows(2) {
+                assert_eq!(pair[1].top() - pair[0].bottom(), px(CARD_GAP), "{cards:?}");
             }
             if width > 600.0 {
                 assert_eq!(status.top(), review.top());

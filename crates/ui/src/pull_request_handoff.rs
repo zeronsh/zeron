@@ -181,11 +181,8 @@ impl PullRequestDetailPage {
                     window.dispatch_action(Box::new(StartPullRequestSession(prompt.clone())), cx)
                 })
         });
-        widgets::section(
-            theme,
-            "Hand off to an agent",
-            widgets::section_card(theme)
-                .mt_0()
+        widgets::section_card(theme)
+                .mt(px(CARD_GAP))
                 .id("pr-handoff")
                 .debug_selector(|| "pr-handoff".into())
                 .child(
@@ -196,13 +193,48 @@ impl PullRequestDetailPage {
                         .gap(px(12.0))
                         .child(
                             div()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text_muted)
+                                .flex()
+                                .items_start()
+                                .gap(px(10.0))
                                 .child(
-                                    "Opens a new session with this pull request's context. Review the prompt, then send it.",
+                                    crate::icons::icon(crate::icons::BOT)
+                                        .size(px(16.0))
+                                        .flex_none()
+                                        .mt(px(1.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .child(
+                                            div()
+                                                .font_weight(gpui::FontWeight::MEDIUM)
+                                                .child("Hand off to an agent"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(crate::typography::ui_rems(12.0))
+                                                .text_color(theme.text_muted)
+                                                .child(
+                                                    "Opens a new session with this pull request's context. Review the prompt, then send it.",
+                                                ),
+                                        ),
                                 ),
                         )
-                        .child(div().flex().flex_wrap().gap(px(8.0)).children(buttons)),
+                        .child(
+                            div()
+                                .id("pr-handoff-actions")
+                                .debug_selector(|| "pr-handoff-actions".into())
+                                .pl(px(26.0))
+                                .flex()
+                                .flex_wrap()
+                                .gap(px(8.0))
+                                .children(buttons),
+                        ),
                 )
                 .child(
                     widgets::card_row(theme, false)
@@ -236,9 +268,8 @@ impl PullRequestDetailPage {
                                 },
                             ),
                         ),
-                ),
-        )
-        .into_any_element()
+                )
+                .into_any_element()
     }
 }
 
