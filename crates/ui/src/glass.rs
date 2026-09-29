@@ -75,32 +75,29 @@ impl Plate {
     }
 }
 
-/// Neutral glass. `t` fades the whole treatment in.
+/// Neutral glass. `t` fades the whole treatment in. Dark appearances lift
+/// translucent white off the surface; light ones sink a translucent tint
+/// into it (shaded under the top edge, lit inside the bottom edge), since a
+/// near-white plate on a near-white surface washes out.
 pub(crate) fn light_plate(theme: &Theme, t: f32) -> Plate {
-    let dark = theme.appearance.is_dark();
-    let (top, bottom, rim, highlight, drop) = if dark {
-        (
-            white(0.09),
-            white(0.04),
-            white(0.10),
-            white(0.10),
-            black(0.35),
-        )
-    } else {
-        (
-            hsla(0.0, 0.0, 0.985, 1.0),
-            hsla(0.0, 0.0, 0.925, 1.0),
-            black(0.10),
-            white(0.95),
-            black(0.08),
-        )
-    };
+    if theme.appearance.is_dark() {
+        return Plate {
+            background: vertical(white(0.08 * t), white(0.05 * t)),
+            rim: white(0.09 * t),
+            shadows: vec![
+                shadow(white(0.07 * t), 1.0, 0.0, 0.0, true),
+                shadow(black(0.16 * t), 1.0, 2.0, 0.0, false),
+            ],
+        };
+    }
     Plate {
-        background: vertical(top.opacity(t), bottom.opacity(t)),
-        rim: rim.opacity(t),
+        background: vertical(black(0.075 * t), black(0.04 * t)),
+        rim: black(0.08 * t),
+        // Inset only: GPUI paints drop shadows under the whole box, so an
+        // outer lip would show through the translucent fill and whiten it.
         shadows: vec![
-            shadow(highlight.opacity(t), 1.0, 0.0, 0.0, true),
-            shadow(drop.opacity(t), 1.0, 3.0, 0.0, false),
+            shadow(black(0.08 * t), 1.0, 2.0, 0.0, true),
+            shadow(white(0.55 * t), -1.0, 0.0, 0.0, true),
         ],
     }
 }
@@ -110,16 +107,24 @@ pub(crate) fn light_plate(theme: &Theme, t: f32) -> Plate {
 pub(crate) fn accent_plate(theme: &Theme, t: f32, glow: f32) -> Plate {
     let dark = theme.appearance.is_dark();
     let base = theme.accent;
-    let top = lift(base, if dark { 0.18 } else { 0.32 });
-    let rim = lift(base, 0.45).opacity(if dark { 0.45 } else { 0.7 });
-    let highlight = white(if dark { 0.22 } else { 0.38 });
-    let halo = base.opacity((0.22 + 0.4 * glow) * t);
+    let top = lift(base, if dark { 0.10 } else { 0.22 });
+    // Light: a defined edge a shade deeper than the fill, with a paler ring
+    // just inside it. Dark: a soft lifted rim.
+    let rim = if dark {
+        lift(base, 0.35).opacity(0.35)
+    } else {
+        crate::motion::mix(base, black(1.0), 0.14)
+    };
+    let highlight = white(if dark { 0.14 } else { 0.32 });
+    let ring = white(if dark { 0.08 } else { 0.22 });
+    // Dark plates sit flat at rest; light ones keep a faint coloured glow.
+    let halo = base.opacity((if dark { 0.0 } else { 0.14 } + 0.3 * glow) * t);
     Plate {
         background: vertical(top.opacity(t), base.opacity(t)),
         rim: rim.opacity(t),
         shadows: vec![
             shadow(highlight.opacity(t), 1.0, 0.0, 0.0, true),
-            shadow(white(0.12 * t), 0.0, 0.0, 1.0, true),
+            shadow(ring.opacity(t), 0.0, 0.0, 1.0, true),
             shadow(halo, 2.0 + 2.0 * glow, 6.0 + 14.0 * glow, 0.0, false),
         ],
     }
@@ -129,18 +134,19 @@ pub(crate) fn accent_plate(theme: &Theme, t: f32, glow: f32) -> Plate {
 /// appearance, so it stays solid over translucent dark glass, with the
 /// appearance's own drop beneath it.
 pub(crate) fn thumb_plate(theme: &Theme) -> Plate {
-    let drop = black(if theme.appearance.is_dark() {
-        0.35
-    } else {
-        0.12
-    });
+    let dark = theme.appearance.is_dark();
+    let mut shadows = vec![
+        shadow(white(0.8), 1.0, 0.0, 0.0, true),
+        shadow(black(if dark { 0.22 } else { 0.14 }), 1.0, 2.0, 0.0, false),
+    ];
+    if !dark {
+        // A wide, faint ambient drop separates it from pale tracks.
+        shadows.push(shadow(black(0.06), 2.0, 6.0, 0.0, false));
+    }
     Plate {
-        background: vertical(hsla(0.0, 0.0, 0.985, 1.0), hsla(0.0, 0.0, 0.925, 1.0)),
-        rim: black(0.10),
-        shadows: vec![
-            shadow(white(0.95), 1.0, 0.0, 0.0, true),
-            shadow(drop, 1.0, 3.0, 0.0, false),
-        ],
+        background: vertical(hsla(0.0, 0.0, 1.0, 1.0), hsla(0.0, 0.0, 0.965, 1.0)),
+        rim: black(if dark { 0.12 } else { 0.11 }),
+        shadows,
     }
 }
 
@@ -154,4 +160,57 @@ pub(crate) fn accent<E: Styled>(el: E, theme: &Theme, t: f32, glow: f32) -> E {
 
 pub(crate) fn thumb<E: Styled>(el: E, theme: &Theme) -> E {
     thumb_plate(theme).apply(el)
+}
+
+/// A grippy dimpled texture for pill thumbs: a grid of small dimples, each a
+/// soft shade with a light lip below it, kept `margin` inside the pill's
+/// outline so no dimple sits on the rounded ends. Fills its parent.
+/// The thumb is near-white in every appearance, so the dimples are too.
+pub(crate) fn grip(pitch: f32, dimple: f32, margin: f32) -> gpui::AnyElement {
+    use gpui::{IntoElement, Styled as _};
+    let shade = black(0.11);
+    let lip = white(0.85);
+    gpui::canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let w = f32::from(bounds.size.width);
+            let h = f32::from(bounds.size.height);
+            let radius = h / 2.0;
+            // Inside the pill: within `radius - margin` of its centre line.
+            let inside = |x: f32, y: f32| {
+                let cx = x.clamp(radius, (w - radius).max(radius));
+                ((x - cx).powi(2) + (y - radius).powi(2)).sqrt() <= radius - margin
+            };
+            let cols = ((w - 2.0 * margin) / pitch).floor().max(0.0) as i32;
+            let rows = ((h - 2.0 * margin) / pitch).floor().max(0.0) as i32;
+            let x0 = (w - cols as f32 * pitch) / 2.0 + pitch / 2.0;
+            let y0 = (h - rows as f32 * pitch) / 2.0 + pitch / 2.0;
+            let dot = |window: &mut Window, x: f32, y: f32, color: Hsla| {
+                window.paint_quad(gpui::quad(
+                    Bounds::new(
+                        bounds.origin + point(px(x - dimple / 2.0), px(y - dimple / 2.0)),
+                        gpui::size(px(dimple), px(dimple)),
+                    ),
+                    Corners::all(px(dimple / 2.0)),
+                    color,
+                    px(0.0),
+                    gpui::transparent_black(),
+                    gpui::BorderStyle::default(),
+                ));
+            };
+            for row in 0..rows {
+                for col in 0..cols {
+                    let (x, y) = (x0 + col as f32 * pitch, y0 + row as f32 * pitch);
+                    if inside(x, y) {
+                        // The lip first, peeking out below the shade.
+                        dot(window, x, y + 0.5, lip);
+                        dot(window, x, y, shade);
+                    }
+                }
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .into_any_element()
 }

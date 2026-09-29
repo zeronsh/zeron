@@ -629,12 +629,14 @@ pub fn badge_active(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div 
         .child(label.into())
 }
 
-pub const SWITCH_WIDTH: f32 = 44.0;
+pub const SWITCH_WIDTH: f32 = 48.0;
 const SWITCH_HEIGHT: f32 = 28.0;
 const SWITCH_TRACK_HEIGHT: f32 = 24.0;
 /// Thumb inset inside the track; radii stay concentric (12 = 10 + 2).
 const SWITCH_THUMB_INSET: f32 = 2.0;
 const SWITCH_THUMB: f32 = SWITCH_TRACK_HEIGHT - 2.0 * SWITCH_THUMB_INSET;
+/// The thumb is a pill, wider than tall, with a dimpled grip.
+const SWITCH_THUMB_WIDTH: f32 = 28.0;
 
 /// A glass switch: a neutral track that the accent plate fills as the thumb
 /// travels, matching the composer's voice controls. The caller owns
@@ -703,7 +705,7 @@ impl RenderOnce for SwitchVisual {
             window.request_animation_frame();
         }
         let top = (SWITCH_HEIGHT - SWITCH_TRACK_HEIGHT) / 2.0;
-        let travel = SWITCH_WIDTH - SWITCH_THUMB - 2.0 * SWITCH_THUMB_INSET;
+        let travel = SWITCH_WIDTH - SWITCH_THUMB_WIDTH - 2.0 * SWITCH_THUMB_INSET;
         // The accent plate covers the neutral rim too, so the two crossfade
         // as one surface while the thumb moves.
         let track_element = crate::glass::light(
@@ -730,16 +732,54 @@ impl RenderOnce for SwitchVisual {
                 position,
                 0.0,
             ))
+        })
+        // The state mark sits centred in the half the thumb leaves empty: a
+        // bar when on, a ring when off, crossfading with the thumb's travel.
+        .child({
+            let empty = SWITCH_WIDTH - SWITCH_THUMB_WIDTH - 2.0 * SWITCH_THUMB_INSET;
+            let centre = SWITCH_THUMB_INSET + empty / 2.0 - 1.0;
+            let ring = if self.theme.appearance.is_dark() {
+                gpui::white().opacity(0.22)
+            } else {
+                gpui::white().opacity(0.6)
+            };
+            div()
+                .absolute()
+                .inset_0()
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(centre - 0.5))
+                        .top(px(SWITCH_TRACK_HEIGHT / 2.0 - 4.5))
+                        .w(px(1.0))
+                        .h(px(7.0))
+                        .rounded_full()
+                        .bg(gpui::white().opacity(0.55))
+                        .opacity(position),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .right(px(centre - 3.5))
+                        .top(px(SWITCH_TRACK_HEIGHT / 2.0 - 4.5))
+                        .size(px(7.0))
+                        .rounded_full()
+                        .border(px(1.0))
+                        .border_color(ring)
+                        .opacity(1.0 - position),
+                )
         });
         let thumb_element = crate::glass::thumb(
             div()
                 .absolute()
                 .top(px(top + SWITCH_THUMB_INSET))
                 .left(px(SWITCH_THUMB_INSET + travel * position))
-                .size(px(SWITCH_THUMB))
+                .w(px(SWITCH_THUMB_WIDTH))
+                .h(px(SWITCH_THUMB))
                 .rounded_full(),
             &self.theme,
-        );
+        )
+        .child(crate::glass::grip(3.0, 1.1, 4.0));
         div()
             .relative()
             .w(px(SWITCH_WIDTH))
