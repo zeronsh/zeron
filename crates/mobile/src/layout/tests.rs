@@ -389,6 +389,27 @@ fn long_streaming_thought_is_capped_and_reuses_its_body() {
     assert!(bodies[40..].windows(2).all(|p| Arc::ptr_eq(&p[0], &p[1])), "past the cap, deltas reuse the prepared body");
 }
 
+/// One huge paragraph (no line breaks for the line cap to act on) streaming
+/// in: the visible text is clipped, so the body stops re-preparing too.
+#[test]
+fn huge_single_paragraph_thought_stops_reshaping() {
+    let mut w = worker(390.0);
+    let mut text = String::new();
+    let mut heights = Vec::new();
+    let mut bodies = Vec::new();
+    for _ in 0..120 {
+        text.push_str(&"streaming thought words ".repeat(10));
+        w.input = thought_input(&text, true);
+        let frame = w.pass();
+        heights.push(frame.display(0).unwrap().height);
+        bodies.push(w.builder.thought_body_for_test("a#r0").expect("thought prepared"));
+    }
+    assert!(text.len() > 25_000);
+    let settled = heights[heights.len() - 1];
+    assert!(heights[80..].iter().all(|h| (h - settled).abs() < 0.01), "capped: {heights:?}");
+    assert!(bodies[80..].windows(2).all(|p| Arc::ptr_eq(&p[0], &p[1])), "past the budget, deltas reuse the prepared body");
+}
+
 /// Release-mode timings (run with `cargo test --release -p zeron-mobile -- --ignored --nocapture`).
 #[test]
 #[ignore]

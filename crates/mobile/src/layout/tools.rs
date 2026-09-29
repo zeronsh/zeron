@@ -330,8 +330,10 @@ fn result_block(ctx: &mut Ctx, st: &Styles, part: &MessagePart) -> Option<Detail
 /// painted width beside its gutter, so heights stay exact anyway.
 ///
 /// Every logical line fills at least one visual line, so only the first `cap`
-/// can ever show: flattening stops there (a long thought costs the same per
-/// streamed delta as a short one). `true` = more content follows the cap.
+/// can ever show: flattening stops there. Those lines are also clipped to
+/// [`THOUGHT_BYTES`], so one huge paragraph streaming in doesn't re-shape its
+/// whole text per delta either: a long thought costs the same per streamed
+/// delta as a short one. `true` = more content follows what's kept.
 fn thought_lines(tree: &BlockTree, cap: usize) -> (Vec<Vec<InlineRun>>, bool) {
     let mut out: Vec<Vec<InlineRun>> = Vec::new();
     for top in &tree.blocks {
@@ -344,12 +346,42 @@ fn thought_lines(tree: &BlockTree, cap: usize) -> (Vec<Vec<InlineRun>>, bool) {
             break;
         }
     }
-    let more = out.len() > cap;
+    let mut more = out.len() > cap;
     out.truncate(cap);
+    more |= clip_bytes(&mut out, THOUGHT_BYTES);
     while out.last().is_some_and(|l| l.iter().all(|r| r.text.trim().is_empty())) {
         out.pop();
     }
     (out, more)
+}
+
+/// Text budget for a thought's visible lines: [`MAX_LINES`] wrapped lines of
+/// real text hold well under this even at the widest iPad column, so the clip
+/// only drops text that's past the fade anyway.
+const THOUGHT_BYTES: usize = MAX_LINES * 512;
+
+/// Keep at most `budget` bytes of run text (cut at a char boundary); `true`
+/// when anything was dropped.
+fn clip_bytes(lines: &mut Vec<Vec<InlineRun>>, budget: usize) -> bool {
+    let mut left = budget;
+    for li in 0..lines.len() {
+        for ri in 0..lines[li].len() {
+            let run = &mut lines[li][ri];
+            if run.text.len() <= left {
+                left -= run.text.len();
+                continue;
+            }
+            let mut cut = left;
+            while !run.text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            run.text.truncate(cut);
+            lines[li].truncate(ri + 1);
+            lines.truncate(li + 1);
+            return true;
+        }
+    }
+    false
 }
 
 /// The indent run every line opens with; list/quote handlers rewrite it to
@@ -1120,6 +1152,20 @@ mod tests {
         let text: Vec<String> = lines.iter().map(|l| l.iter().map(|r| r.text.as_str()).collect()).collect();
         assert_eq!(text, ["one", "", "• two", "", "  three"]);
         assert!(!more);
+    }
+
+    #[test]
+    fn thought_lines_clip_one_huge_paragraph_to_the_byte_budget() {
+        use zeron_markdown::parser::parse_full;
+        let bytes = |lines: &[Vec<InlineRun>]| lines.iter().flatten().map(|r| r.text.len()).sum::<usize>();
+        let (lines, more) = thought_lines(&parse_full(&"word ".repeat(20_000)), MAX_LINES);
+        assert!(more && bytes(&lines) <= THOUGHT_BYTES && bytes(&lines) > THOUGHT_BYTES - 8, "{}", bytes(&lines));
+        // The budget lands inside a two-byte char: cut on its boundary.
+        let (lines, more) = thought_lines(&parse_full(&format!("a{}", "é".repeat(THOUGHT_BYTES))), MAX_LINES);
+        assert!(more && bytes(&lines) == THOUGHT_BYTES - 1, "{}", bytes(&lines));
+        // Under budget: untouched.
+        let (lines, more) = thought_lines(&parse_full("short thought"), MAX_LINES);
+        assert!(!more && bytes(&lines) == "short thought".len());
     }
 
     #[test]
