@@ -560,6 +560,38 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
             "text": "PONG"
         }),
     );
+    // Each step reports its own tokens; `session.usage.updated` follows with
+    // the cumulative session totals, which must not read as occupancy.
+    let step = |wire: &TurnWire, message: &str, model: &str, tokens: Value, cumulative: Value| {
+        wire.v2(
+            "session.step.started",
+            json!({
+                "sessionID": "fixture",
+                "assistantMessageID": message,
+                "model": {"id": model, "providerID": "opencode"},
+            }),
+        );
+        wire.v2(
+            "session.step.ended",
+            json!({
+                "sessionID": "fixture", "assistantMessageID": message,
+                "finish": "stop", "cost": 0, "tokens": tokens,
+            }),
+        );
+        wire.v2(
+            "session.usage.updated",
+            json!({"sessionID": "fixture", "cost": 0, "tokens": cumulative}),
+        );
+    };
+    wire.v2(
+        "session.step.ended",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "finish": "stop", "cost": 0,
+            "tokens": {"input": 10, "output": 2, "reasoning": 0,
+                       "cache": {"read": 0, "write": 0}}
+        }),
+    );
     wire.v2(
         "session.usage.updated",
         json!({
@@ -568,30 +600,29 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
                        "cache": {"read": 0, "write": 0}}
         }),
     );
-    wire.v2(
-        "session.step.started",
-        json!({
-            "sessionID": "fixture",
-            "assistantMessageID": "msg_b",
-            "model": {"id": "long-context", "providerID": "opencode"},
-        }),
+    // A model switch resolves the new model's advertised window.
+    step(
+        &wire,
+        "msg_b",
+        "long-context",
+        json!({"input": 20, "output": 3, "reasoning": 0, "cache": {"read": 5, "write": 0}}),
+        json!({"input": 30, "output": 5, "reasoning": 0, "cache": {"read": 5, "write": 0}}),
     );
-    wire.v2(
-        "session.usage.updated",
-        json!({
-            "sessionID": "fixture", "cost": 0,
-            "tokens": {"input": 20, "output": 3, "reasoning": 0,
-                       "cache": {"read": 5, "write": 0}}
-        }),
+    // A step without reported usage is not an empty context.
+    step(
+        &wire,
+        "msg_c",
+        "long-context",
+        json!({"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}),
+        json!({"input": 30, "output": 5, "reasoning": 0, "cache": {"read": 5, "write": 0}}),
     );
-    // A reported zero after compaction is real usage, not an empty placeholder.
-    wire.v2(
-        "session.usage.updated",
-        json!({
-            "sessionID": "fixture", "cost": 0,
-            "tokens": {"input": 0, "output": 0, "reasoning": 0,
-                       "cache": {"read": 0, "write": 0}}
-        }),
+    // After compaction the next prompt is smaller; the totals keep climbing.
+    step(
+        &wire,
+        "msg_d",
+        "long-context",
+        json!({"input": 4, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}}),
+        json!({"input": 34, "output": 6, "reasoning": 0, "cache": {"read": 5, "write": 0}}),
     );
     wire.v2(
         "session.execution.succeeded",
@@ -626,13 +657,13 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
         .unwrap();
     assert_eq!(status, DoneStatus::Completed);
     assert_eq!(text, "PONG");
-    assert_eq!(usage, Some((20, 3)));
+    assert_eq!(usage, Some((4, 1)));
     assert_eq!(
         context_usage,
         vec![
             (Some(12), Some(1000)),
             (Some(28), Some(2000)),
-            (Some(0), Some(2000)),
+            (Some(5), Some(2000)),
         ]
     );
 }
@@ -1470,11 +1501,10 @@ fn v2_frames_normalize_to_v1_payloads() {
             "type":"tool","tool":"read",
             "state":{"status":"running","input":{"path":"/tmp/x"}}}}})]
     );
-    // Usage totals reach the engine as an assistant message.updated and an
-    // explicit zero is distinguishable from an empty assistant placeholder.
+    // A step's own usage reaches the engine as an assistant message.updated.
     let out = normalize_v2_frame(
-        json!({"id":"evt_9","type":"session.usage.updated","data":{
-            "sessionID":"ses_1","cost":0,
+        json!({"id":"evt_9","type":"session.step.ended","data":{
+            "sessionID":"ses_1","assistantMessageID":"msg_a","finish":"stop","cost":0,
             "tokens":{"input":10,"output":2,"reasoning":0,"cache":{"read":0,"write":0}}}}),
         &mut tools,
     );
@@ -1482,12 +1512,23 @@ fn v2_frames_normalize_to_v1_payloads() {
         out,
         vec![json!({"type":"message.updated","properties":{
             "info":{"sessionID":"ses_1","id":"usage","role":"assistant",
-                    "contextUsageUpdated":true,
                     "tokens":{"input":10,"output":2,"reasoning":0,
                               "cache":{"read":0,"write":0}}}}})]
     );
-    // The usage frame omits model identity; the session's latest step
-    // supplies it so the context window resolves downstream.
+    // Cumulative session totals are spend, not occupancy; malformed step
+    // usage is dropped.
+    for data in [
+        json!({"id":"evt_10","type":"session.usage.updated","data":{
+            "sessionID":"ses_1","cost":0,"tokens":{"input":10,"output":2}}}),
+        json!({"id":"evt_11","type":"session.step.ended","data":{
+            "sessionID":"ses_1","assistantMessageID":"msg_a","tokens":"12"}}),
+        json!({"id":"evt_11","type":"session.step.ended","data":{
+            "sessionID":"ses_1","assistantMessageID":"msg_a"}}),
+    ] {
+        assert_eq!(normalize_v2_frame(data, &mut tools), Vec::<Value>::new());
+    }
+    // step.ended omits model identity; the session's latest step supplies
+    // it so the context window resolves downstream.
     let mut session_models = HashMap::new();
     let step = normalize_v2_frame_with_session_models(
         json!({"id":"evt_12","type":"session.step.started","data":{
@@ -1498,8 +1539,9 @@ fn v2_frames_normalize_to_v1_payloads() {
     );
     assert_eq!(step.len(), 1);
     let out = normalize_v2_frame_with_session_models(
-        json!({"id":"evt_13","type":"session.usage.updated","data":{
-            "sessionID":"ses_2","cost":0,"tokens":{"input":1,"output":2}}}),
+        json!({"id":"evt_13","type":"session.step.ended","data":{
+            "sessionID":"ses_2","assistantMessageID":"msg_b","finish":"stop","cost":0,
+            "tokens":{"input":1,"output":2}}}),
         &mut tools,
         &mut session_models,
     );
@@ -1507,9 +1549,25 @@ fn v2_frames_normalize_to_v1_payloads() {
         out,
         vec![json!({"type":"message.updated","properties":{
             "info":{"sessionID":"ses_2","id":"usage","role":"assistant",
-                    "contextUsageUpdated":true,
                     "tokens":{"input":1,"output":2},
                     "providerID":"opencode","modelID":"long-context"}}})]
+    );
+    // A malformed model leaves the cached one in place.
+    for model in [
+        json!(null),
+        json!("opencode/muse"),
+        json!({"id":"", "providerID":"opencode"}),
+    ] {
+        normalize_v2_frame_with_session_models(
+            json!({"id":"evt_14","type":"session.step.started","data":{
+                "sessionID":"ses_2","assistantMessageID":"msg_c","model":model}}),
+            &mut tools,
+            &mut session_models,
+        );
+    }
+    assert_eq!(
+        session_models.get("ses_2").map(|m| m.model_id.as_str()),
+        Some("long-context")
     );
     // The permission ask keeps its 1.x name on 2.x (observed live when a
     // tool reaches outside the workspace); the auto-approver replies.

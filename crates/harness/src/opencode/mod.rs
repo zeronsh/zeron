@@ -2291,17 +2291,15 @@ fn context_usage_event(info: &Value, context_catalog: &ContextCatalog) -> Option
     .flatten()
     .filter_map(Value::as_u64)
     .collect();
-    let reported_total = tokens.get("total").and_then(Value::as_u64);
-    let tokens = reported_total
+    let tokens = tokens
+        .get("total")
+        .and_then(Value::as_u64)
         .filter(|n| *n > 0)
         .or_else(|| {
             (!counts.is_empty()).then(|| counts.into_iter().fold(0u64, u64::saturating_add))
-        })
-        .or(reported_total);
+        });
     // New assistant placeholders carry zero counters before the request runs.
-    let explicit_usage_update =
-        info.get("contextUsageUpdated").and_then(Value::as_bool) == Some(true);
-    if tokens == Some(0) && !explicit_usage_update && info.pointer("/time/completed").is_none() {
+    if tokens == Some(0) && info.pointer("/time/completed").is_none() {
         return None;
     }
     let window = info
@@ -3683,10 +3681,11 @@ fn oc_tool_call(name: &str, input: &Value) -> ToolCall {
 /// - tools: `session.tool.input.started` (carries the NAME),
 ///   `.input.ended` (args as text), `.called` (args as object),
 ///   `.success` (content array) / `.error`.
-/// - usage: `session.usage.updated` with the cumulative token totals.
+/// - usage: `session.step.ended` carries the step's own tokens; the
+///   cumulative `session.usage.updated` totals are ignored.
 ///
 /// `tool_names` tracks pending calls by session, message, and provider call id.
-/// `session_models` remembers the latest model for usage frames, which omit it.
+/// `session_models` remembers the latest model for step.ended, which omits it.
 type V2ToolKey = (String, String, String);
 const MAX_PENDING_V2_TOOLS: usize = 4096;
 /// Cache cap; overflow clears the cache instead of failing the run.
@@ -3911,21 +3910,20 @@ fn normalize_v2_frame_with_session_models(
                 &json!({ "status": "error", "error": message }),
             )]
         }
-        "session.usage.updated" => {
+        "session.step.ended" => {
             let tokens = data.get("tokens").cloned().unwrap_or(Value::Null);
-            if tokens.is_null() {
+            if !tokens.is_object() {
                 return Vec::new();
             }
-            // The usage frame omits model identity; use the latest step's
-            // model for this session so its advertised context limit resolves.
+            // One step's tokens are the prompt it sent plus its reply, which
+            // is what the 1.x assistant message carried. The frame omits the
+            // model, so the session's latest step supplies it and the
+            // advertised context limit resolves.
             let mut info = json!({
                 "sessionID": session(),
                 "id": "usage",
                 "role": "assistant",
                 "tokens": tokens,
-                // Unlike an empty message placeholder, this is an explicit
-                // usage update and a reported zero must clear prior occupancy.
-                "contextUsageUpdated": true,
             });
             if let Some(model) = data
                 .get("sessionID")
@@ -3940,6 +3938,9 @@ fn normalize_v2_frame_with_session_models(
                 "properties": { "info": info }
             })]
         }
+        // Cumulative session totals (every step, title, and compaction
+        // summed), so they measure spend, not context occupancy.
+        "session.usage.updated" => Vec::new(),
         "session.created" => {
             let Some(id) = data.get("sessionID").and_then(Value::as_str) else {
                 return Vec::new();
@@ -4220,15 +4221,31 @@ mod context_tests {
                 window: None
             })
         );
+    }
+
+    #[test]
+    fn malformed_usage_is_ignored_without_panicking() {
+        let windows = catalog(&[("provider/model", Some(200_000))]);
+        for info in [
+            json!({}),
+            json!({"tokens": null}),
+            json!({"tokens": "12"}),
+            json!({"tokens": [1, 2]}),
+            json!({"tokens": {"input": -1, "output": 1.5, "cache": "x"}}),
+            json!({"providerID": 1, "modelID": null, "tokens": {"input": "3"}}),
+        ] {
+            assert_eq!(context_usage_event(&info, &windows), None, "{info}");
+        }
+        // Unexpected model fields drop only the window, never the count.
         assert_eq!(
             context_usage_event(
-                &json!({"providerID":"provider","modelID":"model",
-                       "contextUsageUpdated":true,"tokens":{"total":0}}),
+                &json!({"providerID": ["provider"], "modelID": "model",
+                        "tokens": {"input": 7, "cache": {"read": "x", "write": 3}}}),
                 &windows
             ),
             Some(AgentEvent::ContextUsage {
-                tokens: Some(0),
-                window: Some(200000)
+                tokens: Some(10),
+                window: None
             })
         );
     }
