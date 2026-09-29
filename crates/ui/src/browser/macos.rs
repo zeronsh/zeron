@@ -36,20 +36,25 @@ pub(super) struct BrowserData(Rc<RefCell<BrowserStore>>);
 impl BrowserData {
     pub fn for_profile(profile: super::profile::BrowserProfile) -> Self {
         thread_local! {
-            static PROFILES: RefCell<std::collections::HashMap<std::path::PathBuf, std::rc::Weak<RefCell<BrowserStore>>>> = RefCell::new(std::collections::HashMap::new());
+            // Keep named stores alive until the app exits, including after its
+            // last window closes or the active identity changes. Destroying a
+            // WKWebsiteDataStore removes its network session; WebKit's cookie
+            // flush on UI-process disconnect only visits sessions still alive.
+            // A weak registry can therefore lose pending cookie deletions while
+            // localStorage/IndexedDB have already been saved during teardown.
+            static PROFILES: RefCell<std::collections::HashMap<std::path::PathBuf, Rc<RefCell<BrowserStore>>>> = RefCell::new(std::collections::HashMap::new());
         }
         PROFILES.with(|profiles| {
             let mut profiles = profiles.borrow_mut();
-            profiles.retain(|_, store| store.strong_count() > 0);
-            if let Some(store) = profiles.get(&profile.root).and_then(std::rc::Weak::upgrade) {
-                return Self(store);
+            if let Some(store) = profiles.get(&profile.root) {
+                return Self(store.clone());
             }
             let root = profile.root.clone();
             let store = Rc::new(RefCell::new(BrowserStore {
                 profile: Some(profile),
                 ..Default::default()
             }));
-            profiles.insert(root, Rc::downgrade(&store));
+            profiles.insert(root, store.clone());
             Self(store)
         })
     }
