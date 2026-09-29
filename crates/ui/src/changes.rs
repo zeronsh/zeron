@@ -64,7 +64,7 @@ use zeron_syntax::LanguageId as Lang;
 // ---------------------------------------------------------------------------
 
 pub const FILE_HEADER_HEIGHT: f32 = crate::surface_chrome::HEADER_HEIGHT;
-const STICKY_FILE_HEADER_BLUR: f32 = 16.0;
+pub(crate) const STICKY_FILE_HEADER_BLUR: f32 = 16.0;
 /// Coverage of the theme's content-plane tint over the sticky header blur.
 /// Light needs substantially more coverage: dark text is much more vulnerable
 /// to rows ghosting through the blur than light text is on a dark tint.
@@ -1488,7 +1488,7 @@ fn sticky_file_header(
 }
 
 /// Offset a sticky header upward as the next file header enters its slot.
-fn sticky_header_push_offset(next_header_y: Option<f32>) -> f32 {
+pub(crate) fn sticky_header_push_offset(next_header_y: Option<f32>) -> f32 {
     next_header_y
         .map(|y| (y - FILE_HEADER_HEIGHT).min(0.0))
         .unwrap_or(0.0)
@@ -1515,16 +1515,16 @@ impl FileHeaderPresentation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct StickyFileHeaderPaint {
-    rest_bg: gpui::Hsla,
-    hover_bg: gpui::Hsla,
-    border: gpui::Hsla,
-    frost_tint: Option<gpui::Hsla>,
+pub(crate) struct StickyFileHeaderPaint {
+    pub(crate) rest_bg: gpui::Hsla,
+    pub(crate) hover_bg: gpui::Hsla,
+    pub(crate) border: gpui::Hsla,
+    pub(crate) frost_tint: Option<gpui::Hsla>,
 }
 
 /// Resolve the sticky header from the diff's content plane, not the elevated
 /// overlay plane used by menus and popovers.
-fn sticky_file_header_paint(theme: &Theme) -> StickyFileHeaderPaint {
+pub(crate) fn sticky_file_header_paint(theme: &Theme) -> StickyFileHeaderPaint {
     if theme.is_frost() {
         let tint_alpha = match theme.appearance {
             crate::theme::Appearance::Dark => STICKY_FILE_HEADER_TINT_ALPHA_DARK,
@@ -4327,17 +4327,17 @@ impl Changes {
 }
 
 /// Green for additions — sampled from the reference diff (soft emerald).
-fn add_color(theme: &Theme) -> gpui::Hsla {
+pub(crate) fn add_color(theme: &Theme) -> gpui::Hsla {
     theme.diff_add // emerald-400
 }
 
 /// Red for deletions — softer than the theme danger, per the reference diff.
-fn del_color(theme: &Theme) -> gpui::Hsla {
+pub(crate) fn del_color(theme: &Theme) -> gpui::Hsla {
     theme.diff_del // red-400
 }
 
 /// One notice row ("New file", "Binary file — contents not shown", …).
-fn notice_row(notice: String, theme: &Theme) -> AnyElement {
+pub(crate) fn notice_row(notice: String, theme: &Theme) -> AnyElement {
     div()
         .h(px(NOTICE_HEIGHT))
         .w_full()
@@ -4352,7 +4352,7 @@ fn notice_row(notice: String, theme: &Theme) -> AnyElement {
 }
 
 /// One `@@ … @@` hunk-header row on the bluish-grey wash.
-fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
+pub(crate) fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
     div()
         .h(px(HUNK_HEADER_HEIGHT))
         .w_full()
@@ -4434,6 +4434,34 @@ pub(crate) fn readonly_diff_line(
     gutter_px: f32,
 ) -> AnyElement {
     diff_line_row(line, spans, theme, gutter_px, DiffCodeWidth::Clipped, None)
+}
+
+/// Read-only unified row whose code plane scrolls with `scroll` while the
+/// gutters stay put. Every row shares one extent, so a whole multi-file
+/// stream moves as one horizontal plane.
+pub(crate) fn readonly_scrolled_diff_line(
+    line: &DiffLine,
+    spans: &[zeron_syntax::HighlightSpan],
+    theme: &Theme,
+    gutter_px: f32,
+    text_width: f32,
+    scroll: &gpui::ScrollHandle,
+    row: usize,
+) -> AnyElement {
+    diff_line_row(
+        line,
+        spans,
+        theme,
+        gutter_px,
+        DiffCodeWidth::Scrollable(DiffHorizontalMetrics {
+            max_text_width: text_width,
+            max_gutter_width: gutter_px,
+        }),
+        Some(DiffCodeScroll {
+            handle: scroll.clone(),
+            id: format!("pr-code-{row}").into(),
+        }),
+    )
 }
 
 /// Read-only split row using the same cells and divider as the Changes pane.

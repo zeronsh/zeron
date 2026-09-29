@@ -64,8 +64,18 @@ fn tab_slot(tab: Tab) -> f32 {
 const NAV_PADDING: f32 = 4.0;
 const NAV_SEGMENT_HEIGHT: f32 = 36.0;
 
+/// What a patch row stands for in the review stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowRole {
+    File,
+    Notice,
+    Hunk,
+    Line,
+}
+
 #[derive(Clone)]
 struct CodeRow {
+    role: RowRole,
     text: SharedString,
     old: String,
     new: String,
@@ -77,11 +87,22 @@ fn code_rows(patch: &str) -> (Vec<CodeRow>, Vec<(String, usize)>) {
     use crate::changes::LineKind;
     let mut rows = Vec::new();
     let mut files = Vec::new();
-    for file in crate::changes::parse_patch(patch) {
+    let mut parsed = crate::changes::parse_patch(patch);
+    // Directory order, so each folder appears once in the tree and the
+    // stream reads in the same order as the tree.
+    parsed.sort_by(|a, b| {
+        let key = |path: &str| match path.rsplit_once('/') {
+            Some((directory, name)) => (1, directory.to_owned(), name.to_owned()),
+            None => (0, String::new(), path.to_owned()),
+        };
+        key(&a.path).cmp(&key(&b.path))
+    });
+    for file in parsed {
         let highlights = zeron_syntax::language_for_path(&file.path)
             .and_then(|language| crate::changes::excerpt_highlights(&file, language));
         files.push((file.path.clone(), rows.len()));
         rows.push(CodeRow {
+            role: RowRole::File,
             text: file.path.clone().into(),
             old: String::new(),
             new: String::new(),
@@ -90,6 +111,7 @@ fn code_rows(patch: &str) -> (Vec<CodeRow>, Vec<(String, usize)>) {
         });
         for notice in crate::changes::file_notices(&file) {
             rows.push(CodeRow {
+                role: RowRole::Notice,
                 text: notice.into(),
                 old: String::new(),
                 new: String::new(),
@@ -99,6 +121,7 @@ fn code_rows(patch: &str) -> (Vec<CodeRow>, Vec<(String, usize)>) {
         }
         for hunk in file.hunks {
             rows.push(CodeRow {
+                role: RowRole::Hunk,
                 text: hunk.header.into(),
                 old: String::new(),
                 new: String::new(),
@@ -107,6 +130,7 @@ fn code_rows(patch: &str) -> (Vec<CodeRow>, Vec<(String, usize)>) {
             });
             rows.extend(hunk.lines.into_iter().map(|line| {
                 CodeRow {
+                    role: RowRole::Line,
                     spans: highlights
                         .as_ref()
                         .map(|h| h.spans(&line).to_vec())
@@ -122,31 +146,49 @@ fn code_rows(patch: &str) -> (Vec<CodeRow>, Vec<(String, usize)>) {
     (rows, files)
 }
 
-fn code_content_width(rows: &[CodeRow]) -> f32 {
-    rows.iter()
-        .map(|row| crate::changes::visual_columns(&row.text))
-        .max()
-        .unwrap_or(0) as f32
-        * 7.0
-        + 128.0
-}
-
 #[derive(Clone)]
 struct ParsedDiff {
     patch: Arc<String>,
     rows: Arc<Vec<CodeRow>>,
     files: Arc<Vec<(String, usize)>>,
     pairs: Arc<Vec<Vec<crate::changes::LinePair>>>,
+    /// Per-file (additions, deletions), counted from the patch itself.
+    stats: Arc<Vec<(u64, u64)>>,
+    /// Widest code line, in display columns, across the whole patch.
+    columns: usize,
+    gutter: f32,
 }
 
 impl ParsedDiff {
     fn new(patch: String) -> Self {
+        use crate::changes::LineKind;
         let (rows, files) = code_rows(&patch);
+        let stats = files
+            .iter()
+            .enumerate()
+            .map(|(file, (_, start))| {
+                let end = files.get(file + 1).map_or(rows.len(), |(_, end)| *end);
+                rows[*start..end].iter().fold((0, 0), |(add, del), row| match row.kind {
+                    LineKind::Add if row.role == RowRole::Line => (add + 1, del),
+                    LineKind::Del if row.role == RowRole::Line => (add, del + 1),
+                    _ => (add, del),
+                })
+            })
+            .collect();
+        let columns = rows
+            .iter()
+            .filter(|row| row.role == RowRole::Line)
+            .map(|row| crate::changes::visual_columns(&row.text))
+            .max()
+            .unwrap_or(0);
         Self {
             pairs: Arc::new(code::split_files(&rows, &files)),
+            gutter: code::code_gutter(&rows),
             patch: Arc::new(patch),
             rows: Arc::new(rows),
             files: Arc::new(files),
+            stats: Arc::new(stats),
+            columns,
         }
     }
 }
@@ -209,14 +251,24 @@ pub struct PullRequestDetailPage {
     code_pairs: Arc<Vec<Vec<crate::changes::LinePair>>>,
     code_split: bool,
     code_files: Arc<Vec<(String, usize)>>,
-    code_width: f32,
+    code_stats: Arc<Vec<(u64, u64)>>,
+    code_columns: usize,
+    code_gutter: f32,
     code_horizontal: gpui::ScrollHandle,
-    code_scroll: gpui::UniformListScrollHandle,
+    /// The review stream: every file's header and (unless folded) body.
+    code_list: gpui::ListState,
+    code_stream: Rc<Vec<code::StreamRow>>,
+    code_ranges: Vec<std::ops::Range<usize>>,
+    collapsed_files: std::collections::HashSet<usize>,
+    /// A file picked from the tree stays selected until the reader scrolls;
+    /// the last files can be too short to reach the top of the viewport.
+    jumped_file: Option<usize>,
+    file_tree_scroll: gpui::ScrollHandle,
     diff_error: Option<String>,
     tab: Tab,
     checks_expanded: bool,
     tab_slide: crate::motion::IndicatorSlide,
-    selected_code_file: usize,
+    tab_focus: [gpui::FocusHandle; 3],
     file_search: Entity<crate::composer::ComposerInput>,
     file_search_subscription: Option<Subscription>,
     file_query: String,
@@ -269,14 +321,21 @@ impl PullRequestDetailPage {
             code_pairs: Default::default(),
             code_split: crate::settings::current(cx).diff_split,
             code_files: Default::default(),
-            code_width: 128.0,
+            code_stats: Default::default(),
+            code_columns: 0,
+            code_gutter: crate::changes::GUTTER_WIDTH,
             code_horizontal: gpui::ScrollHandle::new(),
-            code_scroll: gpui::UniformListScrollHandle::new(),
+            code_list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(1024.0)),
+            code_stream: Default::default(),
+            code_ranges: Vec::new(),
+            collapsed_files: Default::default(),
+            jumped_file: None,
+            file_tree_scroll: gpui::ScrollHandle::new(),
             diff_error: None,
             tab: Tab::Summary,
             checks_expanded: false,
             tab_slide: crate::motion::IndicatorSlide::at(tab_slot(Tab::Summary), Instant::now()),
-            selected_code_file: 0,
+            tab_focus: [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()],
             file_search: cx.new(|cx| crate::composer::ComposerInput::with_context(
                 "Find a changed file…", "PaletteSearch", cx,
             ).with_single_line().with_text_metrics(12.0, 16.0)),
@@ -317,6 +376,15 @@ impl PullRequestDetailPage {
                 }
             }
         }));
+        let page_handle = cx.weak_entity();
+        page.code_list.set_scroll_handler(move |_, _, cx| {
+            // Scrolling hands the tree selection back to the scroll position
+            // and re-pins the sticky header.
+            let _ = page_handle.update(cx, |page, cx| {
+                page.jumped_file = None;
+                cx.notify();
+            });
+        });
         page.comment_subscription =
             Some(cx.subscribe(&page.comment_input, |page, _, event, cx| {
                 page.comment_event(event, cx)
@@ -328,7 +396,7 @@ impl PullRequestDetailPage {
             page.body = Some(snapshot.body);
             page.activity_bodies = snapshot.activity;
             if let Some(diff) = snapshot.diff {
-                page.install_diff(diff);
+                page.install_diff(diff, cx);
             }
         }
         if page.detail.is_none() {
@@ -529,7 +597,7 @@ impl PullRequestDetailPage {
                                 snapshot,
                             );
                         }
-                        page.install_diff(diff);
+                        page.install_diff(diff, cx);
                     }
                     Err(error) => page.diff_error = Some(error),
                 }
@@ -544,16 +612,23 @@ impl PullRequestDetailPage {
             patch: self.diff.clone()?,
             rows: self.code_rows.clone(),
             files: self.code_files.clone(),
+            stats: self.code_stats.clone(),
+            columns: self.code_columns,
+            gutter: self.code_gutter,
         })
     }
 
-    fn install_diff(&mut self, diff: ParsedDiff) {
+    fn install_diff(&mut self, diff: ParsedDiff, cx: &mut Context<Self>) {
         self.code_pairs = diff.pairs;
         self.diff = Some(diff.patch);
         self.code_rows = diff.rows;
         self.code_files = diff.files;
-        self.selected_code_file = self.selected_code_file.min(self.code_files.len().saturating_sub(1));
-        self.code_width = code_content_width(&self.code_rows[self.code_range()]);
+        self.code_stats = diff.stats;
+        self.code_columns = diff.columns;
+        self.code_gutter = diff.gutter;
+        self.collapsed_files.clear();
+        self.jumped_file = None;
+        self.rebuild_stream(cx);
     }
 
     /// Floating pill nav. One raised thumb glides between equal-width segments
@@ -574,18 +649,31 @@ impl PullRequestDetailPage {
             .rounded_full()
             .bg(theme.glass_hover())
             .shadow(crate::theme::card_selected_shadows());
+        let counts = self.detail.as_ref().map(|detail| {
+            [
+                None,
+                Some(detail.files.len()),
+                Some(detail.comments.len() + detail.reviews.len()),
+            ]
+        });
         let segments = TABS.into_iter().enumerate().map(|(slot, (tab, label, id, glyph))| {
             // 1 while the thumb sits on this slot, 0 once it is a slot away.
             let covered = (1.0 - (position - slot as f32).abs()).clamp(0.0, 1.0);
             let hover_key = format!("pr-detail-{}-{id}", cx.entity_id());
             let hover = crate::motion::hover_t(&hover_key);
             let emphasis = covered.max(hover);
+            let selected = tab == self.tab;
+            let count = counts.and_then(|counts| counts[slot]).filter(|count| *count > 0);
             div()
                 .id(id)
                 .debug_selector(move || id.into())
-                .role(gpui::Role::Button)
-                .aria_label(label)
-                .aria_selected(tab == self.tab)
+                .role(gpui::Role::Tab)
+                .aria_label(match count {
+                    Some(count) => format!("{label}, {count}"),
+                    None => label.to_owned(),
+                })
+                .aria_selected(selected)
+                .track_focus(&self.tab_focus[slot].clone().tab_stop(selected))
                 .tab_index(0)
                 .min_w_0()
                 .h(px(NAV_SEGMENT_HEIGHT))
@@ -609,14 +697,41 @@ impl PullRequestDetailPage {
                 .child(
                     crate::icons::icon(glyph)
                         .size(px(14.0))
-                        .text_color(crate::motion::mix(theme.text_muted, theme.accent, covered)),
+                        .flex_none()
+                        .text_color(crate::motion::mix(theme.text_muted, theme.text, emphasis)),
                 )
                 .child(div().min_w_0().truncate().child(label))
+                .children(count.map(|count| {
+                    div()
+                        .flex_none()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .font_weight(gpui::FontWeight::NORMAL)
+                        .text_color(crate::motion::mix(
+                            theme.text_muted.opacity(0.7),
+                            theme.text_muted,
+                            emphasis,
+                        ))
+                        .child(count.to_string())
+                }))
                 .on_click(cx.listener(move |page, _, _, cx| page.select_tab(tab, cx)))
+                .on_key_down(cx.listener(move |page, event: &gpui::KeyDownEvent, window, cx| {
+                    let next = match event.keystroke.key.as_str() {
+                        "left" => (slot + TABS.len() - 1) % TABS.len(),
+                        "right" => (slot + 1) % TABS.len(),
+                        "home" => 0,
+                        "end" => TABS.len() - 1,
+                        _ => return,
+                    };
+                    cx.stop_propagation();
+                    page.select_tab(TABS[next].0, cx);
+                    window.focus(&page.tab_focus[next], cx);
+                }))
         });
         let tabs = div()
             .id("pr-detail-nav")
             .debug_selector(|| "pr-detail-nav".into())
+            .role(gpui::Role::TabList)
+            .aria_label("Pull request sections")
             .occlude()
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_up(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -649,21 +764,6 @@ impl PullRequestDetailPage {
                 tabs,
             )))
             .into_any_element()
-    }
-
-    fn code_range(&self) -> std::ops::Range<usize> {
-        let start = self.code_files.get(self.selected_code_file).map_or(0, |(_, offset)| *offset);
-        let end = self.code_files.get(self.selected_code_file + 1).map_or(self.code_rows.len(), |(_, offset)| *offset);
-        start..end
-    }
-
-    fn select_code_file(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index >= self.code_files.len() { return; }
-        self.selected_code_file = index;
-        self.code_width = code_content_width(&self.code_rows[self.code_range()]);
-        self.code_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
-        self.code_horizontal.set_offset(gpui::Point::default());
-        cx.notify();
     }
 
     fn toggle_files(&mut self, cx: &mut Context<Self>) {
@@ -758,18 +858,29 @@ impl Render for PrActionTooltip {
 fn action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let icon_only = matches!(
         id,
-        "pr-back" | "pr-external" | "pr-copy-url" | "pr-copy-patch" | "pr-files" | "pr-detail-refresh" | "pr-previous-file" | "pr-next-file" | "pr-split"
+        "pr-back"
+            | "pr-external"
+            | "pr-copy-url"
+            | "pr-copy-patch"
+            | "pr-copy-path"
+            | "pr-files"
+            | "pr-fold-all"
+            | "pr-detail-refresh"
+            | "pr-previous-file"
+            | "pr-next-file"
+            | "pr-split"
     );
     let glyph = match id {
         "pr-split" => Some(crate::icons::SPLIT_COLUMNS),
-        "pr-previous-file" => Some(crate::icons::ALT_ARROW_LEFT),
-        "pr-next-file" => Some(crate::icons::ALT_ARROW_RIGHT),
+        "pr-previous-file" => Some(crate::icons::ALT_ARROW_UP),
+        "pr-next-file" => Some(crate::icons::ALT_ARROW_DOWN),
+        "pr-fold-all" => Some(crate::icons::FOLD_VERTICAL),
         "pr-back" => Some(crate::icons::ALT_ARROW_LEFT),
         "pr-copy-url" if label == "Link copied" => Some(crate::icons::CHECK),
-        "pr-copy-url" | "pr-copy-patch" => Some(crate::icons::COPY),
+        "pr-copy-url" | "pr-copy-patch" | "pr-copy-path" => Some(crate::icons::COPY),
         "pr-detail-refresh" | "pr-retry-diff" => Some(crate::icons::REFRESH),
         "pr-external" => Some(crate::icons::ARROW_UP_RIGHT),
-        "pr-files" => Some(crate::icons::FOLDER_WITH_FILES),
+        "pr-files" => Some(crate::icons::FILE_TREE),
         "pr-summary" => Some(crate::icons::DOCUMENT),
         "pr-code" => Some(crate::icons::FILE_CODE),
         "pr-activity" => Some(crate::icons::CHAT_ROUND_LINE),
@@ -1279,7 +1390,7 @@ impl Render for PullRequestDetailPage {
                                     cx.listener(|page, _, _, cx| page.load_diff(true, cx)),
                                 ));
                         } else if self.diff.is_some() {
-                            column = column.child(self.code_workspace(detail, &theme, cx));
+                            column = column.child(self.code_workspace(&theme, window, cx));
                         } else {
                             column = column.child(div().mt(px(20.0)).child("Loading diff…"));
                         }
@@ -1661,8 +1772,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pull_request_file_navigation_slices_cached_diff_and_resets_scrolling(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext;
+    fn pull_request_code_stream_navigates_folds_and_follows_layout(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::default()));
         let (host, cx) = cx.add_window_view(|window, cx| DetailHost::new(window, cx, true));
         let page = host.read_with(cx, |host, _| host.page.clone());
@@ -1670,56 +1780,79 @@ mod tests {
             let patch = ["a.rs", "nested/b.rs", "c.rs"].iter().map(|name| format!(
                 "diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-old\n+{}\n", "new ".repeat(100)
             )).collect::<String>();
-            page.install_diff(ParsedDiff::new(patch));
+            page.install_diff(ParsedDiff::new(patch), cx);
             let cached = page.code_rows.clone();
             page.select_tab(Tab::Code, cx);
+            assert_eq!(page.code_ranges.len(), 3, "every file stays in the stream");
             for index in [2, 0, 1] {
                 page.select_code_file(index, cx);
-                let range = page.code_range();
-                assert_eq!(page.code_rows[range.start].text.as_ref(), page.code_files[index].0);
-                assert_eq!(range.len(), 4);
+                assert_eq!(page.active_file(), Some(index));
                 assert!(Arc::ptr_eq(&cached, &page.code_rows));
-                assert_eq!(page.code_horizontal.offset().x, px(0.0));
             }
             page.select_code_file(99, cx);
-            assert_eq!(page.selected_code_file, 1);
+            assert_eq!(page.active_file(), Some(1));
+        });
+        cx.simulate_resize(gpui::size(px(1200.0), px(850.0)));
+        page.update(cx, |page, cx| {
             page.file_search.update(cx, |input, cx| input.set_text("NESTED", cx));
-            page.files_expanded = true;
         });
         cx.run_until_parked();
         page.read_with(cx, |page, _| assert_eq!(page.file_query, "nested"));
         assert!(cx.debug_bounds("pr-file-navigation").is_some());
+        // Root files lead, so `nested/b.rs` is the last file.
         assert!(cx.debug_bounds("pr-file-0").is_none());
-        assert!(cx.debug_bounds("pr-file-1").is_some());
-        assert!(cx.debug_bounds("pr-file-2").is_none());
+        assert!(cx.debug_bounds("pr-file-1").is_none());
+        assert!(cx.debug_bounds("pr-file-2").is_some());
+        page.update(cx, |page, cx| {
+            page.file_search.update(cx, |input, cx| input.set_text("", cx));
+        });
         for (width, height) in [(320.0, 600.0), (900.0, 400.0), (1200.0, 850.0)] {
             cx.simulate_resize(gpui::size(px(width), px(height)));
             cx.run_until_parked();
             let viewport = cx.debug_bounds("pr-code-viewport").unwrap();
+            let toolbar = cx.debug_bounds("pr-file-navigation").unwrap();
             let nav = cx.debug_bounds("pr-detail-nav").unwrap();
-            assert!(viewport.size.height >= px(60.0), "expanded picker: {viewport:?}");
+            assert!(viewport.size.height >= px(60.0), "{viewport:?}");
             assert!(viewport.bottom() <= nav.top());
-            let browser = cx.debug_bounds("pr-file-browser").unwrap();
-            let search = cx.debug_bounds("pr-file-search").unwrap();
-            assert_eq!(search.size.height, px(crate::surface_chrome::CONTROL_SIZE));
-            let files = cx.debug_bounds("pr-file-list").unwrap();
-            assert!(files.top() >= search.bottom());
-            assert!(files.size.height > px(40.0));
+            assert!(toolbar.bottom() <= viewport.top());
+            assert_eq!(toolbar.left(), viewport.left(), "toolbar and stream share an edge");
+            let header = cx.debug_bounds("pr-file-header-0").unwrap();
+            assert_eq!(header.size.height, px(crate::changes::FILE_HEADER_HEIGHT));
             if width >= 900.0 {
+                let browser = cx.debug_bounds("pr-file-browser").unwrap();
                 assert!(browser.right() < viewport.left(), "files stay beside the diff");
+                assert_eq!(browser.top(), toolbar.top(), "tree header aligns with the toolbar");
+                let search = cx.debug_bounds("pr-file-search").unwrap();
+                assert_eq!(search.size.height, px(crate::surface_chrome::CONTROL_SIZE));
+                let files = cx.debug_bounds("pr-file-list").unwrap();
+                assert!(files.top() >= search.bottom() && files.size.height > px(40.0));
+                assert!(cx.debug_bounds("pr-files").is_none());
             } else {
-                assert!(browser.bottom() < viewport.top(), "compact picker stays above the diff");
+                assert!(cx.debug_bounds("pr-file-browser").is_none(), "compact stream keeps its width");
+                let files = cx.debug_bounds("pr-files").unwrap();
+                cx.simulate_mouse_down(files.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+                cx.simulate_mouse_up(files.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+                cx.run_until_parked();
+                let picker = cx.debug_bounds("pr-file-picker").unwrap();
+                assert!(picker.top() >= toolbar.bottom() && picker.right() <= px(width));
+                let file = cx.debug_bounds("pr-file-2").unwrap();
+                cx.simulate_mouse_down(file.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+                cx.simulate_mouse_up(file.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+                cx.run_until_parked();
+                page.read_with(cx, |page, _| {
+                    assert_eq!(page.active_file(), Some(2));
+                    assert!(!page.files_expanded, "picking a file closes the picker");
+                });
             }
             let toggle = cx.debug_bounds("pr-split").unwrap();
             cx.simulate_mouse_down(toggle.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
             cx.simulate_mouse_up(toggle.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+            page.update(cx, |page, cx| page.select_code_file(0, cx));
             cx.run_until_parked();
-            page.read_with(cx, |page, _| {
-                assert!(page.code_split);
-                assert_eq!(page.selected_code_file, 1);
-            });
-            let left = cx.debug_bounds("pr-split-cell-1-true").unwrap();
-            let right = cx.debug_bounds("pr-split-cell-1-false").unwrap();
+            page.read_with(cx, |page, _| assert!(page.code_split));
+            // Stream rows: header, hunk, then the first paired line.
+            let left = cx.debug_bounds("pr-split-cell-2-true").unwrap();
+            let right = cx.debug_bounds("pr-split-cell-2-false").unwrap();
             assert!(left.left() >= viewport.left());
             assert!(right.right() <= viewport.right());
             assert!((left.size.width - right.size.width).abs() < px(1.0));
@@ -1728,22 +1861,32 @@ mod tests {
             cx.simulate_mouse_up(toggle.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
             cx.run_until_parked();
             page.read_with(cx, |page, _| assert!(!page.code_split));
-            for selector in ["pr-files", "pr-copy-patch", "pr-previous-file", "pr-next-file", "pr-split"] {
+            for selector in ["pr-copy-patch", "pr-previous-file", "pr-next-file", "pr-split", "pr-fold-all"] {
                 let control = cx.debug_bounds(selector).unwrap();
                 assert!(control.left() >= px(24.0) && control.right() <= px(width - 24.0), "{selector}: {control:?}");
             }
         }
-        page.update(cx, |page, cx| {
-            page.file_search.update(cx, |input, cx| input.set_text("", cx));
-            cx.notify();
-        });
-        cx.run_until_parked();
         let file = cx.debug_bounds("pr-file-2").unwrap();
         cx.simulate_mouse_down(file.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_up(file.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
         cx.run_until_parked();
-        page.read_with(cx, |page, _| assert_eq!(page.selected_code_file, 2));
+        page.read_with(cx, |page, _| assert_eq!(page.active_file(), Some(2)));
         assert!(cx.debug_bounds("pr-file-browser").is_some(), "wide file navigator remains available after selection");
+        page.update(cx, |page, cx| page.select_code_file(0, cx));
+        cx.run_until_parked();
+        let header = cx.debug_bounds("pr-file-header-0").unwrap();
+        cx.simulate_mouse_down(header.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(header.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        page.read_with(cx, |page, _| {
+            assert!(page.collapsed_files.contains(&0));
+            assert_eq!(page.code_ranges[0], 0..1, "a folded file keeps only its header");
+        });
+        let fold_all = cx.debug_bounds("pr-fold-all").unwrap();
+        cx.simulate_mouse_down(fold_all.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(fold_all.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        page.read_with(cx, |page, _| assert_eq!(page.code_stream.len(), 3));
     }
 
     struct NavigationHitHost {
@@ -1934,11 +2077,7 @@ mod tests {
                         super::super::pull_request_media::parse_description(review),
                     ];
                     let patch = format!("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+{}\n", "long_expression_".repeat(30));
-                    let (rows, files) = code_rows(&patch);
-                    page.code_width = code_content_width(&rows);
-                    page.code_rows = Arc::new(rows);
-                    page.code_files = Arc::new(files);
-                    page.diff = Some(Arc::new(patch));
+                    page.install_diff(ParsedDiff::new(patch), cx);
                 }
                 page
             });
@@ -2059,7 +2198,7 @@ mod tests {
             );
             assert_eq!(
                 viewport.size.width,
-                px(width - 48.0 - if width - 48.0 >= 760.0 { 236.0 } else { 0.0 }),
+                px(width - 48.0 - if width - 48.0 >= 760.0 { 276.0 } else { 0.0 }),
                 "Code shares available width with the file navigator"
             );
             assert!(nav.size.width <= px(width));
