@@ -28,6 +28,22 @@ pub struct Span {
     pub text: String,
 }
 
+/// Multi-click granularity. Like native text, a drag that starts with a double
+/// or triple click keeps extending by that unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unit {
+    Word,
+    /// A whole text element: a paragraph, list item or code line.
+    Element,
+}
+
+fn unit_range(unit: Unit, text: &str, ix: usize) -> Range<usize> {
+    match unit {
+        Unit::Word => word_range(text, ix),
+        Unit::Element => 0..text.len(),
+    }
+}
+
 #[derive(Clone, Default)]
 struct MdSelection {
     /// Element that owns the drag (where the mouse went down).
@@ -35,6 +51,9 @@ struct MdSelection {
     /// Byte offset of the anchor within its element.
     anchor_ix: usize,
     dragging: bool,
+    /// Granularity and the anchor's unit range for multi-click drags. The
+    /// anchor unit stays selected whichever way the head moves.
+    unit: Option<(Unit, Range<usize>)>,
     /// Document direction established while the anchor is still painted.
     /// Once virtualization moves it out of the registry, this tells us which
     /// side of the accumulated spans to preserve while extending the head.
@@ -91,17 +110,19 @@ pub fn begin(key: &str, ix: usize) {
         anchor_key: key.to_string(),
         anchor_ix: ix,
         dragging: true,
+        unit: None,
         forward: None,
         spans: Vec::new(),
     });
 }
 
 /// Begin with an immediate span (double/triple click inside one element).
-pub fn begin_with_span(key: &str, text: &str, range: Range<usize>) {
+pub fn begin_with_span(key: &str, text: &str, range: Range<usize>, unit: Unit) {
     *state().lock().unwrap() = Some(MdSelection {
         anchor_key: key.to_string(),
         anchor_ix: range.start,
         dragging: true,
+        unit: Some((unit, range.clone())),
         forward: None,
         spans: vec![Span {
             key: key.to_string(),
@@ -147,16 +168,41 @@ pub fn update_drag(elements: &[(&str, &str)], head: (usize, usize)) -> bool {
     let Some(selection) = guard.as_mut().filter(|selection| selection.dragging) else {
         return false;
     };
+    let head_unit = selection.unit.as_ref().map(|(unit, _)| {
+        elements
+            .get(head.0)
+            .map_or(head.1..head.1, |(_, text)| unit_range(*unit, text, head.1))
+    });
     let spans = if let Some(anchor_ei) = elements
         .iter()
         .position(|(key, _)| *key == selection.anchor_key)
     {
-        let anchor = (anchor_ei, selection.anchor_ix);
-        selection.forward = Some(anchor <= head);
-        resolve_spans(elements, anchor, head)
+        match (&selection.unit, head_unit) {
+            (Some((_, anchor)), Some(head_unit)) => {
+                let start = (anchor_ei, anchor.start);
+                let end = (anchor_ei, anchor.end);
+                if (head.0, head_unit.start) < start {
+                    selection.forward = Some(false);
+                    resolve_spans(elements, (head.0, head_unit.start), end)
+                } else {
+                    selection.forward = Some(true);
+                    resolve_spans(elements, start, end.max((head.0, head_unit.end)))
+                }
+            }
+            _ => {
+                let anchor = (anchor_ei, selection.anchor_ix);
+                selection.forward = Some(anchor <= head);
+                resolve_spans(elements, anchor, head)
+            }
+        }
     } else {
         let Some(forward) = selection.forward else {
             return false;
+        };
+        let head = match head_unit {
+            Some(unit) if forward => (head.0, unit.end),
+            Some(unit) => (head.0, unit.start),
+            None => head,
         };
         let Some(spans) = extend_virtualized_drag(&selection.spans, elements, head, forward) else {
             return false;
@@ -433,9 +479,51 @@ mod tests {
     #[test]
     fn double_click_span() {
         let _state = test_state_lock();
-        begin_with_span("p1", "hello world", 6..11);
+        begin_with_span("p1", "hello world", 6..11, Unit::Word);
         assert_eq!(wash_range("p1"), Some(6..11));
         assert_eq!(end_drag("p1").as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn double_click_drag_extends_by_whole_words() {
+        let _state = test_state_lock();
+        let elements = [("p1", "hello big world"), ("p2", "foo bar")];
+        begin_with_span("p1", "hello big world", 6..9, Unit::Word);
+        assert!(!update_drag(&elements, (0, 7)), "jitter keeps the word");
+        assert_eq!(selected_text().as_deref(), Some("big"));
+        assert!(update_drag(&elements, (0, 12)));
+        assert_eq!(selected_text().as_deref(), Some("big world"));
+        assert!(update_drag(&elements, (0, 1)));
+        assert_eq!(selected_text().as_deref(), Some("hello big"));
+        assert!(update_drag(&elements, (1, 1)));
+        assert_eq!(selected_text().as_deref(), Some("big world\nfoo"));
+        end_drag("p1");
+        clear_if_owner("p1");
+    }
+
+    #[test]
+    fn triple_click_drag_extends_by_whole_elements() {
+        let _state = test_state_lock();
+        let elements = [("p1", "first"), ("p2", "second line")];
+        begin_with_span("p1", "first", 0..5, Unit::Element);
+        assert!(!update_drag(&elements, (0, 2)));
+        assert!(update_drag(&elements, (1, 3)));
+        assert_eq!(selected_text().as_deref(), Some("first\nsecond line"));
+        end_drag("p1");
+        clear_if_owner("p1");
+    }
+
+    #[test]
+    fn word_drag_snaps_after_the_anchor_virtualizes() {
+        let _state = test_state_lock();
+        let before = [("p1", "hello world"), ("p2", "foo bar")];
+        begin_with_span("p1", "hello world", 6..11, Unit::Word);
+        assert!(update_drag(&before, (1, 1)));
+        let after = [("p2", "foo bar"), ("p3", "baz qux")];
+        assert!(update_drag(&after, (1, 5)));
+        assert_eq!(selected_text().as_deref(), Some("world\nfoo bar\nbaz qux"));
+        end_active_drag();
+        clear_if_owner("p1");
     }
 
     #[test]

@@ -11386,7 +11386,12 @@ mod tests {
             input.set_text("Unselected draft", cx);
             assert_eq!(input.key_context, MESSAGE_COMPOSER_CONTEXT);
             assert!(input.selected_range.is_empty());
-            crate::markdown::selection::begin_with_span(key, text, 0..text.len());
+            crate::markdown::selection::begin_with_span(
+                key,
+                text,
+                0..text.len(),
+                crate::markdown::selection::Unit::Element,
+            );
             crate::markdown::selection::end_active_drag();
             input.copy(&Copy, window, cx);
             let copied = cx.read_from_clipboard().and_then(|item| item.text());

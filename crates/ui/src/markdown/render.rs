@@ -1620,10 +1620,20 @@ fn register_selection_listeners(
                 match e.click_count {
                     2 => {
                         let range = super::selection::word_range(&text, ix);
-                        super::selection::begin_with_span(&key, &text, range);
+                        super::selection::begin_with_span(
+                            &key,
+                            &text,
+                            range,
+                            super::selection::Unit::Word,
+                        );
                     }
                     n if n >= 3 => {
-                        super::selection::begin_with_span(&key, &text, 0..text.len());
+                        super::selection::begin_with_span(
+                            &key,
+                            &text,
+                            0..text.len(),
+                            super::selection::Unit::Element,
+                        );
                     }
                     _ => super::selection::begin(&key, ix),
                 }
@@ -2826,6 +2836,17 @@ mod tests {
             button: gpui::MouseButton::Left,
             position: first_bounds.origin + point(px(5.0), px(9.0)),
             click_count: 2,
+            ..Default::default()
+        });
+        assert_eq!(
+            super::super::selection::selected_text().as_deref(),
+            Some("selectable")
+        );
+        // Pointer tremor between the second press and release must not
+        // demote the word to a character selection.
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: first_bounds.origin + point(px(12.0), px(9.0)),
+            pressed_button: Some(gpui::MouseButton::Left),
             ..Default::default()
         });
         assert_eq!(
