@@ -40,7 +40,7 @@ use gpui::{
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
-use zeron_proto::ToolCall;
+use zeron_proto::{HarnessId, ToolCall};
 
 use crate::markdown::parser::{
     Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
@@ -1062,6 +1062,13 @@ pub enum RowKind {
         source_chat_id: SharedString,
         source_title: SharedString,
     },
+    /// The provider-switch seam: a labeled divider over `[logo] From → [logo] To`.
+    SwitchMarker {
+        from: SharedString,
+        to: SharedString,
+        from_harness: Option<HarnessId>,
+        to_harness: Option<HarnessId>,
+    },
 }
 
 fn generated_image_devices(owner: &str, fallback: &[String]) -> Vec<String> {
@@ -1644,6 +1651,34 @@ pub fn rows_for_entry(
                             compact_fold: None,
                         });
                     }
+                    MessagePart::Switch {
+                        id: part_id,
+                        from,
+                        to,
+                        from_harness,
+                        to_harness,
+                    } => {
+                        let from_harness = from_harness.as_deref().and_then(HarnessId::from_slug);
+                        let to_harness = to_harness.as_deref().and_then(HarnessId::from_slug);
+                        rows.push(Row {
+                            id: format!("{}#{}", entry.id, part_id).into(),
+                            version: fnv1a(
+                                format!("{from}\u{1}{to}\u{1}{from_harness:?}\u{1}{to_harness:?}")
+                                    .as_bytes(),
+                            ),
+                            turn_start: false,
+                            kind: RowKind::SwitchMarker {
+                                from: single_line(from).into(),
+                                to: single_line(to).into(),
+                                from_harness,
+                                to_harness,
+                            },
+                            entry_id: entry_id.clone(),
+                            timestamp: None,
+                            copy_text: None,
+                            compact_fold: None,
+                        });
+                    }
                     // Tools and thoughts are grouped by the outer arms;
                     // nothing reaches here.
                     MessagePart::Tool { .. } | MessagePart::Reasoning { .. } => {}
@@ -1728,7 +1763,10 @@ pub fn rows_for_entry(
     // change when streaming flips off (chips).
     if !streaming
         && let Some(last) = rows.last_mut()
-        && !matches!(last.kind, RowKind::ForkMarker { .. })
+        && !matches!(
+            last.kind,
+            RowKind::ForkMarker { .. } | RowKind::SwitchMarker { .. }
+        )
     {
         last.timestamp = Some(entry.created_at);
         last.copy_text = assistant_copy_text(entry);
@@ -6634,6 +6672,12 @@ impl Transcript {
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
+            RowKind::SwitchMarker {
+                from,
+                to,
+                from_harness,
+                to_harness,
+            } => switch_marker(from.clone(), to.clone(), *from_harness, *to_harness, &theme),
         };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
@@ -7883,6 +7927,90 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text_muted)
                 .child(source_title),
+        )
+        .into_any_element()
+}
+
+/// The provider-switch seam: the fork divider's rule and caption over a
+/// centered `[logo] From → [logo] To`, each side in its provider's brand mark.
+/// A side without a known harness (a seam from a build that didn't record
+/// one) shows its name alone.
+fn switch_marker(
+    from: SharedString,
+    to: SharedString,
+    from_harness: Option<HarnessId>,
+    to_harness: Option<HarnessId>,
+    theme: &Theme,
+) -> AnyElement {
+    let rule = || div().flex_1().min_w_0().h(px(1.0)).bg(theme.border_strong);
+    let provider = |name: SharedString, harness: Option<HarnessId>| {
+        div()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .when_some(
+                harness.map(crate::pickers::harness_brand_icon),
+                |el, (path, tint)| {
+                    el.child(
+                        crate::icons::icon(path)
+                            .size(px(15.0))
+                            .flex_none()
+                            .text_color(tint.unwrap_or(theme.text_muted)),
+                    )
+                },
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child(name),
+            )
+    };
+    div()
+        .py(px(14.0))
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .child(rule())
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted.opacity(0.7))
+                        .child("Switched provider"),
+                )
+                .child(rule()),
+        )
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(10.0))
+                .child(provider(from, from_harness))
+                .child(
+                    crate::icons::icon(crate::icons::ARROW_RIGHT)
+                        .size(px(13.0))
+                        .flex_none()
+                        .text_color(theme.text_muted.opacity(0.7)),
+                )
+                .child(provider(to, to_harness)),
         )
         .into_any_element()
 }
@@ -10494,6 +10622,65 @@ mod tests {
             id: id.into(),
             text: text.into(),
         }
+    }
+
+    fn switch_entry(from_harness: Option<&str>, to_harness: Option<&str>) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: "switch:1".into(),
+            role: MessageRole::System,
+            parts: vec![MessagePart::Switch {
+                id: "switch:1".into(),
+                from: "Claude Code".into(),
+                to: "Codex".into(),
+                from_harness: from_harness.map(Into::into),
+                to_harness: to_harness.map(Into::into),
+            }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn provider_switch_seam_is_one_marker_row_carrying_both_providers() {
+        let rows = rows_for_entry(
+            &switch_entry(Some("claude-code"), Some("codex")),
+            false,
+            false,
+            &mut parse,
+        );
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].timestamp.is_none(), "a seam has no metadata strip");
+        match &rows[0].kind {
+            RowKind::SwitchMarker {
+                from,
+                to,
+                from_harness,
+                to_harness,
+            } => {
+                assert_eq!(from.as_ref(), "Claude Code");
+                assert_eq!(to.as_ref(), "Codex");
+                assert_eq!(*from_harness, Some(HarnessId::ClaudeCode));
+                assert_eq!(*to_harness, Some(HarnessId::Codex));
+            }
+            _ => panic!("expected a switch marker row"),
+        }
+        // A seam written without provider ids (or by a newer peer naming a
+        // harness this build doesn't know) still renders, minus the logo.
+        for (from, to) in [(None, None), (Some("some-future-agent"), Some("codex"))] {
+            let rows = rows_for_entry(&switch_entry(from, to), false, false, &mut parse);
+            match &rows[0].kind {
+                RowKind::SwitchMarker { from_harness, .. } => assert_eq!(*from_harness, None),
+                _ => panic!("expected a switch marker row"),
+            }
+        }
+        // Changing a provider re-keys the row so a cached one is rebuilt.
+        let version = |from: Option<&str>| {
+            rows_for_entry(&switch_entry(from, Some("codex")), false, false, &mut parse)[0].version
+        };
+        assert_ne!(version(Some("claude-code")), version(Some("cursor")));
     }
 
     #[test]

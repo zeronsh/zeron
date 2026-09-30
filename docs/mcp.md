@@ -34,9 +34,12 @@ instructions in the stored prompt for agents.
 A chat created through `create_chat` records the creating chat as its parent:
 `Chat.parent_chat_id` (proto) ⇄ `parentChatId` on the registry/workspace chat
 row (`Mutate createChat { parentChatId? }` → `WorkspaceHost::create_chat_with_parent`).
-Chats with a parent cannot create chats through MCP, including batch creation
-or an explicit parent override. A side chat cannot be selected as a parent;
-only one level of side chats is supported.
+Any chat may create chats through MCP, whichever provider it runs on, so
+delegation nests: a `claude-code` chat spawns a `codex` chat, which may spawn
+another. The nesting is capped at 3 levels below a top-level chat (counted by
+walking `parentChatId`); `create_chat` / `create_chats` refuse a parent that is
+already that deep, including through an explicit `parent` override, and say so
+in the error.
 
 The default is the origin chat (`ZERON_CHAT_ID`); an explicit `parent` argument
 (id, prefix, or title) overrides it. `list_chats { parent }` returns a chat's
@@ -102,7 +105,7 @@ name (default: the local engine's device).
 | `whoami`           | `LocalDevice`, `EngineInfo`, origin chat summary          |
 | `list_devices`     | `WatchDevices` snapshot                                   |
 | `list_projects`    | `WatchSpaces` snapshot                                    |
-| `list_harnesses`   | `ListHarnesses`                                           |
+| `list_harnesses`   | `ListHarnesses` + `ListAgentAccounts` (login state)       |
 | `list_models`      | `ListModels {harness}`                                    |
 | `list_chats`       | `WatchChats` + `WatchSessions` snapshots (status merged)  |
 | `get_chat`         | above + `WatchDocMessages` opening frame (pending input)  |
@@ -155,6 +158,46 @@ before the send: it returns on a new `last_completed_turn`, an
 edge. A brand-new chat has no session row until the host picks the run up, so
 the wait keeps waiting in that case rather than reporting the unstarted run as
 done (this was the one bug the first live run found).
+
+## Delegating across providers
+
+The `zeron` server is injected into every real harness (table above), and
+`create_chat` takes any `harness`, so every provider agent can hand work to any
+other: Claude Code → Codex and the reverse, or to Cursor, OpenCode, and so on.
+`list_harnesses` marks each provider:
+
+- `available` — installed and enabled on this device.
+- `signedIn` — whether a login for it is present (`ListAgentAccounts`), or
+  `null` when that could not be determined.
+- `connected` — available and not known to be signed out. This is what a
+  delegating agent should choose from; `create_chat` without a `harness` also
+  prefers a connected provider (claude-code first).
+
+`signedIn` is advisory: credential detection does not see every source (an API
+key in the environment, say), so only an explicit `false` counts against a
+provider. `create_chat` still creates the chat but returns a `warning` when the
+chosen provider looks signed out, rather than refusing.
+
+## Switching a chat's provider
+
+A chat is not tied to the provider it started on. Picking another provider in
+the composer (or `Mutate setChatConfig` with a different `harness`) moves the
+conversation between turns; it is refused while a turn is running.
+
+- A harness-native resume id only means something to the harness that minted
+  it, so the chat row stores which one that was
+  (`Chat.harness_session_harness`). `resume_for` turns away an id owned by a
+  different harness; rows from before the tag are attributed from the run
+  journal on first use.
+- On the first run after a switch the host writes a `switch` part (a system
+  entry: `from`, `to` display names) into the transcript, sets the session doc's
+  `providerSwitched` flag, and hands the new provider's fresh session the prior
+  conversation once (`Inner::fork_history_prompt`, the side-chat bootstrap,
+  generalised). That replay is capped (about 80k characters, newest messages
+  win; long messages and tool output are clipped), so a long chat continues
+  with its recent context and a note that earlier messages were omitted.
+- Later turns on the new provider resume its own session natively; switching
+  back starts a fresh session there and replays again.
 
 ## Parallel side chats
 

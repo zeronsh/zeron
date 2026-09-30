@@ -409,9 +409,7 @@ impl ChatConnectionSnapshot {
             sync_requested,
             stats: client.as_ref().map(|client| client.stats()),
             delivery_live: sync_started
-                && client
-                    .as_ref()
-                    .is_some_and(|client| client.delivery_live()),
+                && client.as_ref().is_some_and(|client| client.delivery_live()),
         }
     }
 
@@ -784,6 +782,53 @@ impl ChatDocHandle {
             continuation_of: None,
             duration_ms: None,
         })
+    }
+
+    /// Record that the chat moved from provider `from` to provider `to`: a
+    /// system entry carrying the [`MessagePart::Switch`] seam, plus the
+    /// `providerSwitched` meta flag that makes the next fresh provider session
+    /// owe the transcript. Idempotent against a retried dispatch: nothing is
+    /// written while the latest seam already points at `to` and no turn ran
+    /// since. Returns whether a seam was written.
+    pub fn write_provider_switch(
+        &self,
+        from: (HarnessId, &str),
+        to: (HarnessId, &str),
+        created_at: i64,
+    ) -> Result<bool, DocError> {
+        let ((from_id, from), (to_id, to)) = (from, to);
+        let entries = self.doc.read_entries()?;
+        if entries.is_empty() {
+            return Ok(false);
+        }
+        let latest = entries.iter().rev().find_map(|entry| {
+            entry.parts.iter().find_map(|part| match part {
+                MessagePart::Switch { to, .. } => Some(to.as_str()),
+                _ => None,
+            })
+        });
+        if latest == Some(to) {
+            return Ok(false);
+        }
+        let id = format!("switch:{created_at}");
+        self.doc.push_message(&SessionMessageEntry {
+            id: id.clone(),
+            role: MessageRole::System,
+            parts: vec![MessagePart::Switch {
+                id,
+                from: from.to_string(),
+                to: to.to_string(),
+                from_harness: Some(from_id.as_str().to_owned()),
+                to_harness: Some(to_id.as_str().to_owned()),
+            }],
+            created_at,
+            device_id: self.device_id.clone(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })?;
+        self.doc.mark_provider_switched()?;
+        Ok(true)
     }
 
     /// Recovery sweep: stamp this device's abandoned `streaming` entries `aborted`, appending

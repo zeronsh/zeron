@@ -218,6 +218,24 @@ pub enum MessagePart {
         /// source does not rewrite history.
         source_title: String,
     },
+    /// The seam where a chat changed provider: the turns above ran on
+    /// `from`, the turns below run on `to`. Written by the host engine when
+    /// the first run after a harness change is dispatched. Labels are
+    /// display names ("Claude Code", "Codex"), frozen as of the switch.
+    /// `from_harness` / `to_harness` are the harness slugs (`claude-code`,
+    /// `codex`, ...) the UI draws provider logos from; absent on a seam written
+    /// without them. Old builds' unknown-kind fallback yields an invisible empty
+    /// text part.
+    #[serde(rename_all = "camelCase")]
+    Switch {
+        id: String,
+        from: String,
+        to: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_harness: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_harness: Option<String>,
+    },
 }
 
 impl MessagePart {
@@ -229,7 +247,8 @@ impl MessagePart {
             | MessagePart::Tool { id, .. }
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. }
-            | MessagePart::Fork { id, .. } => id,
+            | MessagePart::Fork { id, .. }
+            | MessagePart::Switch { id, .. } => id,
         }
     }
 
@@ -267,6 +286,7 @@ impl MessagePart {
                 source_title,
                 ..
             } => source_chat_id.len() + source_title.len(),
+            MessagePart::Switch { from, to, .. } => from.len() + to.len(),
         }
     }
 }

@@ -209,6 +209,13 @@ pub struct Chat {
     /// is only injected when the next run launches from the same cwd.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_session_cwd: Option<String>,
+    /// Slug of the harness (`HarnessId::as_str`) that owns
+    /// `harness_session_id`. A resume id only means something to the harness
+    /// that minted it, so a chat switched to another provider must not hand
+    /// it over. `None` on rows written before the tag existed: those are
+    /// taken to belong to the chat's configured harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_session_harness: Option<String>,
     /// The space this chat belongs to. Invariant: `Some` for every UI-created
     /// chat; rows with a missing/dangling space id are not rendered (the host
     /// device's repair sweep deletes its own danglers).

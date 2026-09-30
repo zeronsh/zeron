@@ -1,7 +1,7 @@
 //! Composer pickers (feature-inventory §1.7): RepoPicker (recents + search +
 //! in-app folder browser + clone/create), BranchPicker (search + isolated-
-//! worktree toggle), HarnessModelPicker (harness rail + model list, harness
-//! locked once the chat exists), TraitsPicker (reasoning ladder + advertised
+//! worktree toggle), HarnessModelPicker (harness rail + model list; a chat may
+//! switch harness between turns, never during one), TraitsPicker (reasoning ladder + advertised
 //! model options; trigger shows the non-default summary "High · 1M · Fast").
 //!
 //! All selections accumulate into a [`DraftConfig`] the composer threads into
@@ -832,10 +832,12 @@ impl Pickers {
         &self.config
     }
 
-    /// Harness is locked once the chat exists (feature-inventory §1.7).
+    /// A chat can change provider between turns — the engine hands the new
+    /// harness the transcript — but not while a turn is running or its first
+    /// send is still in flight.
     fn harness_locked(&self, cx: &App) -> bool {
         let state = self.state.read(cx);
-        self.title.is_none() && state.selected_chat.is_some() && !state.side_chat_harness_editable()
+        self.title.is_none() && state.selected_chat.is_some() && !state.harness_switchable()
     }
 
     /// The harnesses this picker offers: runnable ones for the composer,
@@ -1630,10 +1632,14 @@ impl Pickers {
         if self.harness_locked(cx) {
             return;
         }
-        if self.state.read(cx).side_chat_unsaved() && self.effective_harness(cx) != Some(harness) {
-            // A side-chat draft already has a selected row. Replace its inherited
-            // provider settings so both the picker and first createChat use the
-            // new harness, even when its model catalog has not loaded yet.
+        if self.title.is_none()
+            && self.state.read(cx).selected_chat.is_some()
+            && self.effective_harness(cx) != Some(harness)
+        {
+            // The chat already has a row (a side-chat draft's, or a saved
+            // chat's). Replace its inherited provider settings so the picker,
+            // the next send and (for a saved chat) the setChatConfig mutate all
+            // use the new harness, even when its model catalog has not loaded.
             let model = self.defaults.model_for(harness).map(|m| m.id.clone());
             let reasoning = self.defaults.reasoning;
             let options = model
@@ -1854,7 +1860,7 @@ impl Pickers {
     /// The harness descriptors the picker rail offers, with the committed
     /// harness force-included even when it's outside the offered set (a
     /// dev session's mock harness, or one disabled after the chat existed).
-    /// Existing chats only offer their own harness.
+    /// While a turn runs, the chat's own harness is the only one offered.
     fn rail_descriptors(&self, cx: &App) -> Vec<HarnessDescriptor> {
         let Some(list) = self.harnesses.ready() else {
             return Vec::new();
@@ -5701,10 +5707,14 @@ mod tests {
 
         cx.update(|cx| {
             // Forks are already persisted when opened, even before their first
-            // own message. Saved empty side chats must have the same lock.
-            let (_, fork) = side_chat_picker(false, cx);
+            // own message. A saved chat between turns may change provider, but
+            // not while a turn is running.
+            let (fork_state, fork) = side_chat_picker(false, cx);
+            fork_state.update(cx, |state, _| {
+                state.apply_sessions(vec![running_session("side")]);
+            });
             fork.update(cx, |pickers, cx| {
-                assert!(pickers.harness_locked(cx));
+                assert!(pickers.harness_locked(cx), "locked mid-turn");
                 assert_eq!(pickers.rail_descriptors(cx).len(), 1);
                 pickers.pick_harness(HarnessId::Codex, cx);
                 assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::ClaudeCode));
@@ -5727,11 +5737,76 @@ mod tests {
                 "failed creation remains editable"
             );
             state.update(cx, |state, cx| state.side_chat_saved("side", cx));
+            state.update(cx, |state, _| {
+                state.apply_sessions(vec![running_session("side")]);
+            });
             pickers.update(cx, |pickers, cx| {
                 assert!(pickers.harness_locked(cx));
                 pickers.pick_harness(HarnessId::Codex, cx);
                 assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::ClaudeCode));
             });
+        });
+    }
+
+    fn running_session(chat_id: &str) -> zeron_proto::Session {
+        zeron_proto::Session {
+            last_completed_turn: None,
+            chat_id: chat_id.into(),
+            device_id: "local".into(),
+            status: zeron_proto::SessionStatus::Working,
+            started_at: Some(chrono::Utc::now()),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[gpui::test]
+    fn saved_chat_switches_provider_between_turns_and_persists_it(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(256);
+        let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(256);
+        let (state, pickers) = cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let (state, pickers) = side_chat_picker(false, cx);
+            state.update(cx, |state, _| {
+                state.set_test_engine(EngineHandle::from_test_client(zeron_rpc::RpcClient::new(
+                    out, inbound,
+                )));
+            });
+            pickers.update(cx, |pickers, cx| {
+                assert!(!pickers.harness_locked(cx), "idle saved chat can switch");
+                assert_eq!(pickers.rail_descriptors(cx).len(), 2);
+                pickers.pick_harness(HarnessId::Codex, cx);
+                let resolved = pickers.resolved(cx);
+                assert_eq!(resolved.harness, Some(HarnessId::Codex));
+                assert_eq!(resolved.model, None, "the old provider's model must not linger");
+                assert!(resolved.model_options.is_empty());
+                assert!(pickers.mutate_task.is_some(), "a saved chat persists the switch");
+            });
+            (state, pickers)
+        });
+        cx.run_until_parked();
+        let sent = requests.try_recv().expect("setChatConfig went out");
+        assert!(sent.contains("setChatConfig") && sent.contains("\"codex\""), "{sent}");
+        cx.update(|cx| {
+            let row = state.read(cx).selected_chat_row().unwrap().config.clone().unwrap();
+            assert_eq!(row.harness, HarnessId::Codex);
+            assert_eq!(row.sandbox, zeron_proto::SandboxLevel::ReadOnly, "sandbox is kept");
+
+            // A turn starts: the switch is refused until it ends.
+            state.update(cx, |state, _| {
+                state.apply_sessions(vec![running_session("side")]);
+            });
+            pickers.update(cx, |pickers, cx| {
+                assert!(pickers.harness_locked(cx));
+                pickers.pick_harness(HarnessId::ClaudeCode, cx);
+                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::Codex));
+            });
+            state.update(cx, |state, _| state.apply_sessions(Vec::new()));
+            assert!(!pickers.read(cx).harness_locked(cx), "unlocks when the turn ends");
         });
     }
 

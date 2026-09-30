@@ -148,7 +148,7 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
             MessagePart::Error { message, .. } => errors.push(message.clone()),
             // The fork seam is a transcript marker, not agent content: an
             // orchestrator reads the copied history as ordinary turns.
-            MessagePart::Fork { .. } => {}
+            MessagePart::Fork { .. } | MessagePart::Switch { .. } => {}
         }
     }
     RenderedMessage {

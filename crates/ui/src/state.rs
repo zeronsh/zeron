@@ -2079,6 +2079,32 @@ impl AppState {
                 .is_some_and(|id| !self.pending_sends.contains_key(id))
     }
 
+    /// A turn is streaming in this chat, or parked on a question it is still
+    /// owed an answer to. Only the status row decides: a persistent session
+    /// parked between turns reports idle.
+    pub(crate) fn chat_turn_running(&self, chat_id: &str) -> bool {
+        self.sessions.iter().any(|session| {
+            session.chat_id == chat_id
+                && matches!(
+                    session.status,
+                    zeron_proto::SessionStatus::Working | zeron_proto::SessionStatus::AwaitingInput
+                )
+        })
+    }
+
+    /// The selected chat may change provider right now: a saved chat between
+    /// turns (its transcript is handed to the new provider), or a side-chat
+    /// draft before its first send snapshots the harness.
+    pub(crate) fn harness_switchable(&self) -> bool {
+        if self.side_chat_harness_editable() {
+            return true;
+        }
+        !self.unsaved_side_chat
+            && self.selected_chat.as_ref().is_some_and(|id| {
+                !self.pending_sends.contains_key(id) && !self.chat_turn_running(id)
+            })
+    }
+
     fn is_unsaved_side_chat(&self, chat_id: &str) -> bool {
         self.unsaved_side_chat
             && self
@@ -3646,6 +3672,7 @@ mod tests {
             created_at: base + TimeDelta::minutes(created_min),
             harness_session_id: None,
             harness_session_cwd: None,
+            harness_session_harness: None,
             parent_chat_id: None,
             space_id: None,
             last_seen_at: None,

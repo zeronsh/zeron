@@ -22,6 +22,11 @@ use crate::zeron::{HarnessInfo, TurnOutcome, Zeron, session_for, short};
 
 /// Default and ceiling for the blocking waits.
 const MAX_BATCH: usize = 32;
+/// How many levels of chats an agent may delegate through: a top-level chat
+/// spawns depth 1, that one may spawn depth 2, and so on up to this. Deep
+/// enough for claude → gpt → claude, shallow enough to stop a runaway loop of
+/// agents spawning agents.
+const MAX_DELEGATION_DEPTH: usize = 3;
 const DEFAULT_WAIT: Duration = Duration::from_secs(600);
 const MAX_WAIT: Duration = Duration::from_secs(3600);
 /// A session row older than this is not trusted to still be working
@@ -74,7 +79,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_harnesses",
-            description: "Agent harnesses (claude-code, codex, cursor, …) and whether each is available on this device.",
+            description: "Agent harnesses (claude-code, codex, cursor, …). `connected` = installed, enabled and not known to be signed out: those are the providers you can delegate to, whichever provider you are. `signedIn` is null when the login state is unknown.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
@@ -109,7 +114,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a chat in a project (or project-less on a device) with a harness and model. The new chat records your chat as its parent (parentChatId). Optionally send a first prompt and wait for the reply. Returns the new chat id. For parallel delegation use create_chats, or leave wait=false on every launch and wait only after all chats have been started.",
+            description: "Create a chat in a project (or project-less on a device) with a harness and model — any connected provider works (see list_harnesses), whichever provider you run on, so a claude-code agent can hand work to codex and the reverse. The new chat records your chat as its parent (parentChatId); delegation may nest up to 3 levels deep. Optionally send a first prompt and wait for the reply. Returns the new chat id. For parallel delegation use create_chats, or leave wait=false on every launch and wait only after all chats have been started.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -522,6 +527,8 @@ impl Tools {
                 "id": h.id,
                 "name": h.name,
                 "available": h.available(),
+                "connected": h.connected(),
+                "signedIn": h.signed_in,
                 "installed": h.installed,
                 "steersMidTurn": h.steers_mid_turn(),
                 "reasoningLevels": h.reasoning_levels,
@@ -595,14 +602,20 @@ impl Tools {
         Ok(summary)
     }
 
+    /// Refuse a child of `parent` when that would nest chats deeper than
+    /// [`MAX_DELEGATION_DEPTH`].
+    async fn ensure_delegation_depth(&self, parent: &str) -> anyhow::Result<()> {
+        let parent = self.zeron.resolve_chat(parent).await?;
+        let chats = self.zeron.chats().await?;
+        let depth = chain_depth(&parent, &chats);
+        anyhow::ensure!(
+            depth < MAX_DELEGATION_DEPTH,
+            "Delegation is limited to {MAX_DELEGATION_DEPTH} levels of chats (this chat is already {depth} deep). Do the work in this chat, or ask the chat that started you to create the next one."
+        );
+        Ok(())
+    }
+
     async fn create_chat(&self, args: CreateChatArgs) -> anyhow::Result<Value> {
-        if let Some(origin) = self.zeron.origin().chat_id.as_deref() {
-            let chat = self.zeron.resolve_chat(origin).await?;
-            anyhow::ensure!(
-                chat.parent_chat_id.is_none(),
-                "Side chats cannot create chats. Ask your parent chat to create another side chat."
-            );
-        }
         let harnesses = self.zeron.harnesses().await?;
         let harness = match args.harness.as_deref() {
             Some(raw) => {
@@ -673,11 +686,7 @@ impl Tools {
         };
 
         if let Some(parent) = parent_chat_id.as_deref() {
-            let chat = self.zeron.resolve_chat(parent).await?;
-            anyhow::ensure!(
-                chat.parent_chat_id.is_none(),
-                "Cannot create a child of a side chat. Choose a top-level parent chat."
-            );
+            self.ensure_delegation_depth(parent).await?;
         }
         let chat_id = uuid::Uuid::new_v4().to_string();
         let mut mutate = json!({
@@ -715,6 +724,10 @@ impl Tools {
                 .await?;
         }
 
+        let signed_out = harnesses
+            .iter()
+            .find(|h| h.id == harness)
+            .is_some_and(|h| h.signed_in == Some(false));
         let mut result = json!({
             "chatId": chat_id,
             "deviceId": device_id,
@@ -725,6 +738,11 @@ impl Tools {
             "title": args.title,
             "parentChatId": parent_chat_id,
         });
+        if signed_out {
+            result["warning"] = json!(format!(
+                "{harness:?} does not look signed in on this device, so its first turn may fail. Pick a connected harness (list_harnesses) if it does."
+            ));
+        }
         if let Some(prompt) = args.prompt.filter(|p| !p.trim().is_empty()) {
             // The row may not have folded into WatchChats yet; build the
             // chat locally from what we just wrote rather than re-reading.
@@ -743,6 +761,7 @@ impl Tools {
                 created_at: chrono::Utc::now(),
                 harness_session_id: None,
                 harness_session_cwd: None,
+                harness_session_harness: None,
                 parent_chat_id: parent_chat_id.clone(),
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
@@ -1067,14 +1086,40 @@ impl Tools {
     }
 }
 
-/// claude-code when it is offered here, else the first available harness.
+/// Number of ancestors above `chat` (0 for a top-level chat). Bounded so a
+/// corrupt parent cycle cannot spin.
+fn chain_depth(chat: &Chat, chats: &[Chat]) -> usize {
+    let mut depth = 0;
+    let mut next = chat.parent_chat_id.as_deref();
+    while let Some(id) = next {
+        depth += 1;
+        if depth > 64 {
+            break;
+        }
+        next = chats
+            .iter()
+            .find(|c| c.id == id)
+            .and_then(|c| c.parent_chat_id.as_deref());
+    }
+    depth
+}
+
+/// claude-code when it is ready here, else the first ready harness — a
+/// provider that is installed but signed out only when nothing else is.
 fn default_harness(harnesses: &[HarnessInfo]) -> anyhow::Result<HarnessId> {
     if harnesses.is_empty() {
         return Ok(HarnessId::ClaudeCode);
     }
+    let real = |h: &&HarnessInfo| h.id != HarnessId::Mock;
     harnesses
         .iter()
-        .find(|h| h.id == HarnessId::ClaudeCode && h.available())
+        .find(|h| h.id == HarnessId::ClaudeCode && h.connected())
+        .or_else(|| harnesses.iter().filter(real).find(|h| h.connected()))
+        .or_else(|| {
+            harnesses
+                .iter()
+                .find(|h| h.id == HarnessId::ClaudeCode && h.available())
+        })
         .or_else(|| {
             harnesses
                 .iter()
@@ -1102,6 +1147,10 @@ mod tests {
         writes: Mutex<Vec<(String, Value)>>,
         dispatch_barrier: Option<tokio::sync::Barrier>,
         beta_parent: Option<String>,
+        /// Adds two more chats below Beta: Beta → Gamma → Delta.
+        deep: bool,
+        /// `ListAgentAccounts` reply; absent = the method is unknown.
+        accounts: Option<Value>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1124,7 +1173,8 @@ mod tests {
                     "id": "space-1", "deviceId": "dev-local", "path": "/repo/comet",
                     "gitDetected": true, "createdAt": "2026-09-01T00:00:00Z"
                 }])),
-                methods::WATCH_CHATS => stream(json!([
+                methods::WATCH_CHATS => {
+                    let mut chats = json!([
                     {
                         "id": "chat-alpha-1", "deviceId": "dev-local", "title": "Alpha",
                         "archived": false, "spaceId": "space-1",
@@ -1137,7 +1187,24 @@ mod tests {
                         "archived": false, "spaceId": "space-1",
                         "createdAt": "2026-09-02T00:00:00Z"
                     }
-                ])),
+                    ]);
+                    if self.deep {
+                        for (id, title, parent) in [
+                            ("chat-gamma-3", "Gamma", "chat-beta-2"),
+                            ("chat-delta-4", "Delta", "chat-gamma-3"),
+                        ] {
+                            chats.as_array_mut().unwrap().push(json!({
+                                "id": id, "deviceId": "dev-local", "title": title,
+                                "parentChatId": parent, "archived": false, "spaceId": "space-1",
+                                "createdAt": "2026-09-03T00:00:00Z"
+                            }));
+                        }
+                    }
+                    stream(chats)
+                }
+                methods::LIST_AGENT_ACCOUNTS if self.accounts.is_some() => {
+                    RpcReply::Value(self.accounts.clone().unwrap())
+                }
                 methods::WATCH_SESSIONS => stream(json!([])),
                 methods::LIST_HARNESSES => RpcReply::Value(json!([
                     { "id": "claude-code", "name": "Claude Code", "supportsSteering": true,
@@ -1472,46 +1539,104 @@ mod tests {
         assert!(world.writes.lock().unwrap().is_empty());
     }
 
+    fn origin(chat: &str) -> Origin {
+        Origin {
+            chat_id: Some(chat.into()),
+            device_id: None,
+        }
+    }
+
     #[tokio::test]
-    async fn side_chats_cannot_create_chats_or_be_parents() {
+    async fn any_chat_may_delegate_until_the_depth_limit() {
         let world = Arc::new(World {
             beta_parent: Some("chat-alpha-1".into()),
+            deep: true,
             ..Default::default()
         });
-        let side = tools(
-            world.clone(),
-            Origin {
-                chat_id: Some("chat-beta-2".into()),
-                device_id: None,
-            },
-        );
-        for args in [json!({}), json!({"parent":"Alpha"})] {
-            assert!(
-                side.call("create_chat", args)
-                    .await
-                    .unwrap_err()
-                    .contains("Side chats cannot")
-            );
+        // Alpha → Beta → Gamma → Delta. A side chat used to be barred from
+        // creating chats at all; now it delegates like any other, to a limit.
+        for (from, depth) in [("chat-alpha-1", 0), ("chat-beta-2", 1), ("chat-gamma-3", 2)] {
+            let created = tools(world.clone(), origin(from))
+                .call("create_chat", json!({}))
+                .await
+                .unwrap_or_else(|e| panic!("depth-{depth} chat may delegate: {e}"));
+            assert_eq!(created["parentChatId"], from);
         }
-        let batch = side
-            .call("create_chats", json!({"requests":[{}, {"parent":"Alpha"}]}))
+        let too_deep = tools(world.clone(), origin("chat-delta-4"))
+            .call("create_chat", json!({}))
+            .await
+            .unwrap_err();
+        assert!(too_deep.contains("limited to 3 levels"), "{too_deep}");
+
+        // Naming a too-deep parent explicitly is refused the same way, and the
+        // batch form reports it per item.
+        let root = tools(world.clone(), Origin::default());
+        assert!(
+            root.call("create_chat", json!({"parent":"Delta"}))
+                .await
+                .unwrap_err()
+                .contains("limited to 3 levels")
+        );
+        let batch = root
+            .call(
+                "create_chats",
+                json!({"requests":[{"parent":"Delta"}, {"parent":"Alpha"}]}),
+            )
+            .await
+            .unwrap();
+        let results = batch["results"].as_array().unwrap();
+        assert_eq!(results[0]["isError"], true);
+        assert_ne!(results[1]["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn connected_means_installed_enabled_and_not_known_signed_out() {
+        let accounts = |active: bool| {
+            json!({ "accounts": [{
+                "id": "a1", "harness": "claude-code", "active": active,
+                "email": null, "planLabel": null
+            }], "warnings": [] })
+        };
+        // No accounts endpoint: login state unknown, nothing held against it.
+        let unknown = tools(Arc::new(World::default()), Origin::default());
+        let listed = unknown.call("list_harnesses", json!({})).await.unwrap();
+        let claude = &listed["harnesses"][0];
+        assert_eq!(claude["signedIn"], Value::Null);
+        assert_eq!(claude["connected"], true);
+        // Codex is not installed here: never connected.
+        assert_eq!(listed["harnesses"][1]["connected"], false);
+
+        let signed_out = Arc::new(World {
+            accounts: Some(accounts(false)),
+            ..Default::default()
+        });
+        let tools_out = tools(signed_out.clone(), Origin::default());
+        let listed = tools_out.call("list_harnesses", json!({})).await.unwrap();
+        assert_eq!(listed["harnesses"][0]["signedIn"], false);
+        assert_eq!(listed["harnesses"][0]["connected"], false);
+        assert_eq!(listed["harnesses"][0]["available"], true);
+        let created = tools_out
+            .call("create_chat", json!({"harness": "claude-code"}))
             .await
             .unwrap();
         assert!(
-            batch["results"]
-                .as_array()
+            created["warning"]
+                .as_str()
                 .unwrap()
-                .iter()
-                .all(|r| r["isError"] == true)
+                .contains("not look signed in"),
+            "{created}"
         );
-        let root = tools(world.clone(), Origin::default());
-        assert!(
-            root.call("create_chat", json!({"parent":"Beta"}))
-                .await
-                .unwrap_err()
-                .contains("child of a side chat")
-        );
-        assert!(world.writes.lock().unwrap().is_empty());
+
+        let signed_in = Arc::new(World {
+            accounts: Some(accounts(true)),
+            ..Default::default()
+        });
+        let tools_in = tools(signed_in, Origin::default());
+        let listed = tools_in.call("list_harnesses", json!({})).await.unwrap();
+        assert_eq!(listed["harnesses"][0]["signedIn"], true);
+        assert_eq!(listed["harnesses"][0]["connected"], true);
+        let created = tools_in.call("create_chat", json!({})).await.unwrap();
+        assert!(created.get("warning").is_none());
     }
 
     #[tokio::test]

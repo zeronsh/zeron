@@ -86,8 +86,12 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
     core.workspace
         .rename_chat("main", "Main conversation")
         .unwrap();
-    core.workspace
-        .set_chat_harness_session("main", "parent-provider-session", "/tmp");
+    core.workspace.set_chat_harness_session(
+        "main",
+        "parent-provider-session",
+        "/tmp",
+        Some(HarnessId::Mock),
+    );
     let source = core.doc_host.open("main").unwrap();
     source
         .doc()

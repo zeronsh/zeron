@@ -35,7 +35,13 @@ For parallel delegation, use `create_chats` with a prompt for each chat or \
 even if your harness executes tool calls sequentially. Alternatively, launch ALL \
 chats/messages with `wait: false` first, then use `wait_for_turn` to collect replies. \
 Do not wait for one worker before launching the next independent worker. \
-If a chat is `awaitingInput`, answer it with `respond_to_input`.";
+If a chat is `awaitingInput`, answer it with `respond_to_input`.\n\
+\n\
+Delegation is provider-agnostic: `list_harnesses` shows every provider, and \
+those marked `connected` can take work from you whichever provider you run \
+on (a claude-code agent may hand a task to codex, and the reverse). Pass \
+`harness` (and a model from `list_models`) to `create_chat` to choose one. \
+A delegate may itself delegate, up to 3 levels deep.";
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;

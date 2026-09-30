@@ -68,6 +68,12 @@ pub struct HarnessInfo {
     pub installed: bool,
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// Whether a login for this harness is present on the device, from
+    /// `ListAgentAccounts`. `None` = not asked or not answerable. Advisory:
+    /// detection does not see every credential source (an API key in the
+    /// environment, say), so only an explicit `false` counts against a harness.
+    #[serde(skip)]
+    pub signed_in: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -82,6 +88,12 @@ impl HarnessInfo {
     /// Offered on this device: installed and not switched off in Settings.
     pub fn available(&self) -> bool {
         self.installed && self.enabled.unwrap_or(true)
+    }
+
+    /// Ready to take work: installed, enabled, and not known to be signed out.
+    /// What an agent picking a delegate should choose from.
+    pub fn connected(&self) -> bool {
+        self.available() && self.signed_in != Some(false)
     }
 
     /// Can take a prompt inside the running turn (the composer's "Steer").
@@ -243,9 +255,29 @@ impl Zeron {
         self.snapshot_as(methods::WATCH_SESSIONS, json!({})).await
     }
 
+    /// The harness catalog with each row's login state filled in. The login
+    /// lookup is best-effort: when the accounts listing is unavailable every
+    /// `signed_in` stays `None` and nothing is held against a harness.
     pub async fn harnesses(&self) -> anyhow::Result<Vec<HarnessInfo>> {
         let value = self.call(methods::LIST_HARNESSES, json!({})).await?;
-        serde_json::from_value(value).context("ListHarnesses: unexpected shape")
+        let mut harnesses: Vec<HarnessInfo> =
+            serde_json::from_value(value).context("ListHarnesses: unexpected shape")?;
+        let accounts = self
+            .call(methods::LIST_AGENT_ACCOUNTS, json!({}))
+            .await
+            .ok()
+            .and_then(|v| serde_json::from_value::<zeron_proto::AgentAccountsSnapshot>(v).ok());
+        if let Some(snapshot) = accounts {
+            for harness in &mut harnesses {
+                harness.signed_in = Some(
+                    snapshot
+                        .accounts
+                        .iter()
+                        .any(|a| a.harness == harness.id && a.active),
+                );
+            }
+        }
+        Ok(harnesses)
     }
 
     pub async fn models(&self, harness: HarnessId) -> anyhow::Result<Vec<Model>> {
@@ -650,6 +682,7 @@ mod tests {
             created_at: Utc::now(),
             harness_session_id: None,
             harness_session_cwd: None,
+            harness_session_harness: None,
             parent_chat_id: None,
             space_id: None,
             last_seen_at: None,
