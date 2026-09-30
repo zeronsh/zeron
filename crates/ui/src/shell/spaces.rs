@@ -2184,8 +2184,18 @@ pub(super) struct AddSpaceFlow {
     load_task: Option<Task<()>>,
     drives_task: Option<Task<()>>,
     submit_task: Option<Task<()>>,
+    browse_task: Option<Task<()>>,
     _search_events: Subscription,
 }
+
+/// The Locations row that opens the OS folder dialog.
+const BROWSE_FOLDERS_LABEL: &str = if cfg!(target_os = "macos") {
+    "Browse in Finder…"
+} else if cfg!(windows) {
+    "Browse in File Explorer…"
+} else {
+    "Browse folders…"
+};
 
 impl AddSpaceFlow {
     /// The browsed device uses Windows paths, where `\` separates too.
@@ -5233,6 +5243,7 @@ impl Shell {
             load_task: None,
             drives_task: None,
             submit_task: None,
+            browse_task: None,
             _search_events: search_events,
         });
         cx.notify();
@@ -5435,8 +5446,12 @@ impl Shell {
                 return;
             }
             ProjectStep::Locations => {
-                if let Some((name, path)) = self.add_space_locations(cx).get(flow.active).cloned() {
+                let active = flow.active;
+                let locations = self.add_space_locations(cx);
+                if let Some((name, path)) = locations.get(active).cloned() {
                     self.add_space_goto_location(name, path, cx);
+                } else if active == locations.len() && self.add_space_offers_browse(cx) {
+                    self.add_space_browse_folders(cx);
                 }
                 return;
             }
@@ -5653,13 +5668,10 @@ impl Shell {
 
     /// Create the space for the browser's current folder.
     fn submit_add_space(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
         let Some(flow) = self.add_space.as_ref() else {
             return;
         };
-        if flow.submit_busy || flow.step != ProjectStep::Folders {
+        if flow.step != ProjectStep::Folders {
             return;
         }
         let Some(device) = flow.device.clone() else {
@@ -5670,6 +5682,21 @@ impl Shell {
         };
         let path = listing.path.clone();
         let git_detected = flow.browser_repo;
+        self.add_space_create(device, path, git_detected, cx);
+    }
+
+    /// Create the space for `path` on `device`, or switch to the one it
+    /// already has.
+    fn add_space_create(
+        &mut self,
+        device: Device,
+        path: String,
+        git_detected: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.add_space.as_ref().is_none_or(|flow| flow.submit_busy) {
+            return;
+        }
         // Same (device, folder) already has a space → just switch to it. The
         // engine dedupes this case too (a createSpace for a duplicate pair
         // no-ops), so creating would leave the minted id dangling.
@@ -5685,6 +5712,9 @@ impl Shell {
             self.land_in_space(existing, cx);
             return;
         }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
         let Some(flow) = self.add_space.as_mut() else {
             return;
         };
@@ -5745,6 +5775,71 @@ impl Shell {
             flow.submit_task = Some(task);
         }
         cx.notify();
+    }
+
+    /// The OS folder dialog only reaches this device's folders, so it's
+    /// offered as the last location only while browsing the local device,
+    /// and filters by its label like any other row.
+    fn add_space_offers_browse(&self, cx: &App) -> bool {
+        let Some(flow) = &self.add_space else {
+            return false;
+        };
+        let local = self.state.read(cx).local_device_id.clone();
+        flow.step == ProjectStep::Locations
+            && flow
+                .device
+                .as_ref()
+                .is_some_and(|device| local.as_deref() == Some(device.id.as_str()))
+            && !popover::filter_indices(flow.search.read(cx).text(), &[BROWSE_FOLDERS_LABEL])
+                .is_empty()
+    }
+
+    /// Pick the folder in the OS dialog (with the system's favorites and New
+    /// folder). Choosing one there is the confirmation, so it's added
+    /// directly; Cancel returns to the palette.
+    fn add_space_browse_folders(&mut self, cx: &mut Context<Self>) {
+        let Some(flow) = self.add_space.as_mut() else {
+            return;
+        };
+        let Some(device) = flow.device.clone() else {
+            return;
+        };
+        if flow.submit_busy {
+            return;
+        }
+        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add project".into()),
+        });
+        flow.browse_task = Some(cx.spawn(async move |this, cx| {
+            let picked = picked.await;
+            this.update(cx, |shell, cx| {
+                match picked {
+                    Ok(Ok(Some(paths))) => {
+                        if let Some(path) = paths.into_iter().next() {
+                            // The local device answers the same `.git` probe
+                            // ListFolders uses; its SpacesSync re-verifies.
+                            let git_detected = path.join(".git").exists();
+                            let path = path.to_string_lossy().into_owned();
+                            shell.add_space_create(device, path, git_detected, cx);
+                        }
+                    }
+                    Ok(Err(err)) => {
+                        if let Some(flow) = shell.add_space.as_mut() {
+                            flow.error = Some(format!("{err}").into());
+                        }
+                    }
+                    Ok(Ok(None)) | Err(_) => {}
+                }
+                if let Some(flow) = shell.add_space.as_mut() {
+                    flow.focus_pending = true;
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// Back traverses folders, then locations, then devices.
@@ -5814,7 +5909,10 @@ impl Shell {
             popover::MenuKey::Up | popover::MenuKey::Down => {
                 let count = match self.add_space.as_ref().map(|f| f.step) {
                     Some(ProjectStep::Devices) => self.add_space_devices(cx).len(),
-                    Some(ProjectStep::Locations) => self.add_space_locations(cx).len(),
+                    Some(ProjectStep::Locations) => {
+                        self.add_space_locations(cx).len()
+                            + usize::from(self.add_space_offers_browse(cx))
+                    }
                     _ => self.add_space_filtered(cx).len(),
                 };
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
@@ -6008,6 +6106,17 @@ impl Shell {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.add_space_goto_location(name.clone(), path.clone(), cx)
                             }))
+                            .into_any_element(),
+                    );
+                }
+                if self.add_space_offers_browse(cx) {
+                    rows.push(
+                        row(rows.len())
+                            .child(glyph_el(icons::ARROW_UP_RIGHT))
+                            .child(label_el(BROWSE_FOLDERS_LABEL.to_string()))
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.add_space_browse_folders(cx)),
+                            )
                             .into_any_element(),
                     );
                 }
@@ -6894,6 +7003,104 @@ mod project_flow_tests {
             // Slash navigation only applies to folders, never device search.
             search.update(cx, |input, cx| input.set_text("/projects/", cx));
             assert!(!shell.add_space_slash_descend(cx));
+        });
+    }
+
+    #[gpui::test]
+    fn local_device_offers_the_os_folder_dialog(cx: &mut gpui::TestAppContext) {
+        let data = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            // Landing in a space saves UI state, which reads these.
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            crate::settings::init(crate::settings::UiSettings::default(), data.path(), cx);
+        });
+        let shell = cx.new(|cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.local_device_id = Some("local".into());
+                state.devices = serde_json::from_value(serde_json::json!([
+                    {"id":"local","name":"Desktop","platform":"windows","lastSeenAt":null},
+                    {"id":"remote","name":"Server","platform":"linux","lastSeenAt":null}
+                ]))
+                .unwrap();
+                // Saved by an older build, with mixed separators.
+                state.spaces = vec![Space {
+                    id: "existing".into(),
+                    device_id: "local".into(),
+                    path: r"C:\Users\w/dev".into(),
+                    name: None,
+                    git_detected: false,
+                    git_checked_at: None,
+                    checkout_id: None,
+                    created_at: Utc::now(),
+                }];
+                state
+            });
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: data.path().into(),
+                    ipc_port: 0,
+                    edge_url: String::new(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        shell.update(cx, |shell, cx| {
+            shell.open_add_space(cx);
+            let device = |shell: &Shell, cx: &App, id: &str| {
+                shell
+                    .add_space_devices(cx)
+                    .into_iter()
+                    .find(|device| device.id == id)
+                    .unwrap()
+            };
+            // The dialog can't reach another device's folders.
+            let remote = device(shell, cx, "remote");
+            shell.add_space_pick_device(remote, cx);
+            assert!(!shell.add_space_offers_browse(cx));
+            shell.add_space_back_to(ProjectStep::Devices, cx);
+            let local = device(shell, cx, "local");
+            shell.add_space_pick_device(local, cx);
+            assert!(shell.add_space_offers_browse(cx));
+            // It filters like any other location and opens on Enter.
+            let search = shell.add_space.as_ref().unwrap().search.clone();
+            search.update(cx, |input, cx| input.set_text("browse", cx));
+            assert!(shell.add_space_locations(cx).is_empty());
+            shell.add_space_open_active(cx);
+        });
+        assert!(cx.did_prompt_for_paths());
+        // Cancel returns to the palette.
+        cx.simulate_path_prompt_response(|_| None);
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| {
+            let step = shell.add_space.as_ref().map(|flow| flow.step);
+            assert_eq!(step, Some(ProjectStep::Locations));
+            shell.add_space_open_active(cx);
+        });
+        assert!(cx.did_prompt_for_paths());
+        // The dialog's native path names the existing space's folder, so the
+        // pick switches to it rather than adding a duplicate.
+        cx.simulate_path_prompt_response(|_| {
+            Some(vec![std::path::PathBuf::from(r"C:\Users\w\dev")])
+        });
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| {
+            assert!(shell.add_space.is_none());
+            assert_eq!(shell.state.read(cx).spaces.len(), 1);
         });
     }
 }
