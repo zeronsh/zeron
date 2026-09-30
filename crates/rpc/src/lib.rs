@@ -218,6 +218,34 @@ pub mod methods {
     pub const CANCEL_HARNESS_UPDATE: &str = "CancelHarnessUpdate";
     pub const DISMISS_HARNESS_UPDATE: &str = "DismissHarnessUpdate";
     pub const SET_HARNESS_UPDATE_POLICY: &str = "SetHarnessUpdatePolicy";
+    // Device-to-device file transfer (docs/file-transfer.md; relay-forwardable,
+    // so `targetDeviceId` picks the engine that SENDS or holds the transfer —
+    // the receiver of `SendFiles` is `toDeviceId`). Not `WatchTransfers`,
+    // which is the chat-attachment feed.
+    /// `{toDeviceId?, chatId?, paths[], destination?}` → `SendFilesReply`.
+    /// Without `toDeviceId`, `chatId` names a chat whose latest user message
+    /// came from the device to send to.
+    pub const SEND_FILES: &str = "SendFiles";
+    /// Stream of `FileTransfer[]`: the current list first, then every change
+    /// (progress throttled to a few frames per second).
+    pub const WATCH_FILE_TRANSFERS: &str = "WatchFileTransfers";
+    /// Unary snapshot of the same list, for clients that poll instead of streaming.
+    pub const LIST_FILE_TRANSFERS: &str = "ListFileTransfers";
+    /// `{transferId}` — either side; the other side is told.
+    pub const CANCEL_FILE_TRANSFER: &str = "CancelFileTransfer";
+    /// `{transferId}` — an incoming transfer awaiting this device's consent.
+    pub const ACCEPT_FILE_TRANSFER: &str = "AcceptFileTransfer";
+    pub const DECLINE_FILE_TRANSFER: &str = "DeclineFileTransfer";
+    /// Drop finished rows from the history (`{transferId?}`; none = all).
+    pub const CLEAR_FILE_TRANSFERS: &str = "ClearFileTransfers";
+    pub const GET_FILE_TRANSFER_SETTINGS: &str = "GetFileTransferSettings";
+    pub const SET_FILE_TRANSFER_SETTINGS: &str = "SetFileTransferSettings";
+    /// Engine ⇄ engine only: the relay fallback's byte pipe. A stream opened
+    /// by the sender (`{pipeId, transferId, fromDeviceId}`) carries the
+    /// receiver's bytes back; `FileTransferPipeWrite {pipeId, seq, data?,
+    /// eof?}` carries the sender's, reordered by `seq`.
+    pub const FILE_TRANSFER_PIPE: &str = "FileTransferPipe";
+    pub const FILE_TRANSFER_PIPE_WRITE: &str = "FileTransferPipeWrite";
 }
 
 #[derive(Debug, thiserror::Error)]

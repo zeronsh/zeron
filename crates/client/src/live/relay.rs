@@ -32,6 +32,9 @@ const LIVENESS_WARMUP_MS: i64 = 60_000;
 pub(crate) fn deadline(method: &str) -> Duration {
     match method {
         methods::CREATE_WORKTREE => Duration::from_secs(120),
+        // Mirrors the engine's forward deadline: the host walks a large
+        // folder into a manifest before it replies with the transfer id.
+        methods::SEND_FILES => Duration::from_secs(120),
         methods::LIST_MODELS => Duration::from_secs(100),
         methods::UPLOAD_COMMIT => Duration::from_secs(150),
         _ => CALL_TIMEOUT,
@@ -363,4 +366,17 @@ fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken
             backoff = (backoff * 2).min(Duration::from_secs(5));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SendFiles replies only once the sender has walked its sources; a
+    /// large folder must not read as a failed send at the default deadline.
+    #[test]
+    fn send_files_outlives_the_default_deadline() {
+        assert_eq!(deadline(methods::SEND_FILES), Duration::from_secs(120));
+        assert_eq!(deadline(methods::LIST_FILE_TRANSFERS), CALL_TIMEOUT);
+    }
 }

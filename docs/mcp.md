@@ -115,6 +115,59 @@ name (default: the local engine's device).
 | `interrupt_chat`   | `QueueCommand` Interrupt                                  |
 | `respond_to_input` | `QueueCommand` RespondInput                               |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
+| `send_files`       | `SendFiles` (+ `ListFileTransfers` with `wait`)           |
+| `fetch_files`      | `SendFiles {targetDeviceId: source, toDeviceId: local}`   |
+
+`send_files {paths[], device?, destination?, wait?}` sends files or folders
+from the chat's host device straight to another of the user's devices
+(`docs/file-transfer.md`) — "send me the build" from a remote thread puts it
+on the machine the user is typing from. Relative paths resolve against the
+chat's working directory; `~/…` is the host engine's home.
+Without `device` the engine picks the device that typed the chat's latest
+user message (agent-to-agent messages don't count); if that was the host
+itself, a viewer without an engine, or there is no such message, the tool
+fails with the list of devices that can receive. `list_devices` flags them
+with `canReceiveFiles` (every engine that receives also sends). It returns
+once the transfer starts; `wait: true` blocks until it completes, fails or is
+declined (`timeout_secs`, default 600).
+
+`fetch_files {device, paths[], destination?, wait?}` is the pull: the local
+engine forwards `SendFiles` to `device` (`targetDeviceId`) with this device as
+`toDeviceId`, so the source sends exactly as if it had been asked locally and
+this device receives under its own settings (inbox, confirmation). Source
+paths must be absolute or `~/…` (the source engine's home) — a relative path
+would mean a working directory the agent can't see; `destination` is on this
+device and may be relative to the chat's working directory. The transfer row
+has the same id on both engines, so `wait: true` polls the local, incoming
+row and reports where each item landed (`paths`, `destination`); until that
+row exists it also checks the source's row (forwarded `ListFileTransfers`),
+so a pull that fails before reaching this device ends the wait with the
+source's error instead of a timeout. Fetching
+from this device itself, or from an engine without `file-transfer-v1`, fails
+before anything is sent.
+
+### Agents moving files between each other
+
+Two agents on different devices can hand files over without the user in the
+loop:
+
+- **Pull directly.** An agent that knows where the file lives calls
+  `fetch_files { device: "build-server", paths: ["~/ci/out/report.html"] }`.
+- **Ask the other agent.** An agent in chat A (laptop) that doesn't know the
+  path asks chat B (build server) with
+  `send_message { chat: "B", text: "Send me the latest coverage report with send_files", wait: true }`.
+  B's `send_files` without `device` would target the device of B's latest
+  *user* message — agent-to-agent messages don't count — so B should pass
+  `device` explicitly (A's `localDeviceId` from `whoami`, or its name from `list_devices`), which the
+  asking agent can spell out in its message.
+- **Push and tell.** B sends proactively with
+  `send_files { device: "laptop", paths: [...], wait: true }`, then
+  `send_message`s A the landed paths from the result.
+
+Transfers between devices of one account need no approval on the source:
+the same trust boundary as remote chats and terminals. The receiving device's
+"Ask before accepting files from my other devices" setting (Settings → Devices) still applies, so a pull into a device set to
+ask waits for its user.
 
 Watch streams are the engine's only read surface (there is no one-shot "get
 transcript" RPC); a snapshot is "subscribe, take the first item, drop" — drop

@@ -59,6 +59,25 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Serve a standalone local edge — the single-tenant Rust port of the edge
+    /// with one shared-secret bearer, no WorkOS — for development and
+    /// cross-device tests. Engines join it with `ZERON_EDGE_URL`,
+    /// `ZERON_EDGE_TOKEN` and `ZERON_USER_ID=local ZERON_ORG_ID=local`.
+    #[command(name = "local-edge")]
+    LocalEdge {
+        #[arg(long, default_value_t = 27655)]
+        port: u16,
+        /// The shared secret (≥ 16 URL-safe chars); default `$ZERON_LOCAL_EDGE_TOKEN`.
+        #[arg(long)]
+        token: Option<String>,
+        /// Listen address; `0.0.0.0` lets engines on other machines join
+        /// (plain HTTP: only on a trusted network).
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
+        /// State directory; default `{data_dir}/local-edge-server`.
+        #[arg(long)]
+        data_dir: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -163,7 +182,10 @@ fn main() -> anyhow::Result<()> {
     // journald on every snapshot export — enough to fill a disk on a
     // long-running headless host. Quiet them by default (RUST_LOG still
     // overrides the whole filter).
-    let long_running = matches!(&cli.command, None | Some(Command::Headless));
+    let long_running = matches!(
+        &cli.command,
+        None | Some(Command::Headless) | Some(Command::LocalEdge { .. })
+    );
     let default_filter = if long_running {
         "info,loro_internal=warn,loro=warn"
     } else {
@@ -177,10 +199,10 @@ fn main() -> anyhow::Result<()> {
     // the engine logs the exact failure line. One file per launch, previous
     // launch kept as `.old`.
     let log_file = if long_running {
-        let mode = if cli.command.is_some() {
-            "headless"
-        } else {
-            "headed"
+        let mode = match &cli.command {
+            None => "headed",
+            Some(Command::LocalEdge { .. }) => "local-edge",
+            Some(_) => "headless",
         };
         open_log_file(mode)
     } else {
@@ -268,6 +290,26 @@ fn main() -> anyhow::Result<()> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(update_cli::update(&edge_url_from_env(), check))
         }
+        Some(Command::LocalEdge {
+            port,
+            token,
+            bind,
+            data_dir,
+        }) => {
+            let token = token
+                .or_else(|| std::env::var("ZERON_LOCAL_EDGE_TOKEN").ok())
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("pass --token (or set ZERON_LOCAL_EDGE_TOKEN)"))?;
+            let data_dir = data_dir.unwrap_or_else(|| paths::data_dir().join("local-edge-server"));
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(serve_local_edge(zeron_localedge::LocalEdgeConfig {
+                data_dir,
+                bind,
+                port,
+                token,
+            }))
+        }
         Some(Command::Daemon { command }) => match command {
             DaemonCommand::Install => daemon::install(&engine_config_from_env().data_dir),
             DaemonCommand::Uninstall => daemon::uninstall(),
@@ -278,6 +320,14 @@ fn main() -> anyhow::Result<()> {
         },
         None => {
             let edge_token = std::env::var("ZERON_EDGE_TOKEN").ok();
+            if std::env::var_os("ZERON_USER_ID").is_some() {
+                // Local-edge identities are a `zeron headless` feature; an
+                // engine embedded here would take the bearer as its user.
+                tracing::warn!(
+                    "ZERON_USER_ID is read by `zeron headless` only; to use a local edge, run \
+                     a headless engine and start the app with its ZERON_IPC_PORT"
+                );
+            }
             // Headed: the UI probes ZERON_IPC_PORT and connects to a running
             // daemon, or embeds the engine in-process (ARCHITECTURE §1).
             zeron_ui::run_app(zeron_ui::UiConfig {
@@ -343,7 +393,57 @@ fn engine_config_from_env() -> zeron_engine::EngineConfig {
         // Real auth against production by default; see
         // `workos_client_id_from_env` for the dev-mode escape hatches.
         workos_client_id: workos_client_id_from_env(&edge_token),
+        // An opaque dev bearer (a local edge's shared secret) names no user:
+        // `ZERON_USER_ID` does. Unset, the bearer is parsed as `user[@org]`.
+        dev_user_id: edge_token
+            .as_ref()
+            .and(std::env::var("ZERON_USER_ID").ok())
+            .map(|user| user.trim().to_string())
+            .filter(|user| !user.is_empty()),
         edge_token,
+    }
+}
+
+/// `zeron local-edge`: serve until ctrl-c / SIGTERM.
+async fn serve_local_edge(config: zeron_localedge::LocalEdgeConfig) -> anyhow::Result<()> {
+    let edge = zeron_localedge::LocalEdge::start(config).await?;
+    let addr = edge.addr();
+    println!("Local edge listening on {addr}");
+    let host = if addr.ip().is_unspecified() {
+        "<this-host>".to_string()
+    } else {
+        addr.ip().to_string()
+    };
+    println!(
+        "Join an engine:  ZERON_EDGE_URL=http://{host}:{port} ZERON_EDGE_TOKEN=<token> \
+         ZERON_USER_ID=local ZERON_ORG_ID=local zeron headless",
+        port = addr.port()
+    );
+    if !addr.ip().is_loopback() {
+        println!(
+            "Plain HTTP/WebSocket: the token and all traffic are unencrypted on the network. \
+             Bind beyond loopback only on a network you trust."
+        );
+    }
+    shutdown_signal().await?;
+    edge.shutdown().await;
+    Ok(())
+}
+
+/// Ctrl-C or SIGTERM.
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = sigterm.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await
     }
 }
 

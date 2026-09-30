@@ -22,6 +22,7 @@ pub mod chat2_host;
 mod chat_persistence;
 pub mod diff_sync;
 pub mod doc_host;
+mod file_transfers;
 pub mod harness_updates;
 mod http_error;
 pub mod instance_lock;
@@ -121,6 +122,35 @@ pub struct EngineConfig {
     pub org_id: Option<String>,
     /// WorkOS client id — enables real auth; `None` = dev mode (bearer = `edge_token`).
     pub workos_client_id: Option<String>,
+    /// Development identity when `edge_token` is an opaque shared secret rather
+    /// than `user[@org]` (a `zeron local-edge`, see [`Self::with_local_edge`]).
+    /// `None` = the bearer names the user, as a dev edge parses it.
+    pub dev_user_id: Option<String>,
+}
+
+/// The fixed user and org of a runtime joined to a local edge
+/// (`zeron-localedge`): single tenant, so the ids are constants.
+pub const LOCAL_EDGE_IDENTITY: &str = "local";
+
+impl EngineConfig {
+    /// Join a local edge (`zeron local-edge`): its URL and shared-secret
+    /// bearer, in `Development` scope (no WorkOS) under the fixed
+    /// [`LOCAL_EDGE_IDENTITY`]. The identity is not derived from the token, so
+    /// rotating the secret never moves the profile's store. `zeron headless`
+    /// does the same from `ZERON_EDGE_URL` + `ZERON_EDGE_TOKEN` +
+    /// `ZERON_USER_ID=local ZERON_ORG_ID=local`.
+    pub fn with_local_edge(
+        mut self,
+        edge_url: impl Into<String>,
+        token: impl Into<String>,
+    ) -> Self {
+        self.edge_url = edge_url.into();
+        self.edge_token = Some(token.into());
+        self.dev_user_id = Some(LOCAL_EDGE_IDENTITY.into());
+        self.org_id = Some(LOCAL_EDGE_IDENTITY.into());
+        self.workos_client_id = None;
+        self
+    }
 }
 
 /// The assembled engine core — also constructible without the IPC server for tests
@@ -135,6 +165,8 @@ pub struct EngineCore {
     pub terminals: Terminals,
     pub project_actions: ProjectActionsStore,
     pub previews: zeron_preview::PreviewService,
+    /// Device-to-device file transfer (docs/file-transfer.md).
+    pub transfers: zeron_transfer::Transfers,
     pub change_requests: CheckoutChangeRequests,
     pub diff_sync: CheckoutDiffSync,
     pub spaces_sync: SpacesSync,
@@ -149,6 +181,8 @@ pub struct EngineCore {
     auth: std::sync::Mutex<Option<Auth>>,
     /// Peer link cache for `targetDeviceId` routing (attached when edge+auth are ready).
     links: std::sync::Mutex<Option<Arc<zeron_rpc::LinkCache>>>,
+    /// The same links, as the file-transfer relay fallback sees them.
+    transfer_links: Arc<std::sync::Mutex<Option<Arc<zeron_rpc::LinkCache>>>>,
     /// Release checker (attached by [`Engine::assemble_runtime`]) — the
     /// UpdateStatus stream + ApplyUpdate.
     updater: std::sync::Mutex<Option<zeron_update::Updater>>,
@@ -266,6 +300,23 @@ impl EngineCore {
             local_device_name(&device_id),
         )
         .map_err(|e| EngineError::Other(e.to_string()))?;
+        let transfer_links = Arc::new(std::sync::Mutex::new(None));
+        let transfers = zeron_transfer::Transfers::new(
+            zeron_transfer::TransfersConfig {
+                device_id: device_id.clone(),
+                device_name: local_device_name(&device_id),
+                state_dir: profile.store_root().join("file-transfers"),
+                settings_file: data_dir.join("file-transfers.json"),
+                home_dir: repos::session_home_dir().ok(),
+            },
+            Arc::new(file_transfers::EngineNetwork::new(
+                device_id.clone(),
+                previews.clone(),
+                workspace.clone(),
+                transfer_links.clone(),
+            )),
+        );
+        file_transfers::register_peer_service(&previews, &transfers);
         let uploads = Uploads::from_root_with_fallback(
             profile.uploads_root(),
             legacy_uploads_root.as_deref(),
@@ -328,6 +379,7 @@ impl EngineCore {
             terminals,
             project_actions,
             previews,
+            transfers,
             change_requests,
             diff_sync,
             spaces_sync,
@@ -339,6 +391,7 @@ impl EngineCore {
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
+            transfer_links,
             updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
             _instance_lock: lock,
@@ -380,6 +433,10 @@ impl EngineCore {
     /// [`Self::dial_device`], and the doc host's queued-attachment transfers.
     pub fn set_links(&self, links: Arc<zeron_rpc::LinkCache>) {
         self.doc_host.set_links(links.clone());
+        *self
+            .transfer_links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(links.clone());
         *self
             .links
             .lock()
@@ -468,6 +525,7 @@ impl EngineCore {
         )
         .with_auth(self.auth())
         .with_previews(self.previews.clone())
+        .with_transfers(self.transfers.clone())
         .with_harness_updates(self.harness_updates.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
@@ -486,6 +544,7 @@ impl EngineCore {
     /// clearing credentials alone is not a security boundary.
     pub fn disconnect_edge(&self) {
         self.previews.stop();
+        self.transfers.shutdown();
         if let Some(links) = self.links() {
             links.disconnect_all();
         }
@@ -497,6 +556,7 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        self.transfers.shutdown();
         self.previews.shutdown().await;
         self.harness_updates.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally
@@ -635,7 +695,13 @@ impl Engine {
                 .unwrap_or(27641),
         );
         if let Some(token) = &config.edge_token {
-            auth_config.dev_user_id = token.clone();
+            match &config.dev_user_id {
+                Some(user) => {
+                    auth_config.dev_user_id = user.clone();
+                    auth_config.dev_bearer = Some(token.clone());
+                }
+                None => auth_config.dev_user_id = token.clone(),
+            }
         }
         Auth::new(auth_config)
     }

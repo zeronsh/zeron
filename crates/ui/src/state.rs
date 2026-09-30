@@ -297,6 +297,7 @@ impl EngineHandle {
             default_harness: config.default_harness,
             org_id: config.org_id,
             workos_client_id: config.workos_client_id,
+            dev_user_id: None,
         };
 
         // Own the data dir before opening anything under it or binding IPC —
@@ -767,6 +768,9 @@ pub struct AppState {
     /// Device-local agent CLI update lifecycle. Unlike `ListHarnesses`, this
     /// standing stream may be backed by subprocess and network probes.
     pub harness_updates: Vec<zeron_proto::HarnessUpdateStatus>,
+    /// This engine's device-to-device file transfers (`WatchFileTransfers`,
+    /// newest first) — not the chat-attachment `transfers` above.
+    pub file_transfers: Vec<zeron_proto::FileTransfer>,
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
@@ -857,6 +861,7 @@ impl AppState {
             change_requests_visible: true,
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
+            file_transfers: Vec::new(),
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
@@ -1367,6 +1372,14 @@ impl AppState {
 
     pub fn apply_harness_updates(&mut self, statuses: Vec<zeron_proto::HarnessUpdateStatus>) {
         self.harness_updates = statuses;
+    }
+
+    pub fn apply_file_transfers(&mut self, transfers: Vec<zeron_proto::FileTransfer>) -> bool {
+        if self.file_transfers == transfers {
+            return false;
+        }
+        self.file_transfers = transfers;
+        true
     }
 
     pub fn apply_auth(&mut self, auth: AuthState) {
@@ -2029,6 +2042,7 @@ impl AppState {
         self.pending_sends.clear();
         self.upload_progress = None;
         self.transfers.clear();
+        self.file_transfers.clear();
         self.local_device_id = None;
         self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         cx.notify();
@@ -2177,11 +2191,16 @@ impl AppState {
         let engine_info = handle.engine_info();
         let supports_harness_updates =
             engine_info.supports(zeron_proto::capabilities::HARNESS_UPDATES_V1);
+        let supports_file_transfers =
+            engine_info.supports(zeron_proto::capabilities::FILE_TRANSFER_V1);
         self.workspace_scope = Some(engine_info.workspace_scope);
         self.local_device_id = Some(engine_info.device_id.clone());
         self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         if !supports_harness_updates {
             self.harness_updates.clear();
+        }
+        if !supports_file_transfers {
+            self.file_transfers.clear();
         }
         self.engine = Some(handle.clone());
         let mut watch_tasks = Vec::with_capacity(10);
@@ -2246,6 +2265,14 @@ impl AppState {
                     state.apply_harness_updates(value);
                     true
                 },
+            ));
+        }
+        if supports_file_transfers {
+            watch_tasks.push(spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_FILE_TRANSFERS,
+                AppState::apply_file_transfers,
             ));
         }
         self.watch_tasks = watch_tasks;

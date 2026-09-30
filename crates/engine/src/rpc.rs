@@ -90,6 +90,54 @@ struct ChatParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SendFilesParams {
+    #[serde(default)]
+    to_device_id: Option<String>,
+    /// Without `toDeviceId`: reply to the device of this chat's latest
+    /// user message.
+    #[serde(default)]
+    chat_id: Option<String>,
+    paths: Vec<String>,
+    #[serde(default)]
+    destination: Option<String>,
+    /// Diagnostics/tests: force `p2p` or `relay` (default `auto`).
+    #[serde(default)]
+    transport: Option<zeron_transfer::TransportPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TransferIdParams {
+    transfer_id: String,
+    /// Set by the peer engine relaying its own cancel (no echo back).
+    #[serde(default)]
+    from_peer: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClearTransfersParams {
+    #[serde(default)]
+    transfer_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PipeParams {
+    pipe_id: String,
+    from_device_id: String,
+}
+
+fn anyhow_ensure(condition: bool, message: &str) -> Result<(), RpcError> {
+    if condition {
+        Ok(())
+    } else {
+        Err(RpcError::Failed(message.to_owned()))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ListModelsParams {
     harness: HarnessId,
     #[serde(default)]
@@ -617,6 +665,7 @@ pub struct EngineRpc {
     terminals: Terminals,
     project_actions: ProjectActionsStore,
     previews: Option<zeron_preview::PreviewService>,
+    transfers: Option<zeron_transfer::Transfers>,
     change_requests: CheckoutChangeRequests,
     diff_sync: CheckoutDiffSync,
     uploads: Uploads,
@@ -662,6 +711,7 @@ impl EngineRpc {
             terminals,
             project_actions,
             previews: None,
+            transfers: None,
             change_requests,
             diff_sync,
             uploads,
@@ -678,6 +728,138 @@ impl EngineRpc {
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
         self.previews = Some(previews);
         self
+    }
+
+    pub fn with_transfers(mut self, transfers: zeron_transfer::Transfers) -> Self {
+        self.transfers = Some(transfers);
+        self
+    }
+
+    fn transfers(&self) -> Result<&zeron_transfer::Transfers, RpcError> {
+        self.transfers
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("file transfer is unavailable".into()))
+    }
+
+    /// Device-to-device file transfer (docs/file-transfer.md).
+    async fn handle_file_transfer(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<RpcReply, RpcError> {
+        let transfers = self.transfers()?;
+        let failed = |e: anyhow::Error| RpcError::Failed(e.to_string());
+        match method {
+            methods::SEND_FILES => {
+                let p: SendFilesParams = parse_params(params)?;
+                anyhow_ensure(
+                    !p.paths.is_empty(),
+                    "Pick at least one file or folder to send",
+                )?;
+                let local = self.doc_host.device_id().to_owned();
+                let to = match (p.to_device_id.as_deref(), p.chat_id.as_deref()) {
+                    (Some(to), _) if !to.trim().is_empty() => {
+                        crate::file_transfers::resolve_device(&self.workspace, to)
+                            .map_err(RpcError::Failed)?
+                    }
+                    (_, Some(chat)) => crate::file_transfers::recipient_for_chat(
+                        &self.doc_host,
+                        &self.workspace,
+                        &local,
+                        chat,
+                    )
+                    .map_err(RpcError::Failed)?,
+                    _ => {
+                        return Err(RpcError::BadParams(
+                            "toDeviceId (or chatId) is required".into(),
+                        ));
+                    }
+                };
+                if let Some(device) = self
+                    .workspace
+                    .read_devices()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|d| d.id == to)
+                {
+                    anyhow_ensure(
+                        crate::file_transfers::can_receive(&device),
+                        &format!(
+                            "{} can't receive files yet — update Zeron on it first",
+                            device.name
+                        ),
+                    )?;
+                }
+                let reply = transfers
+                    .send(zeron_transfer::SendRequest {
+                        to,
+                        paths: p.paths.into_iter().map(std::path::PathBuf::from).collect(),
+                        destination: p.destination,
+                        policy: p.transport.unwrap_or_default(),
+                    })
+                    .await
+                    .map_err(failed)?;
+                RpcReply::value(&reply)
+            }
+            methods::WATCH_FILE_TRANSFERS => Ok(RpcReply::Stream(watch_stream(transfers.watch()))),
+            methods::LIST_FILE_TRANSFERS => RpcReply::value(&transfers.list()),
+            methods::CANCEL_FILE_TRANSFER => {
+                let p: TransferIdParams = parse_params(params)?;
+                transfers
+                    .cancel(&p.transfer_id, !p.from_peer)
+                    .map_err(failed)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::ACCEPT_FILE_TRANSFER | methods::DECLINE_FILE_TRANSFER => {
+                let p: TransferIdParams = parse_params(params)?;
+                if method == methods::ACCEPT_FILE_TRANSFER {
+                    transfers.accept(&p.transfer_id)
+                } else {
+                    transfers.decline(&p.transfer_id)
+                }
+                .map_err(failed)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::CLEAR_FILE_TRANSFERS => {
+                let p: ClearTransfersParams = parse_params(params)?;
+                transfers.clear(p.transfer_id.as_deref());
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::GET_FILE_TRANSFER_SETTINGS => RpcReply::value(&transfers.settings()),
+            methods::SET_FILE_TRANSFER_SETTINGS => {
+                let p: zeron_proto::FileTransferSettings = parse_params(params)?;
+                RpcReply::value(&transfers.set_settings(p).map_err(failed)?)
+            }
+            methods::FILE_TRANSFER_PIPE => {
+                let p: PipeParams = parse_params(params)?;
+                let known = self
+                    .workspace
+                    .read_devices()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|d| d.id == p.from_device_id);
+                anyhow_ensure(
+                    known && p.from_device_id != self.doc_host.device_id(),
+                    "unknown sending device",
+                )?;
+                let (stream, local) = transfers.relay_pipes().open(&p.pipe_id).map_err(failed)?;
+                transfers.accept_lane(
+                    p.from_device_id,
+                    zeron_proto::FileTransferTransport::Relay,
+                    Box::new(local),
+                );
+                Ok(RpcReply::Stream(stream))
+            }
+            methods::FILE_TRANSFER_PIPE_WRITE => {
+                transfers
+                    .relay_pipes()
+                    .write(params)
+                    .await
+                    .map_err(failed)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            other => Err(RpcError::UnknownMethod(other.into())),
+        }
     }
 
     /// Attach the auth service (AuthStatus + AuthRpc mutations).
@@ -1320,6 +1502,8 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // queueing, verification, and the relayed response itself.
         methods::APPLY_HARNESS_UPDATE => Duration::from_secs(20 * 60),
         methods::CREATE_WORKTREE => Duration::from_secs(120),
+        // Walking a large folder into a manifest happens before the reply.
+        methods::SEND_FILES => Duration::from_secs(120),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
         methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
         _ => Duration::from_secs(30),
@@ -1425,6 +1609,17 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_HARNESS_UPDATE
             | methods::DISMISS_HARNESS_UPDATE
             | methods::SET_HARNESS_UPDATE_POLICY
+            // File transfers: the engine that sends or holds the transfer.
+            // The engine ⇄ engine pipe methods are addressed directly.
+            | methods::SEND_FILES
+            | methods::WATCH_FILE_TRANSFERS
+            | methods::LIST_FILE_TRANSFERS
+            | methods::CANCEL_FILE_TRANSFER
+            | methods::ACCEPT_FILE_TRANSFER
+            | methods::DECLINE_FILE_TRANSFER
+            | methods::CLEAR_FILE_TRANSFERS
+            | methods::GET_FILE_TRANSFER_SETTINGS
+            | methods::SET_FILE_TRANSFER_SETTINGS
     )
 }
 
@@ -1441,6 +1636,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_FILES
             | methods::UPDATE_STATUS
             | methods::WATCH_HARNESS_UPDATES
+            | methods::WATCH_FILE_TRANSFERS
     )
 }
 
@@ -2205,6 +2401,17 @@ impl RpcService for EngineRpc {
             methods::WATCH_TRANSFERS => Ok(RpcReply::Stream(watch_stream(
                 self.doc_host.watch_transfers(),
             ))),
+            methods::SEND_FILES
+            | methods::WATCH_FILE_TRANSFERS
+            | methods::LIST_FILE_TRANSFERS
+            | methods::CANCEL_FILE_TRANSFER
+            | methods::ACCEPT_FILE_TRANSFER
+            | methods::DECLINE_FILE_TRANSFER
+            | methods::CLEAR_FILE_TRANSFERS
+            | methods::GET_FILE_TRANSFER_SETTINGS
+            | methods::SET_FILE_TRANSFER_SETTINGS
+            | methods::FILE_TRANSFER_PIPE
+            | methods::FILE_TRANSFER_PIPE_WRITE => self.handle_file_transfer(method, params).await,
             methods::WATCH_PREVIEWS => {
                 let p: zeron_proto::WatchPreviewsParams = parse_params(params)?;
                 if self

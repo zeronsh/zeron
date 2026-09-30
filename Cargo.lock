@@ -12115,6 +12115,7 @@ dependencies = [
  "tracing-subscriber",
  "windows-sys 0.61.2",
  "zeron-engine",
+ "zeron-localedge",
  "zeron-mcp",
  "zeron-rpc",
  "zeron-ui",
@@ -12195,6 +12196,7 @@ dependencies = [
  "zeron-proto",
  "zeron-rpc",
  "zeron-sync",
+ "zeron-transfer",
  "zeron-update",
  "zip",
 ]
@@ -12224,6 +12226,38 @@ dependencies = [
  "windows-sys 0.61.2",
  "zeron-proto",
  "zip",
+]
+
+[[package]]
+name = "zeron-localedge"
+version = "0.2.99"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zeron-doc",
+ "zeron-engine",
+ "zeron-proto",
+ "zeron-rpc",
+ "zeron-sync",
 ]
 
 [[package]]
@@ -12413,6 +12447,27 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "zeron-transfer"
+version = "0.2.99"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "futures",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "zeron-proto",
+ "zeron-rpc",
 ]
 
 [[package]]

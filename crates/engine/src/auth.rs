@@ -164,6 +164,10 @@ pub struct AuthConfig {
     pub workos_api_base: String,
     /// Dev-mode bearer/user id (mirrors the old `ZERON_EDGE_TOKEN` behavior).
     pub dev_user_id: String,
+    /// Dev-mode bearer when it is an opaque shared secret rather than the
+    /// user id — a local edge (`zeron local-edge`). `None` = the bearer is
+    /// `dev_user_id`.
+    pub dev_bearer: Option<String>,
     /// Loopback callback port; `None` = ephemeral.
     pub callback_port: Option<u16>,
 }
@@ -176,6 +180,7 @@ impl AuthConfig {
             workos_client_id: None,
             workos_api_base: "https://api.workos.com".into(),
             dev_user_id: "dev-user".into(),
+            dev_bearer: None,
             callback_port: None,
         }
     }
@@ -392,11 +397,15 @@ impl Auth {
 
     /// Current bearer. Network failures preserve the session and return
     /// `TemporarilyUnavailable`; only absent/revoked credentials are `SignedOut`.
-    /// Dev mode: the configured user id. WorkOS: cached access token, refreshed when
-    /// it has under 30s left.
+    /// Dev mode: the configured bearer (by default the user id). WorkOS: cached
+    /// access token, refreshed when it has under 30s left.
     pub async fn access_token(&self) -> Result<String, TokenError> {
         if self.inner.workos.is_none() {
-            return Ok(self.inner.config.dev_user_id.clone());
+            let config = &self.inner.config;
+            return Ok(config
+                .dev_bearer
+                .clone()
+                .unwrap_or_else(|| config.dev_user_id.clone()));
         }
         if let Some(entry) = &*lock(&self.inner.access)
             && entry.remaining() > TOKEN_SLACK
@@ -1342,6 +1351,22 @@ mod tests {
         );
         assert!(auth.state().is_signed_in());
         assert!(dir.path().join("session.json").exists());
+    }
+
+    /// A local edge's shared secret is the bearer; the user stays `local`.
+    #[tokio::test]
+    async fn dev_bearer_overrides_the_token_but_not_the_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = AuthConfig::new("http://127.0.0.1:9", dir.path());
+        config.dev_user_id = "local".into();
+        assert_eq!(Auth::new(config.clone()).access_token().await.unwrap(), "local");
+        config.dev_bearer = Some("shared-secret-0123456789".into());
+        let auth = Auth::new(config);
+        assert_eq!(auth.access_token().await.unwrap(), "shared-secret-0123456789");
+        let AuthState::SignedIn { user, .. } = auth.state() else {
+            panic!("dev mode is signed in: {:?}", auth.state());
+        };
+        assert_eq!(user.id, "local");
     }
 
     #[test]

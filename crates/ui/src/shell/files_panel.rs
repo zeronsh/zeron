@@ -168,6 +168,7 @@ impl Shell {
                 )
             });
             let owner = key.clone();
+            let menu_chat = key.clone();
             let sub = cx.subscribe_in(
                 &files,
                 window,
@@ -209,6 +210,9 @@ impl Shell {
                             page: ChatMenuPage::Root,
                         });
                         cx.notify();
+                    }
+                    FilesEvent::EntryContextMenu { path, position, .. } => {
+                        this.open_send_menu_for_path(&menu_chat, path, *position, cx)
                     }
                     FilesEvent::NewChildChat => this.create_child_chat(None, cx),
                     FilesEvent::ForkChat => this.create_side_chat(cx),

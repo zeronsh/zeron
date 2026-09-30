@@ -171,6 +171,13 @@ pub enum FilesEvent {
         chat_id: String,
         position: Point<Pixels>,
     },
+    /// A tree row's context menu: `path` is workspace-relative, as in
+    /// [`WorkspacePathDrag`]; the shell resolves it against the host.
+    EntryContextMenu {
+        path: String,
+        is_directory: bool,
+        position: Point<Pixels>,
+    },
     /// The Chats header's "+": start a fresh side chat of the active chat.
     NewChildChat,
     /// The Chats header's fork: fork the active chat into a side chat.

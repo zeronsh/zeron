@@ -17,6 +17,8 @@ use zeron_proto::{
     Space, UserInputAnswer,
 };
 
+use zeron_rpc::methods;
+
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::zeron::{HarnessInfo, TurnOutcome, Zeron, session_for, short};
 
@@ -180,6 +182,42 @@ fn catalog() -> Vec<ToolDef> {
             })),
         },
         ToolDef {
+            name: "send_files",
+            description: "Send files or folders from this device straight to another of the user's devices (another computer, a server) over a direct tunnel — any size, folders recursively, resumable. Use it when the user asks for something you made (\"send me the build\", \"put the PDF on my laptop\"). Without `device`, it goes to the device the user's latest message in this chat came from. It lands in that device's Zeron Transfers inbox unless `destination` says otherwise. Returns once the transfer starts; wait=true blocks until it finishes. To get files FROM another device, use fetch_files.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array", "items": { "type": "string" }, "minItems": 1,
+                        "description": "Files or folders on this device: absolute, `~/…` (this device's home), or relative to the chat's working directory."
+                    },
+                    "device": { "type": "string", "description": "Receiving device (id or name, see list_devices). Defaults to the device of the user's latest message." },
+                    "destination": { "type": "string", "description": "Folder on the receiving device: absolute or `~/…` (its home), inside its home or a project. Defaults to its inbox." },
+                    "wait": { "type": "boolean", "default": false, "description": "Block until the transfer completes, fails or is declined." },
+                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
+                },
+                "required": ["paths"]
+            }),
+        },
+        ToolDef {
+            name: "fetch_files",
+            description: "Pull files or folders from another of the user's devices onto this one (the device this chat runs on) over the same direct tunnel as send_files. Use it when you need something that lives elsewhere (\"grab the logs from the build server\", \"get the dataset from my desktop\"). The other device sends; this device receives, into its Zeron Transfers inbox unless `destination` says otherwise (this device's receive settings apply, so the user may be asked to accept). Returns once the transfer starts; wait=true blocks until it finishes and reports where each item landed (`paths`).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "device": { "type": "string", "description": "The device to fetch from (id or name, see list_devices; devices with canReceiveFiles can also send)." },
+                    "paths": {
+                        "type": "array", "items": { "type": "string" }, "minItems": 1,
+                        "description": "Files or folders on that device: absolute, or `~/…` for its home."
+                    },
+                    "destination": { "type": "string", "description": "Folder on this device: absolute, `~/…`, or relative to the chat's working directory (inside the home or a project). Defaults to the inbox." },
+                    "wait": { "type": "boolean", "default": false, "description": "Block until the transfer completes, fails or is declined." },
+                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
+                },
+                "required": ["device", "paths"]
+            }),
+        },
+        ToolDef {
             name: "archive_chat",
             description: "Archive a chat (hide it from the active sidebar list); pass archived=false to restore. Use it to tidy up chats you created.",
             input_schema: chat_key_schema(json!({
@@ -293,6 +331,26 @@ struct WaitArgs {
 struct ArchiveArgs {
     chat: String,
     archived: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct FetchFilesArgs {
+    device: String,
+    paths: Vec<String>,
+    destination: Option<String>,
+    #[serde(default)]
+    wait: bool,
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct SendFilesArgs {
+    paths: Vec<String>,
+    device: Option<String>,
+    destination: Option<String>,
+    #[serde(default)]
+    wait: bool,
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -420,6 +478,8 @@ impl Tools {
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
+            "send_files" => self.send_files(parse(args)?).await,
+            "fetch_files" => self.fetch_files(parse(args)?).await,
             other => return Err(format!("unknown tool: {other}")),
         };
         result.map_err(|e| e.to_string())
@@ -496,6 +556,7 @@ impl Tools {
                 "local": d.id == local,
                 "lastSeenAt": d.last_seen_at,
                 "version": d.version,
+                "canReceiveFiles": d.supports(zeron_proto::capabilities::FILE_TRANSFER_V1),
             })).collect::<Vec<_>>()
         }))
     }
@@ -857,6 +918,212 @@ impl Tools {
         Ok(json!({ "chatId": chat.id, "title": chat.title, "archived": archived }))
     }
 
+    /// The folder an agent's relative paths mean: its chat's working
+    /// directory, or this process's cwd when the chat has none.
+    async fn agent_dir(&self) -> Option<std::path::PathBuf> {
+        match self.zeron.origin().chat_id.as_deref() {
+            Some(id) => self.zeron.resolve_chat(id).await.ok().and_then(|c| c.cwd),
+            None => None,
+        }
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+    }
+
+    async fn send_files(&self, args: SendFilesArgs) -> anyhow::Result<Value> {
+        anyhow::ensure!(
+            !args.paths.is_empty(),
+            "paths must list at least one file or folder"
+        );
+        let base = self.agent_dir().await;
+        let paths: Vec<String> = args
+            .paths
+            .iter()
+            .map(|path| on_this_device(base.as_deref(), path))
+            .collect();
+        let mut params = json!({ "paths": paths });
+        match args
+            .device
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+        {
+            Some(device) => {
+                params["toDeviceId"] = self.zeron.resolve_device_id(Some(device)).await?.into()
+            }
+            None => match self.zeron.origin().chat_id.clone() {
+                Some(chat) => params["chatId"] = chat.into(),
+                None => anyhow::bail!(
+                    "Not running inside a chat: say which device to send to (see list_devices)"
+                ),
+            },
+        }
+        if let Some(destination) = args.destination {
+            params["destination"] = destination.into();
+        }
+        let reply = self.zeron.call(methods::SEND_FILES, params).await?;
+        let transfer_id = reply["transferId"].as_str().unwrap_or_default().to_owned();
+        anyhow::ensure!(!transfer_id.is_empty(), "SendFiles replied without a transfer id");
+        let mut result = json!({
+            "transferId": transfer_id,
+            "device": { "id": reply["toDeviceId"], "name": reply["toDeviceName"] },
+            "paths": paths,
+        });
+        if args.wait {
+            self.await_transfer(&mut result, &transfer_id, None, args.timeout_secs)
+                .await?;
+        } else {
+            result["state"] = "started".into();
+        }
+        Ok(result)
+    }
+
+    /// `fetch_files`: this device asks `device` to send to it — `SendFiles`
+    /// addressed to the source with `targetDeviceId`, receiver = this
+    /// engine's device. The transfer row lives on both engines under one id,
+    /// so the wait polls the local (receiving) side.
+    async fn fetch_files(&self, args: FetchFilesArgs) -> anyhow::Result<Value> {
+        anyhow::ensure!(
+            !args.paths.is_empty(),
+            "paths must list at least one file or folder"
+        );
+        let (devices, local) =
+            tokio::try_join!(self.zeron.devices(), self.zeron.local_device_id())?;
+        let from = self.zeron.resolve_device_id(Some(&args.device)).await?;
+        anyhow::ensure!(
+            from != local,
+            "{} is this device: the files are already here (no transfer needed)",
+            args.device
+        );
+        let source = devices.iter().find(|d| d.id == from);
+        if let Some(source) = source
+            && !source.supports(zeron_proto::capabilities::FILE_TRANSFER_V1)
+        {
+            anyhow::bail!(
+                "{} can't send files yet — update Zeron on it first",
+                source.name
+            );
+        }
+        // Relative paths would mean the other device's cwd, which the agent
+        // can't know: only absolute (in the source's own path style) or
+        // home-relative sources.
+        let platform = source.map(|d| d.platform.as_str());
+        if let Some(bad) = args
+            .paths
+            .iter()
+            .find(|p| !(is_home_relative(p) || absolute_on(platform, p)))
+        {
+            anyhow::bail!(
+                "{bad:?} is relative: paths on another device must be absolute or start with ~/"
+            );
+        }
+        let mut params = json!({
+            "targetDeviceId": from,
+            "toDeviceId": local,
+            "paths": args.paths,
+        });
+        if let Some(destination) = args.destination.as_deref() {
+            let base = self.agent_dir().await;
+            params["destination"] = on_this_device(base.as_deref(), destination).into();
+        }
+        let reply = self.zeron.call(methods::SEND_FILES, params).await?;
+        let transfer_id = reply["transferId"].as_str().unwrap_or_default().to_owned();
+        anyhow::ensure!(!transfer_id.is_empty(), "SendFiles replied without a transfer id");
+        let mut result = json!({
+            "transferId": transfer_id,
+            "from": { "id": from, "name": source.map(|d| d.name.clone()) },
+            "to": { "id": reply["toDeviceId"], "name": reply["toDeviceName"] },
+            "sources": args.paths,
+        });
+        if args.wait {
+            self.await_transfer(&mut result, &transfer_id, Some(&from), args.timeout_secs)
+                .await?;
+        } else {
+            result["state"] = "started".into();
+        }
+        Ok(result)
+    }
+
+    /// Poll this engine's `ListFileTransfers` until `transfer_id` ends or the
+    /// timeout passes, folding the row's state into `result`. An incoming
+    /// row appears only once the sender's offer arrives; until then the
+    /// state stays `started`, and for a pull (`source`) the sender's own row
+    /// is checked so a transfer that failed before reaching this device
+    /// ends the wait with its reason.
+    async fn await_transfer(
+        &self,
+        result: &mut Value,
+        transfer_id: &str,
+        source: Option<&str>,
+        timeout_secs: Option<u64>,
+    ) -> anyhow::Result<()> {
+        let timeout = Duration::from_secs(timeout_secs.unwrap_or(600).clamp(1, 3600));
+        let deadline = tokio::time::Instant::now() + timeout;
+        result["state"] = "started".into();
+        loop {
+            let mut row = self.transfer_row(transfer_id, None).await?;
+            if row.is_none()
+                && let Some(source) = source
+                && let Ok(Some(sent)) = self.transfer_row(transfer_id, Some(source)).await
+                && sent.state.is_terminal()
+                && sent.state != zeron_proto::FileTransferState::Completed
+            {
+                row = Some(sent);
+            }
+            if let Some(row) = row {
+                result["state"] = serde_json::to_value(row.state)?;
+                result["bytes"] = row.total_bytes.into();
+                result["files"] = row.file_count.into();
+                // Only the latest row's note: a transient "Reconnecting…"
+                // must not outlive the reconnect.
+                match &row.error {
+                    Some(error) => result["error"] = error.clone().into(),
+                    None => {
+                        result.as_object_mut().map(|r| r.remove("error"));
+                    }
+                }
+                if row.state.is_terminal() {
+                    if row.direction == zeron_proto::FileTransferDirection::Incoming {
+                        // Where each item landed on this device.
+                        result["paths"] = row
+                            .items
+                            .iter()
+                            .filter_map(|item| item.path.clone())
+                            .collect::<Vec<_>>()
+                            .into();
+                        if let Some(destination) = &row.destination {
+                            result["destination"] = destination.clone().into();
+                        }
+                    }
+                    result.as_object_mut().map(|r| r.remove("doneBytes"));
+                    return Ok(());
+                }
+                result["doneBytes"] = row.done_bytes.into();
+            }
+            if tokio::time::Instant::now() >= deadline {
+                result["note"] = "Still transferring; it continues in the background.".into();
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    /// One transfer's row on this engine, or on `device` (forwarded).
+    async fn transfer_row(
+        &self,
+        transfer_id: &str,
+        device: Option<&str>,
+    ) -> anyhow::Result<Option<zeron_proto::FileTransfer>> {
+        let params = match device {
+            Some(device) => json!({ "targetDeviceId": device }),
+            None => json!({}),
+        };
+        let rows = self.zeron.call(methods::LIST_FILE_TRANSFERS, params).await?;
+        Ok(rows
+            .as_array()
+            .and_then(|rows| rows.iter().find(|r| r["id"] == transfer_id))
+            .and_then(|row| serde_json::from_value(row.clone()).ok()))
+    }
+
     async fn interrupt_chat(&self, args: ChatArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
         let command_id = self
@@ -1086,6 +1353,41 @@ fn default_harness(harnesses: &[HarnessInfo]) -> anyhow::Result<HarnessId> {
         })
 }
 
+/// `~` or `~/…`: left for the engine that owns the path to expand against
+/// its own home.
+fn is_home_relative(path: &str) -> bool {
+    path == "~" || path.starts_with("~/")
+}
+
+/// Whether `path` is absolute on a device of `platform` (`None` = unknown:
+/// either style). The check can't use `Path::is_absolute`, which answers for
+/// this machine's OS rather than the source's.
+fn absolute_on(platform: Option<&str>, path: &str) -> bool {
+    let unix = path.starts_with('/');
+    let bytes = path.as_bytes();
+    // `\\server\share`, `\dir` (current drive) or `C:\` / `C:/`.
+    let windows = path.starts_with('\\')
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/'));
+    match platform {
+        Some("windows") => windows || unix,
+        Some(_) => unix,
+        None => unix || windows,
+    }
+}
+
+/// A path the agent typed for this device: absolute and `~/…` as given,
+/// anything else joined onto the agent's working directory.
+fn on_this_device(base: Option<&std::path::Path>, path: &str) -> String {
+    let relative = !(is_home_relative(path) || std::path::Path::new(path).is_absolute());
+    match base {
+        Some(base) if relative => base.join(path).to_string_lossy().into_owned(),
+        _ => path.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1102,6 +1404,8 @@ mod tests {
         writes: Mutex<Vec<(String, Value)>>,
         dispatch_barrier: Option<tokio::sync::Barrier>,
         beta_parent: Option<String>,
+        /// `ListFileTransfers` calls so far (the first reports a reconnect).
+        transfer_polls: std::sync::atomic::AtomicUsize,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1116,10 +1420,20 @@ mod tests {
                 methods::ENGINE_INFO => RpcReply::Value(json!({
                     "deviceId": "dev-local", "workspaceScope": "local"
                 })),
-                methods::WATCH_DEVICES => stream(json!([{
-                    "id": "dev-local", "name": "Laptop", "platform": "linux",
-                    "lastSeenAt": null
-                }])),
+                methods::WATCH_DEVICES => stream(json!([
+                    {
+                        "id": "dev-local", "name": "Laptop", "platform": "linux",
+                        "lastSeenAt": null, "capabilities": ["file-transfer-v1"]
+                    },
+                    {
+                        "id": "dev-desktop", "name": "Desktop", "platform": "linux",
+                        "lastSeenAt": null, "capabilities": ["file-transfer-v1"]
+                    },
+                    {
+                        "id": "dev-old", "name": "Old box", "platform": "linux",
+                        "lastSeenAt": null
+                    }
+                ])),
                 methods::WATCH_SPACES => stream(json!([{
                     "id": "space-1", "deviceId": "dev-local", "path": "/repo/comet",
                     "gitDetected": true, "createdAt": "2026-09-01T00:00:00Z"
@@ -1155,6 +1469,80 @@ mod tests {
                       "status": "complete",
                       "parts": [{ "kind": "text", "id": "t", "text": "hello back" }] }
                 ]})),
+                methods::SEND_FILES => {
+                    // A forwarded pull names this device as the receiver.
+                    let (to, name) = match params["toDeviceId"].as_str() {
+                        Some("dev-local") => ("dev-local", "Laptop"),
+                        _ => ("dev-phone", "Pixel"),
+                    };
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params));
+                    RpcReply::Value(json!({
+                        "transferId": "xfer-1", "toDeviceId": to, "toDeviceName": name
+                    }))
+                }
+                methods::LIST_FILE_TRANSFERS => {
+                    let polls = self
+                        .transfer_polls
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let last_send = self
+                        .writes
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .rev()
+                        .find(|(m, _)| m == methods::SEND_FILES)
+                        .map(|(_, p)| p.clone());
+                    let pulled = last_send
+                        .as_ref()
+                        .is_some_and(|p| p.get("targetDeviceId").is_some());
+                    if pulled && last_send.as_ref().unwrap()["paths"][0] == "/gone" {
+                        // The source failed before its offer reached this
+                        // device: only the source (forwarded) has a row.
+                        return Ok(RpcReply::Value(if params.get("targetDeviceId").is_some() {
+                            json!([{
+                                "id": "xfer-1", "direction": "outgoing",
+                                "peerDeviceId": "dev-local", "peerDeviceName": "Laptop",
+                                "state": "failed", "items": [], "fileCount": 0,
+                                "totalBytes": 0, "doneBytes": 0, "bytesPerSec": 0,
+                                "error": "Couldn't reach Laptop", "createdAt": 1, "updatedAt": 2
+                            }])
+                        } else {
+                            json!([])
+                        }));
+                    }
+                    if pulled {
+                        // The receiving side of a pull: nothing until the
+                        // sender's offer lands, then an incoming row.
+                        return Ok(RpcReply::Value(if polls == 0 {
+                            json!([])
+                        } else {
+                            json!([{
+                                "id": "xfer-1", "direction": "incoming",
+                                "peerDeviceId": "dev-desktop", "peerDeviceName": "Desktop",
+                                "state": "completed",
+                                "items": [{ "name": "logs", "kind": "folder", "size": 42,
+                                            "fileCount": 3, "path": "/home/me/Zeron Transfers/logs" }],
+                                "fileCount": 3, "totalBytes": 42, "doneBytes": 42, "bytesPerSec": 0,
+                                "destination": "/home/me/Zeron Transfers",
+                                "createdAt": 1, "updatedAt": 2
+                            }])
+                        }));
+                    }
+                    let (state, error) = if polls == 0 {
+                        ("reconnecting", json!("Reconnecting to Pixel…"))
+                    } else {
+                        ("completed", Value::Null)
+                    };
+                    RpcReply::Value(json!([{
+                        "id": "xfer-1", "direction": "outgoing", "peerDeviceId": "dev-phone",
+                        "peerDeviceName": "Pixel", "state": state, "items": [],
+                        "fileCount": 1, "totalBytes": 42, "doneBytes": 42, "bytesPerSec": 0,
+                        "error": error, "createdAt": 1, "updatedAt": 2
+                    }]))
+                }
                 methods::MUTATE | methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE => {
                     self.writes
                         .lock()
@@ -1190,6 +1578,170 @@ mod tests {
             assert_eq!(def.input_schema["type"], "object", "{}", def.name);
             assert!(!def.description.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn send_files_defaults_to_the_chats_last_sender_and_waits() {
+        let world = Arc::new(World::default());
+        let origin = Origin {
+            chat_id: Some("chat-alpha-1".into()),
+            ..Default::default()
+        };
+        let tools = tools(world.clone(), origin);
+        let sent = tools
+            .call(
+                "send_files",
+                json!({ "paths": ["/repo/comet/app.apk"], "wait": true }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent["state"], "completed");
+        assert!(
+            sent.get("error").is_none(),
+            "a finished reconnect leaves no note: {sent}"
+        );
+        assert_eq!(sent["device"]["name"], "Pixel");
+        let (method, params) = world.writes.lock().unwrap()[0].clone();
+        assert_eq!(method, methods::SEND_FILES);
+        assert_eq!(
+            params["chatId"], "chat-alpha-1",
+            "no device → the chat decides"
+        );
+        assert!(params.get("toDeviceId").is_none());
+        // An explicit device (by name) is resolved to its id.
+        tools
+            .call(
+                "send_files",
+                json!({ "paths": ["/tmp/x", "~/out/app.apk"], "device": "laptop" }),
+            )
+            .await
+            .unwrap();
+        let params = world.writes.lock().unwrap()[1].1.clone();
+        assert_eq!(params["toDeviceId"], "dev-local");
+        // `~/…` is left for the sending engine to expand to its home.
+        assert_eq!(params["paths"][1], "~/out/app.apk");
+        // Outside a chat a device is required.
+        let lost = super::Tools::new(Arc::new(Zeron::with_client(
+            memory_client(world),
+            Origin::default(),
+        )));
+        let error = lost
+            .call("send_files", json!({ "paths": ["/tmp/x"] }))
+            .await
+            .unwrap_err();
+        assert!(error.contains("say which device"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn fetch_files_asks_the_source_device_to_send_here() {
+        let world = Arc::new(World::default());
+        let origin = Origin {
+            chat_id: Some("chat-alpha-1".into()),
+            ..Default::default()
+        };
+        let tools = tools(world.clone(), origin);
+        let fetched = tools
+            .call(
+                "fetch_files",
+                json!({
+                    "device": "desktop",
+                    "paths": ["/srv/build/logs", "~/notes.md"],
+                    "destination": "incoming",
+                    "wait": true
+                }),
+            )
+            .await
+            .unwrap();
+        let (method, params) = world.writes.lock().unwrap()[0].clone();
+        assert_eq!(method, methods::SEND_FILES);
+        assert_eq!(params["targetDeviceId"], "dev-desktop", "the source sends");
+        assert_eq!(params["toDeviceId"], "dev-local", "to this device");
+        assert_eq!(params["paths"], json!(["/srv/build/logs", "~/notes.md"]));
+        // A relative destination is this chat's (here: the process cwd).
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            params["destination"],
+            cwd.join("incoming").to_string_lossy().as_ref()
+        );
+        assert_eq!(fetched["from"]["name"], "Desktop");
+        assert_eq!(fetched["to"]["id"], "dev-local");
+        // The first poll saw no row yet; the wait held on until it landed.
+        assert_eq!(fetched["state"], "completed");
+        assert_eq!(fetched["paths"], json!(["/home/me/Zeron Transfers/logs"]));
+        assert_eq!(fetched["destination"], "/home/me/Zeron Transfers");
+
+        // Without wait it returns as soon as the source accepted the job.
+        let started = tools
+            .call(
+                "fetch_files",
+                json!({ "device": "dev-desktop", "paths": ["~"] }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(started["state"], "started");
+        assert!(world.writes.lock().unwrap()[1].1.get("destination").is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_files_reports_a_pull_that_failed_on_the_source() {
+        let world = Arc::new(World::default());
+        let tools = tools(world, Origin::default());
+        let fetched = tools
+            .call(
+                "fetch_files",
+                json!({ "device": "desktop", "paths": ["/gone"], "wait": true, "timeout_secs": 30 }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fetched["state"], "failed", "{fetched}");
+        assert_eq!(fetched["error"], "Couldn't reach Laptop");
+        assert!(fetched.get("note").is_none(), "no timeout: {fetched}");
+    }
+
+    #[tokio::test]
+    async fn fetch_files_refuses_what_it_cannot_resolve() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        let fail = |args: Value| {
+            let tools = &tools;
+            async move { tools.call("fetch_files", args).await.unwrap_err() }
+        };
+        let error = fail(json!({ "device": "desktop", "paths": ["build/out.log"] })).await;
+        assert!(error.contains("must be absolute"), "{error}");
+        let error = fail(json!({ "device": "laptop", "paths": ["/tmp/x"] })).await;
+        assert!(error.contains("already here"), "{error}");
+        let error = fail(json!({ "device": "Old box", "paths": ["/tmp/x"] })).await;
+        assert!(error.contains("update Zeron"), "{error}");
+        let error = fail(json!({ "device": "nowhere", "paths": ["/tmp/x"] })).await;
+        assert!(error.contains("no device matches"), "{error}");
+        let error = fail(json!({ "paths": ["/tmp/x"] })).await;
+        assert!(error.contains("device"), "{error}");
+        assert!(
+            world.writes.lock().unwrap().is_empty(),
+            "nothing was sent for a refused fetch"
+        );
+    }
+
+    #[test]
+    fn agent_paths_resolve_against_the_chat_dir_except_absolute_and_home() {
+        let base = std::path::Path::new("/repo/comet");
+        assert_eq!(on_this_device(Some(base), "dist/app"), "/repo/comet/dist/app");
+        assert_eq!(on_this_device(Some(base), "/tmp/x"), "/tmp/x");
+        assert_eq!(on_this_device(Some(base), "~/out"), "~/out");
+        assert_eq!(on_this_device(Some(base), "~"), "~");
+        assert_eq!(on_this_device(None, "dist"), "dist");
+    }
+
+    #[test]
+    fn source_paths_are_absolute_in_the_source_devices_style() {
+        assert!(absolute_on(Some("linux"), "/var/log"));
+        assert!(!absolute_on(Some("linux"), "C:\\logs"));
+        assert!(absolute_on(Some("windows"), "C:\\Users\\me\\out.log"));
+        assert!(absolute_on(Some("windows"), "D:/data"));
+        assert!(absolute_on(Some("windows"), "\\\\nas\\share"));
+        assert!(!absolute_on(Some("windows"), "out\\app.exe"));
+        assert!(!absolute_on(Some("macos"), "build/out"));
+        assert!(absolute_on(None, "C:\\x") && absolute_on(None, "/x"));
     }
 
     #[tokio::test]

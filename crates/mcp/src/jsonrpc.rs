@@ -35,7 +35,11 @@ For parallel delegation, use `create_chats` with a prompt for each chat or \
 even if your harness executes tool calls sequentially. Alternatively, launch ALL \
 chats/messages with `wait: false` first, then use `wait_for_turn` to collect replies. \
 Do not wait for one worker before launching the next independent worker. \
-If a chat is `awaitingInput`, answer it with `respond_to_input`.";
+If a chat is `awaitingInput`, answer it with `respond_to_input`.\n\
+\n\
+Files move between devices directly: `send_files` pushes files or folders \
+from this device to another, `fetch_files` pulls them from another device \
+to this one. Chats on other devices can be asked to send files back too.";
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;

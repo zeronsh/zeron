@@ -154,8 +154,14 @@ zeron/
                                  # validation, provenance, and local VS Code compiler
     ui/           zeron-ui       # gpui app: shell, sidebar, conversation, composer,
                                  # terminal view, diff pane, settings, animation kit
+    transfer/     zeron-transfer # device-to-device file transfer: manifests, verified
+                                 # resumable blocks, relay pipe (docs/file-transfer.md);
+                                 # P2P lanes ride the preview WebRTC mux
+    localedge/    zeron-localedge # single-tenant Rust port of edge/ (SQLite, one shared
+                                 # secret); `zeron local-edge` for dev and cross-device tests
   apps/
-    zeron/                       # the binary (headed default, `headless` subcommand)
+    zeron/                       # the binary (headed default, `headless` and
+                                 # `local-edge` subcommands)
   edge/                          # TypeScript Worker + DOs (ported from zeron/apps/edge,
                                  # + auth-exchange routes absorbed from apps/server)
   docs/                          # this file + research reports

@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod entities;
 pub mod file_mentions;
+pub mod file_transfer;
 pub mod invocation;
 pub mod motion;
 pub mod preview;
@@ -15,6 +16,7 @@ pub mod workspace;
 
 pub use agent::*;
 pub use entities::*;
+pub use file_transfer::*;
 pub use preview::*;
 pub use sidebar_pins::*;
 pub use workspace::*;

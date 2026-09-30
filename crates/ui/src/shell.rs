@@ -63,6 +63,7 @@ mod chat_dropzone;
 #[cfg(test)]
 mod chat_dropzone_tests;
 mod command_palette;
+mod file_transfers;
 mod files_panel;
 mod harness_updates;
 mod navigation_focus;
@@ -1929,6 +1930,8 @@ pub struct Shell {
     /// slightly different times into one banner.
     harness_update_banner_task: Option<Task<()>>,
     /// Independent watches retain device identity across selection changes.
+    /// Device file transfers: send picker, titlebar panel, toast.
+    file_transfers: file_transfers::FileTransfersUi,
     harness_update_devices: std::collections::BTreeMap<String, harness_updates::DeviceUpdates>,
     harness_update_expanded: bool,
     harness_update_transition: Option<WidthTween>,
@@ -2341,6 +2344,7 @@ impl Shell {
             attention_sound_gate: Default::default(),
             harness_update_seen: std::collections::HashSet::new(),
             harness_update_banner_task: None,
+            file_transfers: Default::default(),
             harness_update_devices: Default::default(),
             harness_update_expanded: false,
             harness_update_transition: None,
@@ -2472,6 +2476,7 @@ impl Shell {
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         self.prune_file_explorers(cx);
         self.refresh_harness_update_watch(cx);
+        self.sync_file_transfer_notices(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
             self.side_chat_creating = false;
@@ -3573,6 +3578,7 @@ impl Shell {
                     FilesEvent::OpenSubagent { .. }
                     | FilesEvent::OpenChildChat(_)
                     | FilesEvent::ChildChatContextMenu { .. }
+                    | FilesEvent::EntryContextMenu { .. }
                     | FilesEvent::NewChildChat
                     | FilesEvent::ForkChat => {}
                     FilesEvent::CloseCancelled => {
@@ -6244,6 +6250,7 @@ impl Shell {
                         cx.listener(|this, _, _, cx| this.open_new_session(cx)),
                     ))
             }))
+            .children(self.render_file_transfers_indicator(cx))
             .into_any_element()
     }
 
@@ -9116,6 +9123,9 @@ impl Shell {
     /// Resolve shell-owned Escape surfaces in capture phase, before focused
     /// descendants such as an integrated terminal can consume the key.
     fn capture_escape_surface(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.dismiss_file_transfer_popovers(cx) {
+            return true;
+        }
         // Modals and context menus sit above the rest of the shell. Preserve
         // their existing behavior: only surfaces that already have a Cancel
         // path close here; the others remain explicit blockers.
@@ -9278,6 +9288,7 @@ impl Shell {
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).for_popup();
         let mut overlays: Vec<AnyElement> = Vec::new();
+        overlays.extend(self.render_send_menu(cx));
 
         if let Some(menu_state) = self.chat_menu.get().cloned() {
             let chat_id = menu_state.chat_id;
