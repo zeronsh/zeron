@@ -721,6 +721,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
         legacy
             .upsert_session(&Session {
                 last_completed_turn: None,
+                running_subagents: 0,
                 chat_id: "chat-legacy".into(),
                 device_id: "dev-a".into(),
                 status: SessionStatus::Idle,

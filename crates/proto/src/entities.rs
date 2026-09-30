@@ -302,6 +302,11 @@ pub struct Session {
     pub status: SessionStatus,
     pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
+    /// Subagents of this chat streaming right now. Rides the session row (and
+    /// its staleness window) so every device's sidebar can badge a chat it
+    /// has not opened; read it through `view::running_subagents`.
+    #[serde(default)]
+    pub running_subagents: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -551,6 +556,40 @@ pub struct ReadWorkspaceImageRequest {
     pub expected_checkout_id: String,
     pub offset: usize,
     pub expected_content_hash: Option<String>,
+}
+
+/// Largest `ReadWorkspaceBytes` chunk (base64 keeps a frame under ~700 KiB).
+pub const WORKSPACE_BYTES_CHUNK_MAX: usize = 512 * 1024;
+
+/// Raw bytes of any regular workspace file, in chunks — PDF previews and
+/// downloads of files, folders and projects on another device. Unbounded
+/// size: a continuation names the revision its first chunk reported and
+/// fails if the file changed in between.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadWorkspaceBytesRequest {
+    #[serde(flatten)]
+    pub target: WorkspaceTarget,
+    pub path: String,
+    #[serde(default)]
+    pub offset: u64,
+    /// Chunk size (capped at [`WORKSPACE_BYTES_CHUNK_MAX`], the default).
+    #[serde(default)]
+    pub length: Option<usize>,
+    #[serde(default)]
+    pub expected_revision: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceBytesChunk {
+    /// Opaque file revision (size, mtime, inode).
+    pub revision: String,
+    pub size: u64,
+    /// Base64.
+    pub data: String,
+    pub next_offset: u64,
+    pub done: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

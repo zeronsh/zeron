@@ -12255,10 +12255,13 @@ dependencies = [
 name = "zeron-mobile"
 version = "0.2.97"
 dependencies = [
+ "base64 0.22.1",
+ "pulldown-cmark",
  "serde",
  "serde_json",
  "similar",
  "thiserror 2.0.20",
+ "tokio",
  "uniffi",
  "zeron-client",
  "zeron-doc",
@@ -12266,6 +12269,7 @@ dependencies = [
  "zeron-proto",
  "zeron-syntax",
  "zeron-text",
+ "zeron-vt",
 ]
 
 [[package]]
@@ -12419,7 +12423,6 @@ dependencies = [
 name = "zeron-ui"
 version = "0.2.97"
 dependencies = [
- "alacritty_terminal",
  "anyhow",
  "ashpd",
  "async-io",
@@ -12480,6 +12483,7 @@ dependencies = [
  "zeron-syntax",
  "zeron-theme",
  "zeron-update",
+ "zeron-vt",
 ]
 
 [[package]]
@@ -12496,6 +12500,13 @@ dependencies = [
  "tokio",
  "tracing",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "zeron-vt"
+version = "0.2.97"
+dependencies = [
+ "alacritty_terminal",
 ]
 
 [[package]]

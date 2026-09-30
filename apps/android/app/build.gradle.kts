@@ -73,6 +73,9 @@ android {
     }
 
     packaging { jniLibs { useLegacyPackaging = false } }
+
+    // Pure-Kotlin unit tests only: Android stubs return defaults instead of throwing.
+    testOptions { unitTests.isReturnDefaultValues = true }
 }
 
 tasks.named("preBuild") { dependsOn(buildCore, genIcons) }
@@ -96,6 +99,10 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation("${libs.jna.get()}@aar")
     debugImplementation(libs.compose.ui.tooling)
+
+    testImplementation(libs.junit)
+    // android.jar's org.json is a stub under unit tests; the Agents parsers need the real one.
+    testImplementation(libs.org.json)
 }
 
 kotlin {

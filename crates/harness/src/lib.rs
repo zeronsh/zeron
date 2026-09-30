@@ -186,6 +186,7 @@ pub mod opencode;
 pub mod process;
 mod scratch;
 pub mod shell_env;
+pub mod uninstall;
 pub(crate) mod skills;
 #[cfg(windows)]
 pub mod windows_process;

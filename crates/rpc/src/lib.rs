@@ -37,6 +37,11 @@ pub mod methods {
     pub const LIST_HARNESSES: &str = "ListHarnesses";
     pub const CANCEL_INSTALL: &str = "CancelInstall";
     pub const INSTALL_HARNESS: &str = "InstallHarness";
+    /// Remove what Zeron's installers put on disk for a harness (vendor
+    /// layout, global npm package, managed archive/adapters); refuses a CLI
+    /// installed elsewhere. `{harness, dryRun?}` → `UninstallHarnessResult`.
+    /// `CancelInstall` cancels one still running its npm step.
+    pub const UNINSTALL_HARNESS: &str = "UninstallHarness";
     /// Flip a harness's enablement on the target device (Settings → Providers);
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
@@ -163,6 +168,7 @@ pub mod methods {
     pub const SEARCH_WORKSPACE_FILES: &str = "SearchWorkspaceFiles";
     pub const READ_WORKSPACE_IMAGE: &str = "ReadWorkspaceImage";
     pub const READ_WORKSPACE_FILE: &str = "ReadWorkspaceFile";
+    pub const READ_WORKSPACE_BYTES: &str = "ReadWorkspaceBytes";
     pub const WRITE_WORKSPACE_FILE: &str = "WriteWorkspaceFile";
     pub const WATCH_WORKSPACE_FILES: &str = "WatchWorkspaceFiles";
     pub const CREATE_WORKTREE: &str = "CreateWorktree";
@@ -215,6 +221,13 @@ pub mod methods {
     pub const WATCH_HARNESS_UPDATES: &str = "WatchHarnessUpdates";
     pub const CHECK_HARNESS_UPDATES: &str = "CheckHarnessUpdates";
     pub const APPLY_HARNESS_UPDATE: &str = "ApplyHarnessUpdate";
+    /// Check every monitored harness, then apply each available update in
+    /// turn; per-harness progress rides `WatchHarnessUpdates` (or polled
+    /// `ListHarnessUpdates`). Replies `HarnessUpdateAllResult`.
+    pub const APPLY_ALL_HARNESS_UPDATES: &str = "ApplyAllHarnessUpdates";
+    /// The current ordered status list, without probing anything — the unary
+    /// twin of `WatchHarnessUpdates` for clients that cannot stream.
+    pub const LIST_HARNESS_UPDATES: &str = "ListHarnessUpdates";
     pub const CANCEL_HARNESS_UPDATE: &str = "CancelHarnessUpdate";
     pub const DISMISS_HARNESS_UPDATE: &str = "DismissHarnessUpdate";
     pub const SET_HARNESS_UPDATE_POLICY: &str = "SetHarnessUpdatePolicy";

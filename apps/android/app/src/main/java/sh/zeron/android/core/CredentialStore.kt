@@ -25,7 +25,11 @@ class CredentialStore(context: Context) {
         }
     }
 
-    fun store(credentials: Credentials) {
+    /** The `AUTH_MODE=dev` edge stored [Credentials.Dev] sign in to (developer sign-in). */
+    val devEdge: String? get() = prefs.getString("credentials", null)?.let { runCatching { JSONObject(it) }.getOrNull() }
+        ?.takeIf { it.optString("kind") == "dev" }?.optString("edge")?.ifEmpty { null }
+
+    fun store(credentials: Credentials, devEdge: String? = null) {
         val json = when (credentials) {
             is Credentials.WorkOs -> JSONObject()
                 .put("kind", "workos")
@@ -34,6 +38,7 @@ class CredentialStore(context: Context) {
                 .put("access", credentials.tokens.accessToken)
                 .put("refresh", credentials.tokens.refreshToken)
             is Credentials.Dev -> JSONObject().put("kind", "dev").put("userId", credentials.userId).put("orgId", credentials.orgId)
+                .put("edge", devEdge ?: this.devEdge)
             is Credentials.Demo -> return
         }
         prefs.edit().putString("credentials", json.toString()).apply()

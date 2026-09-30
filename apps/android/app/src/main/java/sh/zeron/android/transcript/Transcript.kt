@@ -74,6 +74,10 @@ class TranscriptActions(
     val openUrl: (String) -> Unit,
     val loadImage: suspend (String) -> androidx.compose.ui.graphics.ImageBitmap?,
     val showText: (title: String, text: String, mono: Boolean) -> Unit,
+    /** A file an agent touched (tool badge): open it in the viewer. */
+    val openFile: (path: String) -> Unit = {},
+    /** Quick actions for a file badge (open in browser, save to Downloads…). */
+    val fileActions: (path: String) -> List<sh.zeron.android.ui.MenuAction> = { emptyList() },
 )
 
 private const val OVERSCAN = 700f

@@ -31,6 +31,8 @@ use markdown::{Ctx, Px};
 pub use rows::{PendingUser, RowKind, TranscriptInput};
 use rows::{Gap, Placed, RowBuilder, RowCore, place_row};
 pub use style::{FaceRole, StyleDesc};
+pub(crate) use file_icons::{file_icon_asset, folder_icon_asset};
+pub(crate) use markdown::syntax_color as markdown_syntax_color;
 use style::Typography;
 
 /// Measures text the bundled faces can't render (emoji, CJK…) with the

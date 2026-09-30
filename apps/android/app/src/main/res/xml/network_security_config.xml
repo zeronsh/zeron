@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The in-app browser is a developer tool: it opens dev servers over plain
+  HTTP — ones on the local network (http://192.168.x.y:3000, the emulator's
+  10.0.2.2), a computer's previews opened straight from it. Everything else
+  the app speaks is TLS from Rust (or a development edge over plain HTTP),
+  which this file doesn't govern.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

@@ -295,6 +295,7 @@ fn space(id: &str, device_id: &str, path: &str) -> Space {
 fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
     Session {
         last_completed_turn: None,
+        running_subagents: 0,
         chat_id: chat_id.into(),
         device_id: device_id.into(),
         status,
@@ -1230,6 +1231,24 @@ fn completion_marker_replicates_and_survives_next_turn() {
     server_round(&mut server, &mut seq, &mut [&mut source, &mut viewer]);
     assert_eq!(viewer.read_sessions().unwrap(), vec![row.clone()]);
     row.status = SessionStatus::Working;
+    source.upsert_session(&row).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut source, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row]);
+}
+
+#[test]
+fn running_subagent_count_replicates_and_clears() {
+    let mut source = RegistryDoc::new("dev-a");
+    let mut viewer = RegistryDoc::new("dev-b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    // The parent turn has settled; its subagents still run.
+    let mut row = session("chat-1", "dev-a", SessionStatus::Idle);
+    row.running_subagents = 12;
+    source.upsert_session(&row).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut source, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row.clone()]);
+    row.running_subagents = 0;
     source.upsert_session(&row).unwrap();
     server_round(&mut server, &mut seq, &mut [&mut source, &mut viewer]);
     assert_eq!(viewer.read_sessions().unwrap(), vec![row]);

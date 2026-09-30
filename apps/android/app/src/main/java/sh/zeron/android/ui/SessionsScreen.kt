@@ -311,7 +311,15 @@ fun SessionItem(
             supportingContent = { Subline(row) },
             trailingContent = {
                 Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    StatusLabel(row)
+                    // Running subagents lead the row's own status (never
+                    // replace it) — also once the parent's turn is done.
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (row.runningSubagents > 0u) {
+                            RunningPill(row.runningSubagents.toInt())
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        StatusLabel(row)
+                    }
                     row.pullRequest?.let { PrBadge(it.number, it.state) }
                 }
             },

@@ -295,10 +295,14 @@ impl SessionCore {
         if lock(&self.room).is_some() {
             return;
         }
-        let Some(chat) = client.workspace.chat(&self.chat_id) else {
-            return;
+        // A subagent doc has no registry row: the engine opens it on a chat2
+        // room from birth (an absent row reads as generation 2 host-side).
+        let room_gen = match client.workspace.chat(&self.chat_id) {
+            Some(chat) => chat.room_gen.unwrap_or(1),
+            None if crate::subagents::is_subagent_doc(&self.chat_id) => 2,
+            None => return,
         };
-        if chat.room_gen.unwrap_or(1) < 2 {
+        if room_gen < 2 {
             // A retired legacy (s2) room: nothing to dial. Show what's local
             // instead of an endless loader.
             let newly = !std::mem::replace(&mut lock(&self.state).hydrated, true);

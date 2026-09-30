@@ -17,8 +17,9 @@ use tokio_util::sync::CancellationToken;
 use zeron_harness::process::{Command, Stdio};
 
 use zeron_proto::{
-    HarnessId, HarnessInstallSource, HarnessUpdateFailure, HarnessUpdatePhase, HarnessUpdatePolicy,
-    HarnessUpdateProgress, HarnessUpdateStatus,
+    HarnessId, HarnessInstallSource, HarnessUpdateAllResult, HarnessUpdateFailure,
+    HarnessUpdateOutcome, HarnessUpdatePhase, HarnessUpdatePolicy, HarnessUpdateProgress,
+    HarnessUpdateStatus,
 };
 
 use crate::now_ms;
@@ -290,6 +291,9 @@ struct Inner {
     cancellations: Mutex<HashMap<HarnessId, ActiveUpdate>>,
     operation_gates: Mutex<HashMap<HarnessId, Arc<tokio::sync::Mutex<()>>>>,
     check_slots: tokio::sync::Semaphore,
+    /// One update-all pass at a time; a second request runs after it (and
+    /// finds nothing left to do).
+    apply_all: tokio::sync::Mutex<()>,
     shutdown: CancellationToken,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     client: reqwest::Client,
@@ -404,6 +408,7 @@ impl HarnessUpdateCoordinator {
                 cancellations: Mutex::new(HashMap::new()),
                 operation_gates: Mutex::new(HashMap::new()),
                 check_slots: tokio::sync::Semaphore::new(2),
+                apply_all: tokio::sync::Mutex::new(()),
                 shutdown: CancellationToken::new(),
                 worker: Mutex::new(None),
                 client: reqwest::Client::builder()
@@ -739,6 +744,96 @@ impl HarnessUpdateCoordinator {
             operation = self.operation_gate(harness).lock_owned() => operation,
         };
         self.apply_locked(harness, false).await
+    }
+
+    /// Check every monitored harness, then apply each update that is
+    /// available and safely applicable, one provider at a time (vendor
+    /// updaters and npm share global state). Detached like [`Self::apply`]:
+    /// a dropped request never abandons an updater mid-mutation. Rows needing
+    /// their own package manager are reported, not attempted.
+    pub async fn apply_all(&self) -> Result<HarnessUpdateAllResult, String> {
+        let coordinator = self.clone();
+        tokio::spawn(async move { coordinator.apply_all_inner().await })
+            .await
+            .map_err(|error| format!("agent update task failed: {error}"))
+    }
+
+    async fn apply_all_inner(&self) -> HarnessUpdateAllResult {
+        let _pass = self.inner.apply_all.lock().await;
+        let mut result = HarnessUpdateAllResult::default();
+        tokio::select! {
+            biased;
+            _ = self.inner.shutdown.cancelled() => {}
+            _ = self.check_all() => {}
+        }
+        let applicable =
+            |status: &HarnessUpdateStatus| status.phase == HarnessUpdatePhase::Available;
+        for harness in self.inner.order.clone() {
+            if self.inner.shutdown.is_cancelled() {
+                break;
+            }
+            let status = self.status(harness);
+            if !applicable(&status) {
+                continue;
+            }
+            if !status.can_apply {
+                result.manual.push(harness);
+                continue;
+            }
+            let _operation = tokio::select! {
+                biased;
+                _ = self.inner.shutdown.cancelled() => break,
+                operation = self.operation_gate(harness).lock_owned() => operation,
+            };
+            // An automatic update may have won the provider slot meanwhile.
+            let status = self.status(harness);
+            if !applicable(&status) || !status.can_apply {
+                continue;
+            }
+            match self.apply_locked(harness, false).await {
+                Ok(version) => result.updated.push(HarnessUpdateOutcome {
+                    harness,
+                    version: Some(version),
+                    error: None,
+                }),
+                Err(error) => result.failed.push(HarnessUpdateOutcome {
+                    harness,
+                    version: None,
+                    error: Some(error),
+                }),
+            }
+        }
+        result.statuses = self.snapshot();
+        result
+    }
+
+    /// Claim `harness` for an uninstall: waits out a running check and
+    /// refuses while an update owns the provider. Hold the guard until the
+    /// removal finished, then call [`Self::forget_install`].
+    pub async fn begin_uninstall(
+        &self,
+        harness: HarnessId,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, String> {
+        let operation = self.operation_gate(harness).lock_owned().await;
+        if self.is_mutating(harness) {
+            return Err(
+                "an update of this agent is in progress; try again when it finishes".into(),
+            );
+        }
+        Ok(operation)
+    }
+
+    /// The CLI is gone: nothing to monitor until it is installed again.
+    pub fn forget_install(&self, harness: HarnessId) {
+        self.mutate(harness, |status| {
+            status.phase = HarnessUpdatePhase::Dormant;
+            status.installed_version = None;
+            status.latest_version = None;
+            status.source = HarnessInstallSource::Unknown;
+            status.progress = None;
+            status.error = None;
+            status.checked_at = None;
+        });
     }
 
     /// Caller holds the provider operation lock through verification.
@@ -2194,6 +2289,139 @@ esac
         assert_eq!(status.installed_version.as_deref(), Some("0.20.0"));
         assert_eq!(status.latest_version, None);
         assert!(status.error.is_none());
+        coordinator.shutdown().await;
+    }
+
+    /// Update all: one check pass, then every applicable update in catalog
+    /// order — successes, failures and manual-only rows reported apart, and
+    /// a second pass finds nothing left to apply.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_all_checks_then_updates_every_applicable_harness() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let script = |name: &str, body: &str| {
+            let path = temp.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        // Grok: 1.0.4 → 1.0.41 through its own updater.
+        let grok = script(
+            "grok",
+            r#"#!/bin/sh
+root="$(dirname "$0")"
+v=1.0.4; test -f "$root/grok-updated" && v=1.0.41
+case "$1:$2" in
+  version:) echo "grok $v (d846eb93d9) [stable]" ;;
+  update:--check) echo "A new version of Grok Build is available: $v -> 1.0.41 [stable]" ;;
+  update:) touch "$root/grok-updated" ;;
+  *) exit 2 ;;
+esac
+"#,
+        );
+        // Hermes: behind origin, but its updater fails.
+        let hermes = script(
+            "hermes",
+            r#"#!/bin/sh
+case "$1:$2" in
+  --version:) printf 'Hermes 0.20.0\n' ;;
+  update:--check) printf 'Update available: 3 commits behind origin/main.\n' ;;
+  update:--yes) echo 'network unreachable' >&2; exit 3 ;;
+  *) exit 2 ;;
+esac
+"#,
+        );
+        // Devin publishes no release feed: manual, never attempted.
+        let devin = script("devin", "#!/bin/sh\necho 'devin 2026.1.0'\n");
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(ExecutableHarness(grok, HarnessId::Grok)));
+        registry.register(Arc::new(ExecutableHarness(hermes, HarnessId::Hermes)));
+        registry.register(Arc::new(ExecutableHarness(devin, HarnessId::Devin)));
+        let coordinator = super::HarnessUpdateCoordinator::new(temp.path(), registry);
+
+        let result = coordinator.apply_all().await.unwrap();
+        assert_eq!(result.updated.len(), 1, "{result:?}");
+        assert_eq!(result.updated[0].harness, HarnessId::Grok);
+        assert_eq!(result.updated[0].version.as_deref(), Some("1.0.41"));
+        assert_eq!(result.failed.len(), 1, "{result:?}");
+        assert_eq!(result.failed[0].harness, HarnessId::Hermes);
+        assert!(
+            result.failed[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("network unreachable")),
+            "{result:?}"
+        );
+        assert!(temp.path().join("grok-updated").is_file());
+        let phase = |id| {
+            result
+                .statuses
+                .iter()
+                .find(|status| status.harness == id)
+                .map(|status| status.phase)
+        };
+        assert_eq!(phase(HarnessId::Grok), Some(HarnessUpdatePhase::Updated));
+        assert_eq!(phase(HarnessId::Hermes), Some(HarnessUpdatePhase::Failed));
+        assert_eq!(
+            phase(HarnessId::Devin),
+            Some(HarnessUpdatePhase::ManualActionRequired)
+        );
+
+        // Nothing new: Grok is current now; Hermes is retried and fails again.
+        let again = coordinator.apply_all().await.unwrap();
+        assert!(again.updated.is_empty(), "{again:?}");
+        assert_eq!(again.failed.len(), 1);
+        assert_eq!(
+            coordinator
+                .status(HarnessId::Grok)
+                .installed_version
+                .as_deref(),
+            Some("1.0.41")
+        );
+        coordinator.shutdown().await;
+    }
+
+    /// An uninstall waits out a running check but is refused mid-update, and
+    /// leaves the row dormant with no stale version.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uninstall_claims_the_provider_and_forgets_its_versions() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let grok = temp.path().join("grok");
+        std::fs::write(
+            &grok,
+            "#!/bin/sh\ncase \"$1:$2\" in\n  version:) echo 'grok 1.0.4' ;;\n  update:--check) echo '1.0.4 -> 1.0.41' ;;\n  *) exit 2 ;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&grok, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(ExecutableHarness(grok, HarnessId::Grok)));
+        let coordinator = super::HarnessUpdateCoordinator::new(temp.path(), registry);
+        coordinator.check_one(HarnessId::Grok).await.unwrap();
+        assert_eq!(
+            coordinator.status(HarnessId::Grok).phase,
+            HarnessUpdatePhase::Available
+        );
+        let claim = coordinator.begin_uninstall(HarnessId::Grok).await.unwrap();
+        coordinator.forget_install(HarnessId::Grok);
+        drop(claim);
+        let status = coordinator.status(HarnessId::Grok);
+        assert_eq!(status.phase, HarnessUpdatePhase::Dormant);
+        assert_eq!(status.installed_version, None);
+        assert_eq!(status.latest_version, None);
+        // Mid-update, the provider is not the uninstaller's to take.
+        super::lock(&coordinator.inner.cancellations).insert(
+            HarnessId::Grok,
+            super::ActiveUpdate {
+                cancel: tokio_util::sync::CancellationToken::new(),
+                automatic: false,
+                previous_phase: HarnessUpdatePhase::Available,
+            },
+        );
+        assert!(coordinator.begin_uninstall(HarnessId::Grok).await.is_err());
+        super::lock(&coordinator.inner.cancellations).clear();
         coordinator.shutdown().await;
     }
 

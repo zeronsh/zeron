@@ -3,6 +3,8 @@ package sh.zeron.android.ui
 import android.net.Uri
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -21,12 +23,17 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -43,6 +50,9 @@ fun SignInScreen(model: AppModel) {
     val context = LocalContext.current
     val error by model.signInError.collectAsState()
     val orgs by model.orgChoice.collectAsState()
+    // Developer sign-in (debuggable builds): seven taps on the mark.
+    var taps by remember { mutableIntStateOf(0) }
+    var developer by remember { mutableStateOf(false) }
     Column(
         Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -51,7 +61,10 @@ fun SignInScreen(model: AppModel) {
         Image(
             painterResource(R.mipmap.ic_launcher_foreground),
             null,
-            Modifier.size(148.dp).clip(MaterialShapes.Cookie12Sided.toShape()),
+            Modifier.size(148.dp).clip(MaterialShapes.Cookie12Sided.toShape()).clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+            ) { if (model.isDebuggable && ++taps >= 7) developer = true },
         )
         Spacer(Modifier.height(32.dp))
         Text("Zeron", style = MaterialTheme.typography.displayMedium)
@@ -87,6 +100,10 @@ fun SignInScreen(model: AppModel) {
             Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center)
         }
     }
+    if (developer) DevSignInDialog(onDismiss = { developer = false }) { edge, user, org ->
+        developer = false
+        model.devSignIn(edge, user, org)
+    }
     orgs?.let { (list, choice) ->
         AlertDialog(
             onDismissRequest = { choice.complete(null) },
@@ -107,4 +124,34 @@ fun SignInScreen(model: AppModel) {
             dismissButton = { TextButton(onClick = { choice.complete(null) }) { Text("Cancel") } },
         )
     }
+}
+
+/**
+ * Developer: an `AUTH_MODE=dev` edge (e.g. `wrangler dev --var AUTH_MODE:dev`
+ * in edge/) and the `user@org` to be — the bearer such an edge accepts.
+ */
+@Composable
+private fun DevSignInDialog(onDismiss: () -> Unit, onSignIn: (String, String, String) -> Unit) {
+    var edge by remember { mutableStateOf("http://10.0.2.2:27740") }
+    var user by remember { mutableStateOf("dev-user") }
+    var org by remember { mutableStateOf("dev-org") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Developer sign-in") },
+        text = {
+            Column {
+                Text(
+                    "Join a development edge (AUTH_MODE=dev) without WorkOS.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(edge, { edge = it }, label = { Text("Edge URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(user, { user = it }, label = { Text("User id") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(org, { org = it }, label = { Text("Organization id") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSignIn(edge, user, org) }) { Text("Sign in") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
