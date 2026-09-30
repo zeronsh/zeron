@@ -115,6 +115,55 @@ impl NewThreadBackgroundEffect {
     }
 }
 
+/// Which sessions the background artwork covers. The blank new-session canvas
+/// always shows it; `AllSessions` also paints it behind an open session's
+/// transcript.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NewThreadBackgroundScope {
+    #[default]
+    EmptySessions,
+    AllSessions,
+}
+
+impl NewThreadBackgroundScope {
+    pub const ALL: [Self; 2] = [Self::EmptySessions, Self::AllSessions];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::EmptySessions => "Empty sessions",
+            Self::AllSessions => "All sessions",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::EmptySessions => "Shows the image only on the blank new-session canvas.",
+            Self::AllSessions => "Shows the image behind open sessions too.",
+        }
+    }
+
+    /// Artwork opacity uses the hero/thread dissolve so the canvas can hand
+    /// itself over to a transcript. Under `AllSessions` the artwork is a
+    /// steady backdrop in both states, so that handoff never applies.
+    pub const fn background_dissolve(self, dock_dissolve: f32) -> f32 {
+        match self {
+            Self::EmptySessions => dock_dissolve,
+            Self::AllSessions => 0.0,
+        }
+    }
+
+    /// Whether the artwork layer mounts this frame. `EmptySessions` reserves
+    /// it for the blank canvas, plus the frames of the route dissolve that
+    /// fades it out as a transcript takes over.
+    pub const fn mounts(self, has_selection: bool, dock_active: bool) -> bool {
+        match self {
+            Self::EmptySessions => !has_selection || dock_active,
+            Self::AllSessions => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct GitHistoryColumns {
@@ -466,6 +515,14 @@ pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String>
 pub fn set_new_thread_background_effect(effect: NewThreadBackgroundEffect, cx: &mut App) {
     if update(SavePolicy::Immediate, cx, |settings| {
         settings.new_thread_background_effect = effect;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
+pub fn set_new_thread_background_scope(scope: NewThreadBackgroundScope, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.new_thread_background_scope = scope;
     }) {
         cx.refresh_windows();
     }
@@ -895,6 +952,9 @@ pub struct UiSettings {
     pub wallpaper_color: Option<zeron_theme::Color>,
     /// Non-destructive treatment composited inside the artwork's fade mask.
     pub new_thread_background_effect: NewThreadBackgroundEffect,
+    /// Which sessions the artwork covers: the blank canvas alone (the
+    /// default), or every open session's transcript as well.
+    pub new_thread_background_scope: NewThreadBackgroundScope,
     /// Snap animations to rest. Defaults to following the OS.
     pub reduce_motion: crate::motion::ReduceMotion,
     /// Also snap animations while the main window is not focused.
@@ -981,6 +1041,7 @@ impl Default for UiSettings {
             wallpaper_theme_colors: false,
             wallpaper_color: None,
             new_thread_background_effect: NewThreadBackgroundEffect::None,
+            new_thread_background_scope: NewThreadBackgroundScope::EmptySessions,
             reduce_motion: crate::motion::ReduceMotion::System,
             pause_animations_in_background: false,
             legacy_accent_color: None,
@@ -1793,6 +1854,10 @@ mod tests {
             loaded.new_thread_background_effect,
             NewThreadBackgroundEffect::None
         );
+        assert_eq!(
+            loaded.new_thread_background_scope,
+            NewThreadBackgroundScope::EmptySessions
+        );
         assert_eq!(loaded.reduce_motion, crate::motion::ReduceMotion::System);
         assert!(!loaded.pause_animations_in_background);
         assert_eq!(loaded.sidebar_width, 300.0);
@@ -2423,6 +2488,7 @@ mod tests {
             wallpaper_theme_colors: false,
             wallpaper_color: None,
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
+            new_thread_background_scope: NewThreadBackgroundScope::AllSessions,
             reduce_motion: crate::motion::ReduceMotion::On,
             pause_animations_in_background: true,
             legacy_accent_color: None,
@@ -2434,6 +2500,7 @@ mod tests {
         assert!(json.contains(r#""codeFencesFitContent": true"#));
         assert!(json.contains(r#""openWebLinksInZeron": false"#));
         assert!(json.contains(r#""newThreadBackgroundEffect": "ascii""#));
+        assert!(json.contains(r#""newThreadBackgroundScope": "allSessions""#));
         assert!(json.contains(r#""reduceMotion": "on""#));
         assert!(json.contains(r#""pauseAnimationsInBackground": true"#));
         assert!(json.contains(r#""terminalFontFamily": "installed:Menlo""#));

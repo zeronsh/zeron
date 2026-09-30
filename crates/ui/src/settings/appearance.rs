@@ -225,6 +225,7 @@ pub struct AppearancePage {
     dark_theme_select: widgets::SelectState,
     surface_select: widgets::SelectState,
     background_effect_select: widgets::SelectState,
+    background_scope_select: widgets::SelectState,
     reduce_motion_select: widgets::SelectState,
     import_dialog: Option<ImportDialog>,
     review_entry: Option<String>,
@@ -488,6 +489,7 @@ impl AppearancePage {
             dark_theme_select: widgets::SelectState::default(),
             surface_select: widgets::SelectState::default(),
             background_effect_select: widgets::SelectState::default(),
+            background_scope_select: widgets::SelectState::default(),
             reduce_motion_select: widgets::SelectState::default(),
             import_dialog: None,
             review_entry: None,
@@ -2626,6 +2628,7 @@ impl Render for AppearancePage {
         let ui_settings = crate::settings::current(cx);
         let current_background = ui_settings.new_thread_composer_background;
         let current_background_effect = ui_settings.new_thread_background_effect;
+        let current_background_scope = ui_settings.new_thread_background_scope;
         let reduced_motion = crate::motion::reduced_motion(cx);
         let cards = AppearanceMode::ALL
             .into_iter()
@@ -2952,7 +2955,7 @@ impl Render for AppearancePage {
                 .into_any_element(),
         );
         if background_available {
-            use crate::settings::NewThreadBackgroundEffect;
+            use crate::settings::{NewThreadBackgroundEffect, NewThreadBackgroundScope};
             let effect_control = widgets::select(
                 "new-thread-background-effect",
                 "Background effect",
@@ -2994,6 +2997,51 @@ impl Render for AppearancePage {
                             )),
                     )
                     .child(effect_control)
+                    .into_any_element(),
+            );
+            let scope_control = widgets::select(
+                "new-thread-background-scope",
+                "Show background",
+                &theme,
+                |page: &mut Self| &mut page.background_scope_select,
+            )
+            .options(
+                NewThreadBackgroundScope::ALL
+                    .into_iter()
+                    .map(|scope| widgets::SelectOption::new(scope.label())),
+                NewThreadBackgroundScope::ALL
+                    .into_iter()
+                    .position(|scope| scope == current_background_scope)
+                    .unwrap_or_default(),
+            )
+            // Wider than the effect row's control: "Empty sessions" is the
+            // longest value in the section and the trigger truncates early.
+            .width(148.0)
+            .on_select(|_, ix, _, cx| {
+                crate::settings::set_new_thread_background_scope(
+                    NewThreadBackgroundScope::ALL[ix],
+                    cx,
+                );
+                cx.notify();
+            })
+            .render(&self.background_scope_select, cx);
+            settings_rows.push(
+                widgets::card_row(&theme, false)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(160.0))
+                            .child(widgets::row_title(&theme, "Show background"))
+                            .child(widgets::meta_line(
+                                &theme,
+                                vec![
+                                    div()
+                                        .child(current_background_scope.description())
+                                        .into_any_element(),
+                                ],
+                            )),
+                    )
+                    .child(scope_control)
                     .into_any_element(),
             );
         }
